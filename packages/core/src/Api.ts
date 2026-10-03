@@ -24,7 +24,8 @@ import * as Schema from "effect/Schema";
 
 // ── models ──────────────────────────────────────────────────────────────
 
-export const ModelUpstream = Schema.Literals(["anthropic", "openai"]);
+/** An upstream the proxy forwards to, by its name in [models.upstreams]: "anthropic", "openai", or one the fleet declares. */
+export const ModelUpstream = Schema.String;
 export type ModelUpstream = typeof ModelUpstream.Type;
 
 /** Why a request failed: "connect", "timeout", "429", "5xx", "529", "4xx", "stream" (after the first byte). */
@@ -63,15 +64,29 @@ export const ModelProxyStats = Schema.Struct({
 });
 export type ModelProxyStats = typeof ModelProxyStats.Type;
 
-/** Claude Code's login, as `claude auth status` reports it under T3's environment. */
-export const ClaudeAuth = Schema.Struct({
-  /** null when it could not be determined. */
-  loggedIn: Schema.NullOr(Schema.Boolean),
-  /** "setup-token", "oauth", "api-key", or what the CLI reports; null if unknown. */
+/**
+ * One T3 provider instance's login and health, as T3 itself reports it
+ * (server.getConfig), or, when T3 cannot be read, as the CLI's own status
+ * command says. Every driver T3 has, not only Claude.
+ */
+export const ProviderAuth = Schema.Struct({
+  instanceId: Schema.String,
+  driver: Schema.String,
+  enabled: Schema.Boolean,
+  auth: Schema.Literals(["authenticated", "unauthenticated", "unknown"]),
+  /** How it is logged in, as T3 names it: "chatgpt", "apiKey", "oauth"…; from the CLI: "setup-token", "claude.ai", "api-key"…; null if unknown. */
   method: Schema.NullOr(Schema.String),
+  /** T3's label for the login, e.g. "Claude Max Subscription"; null if none. Never the account's email. */
+  label: Schema.NullOr(Schema.String),
+  /** T3's provider state: "ready", "warning", "error", "disabled"; null when read from the CLI. */
+  status: Schema.NullOr(Schema.String),
+  /** T3's message, or the CLI's answer. */
   detail: Schema.String,
+  /** When T3 last checked it, ms since the epoch; null when unknown. */
+  checkedAt: Schema.NullOr(Schema.Number),
+  source: Schema.Literals(["t3", "cli"]),
 });
-export type ClaudeAuth = typeof ClaudeAuth.Type;
+export type ProviderAuth = typeof ProviderAuth.Type;
 
 // ── hub ─────────────────────────────────────────────────────────────────
 
@@ -152,7 +167,7 @@ export const UiEnvironment = Schema.Struct({
   agents: Schema.Array(Schema.Struct({ name: Schema.String, version: Schema.NullOr(Schema.String), latest: Schema.NullOr(Schema.String) })),
   providers: Schema.Array(UiProvider),
   sync: Schema.NullOr(Schema.Struct({ at: Schema.Number, result: Schema.Literals(["ok", "fail"]), streak: Schema.Number, message: Schema.String })),
-  claude: Schema.NullOr(ClaudeAuth),
+  providerAuth: Schema.Array(ProviderAuth),
   models: Schema.NullOr(ModelProxyStats),
 });
 export type UiEnvironment = typeof UiEnvironment.Type;
@@ -194,7 +209,7 @@ export const UiAlert = Schema.Struct({
 });
 
 export const UiModels = Schema.Struct({
-  nodes: Schema.Array(Schema.Struct({ node: Schema.String, at: Schema.NullOr(Schema.Number), claude: Schema.NullOr(ClaudeAuth), stats: Schema.NullOr(ModelProxyStats) })),
+  nodes: Schema.Array(Schema.Struct({ node: Schema.String, at: Schema.NullOr(Schema.Number), providerAuth: Schema.Array(ProviderAuth), stats: Schema.NullOr(ModelProxyStats) })),
 });
 export type UiModels = typeof UiModels.Type;
 

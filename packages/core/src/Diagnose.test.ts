@@ -51,10 +51,11 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
     runtimeBinary: "/home/u/.t3/runtime/versions/0.0.46-nightly.20261003.2632/t3",
     serverPath: "/usr/bin:/bin",
     providers: [provider({ instanceId: "claudeAgent" }), provider({ instanceId: "codex" })],
+    access: { state: "ok", expiresAt: 1_800_000_000_000, detail: "read from T3", cli: true },
     problems: [],
     ...t3,
   },
-  claude: null,
+  providerAuth: [],
   proxy: {
     launchers: { claudeAgent: "/home/u/.local/bin/fleet-claude", codex: "/home/u/.local/bin/fleet-codex" },
     credentials: true,

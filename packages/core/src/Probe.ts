@@ -1,6 +1,7 @@
 /**
  * Observes the machine it runs on. Read-only: it starts processes only to ask
- * them for `--version` (and Claude for `auth status`), and never writes a file.
+ * them for `--version` (and, as a fallback, for login status), and never
+ * writes a file. Provider logins come from T3 itself (T3Access.ts).
  *
  * The provider check is the point of fleetx. T3 launches providers with its
  * server's environment, not your shell's, and the two differ: a server
@@ -19,10 +20,10 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
-import type { ClaudeAuth } from "./Api.ts";
+import type { ProviderAuth } from "./Api.ts";
 import { expandHome, type ProbeSettings } from "./Config.ts";
 import { exec, parseVersion } from "./Exec.ts";
-import { claudeAuthStatus } from "./models/ClaudeAuth.ts";
+import { cliLogin } from "./CliLogin.ts";
 import { loadAreas } from "./Plugins.ts";
 import {
   PROBE_PROTOCOL,
@@ -33,6 +34,7 @@ import {
   type ProxyObservation,
   type T3Observation,
 } from "./Observation.ts";
+import { readAccess, readProviderSnapshot, t3CliFromCommandLine } from "./T3Access.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
 
@@ -149,7 +151,7 @@ const runtimeFromCommandLine = (pid: number) =>
   Effect.gen(function* () {
     const ps = yield* exec({ command: "ps", args: ["-ww", "-p", String(pid), "-o", "command="], timeout: Duration.seconds(5) });
     const match = /(\S*\/versions\/([0-9][^/\s]*)\/t3)\b/.exec(ps.stdout);
-    return { binary: match?.[1] ?? null, version: match?.[2] ?? null };
+    return { binary: match?.[1] ?? null, version: match?.[2] ?? null, cli: t3CliFromCommandLine(ps.stdout) !== null };
   });
 
 const fetchDescriptor = (origin: string) =>
@@ -204,6 +206,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
     let installedVersion: string | null = null;
     let runtimeBinary: string | null = null;
     let serverEnv: Env | null = null;
+    let cli = false;
 
     if (Option.isSome(runtimeFile)) {
       const r = runtimeFile.value;
@@ -218,6 +221,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
         }
         const fromCommandLine = yield* runtimeFromCommandLine(r.pid);
         runtimeBinary = fromCommandLine.binary;
+        cli = fromCommandLine.cli;
         installedVersion = descriptor?.serverVersion ?? fromCommandLine.version;
         serverEnv = Option.getOrNull(yield* serverEnvironment(r.pid));
         if (serverEnv === null) problems.push("could not read the T3 server's environment; providers checked with the login PATH");
@@ -234,18 +238,62 @@ const observeT3 = (home: string, loginEnv: Env) =>
       problems.push("the T3 server is not running");
     }
     let providers: Array<ProviderObservation> = [];
-    let claude: ClaudeAuth | null = null;
     if (Option.isSome(settingsText)) {
       const settings = yield* decodeJson(T3SettingsFile, settingsText.value);
       if (Option.isNone(settings)) {
         problems.push("settings.json did not match the provider settings fleetx understands");
       } else {
-        const env = serverEnv ?? loginEnv;
-        providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, env), { concurrency: 4 });
-        // Logged out still starts; ask the binary T3 runs (a launcher adds its token).
-        const claudeProvider = providers.find((p) => p.driver === "claudeAgent" && p.enabled && p.launch.ok && p.resolved !== null);
-        if (claudeProvider?.resolved != null) claude = yield* claudeAuthStatus(claudeProvider.resolved, env);
+        providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, serverEnv ?? loginEnv), { concurrency: 4 });
       }
+    }
+
+    // Logins: T3's own snapshot when fleetx can read it, else each CLI's status command.
+    let access: T3Observation["access"] = null;
+    let providerAuth: Array<ProviderAuth> = [];
+    if (runtime?.alive === true) {
+      const now = yield* Clock.currentTimeMillis;
+      const token = yield* readAccess(home);
+      if (Option.isNone(token) || token.value.origin !== runtime.origin) {
+        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "fleetx has no T3 token here" : `fleetx's token is for ${token.value.origin}`, cli };
+      } else if (token.value.expiresAt <= now) {
+        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "fleetx's T3 token has expired", cli };
+      } else {
+        const snapshot = yield* readProviderSnapshot(runtime.origin, token.value.token);
+        const expiring = token.value.expiresAt - now < 3 * 86_400_000;
+        if (snapshot._tag === "ok") {
+          providerAuth = [...snapshot.providers];
+          access = { state: expiring ? "expiring" : "ok", expiresAt: token.value.expiresAt, detail: "read from T3", cli };
+        } else {
+          access = {
+            state: snapshot._tag === "rejected" ? "rejected" : "failed",
+            expiresAt: token.value.expiresAt,
+            detail: snapshot._tag === "rejected" ? "T3 refused fleetx's token" : snapshot.detail,
+            cli,
+          };
+        }
+      }
+    }
+    if (providerAuth.length === 0) {
+      const env = serverEnv ?? loginEnv;
+      const checks = providers.flatMap((p) => {
+        const check = cliLogin(p.driver);
+        return p.enabled && p.launch.ok && p.resolved !== null && check !== null ? [{ p, run: check(p.resolved, env) }] : [];
+      });
+      providerAuth = yield* Effect.forEach(
+        checks,
+        ({ p, run }) =>
+          Effect.map(run, (login): ProviderAuth => ({
+            instanceId: p.instanceId,
+            driver: p.driver,
+            enabled: p.enabled,
+            ...login,
+            label: null,
+            status: null,
+            checkedAt: null,
+            source: "cli",
+          })),
+        { concurrency: 4 },
+      );
     }
 
     const t3 = {
@@ -255,9 +303,10 @@ const observeT3 = (home: string, loginEnv: Env) =>
       runtimeBinary,
       serverPath: serverEnv?.["PATH"] ?? null,
       providers,
+      access,
       problems,
     } satisfies T3Observation;
-    return { t3, claude };
+    return { t3, providerAuth };
   });
 
 // ---- fleet model proxy -----------------------------------------------------
@@ -316,7 +365,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
   const env: Env = process.env;
   const home = env["HOME"] ?? "";
   const hostname = (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim();
-  const [agents, { t3, claude }, proxy, legacySync] = yield* Effect.all(
+  const [agents, { t3, providerAuth }, proxy, legacySync] = yield* Effect.all(
     [
       Effect.forEach(["claude", "codex"] as const, (a) => observeAgent(a, home, env["PATH"]), { concurrency: 2 }),
       observeT3(home, env),
@@ -360,7 +409,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     observedAt: yield* Clock.currentTimeMillis,
     agents,
     t3,
-    claude,
+    providerAuth,
     proxy,
     areas,
     legacySync,

@@ -9,7 +9,7 @@
  */
 import * as Schema from "effect/Schema";
 
-import { ClaudeAuth } from "./Api.ts";
+import { ProviderAuth } from "./Api.ts";
 
 export const PROBE_PROTOCOL = 5;
 
@@ -67,6 +67,16 @@ export const T3Observation = Schema.Struct({
   /** PATH of the running server process; null when unreadable. */
   serverPath: Schema.NullOr(Schema.String),
   providers: Schema.Array(ProviderObservation),
+  /** fleetx's read-only token for T3's API (T3Access.ts); null when no server runs. */
+  access: Schema.NullOr(
+    Schema.Struct({
+      state: Schema.Literals(["ok", "expiring", "none", "rejected", "failed"]),
+      expiresAt: Schema.NullOr(Schema.Number),
+      detail: Schema.String,
+      /** Whether T3's CLI can be reached here to mint one. */
+      cli: Schema.Boolean,
+    }),
+  ),
   problems: Schema.Array(Schema.String),
 });
 export type T3Observation = typeof T3Observation.Type;
@@ -104,8 +114,11 @@ export const MachineObservation = Schema.Struct({
   observedAt: Schema.Number,
   agents: Schema.Array(AgentObservation),
   t3: T3Observation,
-  /** Claude Code's login under T3's environment; null where T3 does not run Claude. */
-  claude: Schema.NullOr(ClaudeAuth),
+  /**
+   * Each T3 provider instance's login and health: T3's own snapshot, or the
+   * CLIs' status commands when fleetx cannot read it (see t3.access).
+   */
+  providerAuth: Schema.Array(ProviderAuth),
   proxy: Schema.NullOr(ProxyObservation),
   /** Each registered area's facts, keyed by area id; decoded by the area itself. */
   areas: Schema.Record(Schema.String, Schema.Unknown),
