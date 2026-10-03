@@ -37,8 +37,8 @@ describe("hub definitions", () => {
       runner: { type: "docker-stdio", network: "none", env: { KEY: "$DOCS_KEY" } },
     });
     expect(
-      parseDefinition("s", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc", client_secret_env: "S_SECRET" }, tools: { deny: ["delete_*"] } })),
-    ).toMatchObject({ auth: { type: "oauth", client: { clientId: "abc", clientSecretEnv: "S_SECRET" } }, deny: ["delete_*"] });
+      parseDefinition("s", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc", client_secret_env: "S_SECRET", issuer: "https://auth.s" }, tools: { deny: ["delete_*"] } })),
+    ).toMatchObject({ auth: { type: "oauth", client: { clientId: "abc", clientSecretEnv: "S_SECRET", issuer: "https://auth.s" } }, deny: ["delete_*"] });
     expect(parseDefinition("b", JSON.stringify({ kind: "remote", url: "https://b/mcp", auth: { type: "bearer", token_env: "B_TOKEN" } }))).toMatchObject({ auth: { type: "bearer", tokenEnv: "B_TOKEN" } });
   });
 
@@ -47,6 +47,12 @@ describe("hub definitions", () => {
     expect(parseDefinition("x", JSON.stringify({ kind: "remote" }))).toEqual({ problem: "remote definition has no url" });
     expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "file:///etc/passwd" }))).toMatchObject({ problem: expect.stringMatching(/http/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "i", network: "none" }))).toMatchObject({ problem: expect.stringMatching(/stdio/) });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://mcp.example.com/mcp" }))).toMatchObject({ problem: expect.stringMatching(/https/) });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://127.0.0.1:9/mcp" }))).toMatchObject({ runner: { type: "remote" } });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }))).toMatchObject({ runner: { type: "remote" } });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc" } }))).toMatchObject({ problem: expect.stringMatching(/issuer/) });
+    expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "--privileged" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });
+    expect(parseDefinition("x", JSON.stringify({ kind: "registry", image: "-v/:/host", transport: "stdio" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });
     expect(parseDefinition("Bad Name", "{}")).toMatchObject({ problem: expect.stringMatching(/not a valid server name/) });
   });
 

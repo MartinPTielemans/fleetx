@@ -93,6 +93,8 @@ export interface HubConfig {
   /** Default ~/.local/state/fleetx/hub. */
   readonly stateDir?: string;
   readonly checkEvery?: Duration.Input;
+  /** Tests only: accept plain-HTTP OAuth URLs on loopback. Never set in the relay. */
+  readonly allowLoopbackHttp?: boolean;
   /** Secrets for credentials and environments; default the node's secrets.env. */
   readonly secrets?: Effect.Effect<Readonly<Record<string, string>>>;
 }
@@ -182,7 +184,7 @@ export const makeHub = (
     const store: TokenStore = yield* makeTokenStore({ file: config.stateDir === undefined ? tokenStorePath(config.home) : path.join(stateDir, "tokens.age"), identity: config.identity });
     const log = yield* makeCallLog(path.join(stateDir, "calls.jsonl"));
     const redirectUri = config.relayUrl === null ? "" : `${config.relayUrl.replace(/\/+$/, "")}/oauth/callback`;
-    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "fleetx hub" });
+    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "fleetx hub", allowLoopbackHttp: config.allowLoopbackHttp === true });
 
     const entries = new Map<string, Entry>();
     let problems: ReadonlyArray<{ readonly name: string; readonly problem: string }> = [];

@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import type { HubServer } from "../Api.ts";
 import { makeHub, type Hub, type HubEvent } from "./Hub.ts";
+import { discover } from "./OAuth.ts";
 import { messagesInBody, toJson, type JsonRpcMessage } from "./JsonRpc.ts";
 import { fakeAuthServer, fakeProtectedMcp, type FakeAuthServer, type FakeMcpServer } from "./testing/fakes.ts";
 import { readBody } from "./Upstream.ts";
@@ -64,6 +65,7 @@ const startHub = (dir: string, secrets: Record<string, string> = {}) =>
         version: "test",
         stateDir: join(dir, "state"),
         checkEvery: Duration.hours(1),
+        allowLoopbackHttp: true,
         secrets: Effect.succeed(secrets),
       },
       (e) => Effect.sync(() => events.push(e)),
@@ -203,6 +205,64 @@ describe("hub OAuth", () => {
       }),
     );
   }, 30_000);
+});
+
+describe("hub OAuth validation", () => {
+  const failure = (url: string, challenge: string | null, allowLoopbackHttp = true) =>
+    run(discover(url, challenge, { allowLoopbackHttp }).pipe(Effect.flip, Effect.map((e) => e.message)));
+
+  it("refuses plain HTTP unless explicitly allowed (tests only)", async () => {
+    expect(await failure(`${mcp.url}/mcp`, null, false)).toMatch(/HTTPS/);
+  });
+
+  it("requires the metadata to name the issuer it was fetched for (RFC 8414 §3.3)", async () => {
+    const liar = await fakeAuthServer({ openIdOnly: false, expectedResource: () => "", issuer: "https://evil.example" });
+    const server = await fakeProtectedMcp(() => liar.url, () => false);
+    try {
+      expect(await failure(`${server.url}/mcp`, null)).toMatch(/different issuer/);
+    } finally {
+      await liar.close();
+      await server.close();
+    }
+  });
+
+  it("requires the resource metadata to be for this server (RFC 9728 §3.3)", async () => {
+    const server = await fakeProtectedMcp(() => as.url, () => false, { resource: "https://other.example/mcp" });
+    try {
+      expect(await failure(`${server.url}/mcp`, null)).toMatch(/not http/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("follows a resource_metadata hint only on the server's own origin", async () => {
+    const elsewhere = await fakeProtectedMcp(() => as.url, () => false);
+    const server = await fakeProtectedMcp(() => as.url, () => false, { hint: `${elsewhere.url}/meta/resource` });
+    try {
+      const found = await run(discover(`${server.url}/mcp`, `Bearer resource_metadata="${elsewhere.url}/meta/resource"`, { allowLoopbackHttp: true }));
+      expect(found.resource).toBe(`${server.url}/mcp`);
+      expect(elsewhere.metadataHits()).toEqual({ wellKnown: 0, hinted: 0 });
+      expect(server.metadataHits().wellKnown).toBe(1);
+    } finally {
+      await elsewhere.close();
+      await server.close();
+    }
+  });
+
+  it("never sends a static client's secret to an issuer the definition does not name", async () => {
+    const dir = fixture({
+      static: { kind: "remote", url: `${mcp.url}/mcp`, oauth: { client_id: "fixed", client_secret_env: "STATIC_SECRET", issuer: "https://auth.example" } },
+    });
+    await run(
+      Effect.gen(function* () {
+        const { hub } = yield* startHub(dir, { STATIC_SECRET: "do-not-leak" });
+        yield* waitFor(hub, "static", "needs-login");
+        const posts = as.tokenPosts();
+        expect(yield* hub.login("static").pipe(Effect.flip)).toMatch(/names the issuer https:\/\/auth.example/);
+        expect(as.tokenPosts()).toBe(posts);
+      }),
+    );
+  });
 });
 
 describe("hub gateway", () => {
