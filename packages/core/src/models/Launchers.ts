@@ -1,81 +1,63 @@
 /**
- * What the models area installs on a node: the proxy service and two
- * launchers. T3's provider instances point at a launcher instead of the CLI;
- * the launcher runs the managed CLI pointed at the proxy.
+ * What the models area installs on a node: the proxy service, and one
+ * launcher per routed T3 provider instance (~/.local/bin/fleetx-claude,
+ * fleetx-codex, fleetx-<instance>). T3 points the instance at its launcher
+ * instead of the CLI; the launcher runs the CLI pointed at the proxy, the way
+ * the instance's recipe says (see Recipes.ts).
  *
  * A launcher must never be the reason a provider fails. When the proxy is not
  * listening it runs the CLI directly and writes a line to
  * ~/.local/state/fleetx/models-fallback.log, which the proxy's stats and the
- * area report. Subcommands that make no model call (`--version`, login and
- * auth) skip the proxy, so T3's own checks and the probe's `claude auth
- * status` neither need it nor count as fallbacks.
+ * area report. First arguments that make no model call (version, login,
+ * auth) skip the proxy, so T3's own checks and the probe's fallback login
+ * checks neither need it nor count as fallbacks.
  *
- *   fleetx-claude   loads the setup-token from ~/.config/fleetx/secrets.env
- *                   as CLAUDE_CODE_OAUTH_TOKEN when the environment has none,
- *                   and sets ANTHROPIC_BASE_URL to the proxy
- *   fleetx-codex    passes `-c openai_base_url=…`, which keeps Codex's
- *                   built-in OpenAI provider (and its login) and only moves
- *                   where it sends requests
+ * With a token_env, the launcher loads that credential from
+ * ~/.config/fleetx/secrets.env when the environment has none.
  */
-import { MODELS_PORT } from "./Proxy.ts";
+import { MODELS_PORT, proxyUrl, type Recipe } from "./Recipes.ts";
 
-export type LauncherName = "claude" | "codex";
+/** A double-quoted shell word, with {proxy} becoming the launcher's $proxy. */
+const word = (value: string) => `"${value.replace(/[\\"$`]/g, "\\$&").replaceAll("{proxy}", "$proxy")}"`;
 
-export const launcherPath = (home: string, name: LauncherName) => `${home}/.local/bin/fleetx-${name}`;
+const cliWord = (command: string) => (command.startsWith("~/") ? `"$HOME/${command.slice(2).replace(/[\\"$`]/g, "\\$&")}"` : word(command));
 
-/** Which launcher a T3 provider driver uses; null for drivers the proxy does not serve. */
-export const launcherForDriver = (driver: string): LauncherName | null =>
-  driver === "claudeAgent" ? "claude" : driver === "codex" ? "codex" : null;
-
-const header = (name: LauncherName) => `#!/bin/sh
-# fleetx-${name}: ${name === "claude" ? "Claude Code" : "Codex"} through the fleetx model proxy, or directly when the
-# proxy is not listening. Written by fleetx's models area; edits are replaced.
-cli="$HOME/.local/bin/${name}"
-proxy="http://127.0.0.1:${MODELS_PORT}"
-`;
-
-const fallback = (upstream: "anthropic" | "openai") => `
-listening() { command -v curl >/dev/null 2>&1 && curl -fsS -m 1 "$proxy/health" >/dev/null 2>&1; }
-fell_back() {
-  log="$HOME/.local/state/fleetx/models-fallback.log"
-  mkdir -p "$HOME/.local/state/fleetx" 2>/dev/null
-  if [ -f "$log" ] && [ "$(wc -c < "$log")" -gt 65536 ]; then mv -f "$log" "$log.1"; fi
-  printf '%s\\t${upstream}\\t%s\\n' "$(date +%s)" "$1" >> "$log" 2>/dev/null
-}
-`;
-
-export const claudeLauncher = (tokenEnv: string) => `${header("claude")}
-# A setup-token does not rotate, so concurrent sessions cannot log each other out.
-if [ -z "\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -f "$HOME/.config/fleetx/secrets.env" ]; then
-  token=$(sed -n 's/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}${tokenEnv}=//p' "$HOME/.config/fleetx/secrets.env" | tail -n 1)
-  token=\${token#\\"}; token=\${token%\\"}
-  if [ -n "$token" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$token"; fi
-fi
-case "\${1:-}" in
-  -v|--version|auth|setup-token|update|doctor) exec "$cli" "$@" ;;
-esac
-${fallback("anthropic")}
-if listening; then
-  export ANTHROPIC_BASE_URL="$proxy/anthropic"
-  exec "$cli" "$@"
-fi
-fell_back "proxy not listening"
-exec "$cli" "$@"
-`;
-
-export const codexLauncher = () => `${header("codex")}
-case "\${1:-}" in
-  -V|--version|login|logout) exec "$cli" "$@" ;;
-esac
-${fallback("openai")}
-if listening; then
-  exec "$cli" -c "openai_base_url=\\"$proxy/openai\\"" "$@"
-fi
-fell_back "proxy not listening"
-exec "$cli" "$@"
-`;
-
-export const launcherText = (name: LauncherName, tokenEnv: string) => (name === "claude" ? claudeLauncher(tokenEnv) : codexLauncher());
+export const launcherText = (instanceId: string, recipe: Recipe) => {
+  const lines = [
+    "#!/bin/sh",
+    `# T3's ${instanceId} through the fleetx model proxy (upstream ${recipe.upstream}), or directly when the`,
+    "# proxy is not listening. Written by fleetx's models area; edits are replaced.",
+    `cli=${cliWord(recipe.command)}`,
+    `proxy="${proxyUrl(recipe.upstream)}"`,
+  ];
+  if (recipe.tokenEnv !== null) {
+    const t = recipe.tokenEnv;
+    lines.push(
+      `if [ -z "\${${t}:-}" ] && [ -f "$HOME/.config/fleetx/secrets.env" ]; then`,
+      `  token=$(sed -n 's/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}${t}=//p' "$HOME/.config/fleetx/secrets.env" | tail -n 1)`,
+      '  token=${token#\\"}; token=${token%\\"}',
+      `  if [ -n "$token" ]; then export ${t}="$token"; fi`,
+      "fi",
+    );
+  }
+  if (recipe.direct.length > 0) {
+    lines.push('case "${1:-}" in', `  ${recipe.direct.join("|")}) exec "$cli" "$@" ;;`, "esac");
+  }
+  lines.push(
+    `listening() { command -v curl >/dev/null 2>&1 && curl -fsS -m 1 "http://127.0.0.1:${MODELS_PORT}/health" >/dev/null 2>&1; }`,
+    "if listening; then",
+    ...Object.entries(recipe.env).map(([k, v]) => `  export ${k}=${word(v)}`),
+    `  exec "$cli"${recipe.args.map((a) => ` ${word(a)}`).join("")} "$@"`,
+    "fi",
+    'log="$HOME/.local/state/fleetx/models-fallback.log"',
+    'mkdir -p "$HOME/.local/state/fleetx" 2>/dev/null',
+    'if [ -f "$log" ] && [ "$(wc -c < "$log")" -gt 65536 ]; then mv -f "$log" "$log.1"; fi',
+    `printf '%s\\t${recipe.upstream}\\t%s\\n' "$(date +%s)" "proxy not listening" >> "$log" 2>/dev/null`,
+    'exec "$cli" "$@"',
+    "",
+  );
+  return lines.join("\n");
+};
 
 // ---- the service -----------------------------------------------------------
 
@@ -154,10 +136,10 @@ export const serviceInstall = (platform: string, root: boolean, text: string) =>
   ].join("\n");
 };
 
-/** Shell that writes a launcher, executable. */
-export const launcherInstall = (name: LauncherName, text: string) =>
+/** Shell that writes a launcher, executable; `file` is its name in ~/.local/bin. */
+export const launcherInstall = (file: string, text: string) =>
   [
     'mkdir -p "$HOME/.local/bin"',
-    `cat > "$HOME/.local/bin/fleetx-${name}.tmp" <<'FLEETX_LAUNCHER'\n${text}FLEETX_LAUNCHER`,
-    `chmod 755 "$HOME/.local/bin/fleetx-${name}.tmp" && mv -f "$HOME/.local/bin/fleetx-${name}.tmp" "$HOME/.local/bin/fleetx-${name}"`,
+    `cat > "$HOME/.local/bin/${file}.tmp" <<'FLEETX_LAUNCHER'\n${text}FLEETX_LAUNCHER`,
+    `chmod 755 "$HOME/.local/bin/${file}.tmp" && mv -f "$HOME/.local/bin/${file}.tmp" "$HOME/.local/bin/${file}"`,
   ].join("\n");

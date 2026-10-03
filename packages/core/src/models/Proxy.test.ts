@@ -82,7 +82,7 @@ const proxy = (url: string, over: Partial<ModelProxyOptions> = {}) =>
       egress: "direct",
       persist: false,
       retryBaseMs: 5,
-      upstreams: { anthropic: url, openaiApi: `${url}/v1`, openaiChatgpt: `${url}/backend-api/codex` },
+      upstreams: () => ({ anthropic: { url }, openai: { url: `${url}/v1`, chatgptUrl: `${url}/backend-api/codex` }, local: { url: `${url}/local` } }),
       ...over,
     }), quiet),
   );
@@ -117,6 +117,15 @@ describe("model proxy against a fake upstream", () => {
     await fetch(`${base}/openai/responses`, { method: "POST", headers: { authorization: "Bearer sk-proj-x" }, body: "{}" });
     expect(up.seen.map((s) => s.url)).toEqual(["/backend-api/codex/responses", "/v1/responses"]);
     expect(up.seen[0]?.headers["chatgpt-account-id"]).toBe("acct");
+  });
+
+  it("serves any upstream the settings declare, and nothing else", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200).end("{}"));
+    const base = await proxy(up.url);
+    expect((await fetch(`${base}/local/v1/chat/completions`, { method: "POST", body: "{}" })).status).toBe(200);
+    expect(up.seen[0]?.url).toBe("/local/v1/chat/completions");
+    expect((await fetch(`${base}/nowhere/v1`)).status).toBe(404);
+    expect((await stats(base)).upstreams.map((u) => u.upstream)).toEqual(["anthropic", "openai", "local"]);
   });
 
   it("retries 503 and 529 before the first byte, then answers", async () => {
@@ -206,12 +215,14 @@ describe("model proxy against a fake upstream", () => {
 
   it("with egress = relay, goes through the relay's /egress route with the relay token", async () => {
     const up = await upstream((_req, res) => res.writeHead(200).end("via relay"));
-    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { anthropic: up.url, openaiApi: up.url, openaiChatgpt: up.url }), quiet));
-    const base = await proxy("http://127.0.0.1:1", { egress: "relay", relay: { url: relay, token: "relay-secret" } });
+    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true }), quiet));
+    const base = await proxy(up.url, { egress: "relay", relay: { url: relay, token: "relay-secret" } });
     const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", headers: { authorization: "Bearer client" }, body: "{}" });
     expect(await response.text()).toBe("via relay");
     expect(up.seen[0]?.headers["authorization"]).toBe("Bearer client");
+    expect(up.seen[0]?.url).toBe("/v1/messages");
     expect(up.seen[0]?.headers["x-fleetx-relay-token"]).toBeUndefined();
+    expect(up.seen[0]?.headers["x-fleetx-egress-base"]).toBeUndefined();
     const refused = await fetch(`${relay}/egress/anthropic/v1/messages`, { method: "POST", body: "{}" });
     expect(refused.status).toBe(401);
   });

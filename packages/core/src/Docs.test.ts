@@ -15,8 +15,16 @@ describe("docs/troubleshooting.md", () => {
         expect(doc).toContain(`\`${key}\``);
       });
     }
+    // Keys per instance, `models-not-routed-${…}`, are documented as `models-not-routed-<instance>`.
+    for (const [, prefix] of source.matchAll(/key: `([a-z0-9-]+)-\$\{/g)) {
+      it(`explains ${prefix}-<instance>`, () => {
+        expect(doc).toContain(`\`${prefix}-<instance>\``);
+      });
+    }
   }
-  it("explains claude-logged-out", () => {
-    expect(doc).toContain("`claude-logged-out`");
-  });
+  for (const key of ["provider-logged-out-<instance>", "provider-unhealthy-<instance>", "t3-access"]) {
+    it(`explains ${key}`, () => {
+      expect(doc).toContain(`\`${key}\``);
+    });
+  }
 });

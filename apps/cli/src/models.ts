@@ -10,20 +10,20 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import type { ModelProxyStats, ModelWindow } from "@fleetx/core/Api";
 import { loadConfig } from "@fleetx/core/Config";
-import { ModelsSettings } from "@fleetx/core/areas/Models";
-import { launcherForDriver, launcherPath } from "@fleetx/core/models/Launchers";
 import { fetchStats, MODELS_PORT, modelProxyLayer } from "@fleetx/core/models/Proxy";
+import { decodeModelsSettings, launcherPath, upstreamsOf, type ModelsSettings } from "@fleetx/core/models/Recipes";
 import { routeProvider } from "@fleetx/core/models/Route";
 import { RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
 import { providerPlans, readT3Settings } from "@fleetx/core/T3Settings";
@@ -35,8 +35,7 @@ import { encodeJson, reportUserErrors } from "./shared.ts";
 const ownSettings = loadConfig.pipe(
   Effect.map((config) => {
     const self = config.nodes.find((n) => n.name === config.self);
-    const models = Schema.decodeUnknownOption(ModelsSettings)(self?.settings.table["models"] ?? {});
-    return { models: Option.getOrElse(models, () => ({}) as ModelsSettings), relayUrl: config.settings.relay?.url ?? null };
+    return { models: decodeModelsSettings(self?.settings.table["models"]), relayUrl: config.settings.relay?.url ?? null };
   }),
   Effect.orElseSucceed(() => ({ models: {} as ModelsSettings, relayUrl: null as string | null })),
 );
@@ -61,8 +60,17 @@ const serve = Command.make("serve", {
       }
       const home = process.env["HOME"] ?? "";
       yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true })), Effect.ignore);
-      yield* Console.log(`model proxy on 127.0.0.1:${MODELS_PORT}, egress ${egress}${relay === undefined ? "" : ` via ${relay.url}`}`);
-      const routes = modelProxyLayer({ home, version: packageJson.version, egress, ...(relay === undefined ? {} : { relay }) });
+      // Upstreams follow the config repo as sync updates it, without a restart.
+      let upstreams = upstreamsOf(models);
+      yield* ownSettings.pipe(
+        Effect.map((s) => {
+          upstreams = upstreamsOf(s.models);
+        }),
+        Effect.repeat(Schedule.spaced(Duration.seconds(30))),
+        Effect.forkDetach,
+      );
+      yield* Console.log(`model proxy on 127.0.0.1:${MODELS_PORT} for ${Object.keys(upstreams).join(", ")}, egress ${egress}${relay === undefined ? "" : ` via ${relay.url}`}`);
+      const routes = modelProxyLayer({ home, version: packageJson.version, egress, upstreams: () => upstreams, ...(relay === undefined ? {} : { relay }) });
       return yield* Layer.launch(
         HttpRouter.serve(routes).pipe(
           Layer.provide(FetchHttpClient.layer),
@@ -106,7 +114,7 @@ const stats = Command.make("stats", {
 );
 
 const route = Command.make("route", {
-  instance: Argument.String("instance").pipe(Argument.withDescription("T3 provider instance: claudeAgent, codex, or a custom one.")),
+  instance: Argument.String("instance").pipe(Argument.withDescription("T3 provider instance, e.g. claudeAgent or codex.")),
   undo: Flag.Boolean("undo").pipe(Flag.withDescription("Put back the binary path T3 had before fleetx first routed it."), Flag.withDefault(false)),
 }).pipe(
   Command.withDescription("Point a T3 provider instance at its fleetx launcher. Running sessions keep their binary."),
@@ -117,9 +125,7 @@ const route = Command.make("route", {
       if (Option.isNone(settings) || settings.value === "invalid") return yield* Effect.fail("T3's settings.json is missing or unreadable");
       const plan = providerPlans(settings.value).find((p) => p.instanceId === instance);
       if (plan === undefined) return yield* Effect.fail(`T3 has no provider instance named ${instance}`);
-      const name = launcherForDriver(plan.driver);
-      if (name === null) return yield* Effect.fail(`${instance} (${plan.driver}) does not go through the model proxy`);
-      const launcher = launcherPath(home, name);
+      const launcher = launcherPath(home, instance);
       const fs = yield* FileSystem.FileSystem;
       if (!undo && !(yield* fs.exists(launcher))) return yield* Effect.fail(`${launcher} is not installed (fleetx fix --area models)`);
       const result = yield* routeProvider(home, instance, launcher, { undo }).pipe(Effect.mapError((e) => e.message));
@@ -130,6 +136,6 @@ const route = Command.make("route", {
 );
 
 export const modelsCommand = Command.make("models").pipe(
-  Command.withDescription("The model proxy between T3's providers and Anthropic and OpenAI."),
+  Command.withDescription("The model proxy between T3's providers and the model providers."),
   Command.withSubcommands([serve, stats, route]),
 );

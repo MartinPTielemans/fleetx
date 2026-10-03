@@ -94,6 +94,8 @@ export const upstreamStats = (
 };
 
 export const proxyStats = (input: {
+  /** The upstreams the proxy serves; any others seen in records are listed after them. */
+  readonly names: ReadonlyArray<string>;
   readonly now: number;
   readonly startedAt: number;
   readonly version: string;
@@ -105,15 +107,17 @@ export const proxyStats = (input: {
   startedAt: input.startedAt,
   version: input.version,
   egress: input.egress,
-  upstreams: ModelUpstream.literals.map((u) => upstreamStats(u, input.records, input.fallbacks, input.now)),
+  upstreams: [...new Set([...input.names, ...input.records.map((r) => r.upstream), ...input.fallbacks.map((f) => f.upstream)])].map((u) =>
+    upstreamStats(u, input.records, input.fallbacks, input.now),
+  ),
 });
 
-/** Launcher lines: `<epoch seconds>\t<anthropic|openai>\t<reason>`. Unreadable lines are skipped. */
+/** Launcher lines: `<epoch seconds>\t<upstream>\t<reason>`. Unreadable lines are skipped. */
 export const parseFallbacks = (text: string): Array<Fallback> =>
   text.split("\n").flatMap((line) => {
     const [when, upstream] = line.split("\t");
     const at = Number(when) * 1000;
-    return Number.isFinite(at) && at > 0 && (upstream === "anthropic" || upstream === "openai") ? [{ at, upstream }] : [];
+    return Number.isFinite(at) && at > 0 && upstream !== undefined && /^[a-z0-9][a-z0-9-]*$/.test(upstream) ? [{ at, upstream }] : [];
   });
 
 const decodeRecord = Schema.decodeUnknownOption(Schema.fromJsonString(RequestRecord));

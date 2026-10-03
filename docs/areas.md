@@ -98,36 +98,59 @@ Every registered HTTP server gets an `initialize` request as a live check.
 
 ```toml
 [models]
-providers = ["claudeAgent", "codex"]          # T3 instances routed through the proxy
-claude_token_env = "CLAUDE_CODE_OAUTH_TOKEN"  # secret holding a `claude setup-token`
-egress = "direct"                             # or "relay"
+egress = "direct"                     # or "relay"
+
+[models.upstreams.xai]                # beyond the built-in anthropic and openai
+url = "https://api.x.ai/v1"
+
+[models.providers.grok]               # per T3 provider instance
+upstream = "xai"
+env = { XAI_BASE_URL = "{proxy}" }    # {proxy} = http://127.0.0.1:8398/<upstream>
+token_env = "XAI_API_KEY"             # a long-lived credential from the fleet's secrets
+
+[models.providers.codex]
+route = false                         # leave this one alone
 ```
 
 A model proxy on every node, on 127.0.0.1:8398, between T3's providers and
-Anthropic and OpenAI. It is a pass-through: each CLI makes its own requests
-with its own credential, and the proxy forwards them unchanged. It retries
-connection errors and 408, 429, 500, 502, 503, 504 and 529 up to three times,
-only before the first byte reaches the client; sends SSE keepalives while an
-event stream is quiet; and keeps per-upstream stats for 5 minutes, 1 hour and
-24 hours (`fleetx models stats`, and the UI). It logs metadata only, to
-`~/.local/state/fleetx/models.jsonl`; never bodies or auth headers.
+the model providers. It serves `/<upstream>/*` for each upstream: `anthropic`
+(api.anthropic.com), `openai` (the OpenAI API, or the ChatGPT backend for a
+ChatGPT login), and any that `[models.upstreams.<name>]` declares (`url`,
+optionally `chatgpt_url`). It is a pass-through: each CLI makes its own
+requests with its own credential, and the proxy forwards them unchanged. It
+retries connection errors and 408, 429, 500, 502, 503, 504 and 529 up to
+three times, only before the first byte reaches the client; sends SSE
+keepalives while an event stream is quiet; and keeps per-upstream stats for
+5 minutes, 1 hour and 24 hours (`fleetx models stats`, and the UI). It logs
+metadata only, to `~/.local/state/fleetx/models.jsonl`; never bodies or auth
+headers.
 
-The area installs `fleetx models serve` as a service and two launchers,
-`~/.local/bin/fleetx-claude` and `fleetx-codex`, and points T3's provider
-instances at them (`fleetx models route <instance>`; `--undo` reverts).
-`fleetx-claude` sets `ANTHROPIC_BASE_URL` and loads the setup-token from the
-node's secrets as `CLAUDE_CODE_OAUTH_TOKEN`; a setup-token does not rotate, so
-concurrent sessions cannot log each other out. `fleetx-codex` passes
-`-c openai_base_url=…`, which keeps Codex's built-in provider and login; the
-proxy sends a ChatGPT login to the ChatGPT backend and an API key to the
-OpenAI API. When the proxy is not listening, a launcher runs the CLI directly
-and notes it in `~/.local/state/fleetx/models-fallback.log`.
+The area installs `fleetx models serve` as a service, writes a launcher per
+enabled T3 provider instance it can route (`~/.local/bin/fleetx-claude`,
+`fleetx-codex`, `fleetx-<instance>`), and points T3's instances at them
+(`fleetx models route <instance>`; `--undo` reverts). A launcher follows its
+instance's recipe: the variables (`env`) and leading arguments (`args`) that
+point the CLI at `{proxy}`, the CLI to run (`command`), and a long-lived
+credential to load from the node's secrets (`token_env`). Two recipes are
+built in:
+
+| driver | points it at the proxy | token_env |
+|---|---|---|
+| claudeAgent | `ANTHROPIC_BASE_URL={proxy}` | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`; does not rotate) |
+| codex | `-c openai_base_url="{proxy}"` (keeps Codex's built-in provider and login) | none |
+
+Any other driver whose CLI takes a base URL is routed by declaring its recipe;
+one that runs inside T3 without a CLI, or has no recipe, is a note. When the
+proxy is not listening a launcher runs the CLI directly and notes it in
+`~/.local/state/fleetx/models-fallback.log`.
 
 With `egress = "relay"` the proxy sends traffic through the relay's `/egress`
 route instead of directly, for a node on a bad network.
 
-Independently of `[models]`, every node where T3 runs Claude is checked with
-`claude auth status` under T3's environment (`claude-logged-out`).
+Independently of `[models]`, every node reports each T3 provider's login and
+health as T3 itself sees it (`provider-logged-out-<instance>`,
+`provider-unhealthy-<instance>`), read with fleetx's read-only T3 token
+(`fleetx t3 connect`).
 
 ## services
 

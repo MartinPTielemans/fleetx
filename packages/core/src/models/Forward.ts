@@ -7,21 +7,8 @@
  * only hop-by-hop headers are dropped, and the encoding is left to the HTTP
  * client, which decompresses, so the response loses its content-encoding.
  */
-import type { ModelFailureClass, ModelUpstream } from "../Api.ts";
-
-export interface Upstreams {
-  readonly anthropic: string;
-  /** Codex with an API key. */
-  readonly openaiApi: string;
-  /** Codex with a ChatGPT login. */
-  readonly openaiChatgpt: string;
-}
-
-export const UPSTREAMS: Upstreams = {
-  anthropic: "https://api.anthropic.com",
-  openaiApi: "https://api.openai.com/v1",
-  openaiChatgpt: "https://chatgpt.com/backend-api/codex",
-};
+import type { ModelFailureClass } from "../Api.ts";
+import type { UpstreamDef, Upstreams } from "./Recipes.ts";
 
 /** Headers that describe one connection, not the request (RFC 9110 §7.6.1), plus what the client re-derives. */
 const HOP_BY_HOP = new Set([
@@ -41,12 +28,14 @@ const HOP_BY_HOP = new Set([
 
 /** The relay token travels in its own header, so the client's Authorization passes untouched. */
 export const RELAY_TOKEN_HEADER = "x-fleetx-relay-token";
+/** With egress through the relay, the upstream base the node resolved, for the relay to forward to. */
+export const EGRESS_BASE_HEADER = "x-fleetx-egress-base";
 
 export const requestHeaders = (headers: Readonly<Record<string, string | undefined>>): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
-    if (value === undefined || HOP_BY_HOP.has(lower) || lower === RELAY_TOKEN_HEADER) continue;
+    if (value === undefined || HOP_BY_HOP.has(lower) || lower === RELAY_TOKEN_HEADER || lower === EGRESS_BASE_HEADER) continue;
     out[lower] = value;
   }
   return out;
@@ -67,23 +56,26 @@ export const responseHeaders = (headers: Readonly<Record<string, string | undefi
  * Codex is pointed at the proxy with `-c openai_base_url=…`, which keeps its
  * built-in provider for both logins, so the proxy has to tell them apart: a
  * ChatGPT login sends `chatgpt-account-id` and a JWT bearer, an API key
- * neither. The built-in provider uses chatgpt.com/backend-api/codex for the
- * first and api.openai.com/v1 for the second.
+ * neither. An upstream with a chatgpt_url sends the first there.
  */
-export const openaiBase = (headers: Readonly<Record<string, string | undefined>>, upstreams: Upstreams = UPSTREAMS) =>
-  headers["chatgpt-account-id"] !== undefined || /^Bearer eyJ[\w-]*\.[\w-]+\.[\w-]*$/.test(headers["authorization"] ?? "")
-    ? upstreams.openaiChatgpt
-    : upstreams.openaiApi;
+export const isChatgptLogin = (headers: Readonly<Record<string, string | undefined>>) =>
+  headers["chatgpt-account-id"] !== undefined || /^Bearer eyJ[\w-]*\.[\w-]+\.[\w-]*$/.test(headers["authorization"] ?? "");
 
-/** `/anthropic/v1/messages?beta=true` → the upstream and the rest of the path; null for any other path. */
-export const splitPath = (url: string, prefix = ""): { upstream: ModelUpstream; rest: string } | null => {
-  const m = new RegExp(`^${prefix}/(anthropic|openai)(/[^?#]*)?(\\?[^#]*)?`).exec(url);
-  if (m === null) return null;
-  return { upstream: m[1] as ModelUpstream, rest: `${m[2] ?? ""}${m[3] ?? ""}` };
+export const baseFor = (upstream: UpstreamDef, headers: Readonly<Record<string, string | undefined>>) =>
+  upstream.chatgptUrl !== undefined && isChatgptLogin(headers) ? upstream.chatgptUrl : upstream.url;
+
+/** `/anthropic/v1/messages?beta=true` → the upstream's name and the rest of the path; null for a path with no name. */
+export const splitPath = (url: string, prefix = ""): { upstream: string; rest: string } | null => {
+  const m = new RegExp(`^${prefix}/([a-z0-9][a-z0-9-]*)(/[^?#]*)?(\\?[^#]*)?`).exec(url);
+  if (m?.[1] === undefined) return null;
+  return { upstream: m[1], rest: `${m[2] ?? ""}${m[3] ?? ""}` };
 };
 
-export const targetUrl = (upstream: ModelUpstream, rest: string, headers: Readonly<Record<string, string | undefined>>, upstreams: Upstreams = UPSTREAMS) =>
-  `${upstream === "anthropic" ? upstreams.anthropic : openaiBase(headers, upstreams)}${rest}`;
+/** The full upstream URL for a request, or null when no upstream has that name. */
+export const targetUrl = (upstreams: Upstreams, name: string, rest: string, headers: Readonly<Record<string, string | undefined>>) => {
+  const upstream = upstreams[name];
+  return upstream === undefined ? null : `${baseFor(upstream, headers)}${rest}`;
+};
 
 /** The path for the log: no query string, which can carry anything. */
 export const logPath = (rest: string) => rest.split("?")[0] ?? "";

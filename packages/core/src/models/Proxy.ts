@@ -1,10 +1,11 @@
 /**
  * The model proxy: `fleetx models serve`, on 127.0.0.1:8398 on every node,
- * between T3's providers and Anthropic and OpenAI (docs/design/companion.md).
+ * between T3's providers and the model providers (docs/design/companion.md).
  *
- *   *   /anthropic/*   → https://api.anthropic.com/*
- *   *   /openai/*      → chatgpt.com/backend-api/codex/* for a ChatGPT login,
- *                        api.openai.com/v1/* for an API key (see Forward.ts)
+ *   *   /<upstream>/*  → that upstream's url (Recipes.ts): /anthropic/* to
+ *                        api.anthropic.com, /openai/* to the OpenAI API or,
+ *                        for a ChatGPT login, chatgpt.com/backend-api/codex,
+ *                        and any upstream [models.upstreams] declares
  *   GET /stats         ModelProxyStats
  *   GET /health
  *
@@ -55,14 +56,14 @@ import {
   responseHeaders,
   retryAfterMs,
   retryDelay,
+  EGRESS_BASE_HEADER,
   splitPath,
   targetUrl,
-  UPSTREAMS,
-  type Upstreams,
 } from "./Forward.ts";
+import { BUILTIN_UPSTREAMS, MODELS_PORT, type Upstreams } from "./Recipes.ts";
 import { appendRecord, loadFallbacks, loadRecords, MAX_RECORDS, proxyStats, WINDOWS, type RequestRecord } from "./Stats.ts";
 
-export const MODELS_PORT = 8398;
+export { MODELS_PORT };
 
 export interface ModelProxyOptions {
   readonly home: string;
@@ -71,7 +72,8 @@ export interface ModelProxyOptions {
   readonly egress: "direct" | "relay";
   /** Where egress = "relay" sends requests, and the token it needs. */
   readonly relay?: { readonly url: string; readonly token: string };
-  readonly upstreams?: Upstreams;
+  /** Read on every request, so the CLI can reload [models.upstreams] without a restart. */
+  readonly upstreams?: () => Upstreams;
   readonly maxRetries?: number;
   readonly retryBaseMs?: number;
   readonly keepaliveEvery?: Duration.Input;
@@ -135,7 +137,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
     Effect.gen(function* () {
       const startedAt = yield* Clock.currentTimeMillis;
       const persist = options.persist ?? true;
-      const upstreams = options.upstreams ?? UPSTREAMS;
+      const upstreams = options.upstreams ?? (() => BUILTIN_UPSTREAMS);
       const keepaliveEvery = options.keepaliveEvery ?? Duration.seconds(15);
       const headersTimeout = options.headersTimeout ?? Duration.minutes(10);
       // Plain array, appended by one request at a time; windows filter it on /stats.
@@ -161,7 +163,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const fallbacks = yield* loadFallbacks(options.home, now);
-          const body = yield* encodeStats(proxyStats({ now, startedAt, version: options.version, egress: options.egress, records, fallbacks }));
+          const body = yield* encodeStats(proxyStats({ names: Object.keys(upstreams()), now, startedAt, version: options.version, egress: options.egress, records, fallbacks }));
           return HttpServerResponse.text(body, { contentType: "application/json" });
         }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 }))),
       );
@@ -175,12 +177,16 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
           return HttpServerResponse.text("The fleetx model proxy speaks HTTP only", { status: 426 });
         }
         const { upstream, rest } = split;
+        const direct = targetUrl(upstreams(), upstream, rest, request.headers);
+        if (direct === null) return HttpServerResponse.text(`No upstream named ${upstream} in [models.upstreams]`, { status: 404 });
         const headers = requestHeaders(request.headers);
-        const url =
-          options.egress === "relay" && options.relay !== undefined
-            ? `${options.relay.url.replace(/\/+$/, "")}/egress/${upstream}${rest}`
-            : targetUrl(upstream, rest, request.headers, upstreams);
-        if (options.egress === "relay" && options.relay !== undefined) headers[RELAY_TOKEN_HEADER] = options.relay.token;
+        let url = direct;
+        if (options.egress === "relay" && options.relay !== undefined) {
+          // The relay forwards to the base this node resolved; the rest of the path follows.
+          url = `${options.relay.url.replace(/\/+$/, "")}/egress/${upstream}${rest}`;
+          headers[RELAY_TOKEN_HEADER] = options.relay.token;
+          headers[EGRESS_BASE_HEADER] = direct.slice(0, direct.length - rest.length);
+        }
         const body = request.method === "GET" || request.method === "HEAD" ? null : new Uint8Array(yield* request.arrayBuffer);
         const host = new URL(url).host;
 
@@ -245,9 +251,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
         }
       });
 
-      const anthropic = HttpRouter.add("*", "/anthropic/*", forward);
-      const openai = HttpRouter.add("*", "/openai/*", forward);
-      return Layer.mergeAll(health, stats, anthropic, openai);
+      return Layer.mergeAll(health, stats, HttpRouter.add("*", "/*", forward));
     }),
   );
 

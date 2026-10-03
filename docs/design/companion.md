@@ -57,24 +57,30 @@ existing `[proxy]` settings; that path stays as it is.
 
 - `fleetx models serve`: long-running, on 127.0.0.1:8398, installed as a
   service by the `models` area (launchd / systemd, like the relay listener).
-- Routes: `/anthropic/*` forwards to `https://api.anthropic.com/*`;
-  `/openai/*` forwards to the upstream Codex uses for its auth mode (the
-  ChatGPT backend for a ChatGPT login, `https://api.openai.com/v1` for an API
-  key). `GET /stats` returns `ModelProxyStats`; `GET /health`.
+- Routes: `/<upstream>/*` forwards to that upstream: `anthropic`
+  (`https://api.anthropic.com`), `openai` (the ChatGPT backend for a ChatGPT
+  login, `https://api.openai.com/v1` for an API key), and any upstream the
+  settings declare. `GET /stats` returns `ModelProxyStats`; `GET /health`.
 - Retries: on connection errors, and on 408, 429 (honouring `retry-after` up
   to 30s), 500, 502, 503, 504, 529, up to 3 retries with jittered backoff,
   only before the first response byte. After streaming starts an error passes
   through. SSE keepalive comments every 15s while waiting upstream.
 - Optional `egress = "relay"`: forward through the relay
-  (`/egress/anthropic/*`, `/egress/openai/*`, relay token) instead of directly,
+  (`/egress/<upstream>/*`, relay token) instead of directly,
   for a node on a bad network.
-- Launchers: the area writes `~/.local/bin/fleetx-claude` and
-  `~/.local/bin/fleetx-codex`, small shell scripts. They exec the managed CLI
-  with `ANTHROPIC_BASE_URL` (or Codex's provider `base_url` overrides) pointed
-  at the proxy, load `CLAUDE_CODE_OAUTH_TOKEN` from
-  `~/.config/fleetx/secrets.env` when present, and fall back to running the CLI
+- Launchers: the area writes one small shell script per routed T3 provider
+  instance (`~/.local/bin/fleetx-claude`, `fleetx-codex`,
+  `fleetx-<instance>`). Each follows its instance's recipe: the variables or
+  leading arguments that point the CLI at the proxy (`ANTHROPIC_BASE_URL` for
+  Claude, `-c openai_base_url=…` for Codex, declared ones for other drivers),
+  and a long-lived credential loaded from `~/.config/fleetx/secrets.env`
+  (`CLAUDE_CODE_OAUTH_TOKEN` for Claude). It falls back to running the CLI
   directly when the proxy is not listening (logged to
   `~/.local/state/fleetx/models-fallback.log`, which the area reports).
+- Provider logins: every node reports each T3 provider instance's login and
+  health from T3 itself (`server.getConfig`, read with fleetx's own
+  `orchestration:read` token, `fleetx t3 connect`), for every driver T3 has.
+  Without the token, Claude and Codex are checked through their CLIs.
 - Stats: rolling windows (5 minutes, 1 hour, 24 hours) per upstream:
   requests, retried, failed by class, fallbacks, time to first byte p50/p95,
   last error. Metadata only, to `~/.local/state/fleetx/models.jsonl`, bounded.
@@ -83,23 +89,37 @@ existing `[proxy]` settings; that path stays as it is.
 
 ```toml
 [defaults.models]
-providers = ["claudeAgent", "codex"]   # T3 provider instances routed through the proxy
-claude_token_env = "CLAUDE_CODE_OAUTH_TOKEN"   # secret holding the setup-token
 egress = "direct"                      # or "relay"
+
+[defaults.models.upstreams.<name>]     # beyond the built-in anthropic and openai
+url = "https://…"
+
+[defaults.models.providers.<instanceId>]
+upstream = "<name>"                    # built in for claudeAgent and codex
+env = { SOME_BASE_URL = "{proxy}" }    # or args = [...]; built in for claudeAgent and codex
+token_env = "…"                        # long-lived credential; CLAUDE_CODE_OAUTH_TOKEN for Claude
+route = false                          # leave an instance alone
 ```
 
 ### Findings
 
-- `claude-logged-out` (error): `claude auth status`, run with the T3 server's
-  environment and the launcher's, says Claude is not logged in. Checked on
-  every node where T3 enables the Claude provider, with or without `[models]`.
-- `claude-token-missing` (warn): `[models]` is on but the secret is not set;
-  the detail says to run `claude setup-token` and `fleetx secrets set`.
+- `provider-logged-out-<instance>` (error): T3 reports the instance as not
+  logged in (or, without T3's snapshot, `claude auth status` / `codex login
+  status` say so). Every node, with or without `[models]`.
+- `provider-unhealthy-<instance>` (warn): T3 reports the instance as warning
+  or error; the detail is T3's message.
+- `t3-access` (warn, fix): fleetx has no working read-only T3 token; the fix
+  is `fleetx t3 connect`.
+- `provider-token-missing-<instance>` (warn): `[models]` routes the instance,
+  its recipe names a long-lived credential, and the secret is not set.
 - `models-service` (warn, fix): the proxy service is missing, stale or down.
-- `models-launcher` (warn, fix): a launcher is missing or out of date.
-- `models-not-routed` (warn, fix): T3 does not launch the provider through the
-  launcher. The fix points T3's provider instance at it, through a T3
-  interface where T3 offers one.
+- `models-launcher-<instance>` (warn, fix): a launcher is missing or out of
+  date.
+- `models-not-routed-<instance>` (warn, fix): T3 does not launch the instance
+  through its launcher. The fix points T3's provider instance at it (T3 has no
+  interface for this; it edits only that binaryPath in settings.json, which T3
+  reloads).
+- `models-unroutable-<instance>` (info): no CLI or no recipe to route it.
 - `models-failing` (warn): more than 5% of requests failed in the last hour,
   or fallbacks happened; the detail names the error class.
 
