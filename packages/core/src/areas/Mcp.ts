@@ -77,7 +77,13 @@ export type Endpoint = typeof Endpoint.Type;
 
 /** What a client has registered under a name. */
 const Registered = Schema.Union([
-  Schema.Struct({ type: Schema.Literal("http"), url: Schema.String, auth: Schema.Boolean }),
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    url: Schema.String,
+    auth: Schema.Boolean,
+    /** Whether the credential it sends is the declared one (only a yes or no: observations are published). */
+    credential: Schema.optionalKey(Schema.Boolean),
+  }),
   Schema.Struct({ type: Schema.Literal("stdio"), command: Schema.String, args: Schema.Array(Schema.String) }),
   Schema.Struct({ type: Schema.Literal("other") }),
 ]);
@@ -243,7 +249,7 @@ export const dq = (text: string) =>
 const sameEndpoint = (want: Endpoint, got: Registered | null) =>
   got !== null &&
   (want.type === "http"
-    ? got.type === "http" && got.url === want.url && got.auth === (want.tokenEnv !== null)
+    ? got.type === "http" && got.url === want.url && got.auth === (want.tokenEnv !== null) && got.credential !== false
     : got.type === "stdio" && got.command === want.command && JSON.stringify(got.args) === JSON.stringify(want.args));
 
 export const McpArea = defineArea({
@@ -267,17 +273,29 @@ export const McpArea = defineArea({
         ? ((yield* Effect.try(() => parseToml(codexText.value)).pipe(Effect.orElseSucceed(() => ({})))) as { mcp_servers?: Record<string, Record<string, unknown>> }).mcp_servers ?? {}
         : {};
 
-      const fromClaude = (name: string): Registered | null => {
+      // Claude stores the header with the token in it, Codex the variable's name.
+      const fromClaude = (name: string, tokenEnv: string | null, token: string | undefined): Registered | null => {
         const e = claude[name];
         if (e === undefined) return null;
-        if (e.url !== undefined) return { type: "http", url: e.url, auth: e.headers?.["Authorization"] !== undefined };
+        if (e.url !== undefined) {
+          const header = e.headers?.["Authorization"];
+          return {
+            type: "http",
+            url: e.url,
+            auth: header !== undefined,
+            ...(tokenEnv === null || token === undefined || header === undefined ? {} : { credential: header === `Bearer ${token}` }),
+          };
+        }
         if (e.command !== undefined) return { type: "stdio", command: e.command, args: e.args ?? [] };
         return { type: "other" };
       };
-      const fromCodex = (name: string): Registered | null => {
+      const fromCodex = (name: string, tokenEnv: string | null): Registered | null => {
         const e = codexAll[name];
         if (e === undefined) return null;
-        if (typeof e["url"] === "string") return { type: "http", url: e["url"], auth: typeof e["bearer_token_env_var"] === "string" };
+        if (typeof e["url"] === "string") {
+          const env = e["bearer_token_env_var"];
+          return { type: "http", url: e["url"], auth: typeof env === "string", ...(tokenEnv === null || typeof env !== "string" ? {} : { credential: env === tokenEnv }) };
+        }
         if (typeof e["command"] === "string") return { type: "stdio", command: e["command"], args: (e["args"] as Array<string> | undefined) ?? [] };
         return { type: "other" };
       };
@@ -300,11 +318,10 @@ export const McpArea = defineArea({
               ? { endpoint: null, problem: `mcp/${name}.json is missing or not valid` }
               : resolveEndpoint(name, def.value, desired, ctx.home);
             const { endpoint, problem } = resolved;
-            const live =
-              endpoint?.type === "http"
-                ? yield* liveCheck(endpoint.url, endpoint.tokenEnv === null ? undefined : (secrets[endpoint.tokenEnv] ?? ctx.env[endpoint.tokenEnv]))
-                : null;
-            return { name, endpoint, problem, claude: fromClaude(name), codex: fromCodex(name), live };
+            const tokenEnv = endpoint?.type === "http" ? endpoint.tokenEnv : null;
+            const token = tokenEnv === null ? undefined : (secrets[tokenEnv] ?? ctx.env[tokenEnv]);
+            const live = endpoint?.type === "http" ? yield* liveCheck(endpoint.url, token) : null;
+            return { name, endpoint, problem, claude: fromClaude(name, tokenEnv, token), codex: fromCodex(name, tokenEnv), live };
           }),
         { concurrency: 8 },
       );
