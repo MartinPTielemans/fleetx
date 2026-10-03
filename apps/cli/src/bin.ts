@@ -188,7 +188,7 @@ const mcpServeCommand = Command.make("mcp").pipe(
           }).pipe(Effect.provide(services)),
         apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
-        alerts: takeAlerts(config).pipe(
+        alerts: (peek) => takeAlerts(config, peek).pipe(
           Effect.provide(services),
           Effect.mapError((e) => (typeof e === "string" ? e : "reading alerts failed")),
         ),

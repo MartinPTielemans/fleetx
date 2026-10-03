@@ -139,7 +139,7 @@ export const rejectCommand = Command.make("reject", { node: Argument.String("nod
 const seenPath = (home: string) => `${home}/.local/state/fleetx/alerts-seen`;
 
 /** Alerts every node published since the last call; marks them seen. */
-export const takeAlerts = (config: Config) =>
+export const takeAlerts = (config: Config, peek = false) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
@@ -150,8 +150,10 @@ export const takeAlerts = (config: Config) =>
     for (const f of findings.filter((x) => x.key === "state-stale")) alerts.push({ at: yield* Clock.currentTimeMillis, node: f.node, kind: "failing", message: f.title });
     alerts.sort((a, b) => a.at - b.at);
     const newest = Math.max(seen, ...states.flatMap((s) => s.alerts.map((a) => a.at)));
-    yield* fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true }).pipe(Effect.ignore);
-    yield* fs.writeFileString(seenPath(home), String(newest));
+    if (!peek) {
+      yield* fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true }).pipe(Effect.ignore);
+      yield* fs.writeFileString(seenPath(home), String(newest));
+    }
     return alerts;
   });
 

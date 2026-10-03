@@ -81,3 +81,7 @@ on laptop 'cd /tmp/src && printf -- "---\nname: vendored\ndescription: v\n---\nv
 expect laptop "committed and pushed" 'fleetx skills update --yes'
 expect laptop "v2" 'cat ~/fleet/skills/vendored/SKILL.md'
 pass "skills update re-pulls from the source"
+
+# The MCP server starts and lists its tools (an invalid tool schema stops it at startup).
+expect laptop "fleet_alerts" "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | (cat; sleep 4) | fleetx mcp"
+pass "the MCP server starts and lists its tools"

@@ -18,7 +18,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { probeSettings, type Config } from "./Config.ts";
+import { loadConfigFrom, probeSettings, type Config, type Node } from "./Config.ts";
 import { diagnose, type Finding, type Fix } from "./Diagnose.ts";
 import { runFixes } from "./Fix.ts";
 import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
@@ -145,13 +145,17 @@ export interface SyncResult {
   readonly lines: ReadonlyArray<string>;
 }
 
-export const syncRun = (config: Config, options: { readonly apply: boolean } = { apply: true }) =>
+export const syncRun = (startConfig: Config, options: { readonly apply: boolean } = { apply: true }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
-    const repo = config.repo;
-    const self = config.nodes.find((n) => n.name === config.self);
-    if (self === undefined) return yield* Effect.fail(`no node named ${config.self}`);
+    const repo = startConfig.repo;
+    // Reassigned after the pull: everything from observing on must judge this
+    // node by the config it just pulled, not the one it started with.
+    let config = startConfig;
+    const found = config.nodes.find((n) => n.name === config.self);
+    if (found === undefined) return yield* Effect.fail(`no node named ${config.self}`);
+    let self: Node = found;
     const lines: Array<string> = [];
     const now = yield* Clock.currentTimeMillis;
 
@@ -220,6 +224,13 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
           })),
         );
         if (proposal !== null) lines.push(`proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`);
+      }
+
+      // The pull may have changed the config; reload it.
+      const reloaded = yield* loadConfigFrom(repo, config.self).pipe(Effect.option);
+      if (Option.isSome(reloaded)) {
+        config = reloaded.value;
+        self = config.nodes.find((n) => n.name === config.self) ?? self;
       }
 
       // An authority approves proposals the config trusts without review.

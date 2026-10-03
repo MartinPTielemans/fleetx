@@ -110,7 +110,10 @@ const AlertsTool = Tool.make("fleet_alerts", {
   ...shared,
   description:
     "Health changes every machine reported through fleetx sync since the last call (a problem appeared or was resolved, sync started failing or recovered, a machine stopped reporting). Each alert is returned once. For scheduled checks: when the list is empty, say nothing beyond one short line.",
-  parameters: Schema.Struct({}),
+  // MCP requires an object input schema with properties; an empty struct does not produce one.
+  parameters: Schema.Struct({
+    peek: Schema.optionalKey(Schema.Boolean).annotate({ description: "Return the alerts without marking them seen." }),
+  }),
   success: Schema.Struct({
     alerts: Schema.Array(Schema.Struct({ at: Schema.String, node: Schema.String, kind: Schema.String, message: Schema.String })),
   }),
@@ -155,7 +158,7 @@ export interface FleetActions {
   /** Compare a full check with the remembered one, and remember it. */
   readonly compare: (report: CheckReport) => Effect.Effect<Changes>;
   /** Alerts published since the last call, marked seen. */
-  readonly alerts: Effect.Effect<ReadonlyArray<{ readonly at: number; readonly node: string; readonly kind: string; readonly message: string }>, string>;
+  readonly alerts: (peek: boolean) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly node: string; readonly kind: string; readonly message: string }>, string>;
   readonly apply: (fixes: ReadonlyArray<Finding & { readonly fix: Fix }>) => Effect.Effect<ReadonlyArray<FixOutcome>>;
 }
 
@@ -178,8 +181,8 @@ export const fleetHandlers = (actions: FleetActions) =>
           },
         };
       }),
-    fleet_alerts: () =>
-      actions.alerts.pipe(
+    fleet_alerts: ({ peek }) =>
+      actions.alerts(peek === true).pipe(
         Effect.map((alerts) => ({
           alerts: alerts.map((a) => ({ at: DateTime.formatIso(DateTime.makeUnsafe(a.at)), node: a.node, kind: a.kind, message: a.message })),
         })),
