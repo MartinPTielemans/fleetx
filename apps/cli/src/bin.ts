@@ -24,23 +24,10 @@ import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderS
 import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
-
-/**
- * The bundle that gets streamed to other machines. Running from dist/bin.mjs
- * it is this file; running from source it is the last build.
- */
-const ownBundle = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const self = yield* path.fromFileUrl(new URL(import.meta.url));
-  const bundle = self.endsWith(".mjs") ? self : path.join(path.dirname(self), "../dist/bin.mjs");
-  return yield* fs.readFileString(bundle).pipe(
-    Effect.mapError(() => `no bundle at ${bundle}; run \`pnpm build\` first`),
-  );
-});
+import { secretsCommand } from "./secrets.ts";
+import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(MachineObservation));
-const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 /** Internal: observe this machine and print JSON. The controller runs this over ssh. */
 const decodeSettings = Schema.decodeEffect(Schema.fromJsonString(ProbeSettings));
@@ -62,54 +49,6 @@ const probeCommand = Command.make("probe", {
       Effect.flatMap((json) => Console.log(json)),
     ),
   ),
-);
-
-/**
- * Every machine is always observed, because parity findings need all of
- * them; --node only narrows what is shown and fixed.
- */
-const prepare = (only: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    const config = yield* loadConfig;
-    const unknown = only.filter((name) => !config.nodes.some((n) => n.name === name));
-    if (unknown.length > 0) {
-      return yield* Effect.fail(`unknown machine: ${unknown.join(", ")} (known: ${config.nodes.map((n) => n.name).join(", ")})`);
-    }
-    const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
-    const shown = (name: string) => only.length === 0 || only.includes(name);
-    return { config, nodes: config.nodes, bundle, shown };
-  });
-
-/** Narrow a report to the machines asked for. */
-const narrow = (report: CheckReport, shown: (name: string) => boolean): CheckReport => ({
-  ...report,
-  results: report.results.filter((r) => shown(r.node.name)),
-  findings: report.findings.filter((f) => shown(f.node)),
-});
-
-/** A failure meant for the user rather than a bug: a sentence, or a typed config error. */
-const isUserError = (error: unknown): error is string | { readonly _tag: "ConfigError"; readonly message: string } =>
-  typeof error === "string" ||
-  (typeof error === "object" && error !== null && "_tag" in error && error._tag === "ConfigError");
-
-const userMessage = (error: unknown): string =>
-  typeof error === "string" ? error : isUserError(error) && typeof error !== "string" ? error.message : String(error);
-
-/** User errors print one line and exit 1; anything else is a bug and keeps its trace. */
-const reportUserErrors = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(
-    Effect.catchIf(isUserError, (error) =>
-      Console.error(`fleetx: ${userMessage(error)}`).pipe(
-        Effect.andThen(Effect.sync(() => {
-          process.exitCode = 1;
-        })),
-      ),
-    ),
-  );
-
-const nodeFlag = Flag.String("node").pipe(
-  Flag.withDescription("Only this machine (repeatable)."),
-  Flag.atLeast(0),
 );
 
 const statusCommand = Command.make("status", {
@@ -148,15 +87,17 @@ const fixCommand = Command.make("fix", {
     Flag.withDefault(false),
   ),
   dryRun: Flag.Boolean("dry-run").pipe(Flag.withAlias("n"), Flag.withDescription("Show the plan and stop."), Flag.withDefault(false)),
+  area: Flag.String("area").pipe(Flag.withDescription("Only fixes in this area (repeatable): engine, secrets, mcp, …"), Flag.atLeast(0)),
   node: nodeFlag,
 }).pipe(
   Command.withDescription("Apply the fixes `status` suggests, after showing them."),
-  Command.withHandler(({ yes, safe, dryRun, node }) =>
+  Command.withHandler(({ yes, safe, dryRun, area, node }) =>
     Effect.gen(function* () {
       const { config, nodes, bundle, shown } = yield* prepare(node);
       const report = narrow(yield* checkNodes(config, bundle), shown);
       const fixes = report.findings.filter(
-        (f): f is Finding & { readonly fix: Fix } => f.fix !== undefined && (!safe || f.fix.safe),
+        (f): f is Finding & { readonly fix: Fix } =>
+          f.fix !== undefined && (!safe || f.fix.safe) && (area.length === 0 || area.includes(f.area)),
       );
       const skipped = report.findings.filter((f) => f.fix !== undefined && safe && !f.fix.safe);
       yield* Console.log(renderFixPlan(fixes, report.findings, skipped));
@@ -169,7 +110,7 @@ const fixCommand = Command.make("fix", {
         const go = yield* Prompt.run(Prompt.Confirm({ message: `Apply ${fixes.length} fix${fixes.length === 1 ? "" : "es"}?` }));
         if (!go) return;
       }
-      const outcomes = yield* runFixes(nodes, fixes, config.checkout);
+      const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle);
       const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name));
       const after = narrow(yield* checkNodes(config, bundle), (name) => touched.some((n) => n.name === name));
       yield* Console.log(renderFixResults(outcomes));
@@ -234,7 +175,7 @@ const mcpCommand = Command.make("mcp").pipe(
             const report = yield* checkNodes(config, bundle);
             return narrow(report, (name) => only.length === 0 || only.includes(name));
           }).pipe(Effect.provide(services)),
-        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout).pipe(Effect.provide(services)),
+        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
       });
       return yield* Layer.launch(
@@ -249,7 +190,7 @@ const mcpCommand = Command.make("mcp").pipe(
 
 const cli = Command.make("fleetx").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
-  Command.withSubcommands([statusCommand, fixCommand, doctorCommand, configCommand, mcpCommand, probeCommand]),
+  Command.withSubcommands([statusCommand, fixCommand, doctorCommand, configCommand, secretsCommand, mcpCommand, probeCommand]),
 );
 
 const RuntimeLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);

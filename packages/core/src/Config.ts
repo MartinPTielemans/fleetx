@@ -203,13 +203,18 @@ export const ProbeSettings = Schema.Struct({
   areas: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   /** Where this node keeps the config repo. */
   checkout: Schema.optionalKey(Schema.String),
+  /** SHA-256 of the controller's fleetx build. */
+  engine: Schema.optionalKey(Schema.String),
+  /** The node's name. */
+  node: Schema.optionalKey(Schema.String),
 });
 export type ProbeSettings = typeof ProbeSettings.Type;
 
-export const probeSettings = (config: Config, node?: Node): ProbeSettings => ({
+export const probeSettings = (config: Config, node?: Node, engine?: string): ProbeSettings => ({
+  ...(engine === undefined ? {} : { engine }),
   ...(config.settings.proxy === undefined
     ? {}
     : { proxy: { credentials: config.settings.proxy.credentials, launchers: config.settings.proxy.launchers } }),
-  ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown> }),
+  ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name }),
   checkout: config.checkout,
 });

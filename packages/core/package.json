@@ -12,7 +12,8 @@
   "dependencies": {
     "effect": "catalog:",
     "@effect/platform-node": "catalog:",
-    "smol-toml": "catalog:"
+    "smol-toml": "catalog:",
+    "age-encryption": "catalog:"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

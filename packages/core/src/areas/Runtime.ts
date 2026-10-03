@@ -53,7 +53,7 @@ export const RuntimeArea = defineArea({
       const url = yield* exec({
         command: "git",
         args: ["-C", ctx.checkout, "remote", "get-url", "origin"],
-        env: gitEnv(ctx.home, ctx.env),
+        env: gitEnv(ctx.home, ctx.env, ctx.checkout),
         timeout: Duration.seconds(5),
       });
       let remote: typeof Observed.Type["remote"] = null;
@@ -62,7 +62,7 @@ export const RuntimeArea = defineArea({
         const ls = yield* exec({
           command: "git",
           args: ["-C", ctx.checkout, "ls-remote", "--heads", "origin"],
-          env: { ...gitEnv(ctx.home, ctx.env), SSH_AUTH_SOCK: "" },
+          env: { ...gitEnv(ctx.home, ctx.env, ctx.checkout), SSH_AUTH_SOCK: "" },
           timeout: Duration.seconds(20),
         });
         remote = {

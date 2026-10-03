@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 
 import { diagnose, type Finding } from "./Diagnose.ts";
 import { probeSettings, type Config } from "./Config.ts";
+import { sha256 } from "./Hash.ts";
 import { lookupLatest, type Latest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { observeNode, type NodeResult } from "./Remote.ts";
@@ -22,7 +23,8 @@ export interface CheckReport {
 export const checkNodes = (config: Config, bundle: string) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
-    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, probeSettings(config, n)), {
+    const engine = bundle === "" ? undefined : yield* Effect.promise(() => sha256(bundle));
+    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, probeSettings(config, n, engine)), {
       concurrency: "unbounded",
     });
     const t3Versions = results

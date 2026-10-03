@@ -38,7 +38,7 @@ describe("mergeLayers", () => {
 describe("dotfiles", () => {
   const entry = (state: string, target: string | null = null) => ({ src: "zshrc", dest: "~/.zshrc", state, target });
   const diagnose = (state: string, target: string | null = null) =>
-    DotfilesArea.diagnose({ node: "laptop", desired: undefined, observed: [entry(state, target)], fleet: [] });
+    DotfilesArea.diagnose({ node: "laptop", desired: undefined, observed: [entry(state, target)], fleet: [], authority: null });
 
   it("is quiet when linked", () => {
     expect(diagnose("linked")).toEqual([]);

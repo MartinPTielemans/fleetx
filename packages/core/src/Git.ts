@@ -13,11 +13,16 @@ import { exec, type ExecResult } from "./Exec.ts";
 
 export const gitConfigPath = (home: string) => `${home}/.config/fleetx/gitconfig`;
 
-export const gitEnv = (home: string, env: Readonly<Record<string, string | undefined>>) => ({
+/**
+ * `repo`, when given, is trusted regardless of who owns it: git's ownership
+ * check (safe.directory) normally lives in the global config fleetx skips.
+ */
+export const gitEnv = (home: string, env: Readonly<Record<string, string | undefined>>, repo?: string) => ({
   ...env,
   GIT_CONFIG_GLOBAL: gitConfigPath(home),
   GIT_TERMINAL_PROMPT: "0",
   GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+  ...(repo === undefined ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: repo }),
 });
 
 export const git = (dir: string, args: ReadonlyArray<string>, options: { readonly stdin?: string; readonly timeout?: Duration.Input } = {}) =>
@@ -26,7 +31,7 @@ export const git = (dir: string, args: ReadonlyArray<string>, options: { readonl
     return yield* exec({
       command: "git",
       args: ["-C", dir, ...args],
-      env: gitEnv(home, process.env),
+      env: gitEnv(home, process.env, dir),
       ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       timeout: options.timeout ?? Duration.seconds(60),
     });
@@ -58,3 +63,23 @@ export const ensureGitConfig = Effect.gen(function* () {
   yield* fs.writeFileString(path, lines.join("\n") + "\n");
   return path;
 });
+
+/**
+ * Commit `paths` in the repo and push, as an authority changing the config.
+ * Pulls first (rebase) so the push lands on what other nodes see.
+ */
+export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, message: string) =>
+  Effect.gen(function* () {
+    yield* ensureGitConfig;
+    const add = yield* git(repo, ["add", "--", ...paths]);
+    if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
+    const staged = yield* git(repo, ["diff", "--cached", "--quiet", "--", ...paths]);
+    if (staged.code === 0) return "nothing to commit";
+    const commit = yield* git(repo, ["commit", "-q", "-m", message, "--", ...paths]);
+    if (!ok(commit)) return yield* Effect.fail(`git commit failed: ${why(commit)}`);
+    const pull = yield* git(repo, ["pull", "-q", "--rebase", "--autostash"]);
+    if (!ok(pull)) return yield* Effect.fail(`committed, but pulling before the push failed: ${why(pull)}`);
+    const push = yield* git(repo, ["push", "-q"]);
+    if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
+    return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+  });

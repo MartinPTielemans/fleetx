@@ -143,7 +143,8 @@ export const renderFixPlan = (
       lines.push("");
       for (const f of items) {
         lines.push(`  ${c.bold(pad(node, 9))} ${f.title}`);
-        lines.push(`  ${" ".repeat(9)} ${c.cyan("$")} ${f.fix.command}`);
+        const where = f.fix.on !== undefined && f.fix.on !== f.node ? c.dim(` (runs on ${f.fix.on})`) : "";
+        lines.push(`  ${" ".repeat(9)} ${c.cyan("$")} ${f.fix.command.split("\n").join(`\n  ${" ".repeat(11)} `)}${where}`);
         if (f.fix.disrupts) lines.push(`  ${" ".repeat(9)} ${c.yellow(`interrupts: ${f.fix.disrupts}`)}`);
       }
     }

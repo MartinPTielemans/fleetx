@@ -29,6 +29,8 @@ export interface Fix {
   readonly safe: boolean;
   /** What running it interrupts, when it interrupts anything. */
   readonly disrupts?: string;
+  /** Run on this node instead of the finding's (an authority, for repo changes). */
+  readonly on?: string;
 }
 
 export interface Finding {
@@ -410,7 +412,10 @@ const areaFindings = (observed: ReadonlyArray<{ name: string; obs: MachineObserv
       if (Option.isNone(decodedObserved) || Option.isNone(decodedDesired)) continue;
       fleet.push({ node: o.name, desired: decodedDesired.value, observed: decodedObserved.value });
     }
-    for (const entry of fleet) out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet }));
+    const authority = nodes.find((n) => n.roles.includes("authority"))?.name ?? null;
+    for (const entry of fleet) {
+      out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority }));
+    }
   }
   return out;
 };

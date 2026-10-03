@@ -33,6 +33,10 @@ export interface ObserveContext {
   readonly checkout: string;
   /** The login environment the probe runs in. */
   readonly env: Readonly<Record<string, string | undefined>>;
+  /** SHA-256 of the controller's fleetx build; null when not given. */
+  readonly engine: string | null;
+  /** This node's name in the fleet; null when not given. */
+  readonly node: string | null;
 }
 
 export interface DiagnoseContext<D, O> {
@@ -41,6 +45,8 @@ export interface DiagnoseContext<D, O> {
   readonly observed: O;
   /** Every node's facts for this area, for cross-machine rules. */
   readonly fleet: ReadonlyArray<{ readonly node: string; readonly desired: D; readonly observed: O }>;
+  /** The node with the authority role, which fixes that change the repo run on; null if none. */
+  readonly authority: string | null;
 }
 
 export interface Area<D, O> {
