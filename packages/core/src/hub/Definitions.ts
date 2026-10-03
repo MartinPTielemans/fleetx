@@ -107,7 +107,7 @@ export interface HubDefinition {
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
 /** An image reference; never something docker would read as a flag. */
-export const IMAGE_PATTERN = /^[a-z0-9][a-zA-Z0-9._\/:@-]*$/;
+export const IMAGE_PATTERN = /^[a-z0-9][a-zA-Z0-9._/:@-]*$/;
 
 /** Remote servers are reached over HTTPS; plain HTTP only stays on this machine or the tailnet. */
 export const isAllowedRemote = (url: string) => {
@@ -139,7 +139,7 @@ export const parseDefinition = (name: string, text: string): HubDefinition | { r
             client: d.oauth === undefined || d.oauth.issuer === undefined ? null : { clientId: d.oauth.client_id, clientSecretEnv: d.oauth.client_secret_env ?? null, issuer: d.oauth.issuer },
           }
         : { type: "none" };
-  if (d.oauth !== undefined && (d.oauth.issuer === undefined || !/^https:\/\//.test(d.oauth.issuer))) {
+  if (d.oauth !== undefined && (d.oauth.issuer === undefined || !d.oauth.issuer.startsWith("https://"))) {
     return { problem: "oauth needs the https issuer its client is registered with (oauth.issuer), so its secret goes nowhere else" };
   }
   if (d.image !== undefined && !IMAGE_PATTERN.test(d.image)) return { problem: `not an image reference: ${d.image}` };

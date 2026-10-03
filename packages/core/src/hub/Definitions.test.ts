@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -74,13 +74,7 @@ describe("hub container env", () => {
             return { args, file, mode: statSync(file).mode & 0o777, text: readFileSync(file, "utf8") };
           }),
         );
-        let exists = true;
-        try {
-          statSync(inside.file);
-        } catch {
-          exists = false;
-        }
-        return { ...inside, exists };
+        return { ...inside, exists: existsSync(inside.file) };
       }).pipe(Effect.provide(NodeServices.layer)),
     );
     expect(args[0]).toBe("--env-file");
