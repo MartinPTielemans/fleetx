@@ -1,0 +1,6 @@
+# Three nodes on one network; /srv/remote is the shared "GitHub".
+services:
+  laptop: { build: ., hostname: laptop, volumes: [remote:/srv/remote, keys:/keys, ../../apps/cli/dist:/fleetx:ro] }
+  server: { build: ., hostname: server, volumes: [remote:/srv/remote, keys:/keys, ../../apps/cli/dist:/fleetx:ro] }
+  desktop: { build: ., hostname: desktop, volumes: [remote:/srv/remote, keys:/keys, ../../apps/cli/dist:/fleetx:ro] }
+volumes: { remote: {}, keys: {} }
