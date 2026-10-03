@@ -13,8 +13,11 @@
  *   progress      a request's progressToken is rewritten the same way, so
  *                 progress reaches only the client that asked for it
  *   cancellation  notifications/cancelled has its requestId mapped
- *   notifications from the server (list_changed, logging) fan out to every
- *                 client's GET stream
+ *   notifications list_changed and resources/updated fan out to every
+ *                 client's GET stream; log messages go only to the client
+ *                 whose request is in flight (dropped when that is unclear)
+ *   sessions      belong to the client that opened them; the gateway
+ *                 refuses another client's session id
  *
  * The bridge declares no client capabilities, so a server never sends it
  * sampling, elicitation or roots requests; if one does, the bridge answers
@@ -75,6 +78,9 @@ interface Session {
   stream: Queue.Queue<string, Cause.Done> | null;
   lastSeen: number;
 }
+
+/** Notifications every client may see: they say the server changed, not what a client asked. */
+const isBroadcast = (method: string | undefined) => method !== undefined && (method.endsWith("/list_changed") || method === "notifications/resources/updated");
 
 const BACKOFF_MIN = 1_000;
 const BACKOFF_MAX = 5 * 60_000;
@@ -157,8 +163,15 @@ export const makeBridge = (options: {
               const key = progress.get(String(params.progressToken));
               const p = key === undefined ? undefined : pending.get(key);
               if (p?.progressToken != null) yield* p.deliver({ ...message, params: { ...params, progressToken: p.progressToken.client } });
-            } else {
+            } else if (isBroadcast(message.method)) {
               yield* broadcast(message);
+            } else {
+              // Log messages and the like may describe one client's request: only that client gets them,
+              // and only when exactly one session has a request in flight. Otherwise they are dropped.
+              const inFlight = [...pending.values()].filter((p) => p.session !== null);
+              const owners = new Set(inFlight.map((p) => p.session));
+              const latest = inFlight.at(-1);
+              if (owners.size === 1 && latest !== undefined) yield* latest.deliver(message);
             }
           }
         }

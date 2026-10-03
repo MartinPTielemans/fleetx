@@ -28,6 +28,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     const token = m.params._meta?.progressToken;
     if (token !== undefined) send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: 1 } });
+    if (args.log) send({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: `working on ${args.text}` } });
     setTimeout(
       () => send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${args.text} (init ${initializeCount})` }] } }),
       args.delayMs ?? 0,

@@ -31,6 +31,8 @@ const send = (res: ServerResponse, status: number, value: unknown, headers: Reco
 export interface FakeAuthServer {
   readonly url: string;
   readonly refreshes: () => number;
+  /** Every POST to the token endpoint, whatever it carried. */
+  readonly tokenPosts: () => number;
   readonly registrations: () => number;
   /** The last token request's form fields (for asserting resource, verifier, …). */
   readonly lastTokenRequest: () => URLSearchParams | null;
@@ -43,7 +45,12 @@ export interface FakeAuthServer {
   readonly close: () => Promise<void>;
 }
 
-export const fakeAuthServer = async (options: { readonly openIdOnly: boolean; readonly expectedResource: () => string }): Promise<FakeAuthServer> => {
+export const fakeAuthServer = async (options: {
+  readonly openIdOnly: boolean;
+  readonly expectedResource: () => string;
+  /** Lie about the issuer in the metadata. */
+  readonly issuer?: string;
+}): Promise<FakeAuthServer> => {
   let refreshes = 0;
   let registrations = 0;
   let expiresIn = 3600;
@@ -62,8 +69,9 @@ export const fakeAuthServer = async (options: { readonly openIdOnly: boolean; re
     return tokens;
   };
   let base = "";
+  let tokenPosts = 0;
   const metadata = () => ({
-    issuer: base,
+    issuer: options.issuer ?? base,
     authorization_endpoint: `${base}/authorize`,
     token_endpoint: `${base}/token`,
     registration_endpoint: `${base}/register`,
@@ -82,6 +90,7 @@ export const fakeAuthServer = async (options: { readonly openIdOnly: boolean; re
       return send(res, 201, { client_id: id, redirect_uris: r.redirect_uris, token_endpoint_auth_method: "none" });
     }
     if (req.method === "POST" && path === "/token") {
+      tokenPosts++;
       const form = new URLSearchParams(await body(req));
       last = form;
       if (form.get("resource") !== options.expectedResource()) return send(res, 400, { error: "invalid_target" });
@@ -110,6 +119,7 @@ export const fakeAuthServer = async (options: { readonly openIdOnly: boolean; re
   return {
     url,
     refreshes: () => refreshes,
+    tokenPosts: () => tokenPosts,
     registrations: () => registrations,
     lastTokenRequest: () => last,
     approve: (authorizationUrl) => {
@@ -139,30 +149,39 @@ export interface FakeMcpServer {
   readonly url: string;
   /** Requests for the resource metadata: at the well-known path, and at the path the 401 names. */
   readonly metadataHits: () => { readonly wellKnown: number; readonly hinted: number };
+  /** The last request body the server received, exactly as sent. */
+  readonly lastBody: () => string;
   readonly close: () => Promise<void>;
 }
 
 /** A streamable-HTTP MCP server at /mcp that needs a bearer token `isValid` accepts. */
-export const fakeProtectedMcp = async (authServer: () => string, isValid: (token: string) => boolean): Promise<FakeMcpServer> => {
+export const fakeProtectedMcp = async (
+  authServer: () => string,
+  isValid: (token: string) => boolean,
+  options: { readonly resource?: string; readonly hint?: string } = {},
+): Promise<FakeMcpServer> => {
   let base = "";
   const hits = { wellKnown: 0, hinted: 0 };
+  let last = "";
   const { server, url } = await listen(async (req, res) => {
     const path = new URL(req.url ?? "/", base).pathname;
     if (req.method === "GET" && (path === "/.well-known/oauth-protected-resource/mcp" || path === "/meta/resource")) {
       if (path === "/meta/resource") hits.hinted++;
       else hits.wellKnown++;
-      return send(res, 200, { resource: `${base}/mcp`, authorization_servers: [authServer()], scopes_supported: ["mcp"] });
+      return send(res, 200, { resource: options.resource ?? `${base}/mcp`, authorization_servers: [authServer()], scopes_supported: ["mcp"] });
     }
     if (path !== "/mcp") return send(res, 404, {});
     const token = /^Bearer (.+)$/.exec(req.headers["authorization"] ?? "")?.[1] ?? "";
     if (!isValid(token)) {
-      return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer error="invalid_token", resource_metadata="${base}/meta/resource"` });
+      return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer error="invalid_token", resource_metadata="${options.hint ?? `${base}/meta/resource`}"` });
     }
     if (req.method === "DELETE") {
       res.writeHead(204);
       return res.end();
     }
-    const m = JSON.parse(await body(req)) as { id?: number | string; method: string; params?: { name?: string } };
+    const text = await body(req);
+    last = text;
+    const m = JSON.parse(text) as { id?: number | string; method: string; params?: { name?: string } };
     if (m.id === undefined) {
       res.writeHead(202);
       return res.end();
@@ -178,5 +197,6 @@ export const fakeProtectedMcp = async (authServer: () => string, isValid: (token
     res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: m.id, result })}\n\n`);
   });
   base = url;
-  return { url, metadataHits: () => ({ ...hits }), close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return { url, metadataHits: () => ({ ...hits }),
+    lastBody: () => last, close: () => new Promise((resolve) => server.close(() => resolve())) };
 };

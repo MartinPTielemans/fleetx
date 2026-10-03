@@ -14,9 +14,10 @@
  *   auth = { type = "bearer", token_env = "NAME" }   a secret sent as the bearer
  *   remote_auth = true                               OAuth (also detected from a 401)
  *   remote_auth_scopes = ["…"]                       scopes to ask for
- *   oauth = { client_id = "…", client_secret_env = "NAME" }
+ *   oauth = { client_id = "…", client_secret_env = "NAME", issuer = "https://…" }
  *                                                    a static client, for servers
- *                                                    without dynamic registration
+ *                                                    without dynamic registration;
+ *                                                    used only with that issuer
  *   env = { KEY = "$SECRET" }                        container or command environment;
  *                                                    $NAME / ${NAME} read the fleet's secrets
  *   network = "none"                                 no network (stdio images only)
@@ -52,7 +53,12 @@ const RawDefinition = Schema.Struct({
   remote_auth: Schema.optionalKey(Schema.Boolean),
   remote_auth_scopes: Schema.optionalKey(Schema.Array(Schema.String)),
   oauth: Schema.optionalKey(
-    Schema.Struct({ client_id: Schema.String, client_secret_env: Schema.optionalKey(Schema.String), scopes: Schema.optionalKey(Schema.Array(Schema.String)) }),
+    Schema.Struct({
+      client_id: Schema.String,
+      client_secret_env: Schema.optionalKey(Schema.String),
+      issuer: Schema.optionalKey(Schema.String),
+      scopes: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
   ),
   tools: Schema.optionalKey(Schema.Struct({ deny: Schema.optionalKey(Schema.Array(Schema.String)) })),
 });
@@ -84,7 +90,7 @@ export type HubAuth =
   | {
       readonly type: "oauth";
       readonly scopes: ReadonlyArray<string>;
-      readonly client: { readonly clientId: string; readonly clientSecretEnv: string | null } | null;
+      readonly client: { readonly clientId: string; readonly clientSecretEnv: string | null; readonly issuer: string } | null;
     };
 
 export interface HubDefinition {
@@ -99,6 +105,17 @@ export interface HubDefinition {
 }
 
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+
+/** An image reference; never something docker would read as a flag. */
+export const IMAGE_PATTERN = /^[a-z0-9][a-zA-Z0-9._/:@-]*$/;
+
+/** Remote servers are reached over HTTPS; plain HTTP only stays on this machine or the tailnet. */
+export const isAllowedRemote = (url: string) => {
+  const u = URL.parse(url);
+  if (u === null) return false;
+  if (u.protocol === "https:") return true;
+  return u.protocol === "http:" && (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || u.hostname.endsWith(".ts.net"));
+};
 
 const decodeRaw = Schema.decodeUnknownOption(RawDefinition);
 
@@ -119,14 +136,18 @@ export const parseDefinition = (name: string, text: string): HubDefinition | { r
         ? {
             type: "oauth",
             scopes: d.remote_auth_scopes ?? d.oauth?.scopes ?? [],
-            client: d.oauth === undefined ? null : { clientId: d.oauth.client_id, clientSecretEnv: d.oauth.client_secret_env ?? null },
+            client: d.oauth === undefined || d.oauth.issuer === undefined ? null : { clientId: d.oauth.client_id, clientSecretEnv: d.oauth.client_secret_env ?? null, issuer: d.oauth.issuer },
           }
         : { type: "none" };
+  if (d.oauth !== undefined && (d.oauth.issuer === undefined || !d.oauth.issuer.startsWith("https://"))) {
+    return { problem: "oauth needs the https issuer its client is registered with (oauth.issuer), so its secret goes nowhere else" };
+  }
+  if (d.image !== undefined && !IMAGE_PATTERN.test(d.image)) return { problem: `not an image reference: ${d.image}` };
   const base = { name, kind: d.kind, auth, deny };
   switch (d.kind) {
     case "remote": {
       if (d.url === undefined) return { problem: "remote definition has no url" };
-      if (!/^https?:\/\//.test(d.url)) return { problem: `remote url must be http(s): ${d.url}` };
+      if (!isAllowedRemote(d.url)) return { problem: `remote url must be https (plain http only on loopback or a *.ts.net host): ${d.url}` };
       return { ...base, runner: { type: "remote", url: d.url }, upstream: d.url };
     }
     case "hosted-stdio": {

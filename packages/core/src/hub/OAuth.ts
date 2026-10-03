@@ -128,11 +128,25 @@ const firstJson = <A>(urls: ReadonlyArray<string>, schema: Schema.Decoder<A>) =>
     return Option.none<{ url: string; value: A }>();
   });
 
-/** Authorization server endpoints must be HTTPS; plain HTTP only on loopback (development, tests). */
-export const isSecureEndpoint = (url: string) => {
+const LOOPBACK: ReadonlyArray<string> = ["127.0.0.1", "localhost", "[::1]"];
+
+/** Whether a URL's host is this machine. */
+export const isLoopback = (url: string) => {
   const u = URL.parse(url);
-  return u !== null && (u.protocol === "https:" || (u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)));
+  return u !== null && LOOPBACK.includes(u.hostname);
 };
+
+/**
+ * OAuth URLs must be HTTPS. Plain HTTP on loopback is allowed only when a
+ * caller asks for it explicitly (tests); never by default.
+ */
+export const isSecureEndpoint = (url: string, allowLoopbackHttp = false) => {
+  const u = URL.parse(url);
+  return u !== null && (u.protocol === "https:" || (allowLoopbackHttp && u.protocol === "http:" && LOOPBACK.includes(u.hostname)));
+};
+
+/** Same scheme, host and port. */
+const sameOrigin = (a: string, b: string) => URL.parse(a)?.origin === URL.parse(b)?.origin;
 
 export interface Discovery {
   readonly resource: string;
@@ -147,19 +161,34 @@ export interface Discovery {
  * header of its 401, when there was one. A server without resource metadata
  * is taken to be its own authorization server (the 2025-03-26 behaviour).
  */
-export const discover = (serverUrl: string, challenge: string | null) =>
+export const discover = (serverUrl: string, challenge: string | null, options: { readonly allowLoopbackHttp?: boolean } = {}) =>
   Effect.gen(function* () {
+    const allow = options.allowLoopbackHttp === true;
+    if (!isSecureEndpoint(serverUrl, allow)) return yield* new OAuthError({ message: `signing in needs an HTTPS server URL, not ${serverUrl}` });
     const params = parseWwwAuthenticate(challenge);
+    // A resource_metadata hint is followed only on the server's own origin, over HTTPS; otherwise the well-known URLs are used.
     const hinted = params["resource_metadata"];
-    const urls = hinted === undefined ? resourceMetadataUrls(serverUrl) : [hinted, ...resourceMetadataUrls(serverUrl)];
-    const prm = yield* firstJson(urls, ResourceMetadata);
-    const resource = Option.match(prm, { onNone: () => canonicalResource(serverUrl), onSome: (p) => p.value.resource ?? canonicalResource(serverUrl) });
+    const hint = hinted !== undefined && isSecureEndpoint(hinted, allow) && sameOrigin(hinted, serverUrl) ? [hinted] : [];
+    const prm = yield* firstJson([...hint, ...resourceMetadataUrls(serverUrl)], ResourceMetadata);
+    const resource = canonicalResource(serverUrl);
+    if (Option.isSome(prm)) {
+      // RFC 9728 §3.3: the metadata must be for this very resource.
+      const named = prm.value.value.resource;
+      if (named === undefined || URL.parse(named) === null || canonicalResource(named) !== resource) {
+        return yield* new OAuthError({ message: `the resource metadata at ${prm.value.url} is for ${named ?? "no resource"}, not ${resource}` });
+      }
+    }
     const issuer = Option.match(prm, { onNone: () => new URL(serverUrl).origin, onSome: (p) => p.value.authorization_servers?.[0] ?? new URL(serverUrl).origin });
+    if (!isSecureEndpoint(issuer, allow)) return yield* new OAuthError({ message: `the authorization server ${issuer} is not HTTPS` });
     const found = yield* firstJson(serverMetadataUrls(issuer), ServerMetadata);
     if (Option.isNone(found)) return yield* new OAuthError({ message: `no authorization server metadata found for ${issuer}` });
     const metadata = found.value.value;
+    // RFC 8414 §3.3: the metadata must name the issuer it was fetched for.
+    if (metadata.issuer !== issuer) {
+      return yield* new OAuthError({ message: `the metadata for ${issuer} names a different issuer (${metadata.issuer ?? "none"})` });
+    }
     for (const endpoint of [metadata.authorization_endpoint, metadata.token_endpoint, metadata.registration_endpoint]) {
-      if (endpoint !== undefined && !isSecureEndpoint(endpoint)) {
+      if (endpoint !== undefined && !isSecureEndpoint(endpoint, allow)) {
         return yield* new OAuthError({ message: `${issuer} names an endpoint that is not HTTPS: ${endpoint}` });
       }
     }
@@ -292,6 +321,8 @@ export const makeOAuthManager = (options: {
   readonly redirectUri: string;
   readonly secrets: Effect.Effect<Readonly<Record<string, string>>>;
   readonly clientName?: string;
+  /** Tests only: accept plain-HTTP OAuth URLs on loopback. */
+  readonly allowLoopbackHttp?: boolean;
 }) =>
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient;
@@ -313,6 +344,10 @@ export const makeOAuthManager = (options: {
       Effect.gen(function* () {
         const stat = definition.auth.type === "oauth" ? definition.auth.client : null;
         if (stat !== null) {
+          // A static client's secret goes only to the issuer the definition names, never to one the server points at.
+          if (discovery.issuer !== stat.issuer) {
+            return yield* new OAuthError({ message: `the server sends sign-ins to ${discovery.issuer}, but mcp/${definition.name}.json names the issuer ${stat.issuer}` });
+          }
           const secrets = yield* options.secrets;
           const secret = stat.clientSecretEnv === null ? null : (secrets[stat.clientSecretEnv] ?? null);
           if (stat.clientSecretEnv !== null && secret === null) {
@@ -340,7 +375,7 @@ export const makeOAuthManager = (options: {
         const now = yield* Clock.currentTimeMillis;
         for (const [state, p] of pending) if (now - p.createdAt > PENDING_FOR) pending.delete(state);
         if (pending.size >= MAX_PENDING) return yield* new OAuthError({ message: "too many sign-ins in progress; finish or wait for one to expire" });
-        const discovery = yield* provide(discover(serverUrl, challenge));
+        const discovery = yield* provide(discover(serverUrl, challenge, { allowLoopbackHttp: options.allowLoopbackHttp === true }));
         const client = yield* clientFor(definition, discovery);
         const verifier = randomSecret() + randomSecret();
         const challengeValue = yield* sha256Base64url(verifier);

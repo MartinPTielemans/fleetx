@@ -10,9 +10,23 @@ import * as Effect from "effect/Effect";
 
 import { sha256 } from "../Hash.ts";
 
-/** Whether a tool matches any deny pattern (`*` matches any run of characters). */
-export const isDenied = (deny: ReadonlyArray<string>, tool: string) =>
-  deny.some((pattern) => new RegExp(`^${pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(tool));
+/** Tool names longer than this are refused, never matched: patterns stay cheap and log records short. */
+export const MAX_TOOL_NAME = 128;
+
+const escapeRegExp = (s: string) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A server's deny patterns as one matcher, compiled once (`*` matches any run
+ * of characters). Over-long names count as denied: fail closed.
+ */
+export const compileDeny = (deny: ReadonlyArray<string>): ((tool: string) => boolean) => {
+  if (deny.length === 0) return (tool) => tool.length > MAX_TOOL_NAME;
+  const pattern = new RegExp(`^(?:${deny.map((p) => p.split("*").map(escapeRegExp).join(".*")).join("|")})$`);
+  return (tool) => tool.length > MAX_TOOL_NAME || pattern.test(tool);
+};
+
+/** Whether a tool matches any deny pattern. Compile with `compileDeny` where it is called often. */
+export const isDenied = (deny: ReadonlyArray<string>, tool: string) => compileDeny(deny)(tool);
 
 /** Equal-length strings compared without an early exit. */
 export const constantTimeEqual = (a: string, b: string) => {

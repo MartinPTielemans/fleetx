@@ -18,6 +18,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -26,7 +27,7 @@ import { HubCall, HubLoginStart, HubServer } from "../Api.ts";
 import type { Hub } from "./Hub.ts";
 import { parseJson } from "./JsonRpc.ts";
 import { bearerMatches } from "./Policy.ts";
-import type { ForwardRequest } from "./Upstream.ts";
+import type { ForwardRequest, UpstreamResponse } from "./Upstream.ts";
 
 export const ClientToken = Schema.Struct({ client: Schema.String, servers: Schema.NullOr(Schema.Array(Schema.String)), createdAt: Schema.Number });
 export const CreatedToken = Schema.Struct({ token: Schema.String });
@@ -51,6 +52,40 @@ const page = (title: string, message: string, status: number) =>
 
 /** The segment after `prefix` in the path: /hub/servers/<name>/login → name. */
 const segment = (url: string, index: number) => decodeURIComponent(new URL(url, "http://relay").pathname.split("/")[index] ?? "");
+
+/** The largest request body the gateway reads. */
+export const MAX_BODY = 4 * 1024 * 1024;
+
+/** The body as text, or null when it is larger than MAX_BODY; stops reading as soon as it is. */
+const readCapped = (request: HttpServerRequest.HttpServerRequest) =>
+  Effect.gen(function* () {
+    const declared = Number(request.headers["content-length"] ?? "0");
+    if (Number.isFinite(declared) && declared > MAX_BODY) return null;
+    let size = 0;
+    const chunks: Array<Uint8Array> = [];
+    const within = yield* request.stream.pipe(
+      Stream.takeWhile((chunk) => {
+        size += chunk.length;
+        if (size <= MAX_BODY) chunks.push(chunk);
+        return size <= MAX_BODY;
+      }),
+      Stream.runDrain,
+      Effect.as(true),
+    );
+    if (!within || size > MAX_BODY) return null;
+    const all = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    return new TextDecoder().decode(all);
+  });
+
+const toServerResponse = (response: UpstreamResponse) => {
+  const { "content-type": contentType, ...rest } = response.headers;
+  return HttpServerResponse.stream(response.body, { status: response.status, ...(contentType === undefined ? {} : { contentType }), headers: rest });
+};
 
 export const hubRoutes = (hub: Hub, relayToken: string) => {
   const authorized = Effect.gen(function* () {
@@ -146,12 +181,20 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
         const name = segment(request.url, 2);
         const method = request.method === "GET" || request.method === "DELETE" ? request.method : request.method === "POST" ? "POST" : null;
         if (method === null) return problem("Method Not Allowed", 405);
+        // The token first: nothing of an unauthenticated request is read.
+        const access = yield* hub.authorize(name, request.headers["authorization"], method);
+        if ("rejected" in access) return toServerResponse(access.rejected);
         const headers: Record<string, string> = {};
         for (const [k, v] of Object.entries(request.headers)) if (typeof v === "string") headers[k] = v;
-        const forward: ForwardRequest = { method, headers, body: method === "POST" ? yield* request.text : "" };
-        const response = yield* hub.gateway(name, request.headers["authorization"], forward);
-        const { "content-type": contentType, ...rest } = response.headers;
-        return HttpServerResponse.stream(response.body, { status: response.status, ...(contentType === undefined ? {} : { contentType }), headers: rest });
+        let body = "";
+        if (method === "POST") {
+          const read = yield* readCapped(request);
+          if (read === null) return problem("Payload Too Large", 413);
+          body = read;
+        }
+        const forward: ForwardRequest = { method, headers, body };
+        const response = yield* hub.serve(name, access.client, forward);
+        return toServerResponse(response);
       }).pipe(Effect.catchCause(() => Effect.succeed(problem("Bad Gateway", 502)))),
     ),
   );

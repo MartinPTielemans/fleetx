@@ -87,6 +87,21 @@ describe("stdio bridge", () => {
           expect(frame).toContain("notifications/tools/list_changed");
         }
 
+        // A log message reaches only the client whose request is in flight, never another's stream.
+        const gaLog = yield* streamOf(a.session);
+        const gbLog = yield* streamOf(b.session);
+        yield* Effect.sleep(Duration.millis(50));
+        const logged = yield* post(bridge, { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "echo", arguments: { text: "mine", log: true } } }, a.session).pipe(
+          Effect.flatMap(messages),
+        );
+        expect(logged.map((m) => m.method ?? "response")).toEqual(["notifications/message", "response"]);
+        yield* post(bridge, { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "notify" } }, b.session).pipe(Effect.flatMap(messages));
+        for (const fiber of [gaLog, gbLog]) {
+          const frame = yield* Fiber.join(fiber);
+          expect(frame).toContain("list_changed");
+          expect(frame).not.toContain("working on");
+        }
+
         // Unknown sessions are 404; a request without a session is 400; notifications get 202.
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" }, "nope")).status).toBe(404);
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(400);

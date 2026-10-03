@@ -51,6 +51,20 @@ export const isRequest = (m: JsonRpcMessage): boolean => typeof m.method === "st
 export const isNotification = (m: JsonRpcMessage): boolean => typeof m.method === "string" && !hasId(m);
 export const isResponse = (m: JsonRpcMessage): boolean => m.method === undefined && hasId(m) && ("result" in m || "error" in m);
 
+const CANONICAL_KEYS: ReadonlyArray<string> = ["jsonrpc", "id", "method", "params"];
+
+/**
+ * A key that differs only in case from one the hub reads (jsonrpc, id,
+ * method, params, params.name), or null. Some servers (Go's encoding/json)
+ * match keys case-insensitively, last one winning, so `{"name":"ok","Name":
+ * "delete_repo"}` would show the policy one tool and the server another.
+ */
+export const caseVariantKey = (m: JsonRpcMessage): string | null => {
+  for (const key of Object.keys(m)) if (CANONICAL_KEYS.includes(key.toLowerCase()) && !CANONICAL_KEYS.includes(key)) return key;
+  if (isRecord(m.params)) for (const key of Object.keys(m.params)) if (key.toLowerCase() === "name" && key !== "name") return `params.${key}`;
+  return null;
+};
+
 /** The tool a `tools/call` request names, or null. */
 export const toolOf = (m: JsonRpcMessage): string | null => {
   if (m.method !== "tools/call" || !isRecord(m.params)) return null;

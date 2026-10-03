@@ -113,17 +113,19 @@ definition in `mcp/` and serves it at `<relay url>/mcp/<name>`:
 
 | kind | the hub |
 |---|---|
-| `remote` | proxies to `url`, adding the server's credential (OAuth, or a bearer secret) |
+| `remote` | proxies to `url` (https; plain http only on loopback or a `*.ts.net` host), adding the server's credential (OAuth, or a bearer secret) |
 | `container` | runs `image` with Docker on a port from 18200–18299 and proxies to it (`target_port`, default 8080; `path`, default `/mcp`) |
 | `registry` | the same; `transport = "stdio"` (the default for registry) images are bridged |
 | `hosted-stdio` | runs `command` on the relay node and bridges it |
 
 Containers are named `fleetx-mcp-<name>`, run with `--cap-drop ALL
 --security-opt no-new-privileges`, publish only on 127.0.0.1, get `env` from
-the fleet's secrets (`env = { API_KEY = "$CONTEXT7_API_KEY" }`), and can be
+the fleet's secrets (`env = { API_KEY = "$CONTEXT7_API_KEY" }`, passed in a
+private env file that is removed once docker has read it), and can be
 cut off with `network = "none"` (stdio images). The hub adopts a matching
 running container after a restart and restarts one that dies, with backoff.
-One stdio process serves every client: the bridge gives each its own session.
+One stdio process serves every client: the bridge gives each its own session,
+and a session belongs to the client token that opened it.
 
 Optional fields in a definition:
 
@@ -131,7 +133,7 @@ Optional fields in a definition:
 {
   "remote_auth": true,
   "remote_auth_scopes": ["openid", "query:read"],
-  "oauth": { "client_id": "…", "client_secret_env": "NAME" },
+  "oauth": { "client_id": "…", "client_secret_env": "NAME", "issuer": "https://auth.example.com" },
   "tools": { "deny": ["delete_*"] }
 }
 ```
@@ -139,7 +141,10 @@ Optional fields in a definition:
 `remote_auth` asks for an OAuth login up front; a server that answers 401 is
 detected anyway. The hub registers itself with the authorization server
 when it allows dynamic registration; otherwise register a client there with
-the redirect URI `<relay url>/oauth/callback` and add `oauth`. Fields written
+the redirect URI `<relay url>/oauth/callback` and add `oauth`, naming the
+issuer it is registered with: its secret is never sent to any other. The hub
+checks that the authorization server's metadata names its own issuer and that
+the resource metadata is for this server. Fields written
 for ToolHive (callback ports, timeouts, registry references) are ignored.
 
 Sign in once, from any machine: `fleetx mcp login <name>` prints the URL to

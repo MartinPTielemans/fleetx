@@ -51,11 +51,12 @@ import {
   parseMessages,
   sseFrame,
   toJson,
+  caseVariantKey,
   toolOf,
   type JsonRpcMessage,
 } from "./JsonRpc.ts";
 import { makeOAuthManager, type OAuthManager } from "./OAuth.ts";
-import { bearerMatches, bearerOf, constantTimeEqual, hashToken, isDenied, newClientToken } from "./Policy.ts";
+import { bearerMatches, bearerOf, compileDeny, constantTimeEqual, hashToken, newClientToken } from "./Policy.ts";
 import { spawnStdio } from "./Process.ts";
 import { makeTokenStore, tokenStorePath, type TokenStore } from "./TokenStore.ts";
 import {
@@ -93,6 +94,8 @@ export interface HubConfig {
   /** Default ~/.local/state/fleetx/hub. */
   readonly stateDir?: string;
   readonly checkEvery?: Duration.Input;
+  /** Tests only: accept plain-HTTP OAuth URLs on loopback. Never set in the relay. */
+  readonly allowLoopbackHttp?: boolean;
   /** Secrets for credentials and environments; default the node's secrets.env. */
   readonly secrets?: Effect.Effect<Readonly<Record<string, string>>>;
 }
@@ -106,6 +109,15 @@ export interface ClientTokenInfo {
 export interface Hub {
   readonly servers: Effect.Effect<ReadonlyArray<HubServer>>;
   readonly calls: CallLog["list"];
+  /** Check a gateway request's token before anything else is read; rejections are logged once. */
+  readonly authorize: (
+    name: string,
+    authorization: string | undefined,
+    method: string,
+  ) => Effect.Effect<{ readonly client: string } | { readonly rejected: UpstreamResponse }>;
+  /** Serve an authorized request: policy, forwarding, logging. */
+  readonly serve: (name: string, client: string, request: ForwardRequest) => Effect.Effect<UpstreamResponse>;
+  /** `authorize`, then `serve`. */
   readonly gateway: (name: string, authorization: string | undefined, request: ForwardRequest) => Effect.Effect<UpstreamResponse>;
   readonly login: (name: string) => Effect.Effect<string, string>;
   readonly finishLogin: (query: Readonly<Record<string, string | undefined>>) => Effect.Effect<string, string>;
@@ -135,6 +147,8 @@ interface Entry {
   challenge: string | null;
   /** The server asked for a login though its definition did not say so. */
   oauthDetected: boolean;
+  /** The definition's deny patterns, compiled once. */
+  readonly denied: (tool: string) => boolean;
 }
 
 /** Parse dotenv text: KEY=value lines, optional `export`, simple quotes. */
@@ -155,6 +169,16 @@ const STATE_HEADER = "x-fleetx-hub-state";
 
 const jsonRpcFailure = (status: number, message: string, headers: Readonly<Record<string, string>> = {}) =>
   textResponse(status, toJson(errorMessage(null, -32001, message)), headers);
+
+/**
+ * What the log keeps of a JSON-RPC error: its code and words the hub writes.
+ * Never the server's message, which often echoes the arguments.
+ */
+const errorReason = (m: JsonRpcMessage): string | null => {
+  if (m.error === undefined) return null;
+  const code = (m.error as { code?: unknown }).code;
+  return typeof code === "number" && Number.isInteger(code) ? `JSON-RPC error ${code}` : "JSON-RPC error";
+};
 
 /** The parts of a request the call log needs. */
 interface Requested {
@@ -182,7 +206,7 @@ export const makeHub = (
     const store: TokenStore = yield* makeTokenStore({ file: config.stateDir === undefined ? tokenStorePath(config.home) : path.join(stateDir, "tokens.age"), identity: config.identity });
     const log = yield* makeCallLog(path.join(stateDir, "calls.jsonl"));
     const redirectUri = config.relayUrl === null ? "" : `${config.relayUrl.replace(/\/+$/, "")}/oauth/callback`;
-    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "fleetx hub" });
+    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "fleetx hub", allowLoopbackHttp: config.allowLoopbackHttp === true });
 
     const entries = new Map<string, Entry>();
     let problems: ReadonlyArray<{ readonly name: string; readonly problem: string }> = [];
@@ -234,7 +258,7 @@ export const makeHub = (
         const env = resolvedEnv("env" in def.runner ? def.runner.env : {}, yield* secrets);
         let entry: Entry;
         const self = () => entry;
-        const provide = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>) =>
+        const provide = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>) =>
           effect.pipe(Effect.provideService(Scope.Scope, scope), Effect.provide(services));
         const r = def.runner;
         let upstream: Upstream;
@@ -272,7 +296,7 @@ export const makeHub = (
           );
           upstream = bridge;
         }
-        entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false };
+        entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false, denied: compileDeny(def.deny) };
         entries.set(def.name, entry);
         yield* emit({ server: def.name, state: "starting", detail: null });
 
@@ -361,7 +385,7 @@ export const makeHub = (
         if (init.status < 200 || init.status >= 300) return yield* new UpstreamError({ message: `initialize answered HTTP ${init.status}` });
         const initReply = messagesInBody(init.headers["content-type"], initText).find((m) => isResponse(m));
         if (initReply === undefined) return yield* new UpstreamError({ message: "initialize got no answer" });
-        if (initReply.error !== undefined) return yield* new UpstreamError({ message: `initialize failed: ${initReply.error.message}` });
+        if (initReply.error !== undefined) return yield* new UpstreamError({ message: `initialize failed: ${String((initReply.error as { message?: unknown }).message).slice(0, 200)}` });
         const session = init.headers["mcp-session-id"];
         const headers = { "content-type": "application/json", accept, "mcp-protocol-version": "2025-06-18", ...(session === undefined ? {} : { "mcp-session-id": session }) };
         yield* entry.upstream.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", method: "notifications/initialized" }) }).pipe(
@@ -372,7 +396,7 @@ export const makeHub = (
         const listText = yield* readBody(list).pipe(Effect.orElseSucceed(() => ""));
         const tools = (messagesInBody(list.headers["content-type"], listText).find((m) => isResponse(m))?.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
         if (session !== undefined) yield* entry.upstream.forward({ method: "DELETE", headers, body: "" }).pipe(Effect.flatMap(readBody), Effect.ignore);
-        return tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !isDenied(entry.def.deny, t.name)).length;
+        return tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
       });
 
     const check = (entry: Entry): Effect.Effect<void> =>
@@ -387,7 +411,7 @@ export const makeHub = (
             if (list._tag === "Failure") yield* setState(entry, "error", list.failure);
             else {
               const tools = (list.success.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
-              entry.tools = tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !isDenied(entry.def.deny, t.name)).length;
+              entry.tools = tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
               yield* setState(entry, "running", null);
             }
           }
@@ -455,7 +479,7 @@ export const makeHub = (
             const r = open.get(idKey(m.id));
             if (r === undefined) return Effect.void;
             open.delete(r.id);
-            return record({ server, client, method: r.method, tool: r.tool, outcome: m.error === undefined ? "ok" : "error", error: m.error?.message.slice(0, 200) ?? null, durationMs: 0 }, startedAt);
+            return record({ server, client, method: r.method, tool: r.tool, outcome: m.error === undefined ? "ok" : "error", error: errorReason(m), durationMs: 0 }, startedAt);
           },
           { discard: true },
         );
@@ -478,7 +502,7 @@ export const makeHub = (
     };
 
     /** Remove denied tools from tools/list results, so clients never see them. */
-    const filterToolLists = (response: UpstreamResponse, requested: ReadonlyArray<Requested>, deny: ReadonlyArray<string>) =>
+    const filterToolLists = (response: UpstreamResponse, requested: ReadonlyArray<Requested>, denied: (tool: string) => boolean) =>
       Effect.gen(function* () {
         const ids = new Set(requested.filter((r) => r.method === "tools/list").map((r) => r.id));
         const text = yield* readBody(response).pipe(Effect.orElseSucceed(() => ""));
@@ -486,7 +510,7 @@ export const makeHub = (
           if (!isResponse(m) || m.id == null || !ids.has(idKey(m.id))) return m;
           const result = m.result as { tools?: Array<{ name?: unknown }> } | undefined;
           if (result?.tools === undefined) return m;
-          return { ...m, result: { ...result, tools: result.tools.filter((t) => typeof t.name !== "string" || !isDenied(deny, t.name)) } };
+          return { ...m, result: { ...result, tools: result.tools.filter((t) => typeof t.name !== "string" || !denied(t.name)) } };
         };
         if (isEventStream(response.headers["content-type"])) {
           const frames = makeSseParser()(`${text}\n\n`).map((e) => {
@@ -502,46 +526,93 @@ export const makeHub = (
         return textResponse(response.status, toJson(parsed.batch ? parsed.messages.map(filter) : filter(parsed.messages[0] as JsonRpcMessage)), response.headers);
       });
 
-    const gateway: Hub["gateway"] = (name, authorization, request) =>
+    /** Upstream session ids and the client that opened each: one client cannot use another's session. */
+    const sessionOwners = new Map<string, string>();
+    const MAX_SESSIONS = 10_000;
+    const sessionKey = (server: string, session: string) => `${server}\u0000${session}`;
+
+    const authorize: Hub["authorize"] = (name, authorization, method) =>
       Effect.gen(function* () {
         const startedAt = yield* Clock.currentTimeMillis;
-        const parsed = request.method === "POST" ? parseMessages(request.body) : null;
-        const requested: Array<Requested> = (parsed?.messages ?? [])
-          .filter(isRequest)
-          .map((m) => ({ id: idKey(m.id as string | number), method: m.method as string, tool: toolOf(m) }));
         const who = yield* authenticate(authorization, config.relayToken);
-        if (who === null || (who.servers !== null && !who.servers.includes(name))) {
-          yield* recordAll(requested.length > 0 ? requested : [{ id: "", method: request.method, tool: null }], name, who?.client ?? "unknown", "unauthorized", who === null ? "bad or missing token" : "token not valid for this server", startedAt);
-          return who === null ? textResponse(401, "Unauthorized", { "content-type": "text/plain" }) : textResponse(403, "Forbidden", { "content-type": "text/plain" });
-        }
+        if (who !== null && (who.servers === null || who.servers.includes(name))) return { client: who.client };
+        // One record per rejected request, whatever its body would have held: it is never read.
+        yield* record(
+          { server: name, client: who?.client ?? "unknown", method, tool: null, outcome: "unauthorized", error: who === null ? "bad or missing token" : "token not valid for this server", durationMs: 0 },
+          startedAt,
+        );
+        return { rejected: who === null ? textResponse(401, "Unauthorized", { "content-type": "text/plain" }) : textResponse(403, "Forbidden", { "content-type": "text/plain" }) };
+      });
+
+    const serve: Hub["serve"] = (name, client, request) =>
+      Effect.gen(function* () {
+        const startedAt = yield* Clock.currentTimeMillis;
         const entry = entries.get(name);
         if (entry === undefined) return textResponse(404, `No MCP server named ${name}`, { "content-type": "text/plain" });
-        if (request.method === "POST" && parsed === null) return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
+        const session = request.headers["mcp-session-id"];
+        const owner = session === undefined ? undefined : sessionOwners.get(sessionKey(name, session));
+        if (owner !== undefined && owner !== client) return textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
 
-        // Tool policy: a batch with any denied call is refused as a whole.
-        const denied = requested.filter((r) => r.tool !== null && isDenied(entry.def.deny, r.tool));
+        const parsed = request.method === "POST" ? parseMessages(request.body) : null;
+        if (request.method === "POST" && parsed === null) return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
+        const messages = parsed?.messages ?? [];
+        const requests = messages.filter(isRequest);
+        const requested: Array<Requested> = requests.map((m) => ({ id: idKey(m.id as string | number), method: String(m.method), tool: toolOf(m) }));
+        const refuse = (status: number, code: number, reason: (r: Requested) => string, outcome: (r: Requested) => HubCall["outcome"]) =>
+          Effect.gen(function* () {
+            for (const r of requested) yield* record({ server: name, client, method: r.method, tool: r.tool, outcome: outcome(r), error: reason(r), durationMs: 0 }, startedAt);
+            const replies = requests.map((m) => errorMessage(m.id ?? null, code, reason(requested.find((r) => r.id === idKey(m.id as string | number)) as Requested)));
+            return textResponse(status, toJson(parsed?.batch === true ? replies : (replies[0] ?? errorMessage(null, code, "refused"))));
+          });
+
+        // Keys that differ only in case would let the server see another tool than the policy did.
+        if (messages.some((m) => caseVariantKey(m) !== null)) {
+          return yield* refuse(400, -32600, () => "fleetx hub: refused a message with keys that differ only in case", () => "denied");
+        }
+        // A tools/call must name its tool plainly.
+        const unnamed = requests.some((m) => m.method === "tools/call" && toolOf(m) === null);
+        if (unnamed) return yield* refuse(400, -32602, () => "fleetx hub: tools/call needs a string params.name", () => "denied");
+
+        // Tool policy: a batch with any denied call is refused as a whole. Over-long names are denied.
+        const denied = requested.filter((r) => r.tool !== null && entry.denied(r.tool));
         if (denied.length > 0) {
-          const message = (r: Requested) => (denied.includes(r) ? `fleetx hub: the tool ${r.tool} is not allowed on ${name}` : "fleetx hub: refused with a denied tool call in the same batch");
-          for (const r of requested) yield* record({ server: name, client: who.client, method: r.method, tool: r.tool, outcome: denied.includes(r) ? "denied" : "error", error: message(r), durationMs: 0 }, startedAt);
-          const replies = (parsed?.messages ?? []).filter(isRequest).map((m) => errorMessage(m.id ?? null, -32003, message(requested.find((r) => r.id === idKey(m.id as string | number)) as Requested)));
-          return textResponse(200, toJson(parsed?.batch === true ? replies : replies[0]));
+          return yield* refuse(
+            200,
+            -32003,
+            (r) => (denied.includes(r) ? "fleetx hub: this tool is not allowed on this server" : "fleetx hub: refused with a denied tool call in the same batch"),
+            (r) => (denied.includes(r) ? "denied" : "error"),
+          );
         }
 
-        const result = yield* entry.upstream.forward(request).pipe(Effect.result);
+        // Forward what the hub checked, re-serialized, never the raw body.
+        const forward: ForwardRequest = parsed === null ? request : { ...request, body: toJson(parsed.batch ? parsed.messages : parsed.messages[0]) };
+        const result = yield* entry.upstream.forward(forward).pipe(Effect.result);
         if (result._tag === "Failure") {
           const e = result.failure;
           if (e._tag === "NeedsLogin") {
             yield* setState(entry, "needs-login", e.message);
             const message = `fleetx hub: ${name} needs a sign-in (fleetx mcp login ${name})`;
-            yield* recordAll(requested, name, who.client, "error", "needs-login", startedAt);
+            yield* recordAll(requested, name, client, "error", "needs-login", startedAt);
             return jsonRpcFailure(503, message, { [STATE_HEADER]: "needs-login" });
           }
-          yield* recordAll(requested, name, who.client, "error", e.message.slice(0, 200), startedAt);
+          yield* recordAll(requested, name, client, "error", "upstream unreachable", startedAt);
           return jsonRpcFailure(502, `fleetx hub: ${e.message}`, { [STATE_HEADER]: entry.state });
         }
-        const response = entry.def.deny.length > 0 && requested.some((r) => r.method === "tools/list") ? yield* filterToolLists(result.success, requested, entry.def.deny) : result.success;
-        return logged(response, requested, name, who.client, startedAt);
+        const opened = result.success.headers["mcp-session-id"];
+        if (opened !== undefined && !sessionOwners.has(sessionKey(name, opened))) {
+          if (sessionOwners.size >= MAX_SESSIONS) {
+            const oldest = sessionOwners.keys().next();
+            if (oldest.done !== true) sessionOwners.delete(oldest.value);
+          }
+          sessionOwners.set(sessionKey(name, opened), client);
+        }
+        if (request.method === "DELETE" && session !== undefined && result.success.status < 300) sessionOwners.delete(sessionKey(name, session));
+        const response = entry.def.deny.length > 0 && requested.some((r) => r.method === "tools/list") ? yield* filterToolLists(result.success, requested, entry.denied) : result.success;
+        return logged(response, requested, name, client, startedAt);
       });
+
+    const gateway: Hub["gateway"] = (name, authorization, request) =>
+      authorize(name, authorization, request.method).pipe(Effect.flatMap((a) => ("rejected" in a ? Effect.succeed(a.rejected) : serve(name, a.client, request))));
 
     // ── management ──────────────────────────────────────────────────────
 
@@ -572,6 +643,8 @@ export const makeHub = (
         return listed.sort((a, b) => a.name.localeCompare(b.name));
       }),
       calls: log.list,
+      authorize,
+      serve,
       gateway,
       login: (name) =>
         Effect.gen(function* () {
