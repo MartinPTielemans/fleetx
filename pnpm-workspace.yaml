@@ -1,0 +1,39 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  esbuild: true
+
+# Pinned to the versions T3 Code ships with, so code moves between the two
+# repositories without dependency drift.
+catalog:
+  "@effect/platform-node": 4.0.0-rc.115
+  "@effect/platform-node-shared": 4.0.0-rc.115
+  "@effect/tsgo": 0.41.0
+  "@effect/vitest": 4.0.0-rc.115
+  "@types/node": 24.12.4
+  effect: 4.0.0-rc.115
+  smol-toml: 1.4.2
+  typescript: 7.0.2
+  vite: npm:@voidzero-dev/vite-plus-core@1.0.0
+  vite-plus: 1.0.0
+
+# As in T3 Code: vitest comes from vite-plus, not a second copy.
+overrides:
+  "@effect/platform-node-shared": "catalog:"
+  "@effect/vitest>vitest": "-"
+  "@types/node": "catalog:"
+  effect: "catalog:"
+  vite: "catalog:"
+
+packageExtensions:
+  "@effect/vitest@*":
+    dependencies:
+      vite-plus: "catalog:"
+    peerDependenciesMeta:
+      vitest:
+        optional: true
+  vite-plus@*:
+    dependencies:
+      vite: "catalog:"

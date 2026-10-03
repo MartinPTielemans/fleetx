@@ -1,0 +1,23 @@
+{
+  "name": "fleetx",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fleetx": "./src/bin.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "vp pack"
+  },
+  "dependencies": {
+    "@fleetx/core": "workspace:*",
+    "effect": "catalog:",
+    "@effect/platform-node": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "version": "0.1.0"
+}
