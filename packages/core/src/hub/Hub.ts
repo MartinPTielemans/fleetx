@@ -327,7 +327,8 @@ export const makeHub = (
       const wanted = new Map<string, HubDefinition>(loaded.definitions.map((d) => [d.name, d]));
       for (const [name, port] of Object.entries(config.ports)) if (!wanted.has(name)) wanted.set(name, portDefinition(name, port));
       const secretValues = yield* secrets;
-      for (const [name, entry] of [...entries]) {
+      // Deleting the current key while iterating a Map is safe.
+      for (const [name, entry] of entries) {
         if (!wanted.has(name)) {
           yield* Effect.logInfo(`hub: ${name} is no longer defined; stopping it`);
           yield* stop(entry, true);

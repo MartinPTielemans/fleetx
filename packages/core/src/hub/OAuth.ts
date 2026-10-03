@@ -453,7 +453,7 @@ export const makeOAuthManager = (options: {
       forget: (server) =>
         options.store.update((s) => {
           const e = s.servers[server];
-          return [undefined, withServer(s, server, e === undefined ? null : { ...(e.client === undefined ? {} : { client: e.client }) })];
+          return [undefined, withServer(s, server, e === undefined ? null : e.client === undefined ? {} : { client: e.client })];
         }),
       expiresAt: (server) => entry(server).pipe(Effect.map((e) => e?.tokens?.expiresAt ?? null)),
       hasTokens: (server) => entry(server).pipe(Effect.map((e) => e?.tokens !== undefined)),

@@ -227,7 +227,7 @@ describe("hub gateway", () => {
         expect(session).not.toBe("");
 
         const list = yield* rpc(hub, "local", "tools/list", {}, { session });
-        const names = (list.message?.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+        const names = (list.message?.result as { tools: Array<{ name: string }> } | undefined)?.tools.map((t) => t.name);
         expect(names).toEqual(["echo", "notify", "crash"]);
 
         const denied = yield* rpc(hub, "local", "tools/call", { name: "delete_all", arguments: {} }, { session });
