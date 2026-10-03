@@ -1,23 +1,33 @@
 {
   "name": "fleetx",
-  "private": true,
+  "private": false,
   "type": "module",
   "bin": {
-    "fleetx": "./src/bin.ts"
+    "fleetx": "./dist/bin.mjs"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "vp pack"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:",
     "@fleetx/core": "workspace:*",
     "effect": "catalog:",
     "@effect/platform-node": "catalog:"
   },
-  "devDependencies": {
-    "@effect/vitest": "catalog:",
-    "@types/node": "catalog:",
-    "vite-plus": "catalog:"
+  "version": "0.1.0",
+  "description": "Keep every machine you run T3 Code on equivalent.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MartinPTielemans/fleetx.git"
   },
-  "version": "0.1.0"
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
 }
