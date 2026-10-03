@@ -2,9 +2,11 @@
  * Hosted servers in Docker, through the `docker` CLI.
  *
  * Every container is named fleetx-mcp-<name>, runs with `--cap-drop ALL
- * --security-opt no-new-privileges`, and publishes only on 127.0.0.1. Secrets
- * reach it as `-e NAME` with the value in the docker CLI's environment, so
- * they never appear on a command line.
+ * --security-opt no-new-privileges`, and publishes only on 127.0.0.1. Its
+ * environment reaches it through `--env-file`, a mode-600 file in a private
+ * temporary directory removed as soon as the docker CLI has read it: values
+ * never appear on a command line, and never enter the docker CLI's own
+ * environment (where DOCKER_HOST or PATH would change what docker does).
  *
  *   HTTP images   run detached on a port from 18200–18299. After a hub
  *                 restart a running container with the same spec (a digest
@@ -16,12 +18,15 @@
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import type * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { sha256 } from "../Hash.ts";
 import type { StdioProcess } from "./Bridge.ts";
 import { exec } from "../Exec.ts";
+import { IMAGE_PATTERN } from "./Definitions.ts";
 import { parseJson, toJson } from "./JsonRpc.ts";
 import { spawnStdio } from "./Process.ts";
 
@@ -51,7 +56,29 @@ const docker = (args: ReadonlyArray<string>, env: Readonly<Record<string, string
 const failure = (r: { readonly stdout: string; readonly stderr: string; readonly code: number | null; readonly timedOut: boolean; readonly spawnError?: string }) =>
   r.spawnError !== undefined ? `docker is not available: ${r.spawnError}` : r.timedOut ? "docker timed out" : (r.stderr.trim() || r.stdout.trim()).split("\n").slice(-2).join(" ").slice(0, 300);
 
-const envArgs = (env: Readonly<Record<string, string>>) => Object.keys(env).sort().flatMap((k) => ["-e", k]);
+/**
+ * Write the environment to a private env file for `--env-file`, in a
+ * temporary directory that lives as long as the enclosing scope.
+ */
+export const envFile = (env: Readonly<Record<string, string>>) =>
+  Effect.gen(function* () {
+    const keys = Object.keys(env).sort();
+    if (keys.length === 0) return [] as Array<string>;
+    for (const key of keys) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return yield* Effect.fail(`env name ${key} is not valid`);
+      if (/[\r\n\0]/.test(env[key] ?? "")) return yield* Effect.fail(`env ${key} has a line break, which an env file cannot carry`);
+    }
+    const fs = yield* FileSystem.FileSystem;
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "fleetx-hub-" }).pipe(Effect.mapError(() => "cannot create a private temporary directory"));
+    yield* fs.chmod(dir, 0o700).pipe(Effect.ignore);
+    const file = `${dir}/env`;
+    yield* fs
+      .writeFileString(file, keys.map((k) => `${k}=${env[k] ?? ""}\n`).join(""), { mode: 0o600 })
+      .pipe(Effect.mapError(() => "cannot write the container's env file"));
+    return ["--env-file", file];
+  });
+
+const checkImage = (image: string) => (IMAGE_PATTERN.test(image) ? Effect.void : Effect.fail(`not an image reference: ${image}`));
 
 export interface Inspected {
   readonly running: boolean;
@@ -112,11 +139,15 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
       if (started.code === 0) return { port: existing.port, adopted: true };
     }
     if (existing !== null) yield* removeContainer(name);
+    yield* checkImage(spec.image);
     const used = yield* portsInUse;
     let lastError = "no free port in 18200–18299";
     for (let port = PORT_RANGE.first; port <= PORT_RANGE.last; port++) {
       if (used.has(port) || reserved.has(port)) continue;
-      const r = yield* docker(
+      const r = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const envArgs = yield* envFile(spec.env);
+          return yield* docker(
         [
           "run",
           "-d",
@@ -129,12 +160,14 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
           ...HARDENING,
           "-p",
           `127.0.0.1:${port}:${spec.targetPort}`,
-          ...envArgs(spec.env),
+          ...envArgs,
           spec.image,
           ...spec.args,
         ],
-        spec.env,
+        {},
         Duration.minutes(10),
+          );
+        }),
       );
       if (r.code === 0) return { port, adopted: false };
       lastError = failure(r);
@@ -147,10 +180,15 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
 /** `docker run -i --rm` for a stdio image, as a process the bridge supervises. */
 export const spawnStdioContainer = (
   spec: ContainerSpec & { readonly network: "none" | null },
-): Effect.Effect<StdioProcess, string, Scope.Scope | ChildProcessSpawner.ChildProcessSpawner> =>
+): Effect.Effect<StdioProcess, string, Scope.Scope | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function* () {
     const name = containerName(spec.server);
+    yield* checkImage(spec.image);
     yield* removeContainer(name);
+    // The env file lives in its own scope: removed seconds after docker has read it, or when the process stops.
+    const fileScope = yield* Scope.fork(yield* Effect.scope);
+    const envArgs = yield* envFile(spec.env).pipe(Effect.provideService(Scope.Scope, fileScope));
+    yield* Scope.close(fileScope, Exit.void).pipe(Effect.delay(Duration.seconds(10)), Effect.forkScoped);
     return yield* spawnStdio({
       command: "docker",
       args: [
@@ -163,11 +201,11 @@ export const spawnStdioContainer = (
         `dev.fleetx.hub=${spec.server}`,
         ...HARDENING,
         ...(spec.network === "none" ? ["--network", "none"] : []),
-        ...envArgs(spec.env),
+        ...envArgs,
         spec.image,
         ...spec.args,
       ],
-      env: spec.env,
+      env: {},
     });
   });
 

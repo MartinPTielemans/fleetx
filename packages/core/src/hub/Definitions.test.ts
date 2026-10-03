@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeCallLog } from "./Calls.ts";
+import { envFile } from "./Docker.ts";
 import { expandSecrets, parseDefinition } from "./Definitions.ts";
 import { makeSseParser } from "./JsonRpc.ts";
 import { caseVariantKey } from "./JsonRpc.ts";
@@ -59,6 +60,35 @@ describe("hub definitions", () => {
 
   it("fills environments from the fleet's secrets", () => {
     expect(expandSecrets("Bearer $A and ${B}, not $c", { A: "1", B: "2" })).toBe("Bearer 1 and 2, not $c");
+  });
+});
+
+describe("hub container env", () => {
+  it("goes through a private env file that is gone with its scope", async () => {
+    const { args, mode, text, exists } = await Effect.runPromise(
+      Effect.gen(function* () {
+        const inside = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const args = yield* envFile({ B: "two words", A: "1" });
+            const file = args[1] ?? "";
+            return { args, file, mode: statSync(file).mode & 0o777, text: readFileSync(file, "utf8") };
+          }),
+        );
+        let exists = true;
+        try {
+          statSync(inside.file);
+        } catch {
+          exists = false;
+        }
+        return { ...inside, exists };
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+    expect(args[0]).toBe("--env-file");
+    expect(mode).toBe(0o600);
+    expect(text).toBe("A=1\nB=two words\n");
+    expect(exists).toBe(false);
+    const refused = await Effect.runPromise(Effect.scoped(envFile({ A: "x\ny" })).pipe(Effect.flip, Effect.provide(NodeServices.layer)));
+    expect(refused).toMatch(/line break/);
   });
 });
 

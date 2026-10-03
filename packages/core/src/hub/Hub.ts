@@ -258,7 +258,7 @@ export const makeHub = (
         const env = resolvedEnv("env" in def.runner ? def.runner.env : {}, yield* secrets);
         let entry: Entry;
         const self = () => entry;
-        const provide = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>) =>
+        const provide = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>) =>
           effect.pipe(Effect.provideService(Scope.Scope, scope), Effect.provide(services));
         const r = def.runner;
         let upstream: Upstream;
