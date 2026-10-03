@@ -1,4 +1,4 @@
-// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at aad73290:packages/shared/src/cliRelease.ts.
+// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at a21702d0:packages/shared/src/cliRelease.ts.
 // Do not edit; refresh with scripts/vendor-t3.sh.
 /**
  * Naming shared by the release workflow, the runtime installers, and
