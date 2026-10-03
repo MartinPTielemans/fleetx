@@ -130,6 +130,14 @@ nothing changed. Scheduled checks use this to stay quiet.
 Register it with Claude Code (`claude mcp add fleetx -- fleetx mcp`) or Codex,
 and any thread can be asked "what's wrong with my environments?".
 
+## Documentation
+
+- [Quickstart](docs/quickstart.md): one machine to two in five minutes
+- [Topologies](docs/topologies.md): roles, relays, profiles
+- [Areas](docs/areas.md): everything fleetx manages, and its settings
+- [Troubleshooting](docs/troubleshooting.md): every `doctor` finding explained
+- [Plan](docs/PLAN.md): what is built and what is next
+
 ## Development
 
 fleetx uses T3 Code's own stack (TypeScript, Effect 4, Node 24, pnpm,
@@ -137,9 +145,10 @@ vite-plus), so its packages could move into T3's monorepo.
 
 ```sh
 pnpm install
-pnpm test
+pnpm typecheck && pnpm test
 pnpm --filter fleetx build
 node apps/cli/dist/bin.mjs status
+tests/integration/run.sh       # three throwaway nodes in Docker
 ```
 
 ## License
