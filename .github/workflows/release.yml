@@ -44,7 +44,6 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           hash="sha256-$(openssl dgst -sha256 -binary fleetx.mjs | base64)"
-          printf '{\n  "version": "%s",\n  "hash": "%s"\n}\n' "$version" "$hash" > nix/release.json
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch -q origin main && git checkout -q main
