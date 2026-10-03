@@ -8,6 +8,7 @@ import { Flag } from "effect/unstable/cli";
 
 import type { CheckReport } from "@fleetx/core/Check";
 import { loadConfig } from "@fleetx/core/Config";
+import { newBuild } from "@fleetx/core/Runtime";
 
 /**
  * The bundle that gets streamed to other machines. Running from dist/bin.mjs
@@ -75,3 +76,13 @@ export const nodeFlag = Flag.String("node").pipe(
   Flag.atLeast(0),
 );
 
+/**
+ * Runs a long-running service until it stops or this bundle is replaced by a
+ * new build; then it returns, the process exits, and its unit starts the new
+ * build (see newBuild in Runtime.ts).
+ */
+export const untilNewBuild = <A, E, R>(service: Effect.Effect<A, E, R>) =>
+  Effect.raceFirst(
+    service,
+    newBuild(process.argv[1] ?? "").pipe(Effect.flatMap(() => Console.log("a new fleetx build is installed; exiting so the service restarts on it"))),
+  );

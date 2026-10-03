@@ -29,7 +29,7 @@ import { RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
 import { providerPlans, readT3Settings } from "@fleetx/core/T3Settings";
 
 import packageJson from "../package.json" with { type: "json" };
-import { encodeJson, reportUserErrors } from "./shared.ts";
+import { encodeJson, reportUserErrors, untilNewBuild } from "./shared.ts";
 
 /** This node's [models] settings; empty when fleetx is not set up here (the proxy still serves). */
 const ownSettings = loadConfig.pipe(
@@ -71,10 +71,12 @@ const serve = Command.make("serve", {
       );
       yield* Console.log(`model proxy on 127.0.0.1:${MODELS_PORT} for ${Object.keys(upstreams).join(", ")}, egress ${egress}${relay === undefined ? "" : ` via ${relay.url}`}`);
       const routes = modelProxyLayer({ home, version: packageJson.version, egress, upstreams: () => upstreams, ...(relay === undefined ? {} : { relay }) });
-      return yield* Layer.launch(
-        HttpRouter.serve(routes).pipe(
-          Layer.provide(FetchHttpClient.layer),
-          Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT })),
+      return yield* untilNewBuild(
+        Layer.launch(
+          HttpRouter.serve(routes).pipe(
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT })),
+          ),
         ),
       );
     }).pipe(reportUserErrors),
