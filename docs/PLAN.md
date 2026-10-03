@@ -75,10 +75,14 @@ Ticked items are done and in `main`.
 
 - [x] `fleetx ui`: a local web app in T3's look, embedded in the bundle; token,
       Host and Origin checks; live through server-sent events
-- [ ] models: the model proxy and provider logins (the Models view shows them
-      once observations carry them)
-- [ ] hub: fleetx's own MCP hub on the relay (the MCP view talks to its `/hub`
-      endpoints once they exist)
+- [x] models: a pass-through model proxy on every node with configurable
+      upstreams, launchers per T3 provider instance, long-lived credentials
+      per provider; login and health of every T3 provider from T3 itself
+- [x] hub: fleetx's own MCP hub on the relay, replacing ToolHive: containers,
+      stdio bridge, OAuth with sign-in through the relay, client tokens,
+      tool policy, call log
+- [x] Security review before deploy; its must-fix items fixed
+- [ ] The author's fleet on the hub and the model proxy
 
 ## Migration (the author's own fleet)
 
