@@ -19,6 +19,18 @@ catalog:
   typescript: 7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@1.0.0
   vite-plus: 1.0.0
+  # The UI (apps/ui), at the versions T3 Code's web app resolves to.
+  "@base-ui/react": 1.5.0
+  "@tailwindcss/vite": 4.3.3
+  "@types/react": 19.3.0
+  "@types/react-dom": 19.2.3
+  "@vitejs/plugin-react": 6.0.2
+  class-variance-authority: 0.7.1
+  lucide-react: 0.564.0
+  react: 19.2.6
+  react-dom: 19.2.6
+  tailwind-merge: 3.6.0
+  tailwindcss: 4.3.3
 
 # As in T3 Code: vitest comes from vite-plus, not a second copy.
 overrides:

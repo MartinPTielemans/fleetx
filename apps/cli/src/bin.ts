@@ -25,9 +25,13 @@ import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
 import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
+import { hubCommands } from "./hub.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
+import { modelsCommand } from "./models.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
+import { t3Command } from "./t3.ts";
+import { uiCommand } from "./ui.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(MachineObservation));
@@ -218,11 +222,14 @@ const cli = Command.make("fleetx").pipe(
     alertsCommand,
     listenCommand,
     relayCommand,
+    modelsCommand,
+    t3Command,
     doctorCommand,
     configCommand,
     secretsCommand,
     skillsCommand,
-    mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand])),
+    uiCommand,
+    mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand, ...hubCommands])),
     probeCommand,
   ]),
 );

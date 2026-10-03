@@ -71,6 +71,19 @@ Ticked items are done and in `main`.
 - [x] Integration tests with throwaway container nodes in CI
 - [x] Docs: quickstart, topologies, areas, troubleshooting kept complete by a test
 
+## Phase 6: companion (docs/design/companion.md)
+
+- [x] `fleetx ui`: a local web app in T3's look, embedded in the bundle; token,
+      Host and Origin checks; live through server-sent events
+- [x] models: a pass-through model proxy on every node with configurable
+      upstreams, launchers per T3 provider instance, long-lived credentials
+      per provider; login and health of every T3 provider from T3 itself
+- [x] hub: fleetx's own MCP hub on the relay, replacing ToolHive: containers,
+      stdio bridge, OAuth with sign-in through the relay, client tokens,
+      tool policy, call log
+- [x] Security review before deploy; its must-fix items fixed
+- [ ] The author's fleet on the hub and the model proxy
+
 ## Migration (the author's own fleet)
 
 - [x] fleetx checks all machines alongside the bash fleet

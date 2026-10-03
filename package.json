@@ -9,7 +9,7 @@
   "scripts": {
     "prepare": "effect-tsgo patch",
     "fleetx": "node apps/cli/src/bin.ts",
-    "build": "vp run --filter './apps/*' build",
+    "build": "vp run --filter fleetx build",
     "typecheck": "vp run -r typecheck",
     "lint": "vp lint --report-unused-disable-directives",
     "test": "scripts/check-no-personal-data.sh && vp run -r test",

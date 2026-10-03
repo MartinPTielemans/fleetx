@@ -55,6 +55,15 @@ claude mcp add fleetx -- fleetx mcp
 Any thread can now be asked "what's wrong with my environments?". The tools are
 `fleet_status`, `fleet_apply_fixes` and `fleet_alerts`.
 
+Or open it in a browser:
+
+```sh
+fleetx ui
+```
+
+Every view the CLI has, live: environments, findings and fixes, proposals,
+alerts, the MCP hub, models, and each machine's config.
+
 ## What happens from here
 
 Every machine runs `fleetx sync` on a timer: it pulls the repository, converges,

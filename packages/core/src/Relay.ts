@@ -6,14 +6,20 @@
  *   POST /report        a node's state after its sync
  *   GET  /fleet         every node's latest reported state
  *   GET  /events        server-sent events: "pull" when the branch moves,
- *                       "state" when a node reports; replays what a client
- *                       missed (Last-Event-ID or ?since=) so a laptop that
- *                       slept catches up
- *   *    /mcp/<name>    MCP gateway: forwards to a server hosted on this node,
- *                       so clients need one endpoint and one token
+ *                       "state" when a node reports, "hub" when a hosted MCP
+ *                       server changes state; replays what a client missed
+ *                       (Last-Event-ID or ?since=) so a laptop that slept
+ *                       catches up
+ *   *    /mcp/<name>    the MCP hub's gateway: every hosted server behind one
+ *                       endpoint and one token (see hub/Hub.ts)
+ *        /hub/*, /oauth/callback
+ *                       managing the hub and signing in (see hub/Routes.ts)
+ *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
+ *                       (models/Egress.ts; token in x-fleetx-relay-token)
  *   GET  /health
  *
- * Everything but /health needs `Authorization: Bearer $FLEETX_RELAY_TOKEN`.
+ * Everything but /health and /oauth/callback needs `Authorization: Bearer
+ * $FLEETX_RELAY_TOKEN` (the gateway also takes per-client tokens).
  * It listens on 127.0.0.1; publish it to the tailnet (tailscale serve), never
  * to the internet.
  */
@@ -27,21 +33,27 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { git, out } from "./Git.ts";
+import { egressLayer } from "./models/Egress.ts";
+import { makeHub, type HubConfig } from "./hub/Hub.ts";
+import { bearerMatches } from "./hub/Policy.ts";
+import { hubRoutes } from "./hub/Routes.ts";
 import { NodeState } from "./State.ts";
 
 export interface RelayEvent {
   readonly id: number;
   readonly at: number;
-  readonly type: "pull" | "state";
+  readonly type: "pull" | "state" | "hub";
   readonly node?: string;
   readonly rev?: string;
+  /** hub: the server, its new state, and why. */
+  readonly server?: string;
+  readonly state?: string;
+  readonly detail?: string | null;
 }
 
 export interface RelayOptions {
@@ -49,8 +61,8 @@ export interface RelayOptions {
   /** The config repo on this node, watched for new commits. */
   readonly repo: string;
   readonly branch: string;
-  /** Hosted MCP servers: name → local port. */
-  readonly mcpPorts: Readonly<Record<string, number>>;
+  /** The MCP hub behind /mcp/<name> and /hub/*. */
+  readonly hub: Omit<HubConfig, "relayToken">;
   /** How often to look for new commits. */
   readonly pollEvery?: Duration.Input;
 }
@@ -91,8 +103,12 @@ export const relayLayer = (options: RelayOptions) =>
 
       const authorized = Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
-        return request.headers["authorization"] === `Bearer ${options.token}`;
+        return yield* bearerMatches(request.headers["authorization"], options.token);
       });
+
+      const hubService = yield* makeHub({ ...options.hub, relayToken: options.token }, (e) =>
+        emit({ type: "hub", server: e.server, state: e.state, detail: e.detail }),
+      );
 
       const health = HttpRouter.add("GET", "/health", HttpServerResponse.text("ok"));
 
@@ -144,41 +160,6 @@ export const relayLayer = (options: RelayOptions) =>
         }),
       );
 
-      // MCP gateway: forward the request as-is, stream the answer back.
-      const gateway = HttpRouter.add(
-        "*",
-        "/mcp/:name",
-        Effect.gen(function* () {
-          if (!(yield* authorized)) return unauthorized;
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const name = new URL(request.url, "http://relay").pathname.split("/")[2] ?? "";
-          const port = options.mcpPorts[name];
-          if (port === undefined) return HttpServerResponse.text(`No MCP server named ${name}`, { status: 404 });
-          const forward: Record<string, string> = {};
-          for (const h of ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]) {
-            const v = request.headers[h];
-            if (typeof v === "string") forward[h] = v;
-          }
-          const body = request.method === "GET" || request.method === "DELETE" ? "" : yield* request.text;
-          const client = yield* HttpClient.HttpClient;
-          let upstream = HttpClientRequest.make(request.method as "GET")(`http://127.0.0.1:${port}/mcp`).pipe(
-            HttpClientRequest.setHeaders(forward),
-          );
-          if (body !== "") upstream = HttpClientRequest.bodyText(upstream, body, forward["content-type"] ?? "application/json");
-          const response = yield* client.execute(upstream);
-          const headers: Record<string, string> = {};
-          for (const h of ["mcp-session-id", "mcp-protocol-version"]) {
-            const v = response.headers[h];
-            if (typeof v === "string") headers[h] = v;
-          }
-          return HttpServerResponse.stream(response.stream, {
-            status: response.status,
-            contentType: response.headers["content-type"] ?? "application/json",
-            headers,
-          });
-        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 }))),
-      );
-
-      return Layer.mergeAll(health, report, fleet, eventStream, gateway);
+      return Layer.mergeAll(health, report, fleet, eventStream, hubRoutes(hubService, options.token), egressLayer(options.token));
     }),
   );

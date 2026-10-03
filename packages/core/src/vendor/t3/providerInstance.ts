@@ -1,4 +1,4 @@
-// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at aad73290:packages/contracts/src/providerInstance.ts.
+// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at a21702d0:packages/contracts/src/providerInstance.ts.
 // Do not edit; refresh with scripts/vendor-t3.sh.
 /**
  * Provider-instance contracts.

@@ -193,7 +193,9 @@ const providerFindings = (node: string, obs: MachineObservation, proxy: ProxySet
     // T3 starts something; is it the copy fleet keeps current?
     const agentName = DRIVER_AGENT[p.driver];
     const agent = obs.agents.find((a) => a.name === agentName);
-    if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && p.resolved !== agent.managedPath) {
+    // A fleetx models launcher (fleetx-claude, fleetx-codex, …) runs the managed CLI itself.
+    const viaModels = p.resolved !== null && basename(p.resolved).startsWith("fleetx-");
+    if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && !viaModels && p.resolved !== agent.managedPath) {
       out.push({
         node,
         severity: "warn",
@@ -289,7 +291,7 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
 };
 
 const syncFindings = (node: string, obs: MachineObservation): Array<Finding> => {
-  const sync = obs.legacySync;
+  const sync = obs.lastSync;
   if (sync === null) return [];
   const out: Array<Finding> = [];
   if (sync.streak >= 3) {
@@ -315,6 +317,22 @@ const parityFindings = (
 ): Array<Finding> => {
   const out: Array<Finding> = [];
   if (observed.length < 2) return out;
+  // T3's apps (desktop, web, phone) speak one client protocol and refuse a server
+  // on another, showing "Client not supported". Machines on different protocols
+  // cannot all be reached from the same app.
+  const protocols = observed.flatMap((o) => (o.obs.t3.descriptor?.protocol === undefined ? [] : [{ name: o.name, protocol: o.obs.t3.descriptor.protocol }]));
+  const newest = Math.max(...protocols.map((p) => p.protocol));
+  const onNewest = protocols.filter((p) => p.protocol === newest).map((p) => p.name);
+  for (const p of protocols.filter((x) => x.protocol < newest)) {
+    out.push({
+      node: p.name,
+      severity: "warn",
+      area: "parity",
+      key: "t3-protocol-behind",
+      title: `T3 here speaks client protocol ${p.protocol}; ${onNewest.join(", ")} speak ${newest}`,
+      detail: "an app that connects to one side shows the other as \"Client not supported\"; update T3 here, or update the apps",
+    });
+  }
   const instanceIds = [...new Set(observed.flatMap((o) => o.obs.t3.providers.map((p) => p.instanceId)))].sort();
   for (const id of instanceIds) {
     const per = observed.map((o) => ({ name: o.name, p: o.obs.t3.providers.find((x) => x.instanceId === id) }));
@@ -405,6 +423,79 @@ const proxyFindings = (node: string, obs: MachineObservation, proxy: ProxySettin
   ];
 };
 
+/** What a person does about a logged-out provider, per driver. */
+const LOGIN_HELP: Readonly<Record<string, string>> = {
+  claudeAgent:
+    "run `claude auth login` on this machine. For a login that does not expire, run `claude setup-token` and keep it in the fleet's secrets as CLAUDE_CODE_OAUTH_TOKEN, with [models] on (see the models area)",
+  codex: "run `codex login` on this machine",
+};
+
+/**
+ * Each enabled provider's login and health, as T3 reports it (or, without
+ * T3's snapshot, the CLI's status command). A logged-out provider still
+ * starts, so the launch check passes and the first sign is a failed turn in
+ * T3; that makes it an error. A provider T3 marks as warning or error is
+ * reported with T3's own message, unless the launch check already did.
+ */
+const providerAuthFindings = (node: string, obs: MachineObservation): Array<Finding> => {
+  const out: Array<Finding> = [];
+  for (const p of obs.providerAuth) {
+    if (!p.enabled) continue;
+    const label = providerLabel(p.instanceId);
+    const launchFailed = obs.t3.providers.some((x) => x.instanceId === p.instanceId && x.enabled && !x.launch.ok);
+    if (p.auth === "unauthenticated") {
+      out.push({
+        node,
+        key: `provider-logged-out-${p.instanceId}`,
+        severity: "error",
+        area: "providers",
+        title: `${label} is not logged in for T3; every ${label} turn there fails`,
+        detail: `${p.detail}. ${LOGIN_HELP[p.driver] ?? `sign in to ${label} from T3's provider settings on this machine`}`,
+      });
+    } else if ((p.status === "error" || p.status === "warning") && !launchFailed) {
+      out.push({
+        node,
+        key: `provider-unhealthy-${p.instanceId}`,
+        severity: "warn",
+        area: "providers",
+        title: `T3 reports ${label} as ${p.status === "error" ? "failing" : "degraded"}`,
+        detail: p.detail,
+      });
+    }
+  }
+  return out;
+};
+
+/**
+ * fleetx's read-only token for T3's API, which provider health comes from.
+ * Without it only Claude and Codex are checked, through their CLIs.
+ */
+const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding> => {
+  const access = obs.t3.access;
+  if (access === null || access.state === "ok") return [];
+  const fix: Fix | undefined = access.cli ? { command: "fleetx t3 connect", safe: false } : undefined;
+  const how = fix === undefined ? "; T3's CLI was not found on this machine to issue one" : "";
+  const title =
+    access.state === "none"
+      ? "fleetx cannot read T3's provider status here; only Claude and Codex logins are checked, through their CLIs"
+      : access.state === "expiring"
+        ? "fleetx's read-only T3 token expires within three days"
+        : access.state === "rejected"
+          ? "T3 no longer accepts fleetx's read-only token; provider logins fall back to the CLIs"
+          : "fleetx could not read T3's provider status this time";
+  return [
+    {
+      node,
+      key: "t3-access",
+      severity: access.state === "failed" ? "info" : "warn",
+      area: "t3",
+      title,
+      detail: `${access.detail}${how}`,
+      ...(fix === undefined || access.state === "failed" ? {} : { fix }),
+    },
+  ];
+};
+
 const RANK: Readonly<Record<Severity, number>> = { error: 0, warn: 1, info: 2 };
 
 /** Every registered area's findings, each area seeing all nodes' facts. */
@@ -466,6 +557,8 @@ export const diagnose = (
     findings.push(...providerFindings(r.node.name, r.observation, proxy));
     findings.push(...proxyFindings(r.node.name, r.observation, proxy));
     findings.push(...syncFindings(r.node.name, r.observation));
+    findings.push(...providerAuthFindings(r.node.name, r.observation));
+    findings.push(...t3AccessFindings(r.node.name, r.observation));
   }
   findings.push(...parityFindings(observed, proxy));
   findings.push(...areaFindings(observed, nodes, areas));

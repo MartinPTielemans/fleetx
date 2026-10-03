@@ -34,7 +34,7 @@ const provider = (over: Partial<ProviderObservation> & { instanceId: string }): 
 });
 
 const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObservation["t3"]> = {}): MachineObservation => ({
-  protocol: 4,
+  protocol: 5,
   hostname: "h",
   platform: "linux",
   arch: "x64",
@@ -51,16 +51,18 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
     runtimeBinary: "/home/u/.t3/runtime/versions/0.0.46-nightly.20261003.2632/t3",
     serverPath: "/usr/bin:/bin",
     providers: [provider({ instanceId: "claudeAgent" }), provider({ instanceId: "codex" })],
+    access: { state: "ok", expiresAt: 1_800_000_000_000, detail: "read from T3", cli: true },
     problems: [],
     ...t3,
   },
+  providerAuth: [],
   proxy: {
     launchers: { claudeAgent: "/home/u/.local/bin/fleet-claude", codex: "/home/u/.local/bin/fleet-codex" },
     credentials: true,
     key: "accepted",
   },
   areas: {},
-  legacySync: { when: 1_791_000_000, result: "ok", message: "abc", streak: 0 },
+  lastSync: { when: 1_791_000_000, result: "ok", message: "abc", streak: 0 },
   ...over,
 });
 
@@ -100,6 +102,12 @@ describe("diagnose", () => {
     expect(finding?.fix?.command).toBe("~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes");
     expect(finding?.fix?.safe).toBe(false);
     expect(finding?.fix?.disrupts).toContain("server");
+  });
+
+  it("warns when machines speak different T3 client protocols", () => {
+    const descriptor = (protocol: number) => ({ environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2632", protocol });
+    const findings = diagnose([ok("a", machine({}, { descriptor: descriptor(2) })), ok("b", machine({}, { descriptor: descriptor(1) }))], latest, settings);
+    expect(titles(findings)).toEqual(["b: T3 here speaks client protocol 1; a speak 2"]);
   });
 
   it("only notes a nightly from the same day", () => {
@@ -192,6 +200,16 @@ describe("diagnose", () => {
       ],
     });
     expect(diagnose([ok("laptop", shimmed)], latest, settings)).toEqual([]);
+  });
+
+  it("counts a fleetx models launcher as the managed CLI", () => {
+    const routed = machine({}, {
+      providers: [
+        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/fleetx-claude", resolved: "/home/u/.local/bin/fleetx-claude" }),
+        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/fleetx-codex", resolved: "/home/u/.local/bin/fleetx-codex" }),
+      ],
+    });
+    expect(diagnose([ok("laptop", routed)], latest, {}).filter((f) => f.area === "providers")).toEqual([]);
   });
 
   it("reports a machine it could not reach without dropping the others", () => {

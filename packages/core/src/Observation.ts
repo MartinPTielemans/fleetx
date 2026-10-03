@@ -9,7 +9,9 @@
  */
 import * as Schema from "effect/Schema";
 
-export const PROBE_PROTOCOL = 4;
+import { ProviderAuth } from "./Api.ts";
+
+export const PROBE_PROTOCOL = 5;
 
 /** An agent CLI as fleet manages it, plus every other copy PATH can reach. */
 export const AgentObservation = Schema.Struct({
@@ -56,6 +58,8 @@ export const T3Observation = Schema.Struct({
       environmentId: Schema.String,
       label: Schema.String,
       serverVersion: Schema.String,
+      /** The protocol T3's apps must speak to connect (1 for servers that predate it). */
+      protocol: Schema.optionalKey(Schema.Number),
     }),
   ),
   /** Where the version came from when the descriptor was unreachable. */
@@ -65,6 +69,16 @@ export const T3Observation = Schema.Struct({
   /** PATH of the running server process; null when unreadable. */
   serverPath: Schema.NullOr(Schema.String),
   providers: Schema.Array(ProviderObservation),
+  /** fleetx's read-only token for T3's API (T3Access.ts); null when no server runs. */
+  access: Schema.NullOr(
+    Schema.Struct({
+      state: Schema.Literals(["ok", "expiring", "none", "rejected", "failed"]),
+      expiresAt: Schema.NullOr(Schema.Number),
+      detail: Schema.String,
+      /** Whether T3's CLI can be reached here to mint one. */
+      cli: Schema.Boolean,
+    }),
+  ),
   problems: Schema.Array(Schema.String),
 });
 export type T3Observation = typeof T3Observation.Type;
@@ -84,14 +98,17 @@ export const ProxyObservation = Schema.Struct({
 });
 export type ProxyObservation = typeof ProxyObservation.Type;
 
-/** The record a bash `fleet sync` timer leaves, where one runs alongside fleetx. */
-export const LegacySyncObservation = Schema.Struct({
+/**
+ * The node's last sync: fleetx's own record (~/.local/state/fleetx/last-sync),
+ * or, where only a bash `fleet sync` timer runs, the record that one leaves.
+ */
+export const SyncObservation = Schema.Struct({
   when: Schema.Number,
   result: Schema.String,
   message: Schema.String,
   streak: Schema.Number,
 });
-export type LegacySyncObservation = typeof LegacySyncObservation.Type;
+export type SyncObservation = typeof SyncObservation.Type;
 
 export const MachineObservation = Schema.Struct({
   protocol: Schema.Literal(PROBE_PROTOCOL),
@@ -102,9 +119,14 @@ export const MachineObservation = Schema.Struct({
   observedAt: Schema.Number,
   agents: Schema.Array(AgentObservation),
   t3: T3Observation,
+  /**
+   * Each T3 provider instance's login and health: T3's own snapshot, or the
+   * CLIs' status commands when fleetx cannot read it (see t3.access).
+   */
+  providerAuth: Schema.Array(ProviderAuth),
   proxy: Schema.NullOr(ProxyObservation),
   /** Each registered area's facts, keyed by area id; decoded by the area itself. */
   areas: Schema.Record(Schema.String, Schema.Unknown),
-  legacySync: Schema.NullOr(LegacySyncObservation),
+  lastSync: Schema.NullOr(SyncObservation),
 });
 export type MachineObservation = typeof MachineObservation.Type;

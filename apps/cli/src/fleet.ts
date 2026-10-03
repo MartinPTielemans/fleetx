@@ -57,7 +57,7 @@ export const fleetFromStates = (config: Config) =>
       results.push({
         node,
         ok: true,
-        observation: { ...state.observation, legacySync: { when: Math.round(state.at / 1000), result: state.result, message: state.message, streak: state.streak } },
+        observation: { ...state.observation, lastSync: { when: Math.round(state.at / 1000), result: state.result, message: state.message, streak: state.streak } },
         ms: 0,
       });
       findings.push(...(state.findings as ReadonlyArray<Finding>));

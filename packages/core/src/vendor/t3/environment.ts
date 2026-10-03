@@ -1,4 +1,4 @@
-// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at aad73290:packages/contracts/src/environment.ts.
+// Vendored from T3 Code (https://github.com/pingdotgg/t3code, MIT) at a21702d0:packages/contracts/src/environment.ts.
 // Do not edit; refresh with scripts/vendor-t3.sh.
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
