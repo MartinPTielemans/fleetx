@@ -18,6 +18,7 @@
  *                POST /api/hub/servers/<n>/login | /logout | /restart
  *                GET  /api/hub/calls           HubCall[] (from the relay)
  *                GET  /api/config/<node>       UiConfigRow[]
+ *                GET  /api/session             UiSession
  *                GET  /api/events              server-sent events: relay events, plus "check"
  */
 import * as Schema from "effect/Schema";
@@ -199,3 +200,16 @@ export const UiModels = Schema.Struct({
 export type UiModels = typeof UiModels.Type;
 
 export const UiConfigRow = Schema.Struct({ path: Schema.String, value: Schema.String, source: Schema.String });
+
+/** Who is asking, so the UI can label this machine and offer only what it may do. */
+export const UiSession = Schema.Struct({
+  version: Schema.String,
+  /** This machine's node name. */
+  self: Schema.String,
+  /** Whether this machine may approve and reject proposals. */
+  authority: Schema.Boolean,
+  nodes: Schema.Array(Schema.String),
+  /** The relay's URL, when the fleet has one; the hub and live events go through it. */
+  relay: Schema.NullOr(Schema.String),
+});
+export type UiSession = typeof UiSession.Type;
