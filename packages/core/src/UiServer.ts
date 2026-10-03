@@ -57,6 +57,7 @@ import {
 } from "./Api.ts";
 import type { CheckReport } from "./Check.ts";
 import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
+import { constantTimeEqual } from "./hub/Policy.ts";
 import type { FixOutcome } from "./Fix.ts";
 import { releasesBehind } from "./Latest.ts";
 import { findingId } from "./Memory.ts";
@@ -247,7 +248,7 @@ export const refusal = (
   if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
   if (options.token === null) return null;
   const token = request.headers["x-fleetx-token"] ?? query.get("token") ?? "";
-  if (token !== options.token) return { status: 401, message: "missing or stale token: open the link `fleetx ui` printed" };
+  if (!constantTimeEqual(token, options.token)) return { status: 401, message: "missing or stale token: open the link `fleetx ui` printed" };
   return null;
 };
 
