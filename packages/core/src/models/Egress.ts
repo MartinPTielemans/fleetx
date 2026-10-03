@@ -13,33 +13,67 @@
  * own credential, which passes through unchanged like everything else.
  */
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-import { EGRESS_BASE_HEADER, RELAY_TOKEN_HEADER, requestHeaders, responseHeaders, splitPath } from "./Forward.ts";
+import {
+  EGRESS_BASE_HEADER,
+  RELAY_TOKEN_HEADER,
+  requestHeaders,
+  responseHeaders,
+  splitPath,
+} from "./Forward.ts";
+import { constantTimeEqual, hashToken } from "../hub/Policy.ts";
 import { sendUpstream } from "./Proxy.ts";
 
 /** `allowInsecure` lets tests use a plain-HTTP fake upstream. */
 export const egressLayer = (token: string, options: { readonly allowInsecure?: boolean } = {}) =>
-  HttpRouter.add(
-    "*",
-    "/egress/*",
+  Layer.unwrap(
     Effect.gen(function* () {
-      const request = yield* HttpServerRequest.HttpServerRequest;
-      if (token === "" || request.headers[RELAY_TOKEN_HEADER] !== token) return HttpServerResponse.text("Unauthorized", { status: 401 });
-      const split = splitPath(request.url, "/egress");
-      const base = request.headers[EGRESS_BASE_HEADER] ?? "";
-      if (split === null || !(base.startsWith("https://") || (options.allowInsecure === true && base.startsWith("http://")))) {
-        return HttpServerResponse.text("Bad Request", { status: 400 });
-      }
-      const body = request.method === "GET" || request.method === "HEAD" ? null : new Uint8Array(yield* request.arrayBuffer);
-      const response = yield* sendUpstream({ method: request.method, url: `${base}${split.rest}`, headers: requestHeaders(request.headers), body });
-      const contentType = response.headers["content-type"];
-      return HttpServerResponse.stream(response.stream, {
-        status: response.status,
-        headers: responseHeaders(response.headers),
-        ...(contentType === undefined ? {} : { contentType }),
-      });
-    }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 }))),
+      // Captured here so the route needs nothing from the server that runs it.
+      const client = yield* HttpClient.HttpClient;
+      return HttpRouter.add(
+        "*",
+        "/egress/*",
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const given = request.headers[RELAY_TOKEN_HEADER] ?? "";
+          if (token === "" || !constantTimeEqual(yield* hashToken(given), yield* hashToken(token)))
+            return HttpServerResponse.text("Unauthorized", { status: 401 });
+          const split = splitPath(request.url, "/egress");
+          const base = request.headers[EGRESS_BASE_HEADER] ?? "";
+          if (
+            split === null ||
+            !(
+              base.startsWith("https://") ||
+              (options.allowInsecure === true && base.startsWith("http://"))
+            )
+          ) {
+            return HttpServerResponse.text("Bad Request", { status: 400 });
+          }
+          const body =
+            request.method === "GET" || request.method === "HEAD"
+              ? null
+              : new Uint8Array(yield* request.arrayBuffer);
+          const response = yield* sendUpstream({
+            method: request.method,
+            url: `${base}${split.rest}`,
+            headers: requestHeaders(request.headers),
+            body,
+          });
+          const contentType = response.headers["content-type"];
+          return HttpServerResponse.stream(response.stream, {
+            status: response.status,
+            headers: responseHeaders(response.headers),
+            ...(contentType === undefined ? {} : { contentType }),
+          });
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, client),
+          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 })),
+        ),
+      );
+    }),
   );

@@ -19,7 +19,10 @@ import { loadConfig } from "@fleetx/core/Config";
 import { git, out } from "@fleetx/core/Git";
 import { relayLayer } from "@fleetx/core/Relay";
 import { listen, RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
+import { ensureIdentity } from "@fleetx/core/Secrets";
 import { syncRun } from "@fleetx/core/Sync";
+
+import packageJson from "../package.json" with { type: "json" };
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -33,9 +36,26 @@ const serve = Command.make("serve").pipe(
       const token = yield* secretVar(RELAY_TOKEN);
       if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets (fleetx secrets set ${RELAY_TOKEN}=… on an authority)`);
       const port = config.settings.relay?.port ?? 8399;
-      const mcp = (self.settings.table["mcp"] ?? {}) as { ports?: Record<string, number> };
-      yield* Console.log(`relay on 127.0.0.1:${port}; MCP gateway for ${Object.keys(mcp.ports ?? {}).join(", ") || "no servers"}`);
-      const routes = relayLayer({ token, repo: config.repo, branch: config.branch, mcpPorts: mcp.ports ?? {} });
+      const mcp = (self.settings.table["mcp"] ?? {}) as { ports?: Record<string, number>; hub?: boolean };
+      const { identity } = yield* ensureIdentity;
+      const hub = mcp.hub === true;
+      yield* Console.log(
+        `relay on 127.0.0.1:${port}; ${hub ? "MCP hub serving the repo's hosted servers" : `MCP gateway for ${Object.keys(mcp.ports ?? {}).join(", ") || "no servers"}`}`,
+      );
+      const routes = relayLayer({
+        token,
+        repo: config.repo,
+        branch: config.branch,
+        hub: {
+          repo: config.repo,
+          home: process.env["HOME"] ?? "",
+          enabled: hub,
+          ports: mcp.ports ?? {},
+          relayUrl: config.settings.relay?.url ?? null,
+          identity,
+          version: packageJson.version,
+        },
+      });
       return yield* Layer.launch(
         HttpRouter.serve(routes).pipe(
           Layer.provide(FetchHttpClient.layer),
