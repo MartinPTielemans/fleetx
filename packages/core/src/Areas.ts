@@ -9,6 +9,7 @@ import { RuntimeArea } from "./areas/Runtime.ts";
 import { McpArea } from "./areas/Mcp.ts";
 import { RelayArea } from "./areas/RelayArea.ts";
 import { SecretsArea } from "./areas/SecretsArea.ts";
+import { ServicesArea } from "./areas/Services.ts";
 import { SkillsArea } from "./areas/Skills.ts";
 
-export const AREAS: ReadonlyArray<AnyArea> = [RuntimeArea, EngineArea, SecretsArea, RelayArea, DotfilesArea, InstructionsArea, SkillsArea, McpArea];
+export const AREAS: ReadonlyArray<AnyArea> = [RuntimeArea, EngineArea, SecretsArea, RelayArea, DotfilesArea, InstructionsArea, SkillsArea, McpArea, ServicesArea];
