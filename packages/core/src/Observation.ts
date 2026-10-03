@@ -9,7 +9,9 @@
  */
 import * as Schema from "effect/Schema";
 
-export const PROBE_PROTOCOL = 4;
+import { ClaudeAuth } from "./Api.ts";
+
+export const PROBE_PROTOCOL = 5;
 
 /** An agent CLI as fleet manages it, plus every other copy PATH can reach. */
 export const AgentObservation = Schema.Struct({
@@ -102,6 +104,8 @@ export const MachineObservation = Schema.Struct({
   observedAt: Schema.Number,
   agents: Schema.Array(AgentObservation),
   t3: T3Observation,
+  /** Claude Code's login under T3's environment; null where T3 does not run Claude. */
+  claude: Schema.NullOr(ClaudeAuth),
   proxy: Schema.NullOr(ProxyObservation),
   /** Each registered area's facts, keyed by area id; decoded by the area itself. */
   areas: Schema.Record(Schema.String, Schema.Unknown),

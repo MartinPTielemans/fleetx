@@ -1,6 +1,6 @@
 /**
  * Observes the machine it runs on. Read-only: it starts processes only to ask
- * them for `--version`, and never writes a file.
+ * them for `--version` (and Claude for `auth status`), and never writes a file.
  *
  * The provider check is the point of fleetx. T3 launches providers with its
  * server's environment, not your shell's, and the two differ: a server
@@ -19,8 +19,10 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
+import type { ClaudeAuth } from "./Api.ts";
 import { expandHome, type ProbeSettings } from "./Config.ts";
 import { exec, parseVersion } from "./Exec.ts";
+import { claudeAuthStatus } from "./models/ClaudeAuth.ts";
 import { loadAreas } from "./Plugins.ts";
 import {
   PROBE_PROTOCOL,
@@ -31,25 +33,13 @@ import {
   type ProxyObservation,
   type T3Observation,
 } from "./Observation.ts";
+import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
-import { ProviderInstanceConfigMap } from "./vendor/t3/providerInstance.ts";
+
+/** Moved to T3Settings.ts; re-exported for existing importers. */
+export { providerPlans, T3_DRIVERS } from "./T3Settings.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
-
-/**
- * T3's built-in providers: whether they are on when settings say nothing, and
- * the command they run (null for SDK-backed providers with no binary).
- * Mirrors the defaults in T3's contracts/settings.ts.
- */
-export const T3_DRIVERS: Readonly<Record<string, { readonly enabled: boolean; readonly bin: string | null }>> = {
-  codex: { enabled: true, bin: "codex" },
-  claudeAgent: { enabled: true, bin: "claude" },
-  grok: { enabled: false, bin: "grok" },
-  pi: { enabled: false, bin: "pi" },
-  opencode: { enabled: false, bin: "opencode" },
-  cursor: { enabled: false, bin: null },
-  antigravity: { enabled: false, bin: null },
-};
 
 // ---- filesystem helpers -------------------------------------------------
 
@@ -116,19 +106,6 @@ const RuntimeFile = Schema.Struct({
   startedAt: Schema.optional(Schema.String),
 });
 
-const ProviderSettings = Schema.Struct({
-  enabled: Schema.optionalKey(Schema.Boolean),
-  binaryPath: Schema.optionalKey(Schema.String),
-});
-
-/** The part of T3's settings.json fleetx reads; everything else is ignored. */
-const SettingsFile = Schema.Struct({
-  providers: Schema.optionalKey(Schema.Record(Schema.String, ProviderSettings)),
-  providerInstances: Schema.optionalKey(ProviderInstanceConfigMap),
-});
-
-const InstanceConfig = Schema.Struct({ binaryPath: Schema.optionalKey(Schema.String) });
-
 const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
   Schema.decodeEffect(Schema.fromJsonString(schema))(text).pipe(Effect.option);
 
@@ -187,42 +164,6 @@ const fetchDescriptor = (origin: string) =>
     if (Option.isNone(text)) return Option.none<ExecutionEnvironmentDescriptor>();
     return yield* decodeJson(ExecutionEnvironmentDescriptor, text.value);
   });
-
-interface ProviderPlan {
-  readonly instanceId: string;
-  readonly driver: string;
-  readonly enabled: boolean;
-  readonly binaryPath: string | null;
-}
-
-/** Instances T3 would run, with T3's own fallbacks applied. */
-export const providerPlans = (settings: typeof SettingsFile.Type): Array<ProviderPlan> => {
-  const legacy = settings.providers ?? {};
-  const instances = settings.providerInstances ?? {};
-  const plans: Array<ProviderPlan> = [];
-  const decodeConfig = Schema.decodeUnknownOption(InstanceConfig);
-  for (const [instanceId, instance] of Object.entries(instances)) {
-    const driver = String(instance.driver);
-    const defaults = T3_DRIVERS[driver];
-    const config = Option.getOrElse(decodeConfig(instance.config ?? {}), () => ({}) as typeof InstanceConfig.Type);
-    plans.push({
-      instanceId,
-      driver,
-      enabled: instance.enabled ?? legacy[driver]?.enabled ?? defaults?.enabled ?? false,
-      binaryPath: config.binaryPath || legacy[driver]?.binaryPath || defaults?.bin || null,
-    });
-  }
-  for (const [driver, defaults] of Object.entries(T3_DRIVERS)) {
-    if (plans.some((p) => p.driver === driver)) continue;
-    plans.push({
-      instanceId: driver,
-      driver,
-      enabled: legacy[driver]?.enabled ?? defaults.enabled,
-      binaryPath: legacy[driver]?.binaryPath || defaults.bin,
-    });
-  }
-  return plans.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
-};
 
 const observeProvider = (plan: ProviderPlan, env: Env) =>
   Effect.gen(function* () {
@@ -293,17 +234,21 @@ const observeT3 = (home: string, loginEnv: Env) =>
       problems.push("the T3 server is not running");
     }
     let providers: Array<ProviderObservation> = [];
+    let claude: ClaudeAuth | null = null;
     if (Option.isSome(settingsText)) {
-      const settings = yield* decodeJson(SettingsFile, settingsText.value);
+      const settings = yield* decodeJson(T3SettingsFile, settingsText.value);
       if (Option.isNone(settings)) {
         problems.push("settings.json did not match the provider settings fleetx understands");
       } else {
         const env = serverEnv ?? loginEnv;
         providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, env), { concurrency: 4 });
+        // Logged out still starts; ask the binary T3 runs (a launcher adds its token).
+        const claudeProvider = providers.find((p) => p.driver === "claudeAgent" && p.enabled && p.launch.ok && p.resolved !== null);
+        if (claudeProvider?.resolved != null) claude = yield* claudeAuthStatus(claudeProvider.resolved, env);
       }
     }
 
-    return {
+    const t3 = {
       runtime,
       descriptor,
       installedVersion,
@@ -312,6 +257,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
       providers,
       problems,
     } satisfies T3Observation;
+    return { t3, claude };
   });
 
 // ---- fleet model proxy -----------------------------------------------------
@@ -370,7 +316,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
   const env: Env = process.env;
   const home = env["HOME"] ?? "";
   const hostname = (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim();
-  const [agents, t3, proxy, legacySync] = yield* Effect.all(
+  const [agents, { t3, claude }, proxy, legacySync] = yield* Effect.all(
     [
       Effect.forEach(["claude", "codex"] as const, (a) => observeAgent(a, home, env["PATH"]), { concurrency: 2 }),
       observeT3(home, env),
@@ -414,6 +360,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     observedAt: yield* Clock.currentTimeMillis,
     agents,
     t3,
+    claude,
     proxy,
     areas,
     legacySync,

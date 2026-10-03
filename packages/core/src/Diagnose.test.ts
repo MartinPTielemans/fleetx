@@ -34,7 +34,7 @@ const provider = (over: Partial<ProviderObservation> & { instanceId: string }): 
 });
 
 const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObservation["t3"]> = {}): MachineObservation => ({
-  protocol: 4,
+  protocol: 5,
   hostname: "h",
   platform: "linux",
   arch: "x64",
@@ -54,6 +54,7 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
     problems: [],
     ...t3,
   },
+  claude: null,
   proxy: {
     launchers: { claudeAgent: "/home/u/.local/bin/fleet-claude", codex: "/home/u/.local/bin/fleet-codex" },
     credentials: true,
@@ -192,6 +193,16 @@ describe("diagnose", () => {
       ],
     });
     expect(diagnose([ok("laptop", shimmed)], latest, settings)).toEqual([]);
+  });
+
+  it("counts a fleetx models launcher as the managed CLI", () => {
+    const routed = machine({}, {
+      providers: [
+        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/fleetx-claude", resolved: "/home/u/.local/bin/fleetx-claude" }),
+        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/fleetx-codex", resolved: "/home/u/.local/bin/fleetx-codex" }),
+      ],
+    });
+    expect(diagnose([ok("laptop", routed)], latest, {}).filter((f) => f.area === "providers")).toEqual([]);
   });
 
   it("reports a machine it could not reach without dropping the others", () => {

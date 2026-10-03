@@ -193,7 +193,9 @@ const providerFindings = (node: string, obs: MachineObservation, proxy: ProxySet
     // T3 starts something; is it the copy fleet keeps current?
     const agentName = DRIVER_AGENT[p.driver];
     const agent = obs.agents.find((a) => a.name === agentName);
-    if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && p.resolved !== agent.managedPath) {
+    // A fleetx models launcher runs the managed CLI itself.
+    const viaModels = p.resolved !== null && basename(p.resolved) === `fleetx-${agent?.name}`;
+    if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && !viaModels && p.resolved !== agent.managedPath) {
       out.push({
         node,
         severity: "warn",
@@ -405,6 +407,26 @@ const proxyFindings = (node: string, obs: MachineObservation, proxy: ProxySettin
   ];
 };
 
+/**
+ * Claude Code logged out under T3's environment: every Claude turn in T3
+ * fails, though the provider still starts. Checked wherever T3 runs Claude,
+ * with or without [models]; a setup-token routed by the models area is the
+ * lasting fix (docs/design/companion.md).
+ */
+const claudeFindings = (node: string, obs: MachineObservation): Array<Finding> =>
+  obs.claude?.loggedIn === false
+    ? [
+        {
+          node,
+          key: "claude-logged-out",
+          severity: "error",
+          area: "models",
+          title: "Claude is not logged in for T3; every Claude turn there fails",
+          detail: `${obs.claude.detail}. Run \`claude auth login\` on this machine; for a login that does not expire, run \`claude setup-token\`, store it with \`fleetx secrets set CLAUDE_CODE_OAUTH_TOKEN=…\` and turn on [models]`,
+        },
+      ]
+    : [];
+
 const RANK: Readonly<Record<Severity, number>> = { error: 0, warn: 1, info: 2 };
 
 /** Every registered area's findings, each area seeing all nodes' facts. */
@@ -466,6 +488,7 @@ export const diagnose = (
     findings.push(...providerFindings(r.node.name, r.observation, proxy));
     findings.push(...proxyFindings(r.node.name, r.observation, proxy));
     findings.push(...syncFindings(r.node.name, r.observation));
+    findings.push(...claudeFindings(r.node.name, r.observation));
   }
   findings.push(...parityFindings(observed, proxy));
   findings.push(...areaFindings(observed, nodes, areas));
