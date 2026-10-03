@@ -80,6 +80,8 @@ const RelaySection = Schema.Struct({
 
 const FleetFile = Schema.Struct({
   fleet: Schema.optionalKey(FleetSection),
+  /** Plugin areas, relative to the config repo (see Plugins.ts). */
+  plugins: Schema.optionalKey(Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) })),
   relay: Schema.optionalKey(RelaySection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
@@ -221,6 +223,7 @@ export const ProbeSettings = Schema.Struct({
   /** The node's name. */
   node: Schema.optionalKey(Schema.String),
   roles: Schema.optionalKey(Schema.Array(Schema.String)),
+  plugins: Schema.optionalKey(Schema.Array(Schema.String)),
   relay: Schema.optionalKey(Schema.Struct({ url: Schema.NullOr(Schema.String), port: Schema.Number })),
 });
 export type ProbeSettings = typeof ProbeSettings.Type;
@@ -233,4 +236,5 @@ export const probeSettings = (config: Config, node?: Node, engine?: string): Pro
   ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name, roles: node.roles }),
   ...(config.settings.relay === undefined ? {} : { relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 } }),
   checkout: config.checkout,
+  ...(config.settings.plugins?.areas === undefined ? {} : { plugins: config.settings.plugins.areas }),
 });

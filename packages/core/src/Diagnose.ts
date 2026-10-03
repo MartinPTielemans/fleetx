@@ -10,6 +10,7 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import type { AnyArea } from "./Area.ts";
 import { AREAS } from "./Areas.ts";
 import type { FleetSettings, Node, ProxySettings } from "./Config.ts";
 import type { Latest } from "./Latest.ts";
@@ -396,9 +397,19 @@ const proxyFindings = (node: string, obs: MachineObservation, proxy: ProxySettin
 const RANK: Readonly<Record<Severity, number>> = { error: 0, warn: 1, info: 2 };
 
 /** Every registered area's findings, each area seeing all nodes' facts. */
-const areaFindings = (observed: ReadonlyArray<{ name: string; obs: MachineObservation }>, nodes: ReadonlyArray<Node>): Array<Finding> => {
+const areaFindings = (
+  observed: ReadonlyArray<{ name: string; obs: MachineObservation }>,
+  nodes: ReadonlyArray<Node>,
+  areas: ReadonlyArray<AnyArea>,
+): Array<Finding> => {
   const out: Array<Finding> = [];
-  for (const area of AREAS) {
+  for (const o of observed) {
+    const plugins = o.obs.areas["_plugins"] as { problems?: ReadonlyArray<string> } | undefined;
+    for (const [i, problem] of (plugins?.problems ?? []).entries()) {
+      out.push({ node: o.name, key: `plugin-problem-${i + 1}`, severity: "error", area: "plugins", title: problem });
+    }
+  }
+  for (const area of areas) {
     const fleet: Array<{ node: string; desired: unknown; observed: unknown }> = [];
     for (const o of observed) {
       const raw = o.obs.areas[area.id];
@@ -425,6 +436,7 @@ export const diagnose = (
   latest: Latest,
   settings: FleetSettings = {},
   nodes: ReadonlyArray<Node> = [],
+  areas: ReadonlyArray<AnyArea> = AREAS,
 ): Array<Finding> => {
   const proxy = settings.proxy;
   const findings: Array<Finding> = [];
@@ -445,6 +457,6 @@ export const diagnose = (
     findings.push(...syncFindings(r.node.name, r.observation));
   }
   findings.push(...parityFindings(observed, proxy));
-  findings.push(...areaFindings(observed, nodes));
+  findings.push(...areaFindings(observed, nodes, areas));
   return findings.sort((a, b) => RANK[a.severity] - RANK[b.severity] || a.node.localeCompare(b.node));
 };

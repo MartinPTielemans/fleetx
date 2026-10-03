@@ -24,6 +24,7 @@ import { runFixes } from "./Fix.ts";
 import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
+import { loadAreas } from "./Plugins.ts";
 import { probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
@@ -255,8 +256,9 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
       const findingsFor = (results: ReadonlyArray<NodeResult>) =>
         Effect.gen(function* () {
           const latest = yield* lookupLatest(versions(results));
+          const { areas } = yield* loadAreas(repo, config.settings.plugins?.areas ?? []);
           // This node's findings, plus fixes other nodes need that must run here (an authority adding a node's key).
-          return applyAccepted(diagnose(results, latest, config.settings, config.nodes), config.settings.accept).filter(
+          return applyAccepted(diagnose(results, latest, config.settings, config.nodes, areas), config.settings.accept).filter(
             (f) => f.node === self.name || f.fix?.on === self.name,
           );
         });

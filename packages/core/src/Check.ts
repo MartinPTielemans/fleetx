@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import { diagnose, type Finding } from "./Diagnose.ts";
 import { probeSettings, type Config } from "./Config.ts";
 import { sha256 } from "./Hash.ts";
+import { loadAreas } from "./Plugins.ts";
 import { lookupLatest, type Latest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { observeNode, type NodeResult } from "./Remote.ts";
@@ -31,6 +32,7 @@ export const checkNodes = (config: Config, bundle: string) =>
       .flatMap((r) => (r.ok ? [r.observation.t3.descriptor?.serverVersion ?? r.observation.t3.installedVersion ?? ""] : []))
       .filter((v) => v !== "");
     const latest = yield* lookupLatest(t3Versions);
-    const findings = applyAccepted(diagnose(results, latest, config.settings, config.nodes), config.settings.accept);
+    const { areas } = yield* loadAreas(config.repo, config.settings.plugins?.areas ?? []);
+    const findings = applyAccepted(diagnose(results, latest, config.settings, config.nodes, areas), config.settings.accept);
     return { results, latest, findings, elapsedMs: (yield* Clock.currentTimeMillis) - started } satisfies CheckReport;
   });

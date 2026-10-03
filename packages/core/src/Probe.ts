@@ -19,9 +19,9 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
-import { AREAS } from "./Areas.ts";
 import { expandHome, type ProbeSettings } from "./Config.ts";
 import { exec, parseVersion } from "./Exec.ts";
+import { loadAreas } from "./Plugins.ts";
 import {
   PROBE_PROTOCOL,
   type AgentObservation,
@@ -381,8 +381,10 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
   );
   const checkout = expandHome(settings.checkout ?? "~/fleet", home);
   const areas: Record<string, unknown> = {};
+  const loaded = yield* loadAreas(checkout, settings.plugins ?? []);
+  if (loaded.problems.length > 0) areas["_plugins"] = { problems: loaded.problems };
   yield* Effect.forEach(
-    AREAS,
+    loaded.areas,
     (area) =>
       Effect.gen(function* () {
         const desired = yield* Schema.decodeUnknownEffect(area.desired)(settings.areas?.[area.id]).pipe(Effect.option);
