@@ -2,9 +2,9 @@
 
 `fleetx doctor` checks what fleetx and T3 run on; `fleetx status` checks
 everything else. Each finding has a key (the part after the machine name in
-its id, `laptop:node-too-old`). This page explains each runtime and engine key
-and what to do. A test keeps it complete: adding a finding to those areas
-without documenting it here fails the build.
+its id, `laptop:node-too-old`). This page explains each runtime, engine and
+models key and what to do. A test keeps it complete: adding a finding to those
+areas without documenting it here fails the build.
 
 ## runtime
 
@@ -47,6 +47,45 @@ node binary with a fixed PATH. Logs: `~/.local/state/fleetx/sync.log`.
 **`fleetx-timer-unwanted`** — a sync timer is installed but this machine's
 settings do not ask for one. The fix removes it.
 
+## models
+
+**`claude-logged-out`** — `claude auth status`, run the way T3 runs Claude,
+says Claude is not logged in, so every Claude turn in T3 fails although the
+provider still starts. Run `claude auth login` on that machine. Logins drop
+when several Claude processes refresh one rotating token at once; for a
+credential that does not expire, run `claude setup-token`, store it with
+`fleetx secrets set CLAUDE_CODE_OAUTH_TOKEN=<token>` on an authority, and turn
+on `[models]`, whose launcher hands it to Claude.
+
+**`claude-token-missing`** — `[models]` routes Claude, but this machine's
+secrets have no setup-token (`claude_token_env`, `CLAUDE_CODE_OAUTH_TOKEN` by
+default), so Claude keeps a login that can expire. Run `claude setup-token`
+once, then `fleetx secrets set CLAUDE_CODE_OAUTH_TOKEN=<token>` on an
+authority; nodes pick it up on sync.
+
+**`models-service`** — the model proxy's service is missing, out of date, not
+running, or not answering on 127.0.0.1:8398. The fix (re)installs and
+restarts it. Until it runs, the launchers start the CLIs directly. Log:
+`~/.local/state/fleetx/models.log`.
+
+**`models-launcher`** — `~/.local/bin/fleetx-claude` or `fleetx-codex` is
+missing or differs from what this fleetx writes. The fix rewrites it.
+
+**`models-not-routed-<instance>`** — T3 starts that provider instance
+directly rather than through its launcher. The fix, `fleetx models route
+<instance>`, sets the instance's binary path in `~/.t3/userdata/settings.json`
+(T3 has no command for it and reloads the file itself); running sessions keep
+their binary. `fleetx models route <instance> --undo` puts the old path back.
+It is offered once the launcher is installed.
+
+**`models-failing`** — more than 5% of a provider's requests failed in the
+last hour, or launches fell back to the CLI because the proxy was not
+listening. The detail names the most common failure class: `connect` and
+`timeout` (the network), `429` and `529` (rate limits, overload), `5xx`,
+`4xx`, or `stream` (broken off after it started). `fleetx models stats` shows
+the windows; `~/.local/state/fleetx/models.jsonl` has every request's
+metadata.
+
 ## Other common findings
 
 **A provider "will not start in T3"** — the T3 server launches providers with
@@ -66,4 +105,5 @@ server's credential on the machine hosting it expired. Sign in again there
 are proposed, and only by `fleetx sync`. `fleetx review` on an authority lists
 what is waiting.
 
-**Logs** — `~/.local/state/fleetx/sync.log`, `listen.log`, `serve.log`.
+**Logs** — `~/.local/state/fleetx/sync.log`, `listen.log`, `serve.log`,
+`models.log`.
