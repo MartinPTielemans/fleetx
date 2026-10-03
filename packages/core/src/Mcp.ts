@@ -106,7 +106,17 @@ const ApplyTool = Tool.make("fleet_apply_fixes", {
   success: ApplyResult,
 }).annotate(Tool.Destructive, true);
 
-export const FleetToolkit = Toolkit.make(StatusTool, ApplyTool);
+const AlertsTool = Tool.make("fleet_alerts", {
+  ...shared,
+  description:
+    "Health changes every machine reported through fleetx sync since the last call (a problem appeared or was resolved, sync started failing or recovered, a machine stopped reporting). Each alert is returned once. For scheduled checks: when the list is empty, say nothing beyond one short line.",
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({
+    alerts: Schema.Array(Schema.Struct({ at: Schema.String, node: Schema.String, kind: Schema.String, message: Schema.String })),
+  }),
+}).annotate(Tool.Destructive, false);
+
+export const FleetToolkit = Toolkit.make(StatusTool, ApplyTool, AlertsTool);
 
 
 
@@ -144,6 +154,8 @@ export interface FleetActions {
   readonly check: (nodes: ReadonlyArray<string>) => Effect.Effect<CheckReport, string>;
   /** Compare a full check with the remembered one, and remember it. */
   readonly compare: (report: CheckReport) => Effect.Effect<Changes>;
+  /** Alerts published since the last call, marked seen. */
+  readonly alerts: Effect.Effect<ReadonlyArray<{ readonly at: number; readonly node: string; readonly kind: string; readonly message: string }>, string>;
   readonly apply: (fixes: ReadonlyArray<Finding & { readonly fix: Fix }>) => Effect.Effect<ReadonlyArray<FixOutcome>>;
 }
 
@@ -166,6 +178,13 @@ export const fleetHandlers = (actions: FleetActions) =>
           },
         };
       }),
+    fleet_alerts: () =>
+      actions.alerts.pipe(
+        Effect.map((alerts) => ({
+          alerts: alerts.map((a) => ({ at: DateTime.formatIso(DateTime.makeUnsafe(a.at)), node: a.node, kind: a.kind, message: a.message })),
+        })),
+        Effect.mapError(toFailure),
+      ),
     fleet_apply_fixes: ({ fixIds }) =>
       Effect.gen(function* () {
         const before = yield* actions.check([]).pipe(Effect.mapError(toFailure));

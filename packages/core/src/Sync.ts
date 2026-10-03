@@ -288,7 +288,10 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
       const findingsFor = (results: ReadonlyArray<NodeResult>) =>
         Effect.gen(function* () {
           const latest = yield* lookupLatest(versions(results));
-          return applyAccepted(diagnose(results, latest, config.settings, config.nodes), config.settings.accept).filter((f) => f.node === self.name);
+          // This node's findings, plus fixes other nodes need that must run here (an authority adding a node's key).
+          return applyAccepted(diagnose(results, latest, config.settings, config.nodes), config.settings.accept).filter(
+            (f) => f.node === self.name || f.fix?.on === self.name,
+          );
         });
 
       let selfResult = yield* observeSelf;
@@ -315,7 +318,7 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
       const streak = failed ? Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }) + 1 : 0;
       const alerts: Array<Alert> = [...Option.match(previous, { onNone: () => [], onSome: (p) => p.alerts })];
       const before = healthOf(Option.match(previous, { onNone: () => [] as Array<Finding>, onSome: (p) => p.findings as ReadonlyArray<Finding> }));
-      const after = healthOf(findings);
+      const after = healthOf(findings.filter((f) => f.node === self.name));
       for (const problem of after) if (!before.has(problem)) alerts.push({ at: now, node: self.name, kind: "problem", message: problem.split("\t")[1] ?? problem });
       for (const problem of before) if (!after.has(problem)) alerts.push({ at: now, node: self.name, kind: "resolved", message: problem.split("\t")[1] ?? problem });
       const wasFailing = Option.match(previous, { onNone: () => false, onSome: (p) => p.streak >= config.alertAfter });
@@ -330,7 +333,7 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
         message: message || (lines.length === 0 ? "nothing to do" : lines.join("; ")),
         rev: out(yield* git(repo, ["rev-parse", "--short", "HEAD"])),
         observation: selfResult.ok ? selfResult.observation : null,
-        findings: findings.map((f) => ({ node: f.node, key: f.key, severity: f.severity, area: f.area, title: f.title, ...(f.detail === undefined ? {} : { detail: f.detail }) })),
+        findings: findings.filter((f) => f.node === self.name).map((f) => ({ node: f.node, key: f.key, severity: f.severity, area: f.area, title: f.title, ...(f.detail === undefined ? {} : { detail: f.detail }) })),
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
       };

@@ -24,7 +24,8 @@ import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderS
 import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
-import { alertsCommand, approveCommand, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
+import { alertsCommand, approveCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
+import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
 import { secretsCommand } from "./secrets.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
@@ -186,6 +187,10 @@ const mcpCommand = Command.make("mcp").pipe(
           }).pipe(Effect.provide(services)),
         apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
+        alerts: takeAlerts(config).pipe(
+          Effect.provide(services),
+          Effect.mapError((e) => (typeof e === "string" ? e : "reading alerts failed")),
+        ),
       });
       return yield* Layer.launch(
         McpServer.toolkit(FleetToolkit).pipe(
@@ -200,6 +205,9 @@ const mcpCommand = Command.make("mcp").pipe(
 const cli = Command.make("fleetx").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
   Command.withSubcommands([
+    initCommand,
+    inviteCommand,
+    joinCommand,
     statusCommand,
     fixCommand,
     syncCommand,
