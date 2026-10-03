@@ -139,6 +139,22 @@ export const resolveEndpoint = (
   desired: McpDesired,
   home: string,
 ): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
+  const resolved = resolveUnchecked(name, d, desired, home);
+  // The variable's name goes into fix commands unquoted; only a plain name may.
+  if (resolved.endpoint?.type === "http" && resolved.endpoint.tokenEnv !== null && !ENV_NAME.test(resolved.endpoint.tokenEnv)) {
+    return { endpoint: null, problem: `token_env ${JSON.stringify(resolved.endpoint.tokenEnv)} is not a variable name (A-Z, 0-9, _)` };
+  }
+  return resolved;
+};
+
+export const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+const resolveUnchecked = (
+  name: string,
+  d: typeof Definition.Type,
+  desired: McpDesired,
+  home: string,
+): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
   const tokenEnv = d.auth?.type === "bearer" ? (d.auth.token_env ?? null) : null;
   const fail = (problem: string) => ({ endpoint: null, problem }) as const;
   const ok = (endpoint: Endpoint) => ({ endpoint, problem: null }) as const;
@@ -215,8 +231,14 @@ export const toolhiveWorkloads = (text: string): Array<string> => {
     .map((w) => w.name);
 };
 
-/** Double-quote for the shell, leaving only $VAR expansions active. */
-const dq = (text: string) => `"${text.replace(/[\\"`]/g, "\\$&")}"`;
+/**
+ * Double-quote for the shell, leaving only plain `$NAME` and `${NAME}`
+ * references active: every other `$` (a `$(…)`, `$((…))`, `${x:-…}`) is
+ * escaped, as are backticks, quotes and backslashes, so a definition's url,
+ * command or args can name a variable and nothing more.
+ */
+export const dq = (text: string) =>
+  `"${text.replace(/[\\"`]/g, "\\$&").replace(/\$(?![A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/g, "\\$$")}"`;
 
 const sameEndpoint = (want: Endpoint, got: Registered | null) =>
   got !== null &&

@@ -1,6 +1,10 @@
+// The shell-safety test runs a real sh.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { execFileSync } from "node:child_process";
+
 import { describe, expect, it } from "vite-plus/test";
 
-import { McpArea, resolveEndpoint, toolhiveWorkloads, type McpDesired } from "./Mcp.ts";
+import { dq, McpArea, resolveEndpoint, toolhiveWorkloads, type McpDesired } from "./Mcp.ts";
 
 const home = "/home/u";
 const gateway = "https://relay.tailnet.ts.net:8399/";
@@ -87,5 +91,28 @@ describe("mcp area: hub findings", () => {
     expect(toolhiveWorkloads('[{"name":"fetch","status":"running"},{"name":"old","status":"stopped"},{"name":"bare"}]')).toEqual(["fetch", "bare"]);
     expect(toolhiveWorkloads("null")).toEqual([]);
     expect(toolhiveWorkloads("")).toEqual([]);
+  });
+});
+
+describe("mcp area: shell safety", () => {
+  it("leaves only plain $NAME and ${NAME} active in double quotes", () => {
+    expect(dq("$HOME/bin/x")).toBe('"$HOME/bin/x"');
+    expect(dq("Bearer ${TOKEN}")).toBe('"Bearer ${TOKEN}"');
+    expect(dq("https://x/$(id)")).toBe('"https://x/\\$(id)"');
+    expect(dq("$((1+1)) ${X:-$(id)} `id` \"q\" \\")).toBe('"\\$((1+1)) \\${X:-\\$(id)} \\`id\\` \\"q\\" \\\\"');
+    expect(dq("cost $5")).toBe('"cost \\$5"');
+    // What the shell makes of it: the text, with only the plain reference expanded.
+    const out = execFileSync("/bin/sh", ["-c", `printf %s ${dq("$(echo pwned) `echo pwned` ${X:-d} $X")}`], { env: { X: "x", PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+    expect(out).toBe("$(echo pwned) `echo pwned` ${X:-d} x");
+  });
+
+  it("refuses a token_env that is not a plain variable name", () => {
+    for (const bad of ["X; rm -rf ~", "$(id)", "lower_case", "A B"]) {
+      expect(resolveEndpoint("d", { kind: "direct", url: "https://d/mcp", auth: { type: "bearer", token_env: bad } }, {}, home)).toMatchObject({
+        endpoint: null,
+        problem: expect.stringMatching(/is not a variable name/),
+      });
+      expect(resolveEndpoint("c", { kind: "container" }, { hub: true, gateway, token_env: bad }, home).endpoint).toBeNull();
+    }
   });
 });
