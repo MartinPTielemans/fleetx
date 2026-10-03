@@ -23,6 +23,11 @@
  * With egress = "relay" it sends everything to the relay's /egress route
  * instead, which forwards once; retries still happen here.
  *
+ * It answers only requests addressed to it by its loopback name
+ * (Host 127.0.0.1:<port> or localhost:<port>), so a web page cannot reach it
+ * through DNS rebinding, and refuses any request a browser marks as coming
+ * from another origin (mirroring UiServer's refusal).
+ *
  * Codex prefers a WebSocket for /responses. The proxy answers the upgrade
  * with 426, which makes Codex use HTTP and server-sent events for the session.
  */
@@ -42,6 +47,7 @@ import type * as HttpClientError from "effect/unstable/http/HttpClientError";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
@@ -131,11 +137,34 @@ export const withKeepalive = <E>(stream: Stream.Stream<Uint8Array, E>, every: Du
     ),
   );
 
-/** The proxy's routes, as one layer; needs an HttpClient. */
+/**
+ * Why a request is refused before anything else happens, or null: only the
+ * proxy's own loopback names, with this port, are answered (421 otherwise),
+ * and a browser's cross-origin request is refused (403). The CLIs send no
+ * Origin.
+ */
+export const proxyRefusal = (headers: Readonly<Record<string, string | undefined>>, port: number): { readonly status: number; readonly message: string } | null => {
+  const allowed = ["127.0.0.1", "localhost"].map((h) => `${h}:${port}`);
+  const host = headers["host"];
+  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "the fleetx model proxy answers only on its loopback address" };
+  const origin = headers["origin"];
+  if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
+  return null;
+};
+
+/** The proxy's routes, as one layer; needs an HttpClient, and the HttpServer it runs on (for its port). */
 export const modelProxyLayer = (options: ModelProxyOptions) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const startedAt = yield* Clock.currentTimeMillis;
+      const address = (yield* HttpServer.HttpServer).address;
+      const port = "port" in address ? address.port : MODELS_PORT;
+      const guarded = <E, R>(handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const refused = proxyRefusal(request.headers, port);
+          return refused === null ? yield* handler : HttpServerResponse.text(refused.message, { status: refused.status });
+        });
       const persist = options.persist ?? true;
       const upstreams = options.upstreams ?? (() => BUILTIN_UPSTREAMS);
       const keepaliveEvery = options.keepaliveEvery ?? Duration.seconds(15);
@@ -155,17 +184,17 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
           if (persist) yield* appendRecord(options.home, record);
         }).pipe(Effect.provide(services));
 
-      const health = HttpRouter.add("GET", "/health", HttpServerResponse.text("ok"));
+      const health = HttpRouter.add("GET", "/health", guarded(Effect.succeed(HttpServerResponse.text("ok"))));
 
       const stats = HttpRouter.add(
         "GET",
         "/stats",
-        Effect.gen(function* () {
+        guarded(Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const fallbacks = yield* loadFallbacks(options.home, now);
           const body = yield* encodeStats(proxyStats({ names: Object.keys(upstreams()), now, startedAt, version: options.version, egress: options.egress, records, fallbacks }));
           return HttpServerResponse.text(body, { contentType: "application/json" });
-        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 }))),
+        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })))),
       );
 
       const forward = Effect.gen(function* () {
@@ -251,7 +280,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
         }
       });
 
-      return Layer.mergeAll(health, stats, HttpRouter.add("*", "/*", forward));
+      return Layer.mergeAll(health, stats, HttpRouter.add("*", "/*", guarded(forward)));
     }),
   );
 

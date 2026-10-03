@@ -22,7 +22,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { ModelProxyStats } from "../Api.ts";
 import { egressLayer } from "./Egress.ts";
-import { modelProxyLayer, type ModelProxyOptions } from "./Proxy.ts";
+import { modelProxyLayer, proxyRefusal, type ModelProxyOptions } from "./Proxy.ts";
 
 type Handler = (req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse, n: number) => void;
 
@@ -200,6 +200,25 @@ describe("model proxy against a fake upstream", () => {
     expect(response.status).toBe(502);
     const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
     expect(anthropic?.m5).toMatchObject({ requests: 1, failed: 1, failures: { connect: 1 } });
+  });
+
+  it("answers only its loopback names, refusing DNS rebinding and other origins", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200).end("{}"));
+    const base = await proxy(up.url);
+    const port = Number(new URL(base).port);
+    const status = (headers: Record<string, string>, path = "/anthropic/v1/messages") =>
+      new Promise<number>((resolve) => {
+        const req = NodeHttp.request({ host: "127.0.0.1", port, path, method: "POST", headers }, (res) => resolve(res.statusCode ?? 0));
+        req.end("{}");
+      });
+    expect(await status({ host: `evil.example:${port}` })).toBe(421);
+    expect(await status({ host: `127.0.0.1:${port + 1}` })).toBe(421);
+    expect(await status({ host: `evil.example:${port}` }, "/stats")).toBe(421);
+    expect(await status({ host: `localhost:${port}`, origin: "http://evil.example" })).toBe(403);
+    expect(up.seen.length).toBe(0);
+    expect(await status({ host: `localhost:${port}` })).toBe(200);
+    expect(proxyRefusal({ host: "127.0.0.1:8398" }, 8398)).toBeNull();
+    expect(proxyRefusal({}, 8398)?.status).toBe(421);
   });
 
   it("answers a WebSocket upgrade with 426 so Codex uses HTTP", async () => {
