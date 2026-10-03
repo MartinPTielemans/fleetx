@@ -66,7 +66,7 @@ const row = (obs: MachineObservation, name: string, findings: ReadonlyArray<Find
     })
     .join("  ");
 
-  const sync = obs.legacySync;
+  const sync = obs.lastSync;
   const syncCell =
     sync === null
       ? c.dim("—")

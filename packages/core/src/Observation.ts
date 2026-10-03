@@ -58,6 +58,8 @@ export const T3Observation = Schema.Struct({
       environmentId: Schema.String,
       label: Schema.String,
       serverVersion: Schema.String,
+      /** The protocol T3's apps must speak to connect (1 for servers that predate it). */
+      protocol: Schema.optionalKey(Schema.Number),
     }),
   ),
   /** Where the version came from when the descriptor was unreachable. */
@@ -96,14 +98,17 @@ export const ProxyObservation = Schema.Struct({
 });
 export type ProxyObservation = typeof ProxyObservation.Type;
 
-/** The record a bash `fleet sync` timer leaves, where one runs alongside fleetx. */
-export const LegacySyncObservation = Schema.Struct({
+/**
+ * The node's last sync: fleetx's own record (~/.local/state/fleetx/last-sync),
+ * or, where only a bash `fleet sync` timer runs, the record that one leaves.
+ */
+export const SyncObservation = Schema.Struct({
   when: Schema.Number,
   result: Schema.String,
   message: Schema.String,
   streak: Schema.Number,
 });
-export type LegacySyncObservation = typeof LegacySyncObservation.Type;
+export type SyncObservation = typeof SyncObservation.Type;
 
 export const MachineObservation = Schema.Struct({
   protocol: Schema.Literal(PROBE_PROTOCOL),
@@ -122,6 +127,6 @@ export const MachineObservation = Schema.Struct({
   proxy: Schema.NullOr(ProxyObservation),
   /** Each registered area's facts, keyed by area id; decoded by the area itself. */
   areas: Schema.Record(Schema.String, Schema.Unknown),
-  legacySync: Schema.NullOr(LegacySyncObservation),
+  lastSync: Schema.NullOr(SyncObservation),
 });
 export type MachineObservation = typeof MachineObservation.Type;

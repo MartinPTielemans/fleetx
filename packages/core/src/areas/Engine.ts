@@ -87,6 +87,9 @@ Nice=10
 Description=Run fleetx sync every ${interval}s
 
 [Timer]
+# OnActiveSec starts the chain when the timer is (re)installed after its
+# service already ran; without it OnUnitActiveSec never fires again.
+OnActiveSec=1min
 OnBootSec=2min
 OnUnitActiveSec=${interval}s
 Persistent=true
@@ -166,7 +169,17 @@ export const EngineArea = defineArea({
       const check =
         platform === "darwin"
           ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`], timeout: Duration.seconds(5) })
-          : yield* exec({ command: "systemctl", args: [...(root ? [] : ["--user"]), "is-active", "--quiet", "fleetx-sync.timer"], timeout: Duration.seconds(5) });
+          : yield* exec({
+              command: "systemctl",
+              args: [...(root ? [] : ["--user"]), "show", "fleetx-sync.timer", "-p", "ActiveState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
+              timeout: Duration.seconds(5),
+            });
+      // An active timer can still have nothing scheduled (it "elapsed"): that one never runs again.
+      const scheduled = (text: string) => {
+        const prop = (name: string) => new RegExp(`^${name}=(.*)$`, "m").exec(text)?.[1]?.trim() ?? "";
+        const mono = prop("NextElapseUSecMonotonic");
+        return prop("ActiveState") === "active" && ((mono !== "" && mono !== "infinity") || prop("NextElapseUSecRealtime") !== "");
+      };
       return {
         wanted: ctx.engine,
         installed,
@@ -174,7 +187,7 @@ export const EngineArea = defineArea({
         platform,
         root,
         nodePath,
-        timer: { installed: installedTimer, want, loaded: check.code === 0 },
+        timer: { installed: installedTimer, want, loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)) },
       };
     }),
   diagnose: ({ node, observed }) => {

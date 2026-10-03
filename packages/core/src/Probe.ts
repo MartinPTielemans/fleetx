@@ -28,7 +28,7 @@ import { loadAreas } from "./Plugins.ts";
 import {
   PROBE_PROTOCOL,
   type AgentObservation,
-  type LegacySyncObservation,
+  type SyncObservation,
   type MachineObservation,
   type ProviderObservation,
   type ProxyObservation,
@@ -215,7 +215,12 @@ const observeT3 = (home: string, loginEnv: Env) =>
       if (alive) {
         const d = yield* fetchDescriptor(r.origin);
         if (Option.isSome(d)) {
-          descriptor = { environmentId: String(d.value.environmentId), label: d.value.label, serverVersion: d.value.serverVersion };
+          descriptor = {
+            environmentId: String(d.value.environmentId),
+            label: d.value.label,
+            serverVersion: d.value.serverVersion,
+            protocol: d.value.orchestrationProtocolVersion ?? 1,
+          };
         } else {
           problems.push(`server at ${r.origin} did not answer /.well-known/t3/environment`);
         }
@@ -343,10 +348,19 @@ const observeProxy = (home: string, settings: ProbeSettings["proxy"]) =>
     return { launchers, credentials: true, key } satisfies ProxyObservation;
   });
 
-// ---- a bash `fleet sync` timer, where one runs alongside -------------------
+// ---- the last sync ---------------------------------------------------------
 
-const observeLegacySync = (home: string) =>
+/** Where `fleetx sync` records each run on the node: `<seconds>\t<ok|fail>\t<streak>\t<message>`. */
+export const lastSyncPath = (home: string) => `${home}/.local/state/fleetx/last-sync`;
+
+/** fleetx's own record first; a bash `fleet sync` timer's only where fleetx has never synced. */
+const observeLastSync = (home: string) =>
   Effect.gen(function* () {
+    const own = yield* readText(lastSyncPath(home));
+    if (Option.isSome(own)) {
+      const [when, result, streak, ...message] = own.value.trim().split("\t");
+      return { when: Number(when) || 0, result: result ?? "unknown", message: message.join("\t"), streak: Number(streak) || 0 } satisfies SyncObservation;
+    }
     const last = yield* readText(`${home}/.local/state/fleet/last-sync`);
     if (Option.isNone(last)) return null;
     const [when, result, ...message] = last.value.trim().split("\t");
@@ -356,7 +370,7 @@ const observeLegacySync = (home: string) =>
       result: result ?? "unknown",
       message: message.join("\t"),
       streak: Number(streak.trim()) || 0,
-    } satisfies LegacySyncObservation;
+    } satisfies SyncObservation;
   });
 
 // ---- machine --------------------------------------------------------------
@@ -365,12 +379,12 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
   const env: Env = process.env;
   const home = env["HOME"] ?? "";
   const hostname = (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim();
-  const [agents, { t3, providerAuth }, proxy, legacySync] = yield* Effect.all(
+  const [agents, { t3, providerAuth }, proxy, lastSync] = yield* Effect.all(
     [
       Effect.forEach(["claude", "codex"] as const, (a) => observeAgent(a, home, env["PATH"]), { concurrency: 2 }),
       observeT3(home, env),
       observeProxy(home, settings.proxy),
-      observeLegacySync(home),
+      observeLastSync(home),
     ],
     { concurrency: "unbounded" },
   );
@@ -412,6 +426,6 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     providerAuth,
     proxy,
     areas,
-    legacySync,
+    lastSync,
   } satisfies MachineObservation;
 });

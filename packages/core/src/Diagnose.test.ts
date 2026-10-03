@@ -62,7 +62,7 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
     key: "accepted",
   },
   areas: {},
-  legacySync: { when: 1_791_000_000, result: "ok", message: "abc", streak: 0 },
+  lastSync: { when: 1_791_000_000, result: "ok", message: "abc", streak: 0 },
   ...over,
 });
 
@@ -102,6 +102,12 @@ describe("diagnose", () => {
     expect(finding?.fix?.command).toBe("~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes");
     expect(finding?.fix?.safe).toBe(false);
     expect(finding?.fix?.disrupts).toContain("server");
+  });
+
+  it("warns when machines speak different T3 client protocols", () => {
+    const descriptor = (protocol: number) => ({ environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2632", protocol });
+    const findings = diagnose([ok("a", machine({}, { descriptor: descriptor(2) })), ok("b", machine({}, { descriptor: descriptor(1) }))], latest, settings);
+    expect(titles(findings)).toEqual(["b: T3 here speaks client protocol 1; a speak 2"]);
   });
 
   it("only notes a nightly from the same day", () => {

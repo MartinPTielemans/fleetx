@@ -429,7 +429,7 @@ describe("provider logins and health", () => {
       providerAuth,
       proxy: null,
       areas: {},
-      legacySync: null,
+      lastSync: null,
     }) satisfies MachineObservation;
   const result = (observation: MachineObservation): NodeResult => ({
     node: { name: "n", ssh: null, roles: ["member"], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } },

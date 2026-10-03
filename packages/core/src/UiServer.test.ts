@@ -49,7 +49,7 @@ const observation: MachineObservation = {
   proxy: null,
   areas: {},
   providerAuth: [{ instanceId: "claudeAgent", driver: "claudeAgent", enabled: true, auth: "authenticated", method: "setup-token", label: null, status: "ready", detail: "", checkedAt: 1, source: "t3" }],
-  legacySync: null,
+  lastSync: null,
 };
 
 const upgrade: Finding & { fix: Fix } = {

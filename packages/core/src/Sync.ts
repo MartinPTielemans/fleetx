@@ -25,7 +25,7 @@ import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
-import { probeMachine } from "./Probe.ts";
+import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
@@ -317,6 +317,8 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
       };
+      // Recorded locally before publishing, so the probe sees the run even when the push fails.
+      yield* fs.writeFileString(lastSyncPath(home), `${Math.round(now / 1000)}\t${state.result}\t${streak}\t${state.message.replaceAll("\n", " ")}\n`).pipe(Effect.ignore);
       yield* publishState(repo, state);
       if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
       return { state, lines };

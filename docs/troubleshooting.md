@@ -136,6 +136,13 @@ disrupting them until the hub serves them; sign in to OAuth servers first).
 
 ## Other common findings
 
+**`t3-protocol-behind`** — T3's apps (desktop, web and the phone app) speak
+one client protocol and refuse a server on another, showing "Client not
+supported". This machine's T3 speaks an older one than the others, so no app
+can reach all of them. Update T3 here (`fleetx fix`), or, when the apps are
+the older side, update the apps; until an app catches up, accept the T3
+finding on the machines you need from it rather than letting sync update them.
+
 **A provider "will not start in T3"** — the T3 server launches providers with
 its own environment, which can lack directories your shell has. `status`
 shows the launch error; point the provider at an absolute path, or make the

@@ -180,7 +180,7 @@ export const toUiStatus = (check: UiCheck, checkedAt: number): UiStatus => {
     }
     const obs = r.observation;
     const version = obs.t3.descriptor?.serverVersion ?? obs.t3.installedVersion;
-    const legacy = obs.legacySync;
+    const legacy = obs.lastSync;
     return {
       ...base,
       reachable: true,
