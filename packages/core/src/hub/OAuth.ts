@@ -128,6 +128,12 @@ const firstJson = <A>(urls: ReadonlyArray<string>, schema: Schema.Decoder<A>) =>
     return Option.none<{ url: string; value: A }>();
   });
 
+/** Authorization server endpoints must be HTTPS; plain HTTP only on loopback (development, tests). */
+export const isSecureEndpoint = (url: string) => {
+  const u = URL.parse(url);
+  return u !== null && (u.protocol === "https:" || (u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)));
+};
+
 export interface Discovery {
   readonly resource: string;
   readonly issuer: string;
@@ -152,6 +158,11 @@ export const discover = (serverUrl: string, challenge: string | null) =>
     const found = yield* firstJson(serverMetadataUrls(issuer), ServerMetadata);
     if (Option.isNone(found)) return yield* new OAuthError({ message: `no authorization server metadata found for ${issuer}` });
     const metadata = found.value.value;
+    for (const endpoint of [metadata.authorization_endpoint, metadata.token_endpoint, metadata.registration_endpoint]) {
+      if (endpoint !== undefined && !isSecureEndpoint(endpoint)) {
+        return yield* new OAuthError({ message: `${issuer} names an endpoint that is not HTTPS: ${endpoint}` });
+      }
+    }
     const methods = metadata.code_challenge_methods_supported;
     if (methods !== undefined && !methods.includes("S256")) {
       return yield* new OAuthError({ message: `${issuer} does not support PKCE with S256` });

@@ -261,7 +261,15 @@ export const makeHub = (
             r.type === "docker-stdio"
               ? spawnStdioContainer({ server: def.name, image: r.image, args: r.args, env, network: r.network })
               : spawnStdio({ command: expandHome(r.command, config.home), args: r.args.map((a) => expandHome(a, config.home)), env });
-          bridge = yield* provide(makeBridge({ name: def.name, spawn: provide(spawn), version: config.version }));
+          bridge = yield* provide(
+            makeBridge({
+              name: def.name,
+              spawn: provide(spawn),
+              version: config.version,
+              // Report the process's state as it changes, not only at the next check.
+              onStatus: () => Effect.suspend(() => (entry === undefined ? Effect.void : check(entry))).pipe(Effect.forkIn(scope), Effect.asVoid),
+            }),
+          );
           upstream = bridge;
         }
         entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false };

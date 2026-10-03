@@ -98,9 +98,17 @@ export const makeBridge = (options: {
   readonly name: string;
   readonly spawn: Effect.Effect<StdioProcess, string, Scope.Scope>;
   readonly version?: string;
+  /** Called whenever the status changes. */
+  readonly onStatus?: (status: BridgeStatus) => Effect.Effect<void>;
 }): Effect.Effect<Bridge, never, Scope.Scope> =>
   Effect.gen(function* () {
     let status: BridgeStatus = { state: "starting", detail: null };
+    const setStatus = (next: BridgeStatus) =>
+      Effect.suspend(() => {
+        const changed = next.state !== status.state || next.detail !== status.detail;
+        status = next;
+        return changed && options.onStatus !== undefined ? options.onStatus(next) : Effect.void;
+      });
     let nextId = 1;
     const pending = new Map<string, Pending>();
     const progress = new Map<string, string>(); // bridge token → pending key
@@ -194,7 +202,7 @@ export const makeBridge = (options: {
     // The supervisor: start, initialize, read until exit, back off, again.
     const runOnce: Effect.Effect<{ readonly why: string; readonly startedAt: number }, string> = Effect.scoped(
       Effect.gen(function* () {
-        status = { state: "starting", detail: status.state === "error" ? status.detail : null };
+        yield* setStatus({ state: "starting", detail: status.state === "error" ? status.detail : null });
         const process = yield* options.spawn;
         current = process;
         const reader = yield* process.lines.pipe(
@@ -213,7 +221,7 @@ export const makeBridge = (options: {
         if (init.error !== undefined) return yield* Effect.fail(`initialize failed: ${init.error.message}`);
         yield* process.write(toJson({ jsonrpc: "2.0", method: "notifications/initialized" }));
         yield* Deferred.succeed(initialized, init);
-        status = { state: "running", detail: null };
+        yield* setStatus({ state: "running", detail: null });
         const startedAt = yield* Clock.currentTimeMillis;
         const why = yield* process.exited.pipe(Effect.raceFirst(Deferred.await(kill).pipe(Effect.as("restarted"))));
         yield* Fiber.interrupt(reader);
@@ -233,7 +241,7 @@ export const makeBridge = (options: {
         initialized = yield* Deferred.make<JsonRpcMessage, string>();
         kill = yield* Deferred.make<void>();
         if (killed || stayedUp) backoff = BACKOFF_MIN;
-        status = killed ? { state: "starting", detail: null } : { state: "error", detail: reason };
+        yield* setStatus(killed ? { state: "starting", detail: null } : { state: "error", detail: reason });
         if (!killed) yield* Effect.logWarning(`hub: ${options.name} ${reason}; restarting in ${Math.round(backoff / 1000)}s`);
         yield* Effect.sleep(killed ? 0 : backoff);
         backoff = Math.min(backoff * 2, BACKOFF_MAX);

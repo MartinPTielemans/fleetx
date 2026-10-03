@@ -2,9 +2,9 @@
 
 `fleetx doctor` checks what fleetx and T3 run on; `fleetx status` checks
 everything else. Each finding has a key (the part after the machine name in
-its id, `laptop:node-too-old`). This page explains each runtime and engine key
-and what to do. A test keeps it complete: adding a finding to those areas
-without documenting it here fails the build.
+its id, `laptop:node-too-old`). This page explains each runtime, engine and
+mcp key and what to do. A test keeps it complete: adding a finding to those
+areas without documenting it here fails the build.
 
 ## runtime
 
@@ -47,6 +47,29 @@ node binary with a fixed PATH. Logs: `~/.local/state/fleetx/sync.log`.
 **`fleetx-timer-unwanted`** — a sync timer is installed but this machine's
 settings do not ask for one. The fix removes it.
 
+## mcp
+
+**`mcp-<name>-undefined`** — the node lists a server whose `mcp/<name>.json`
+is missing, invalid, or cannot be resolved (a hosted server with neither
+`[mcp] hub = true` and `gateway`, nor an `origin` and port).
+
+**`mcp-<name>-unregistered`** — Claude or Codex has the server registered
+differently from the definition, or not at all. The fix re-registers it.
+
+**`mcp-<name>-down`** — the server did not answer an `initialize`. With the
+hub, `fleetx mcp servers` on any machine shows why; a 401 means its
+credential expired: `fleetx mcp login <name>`.
+
+**`mcp-<name>-needs-login`** — the hub has no working login for the server:
+it was never signed in, the refresh token was revoked, or someone signed out.
+A person signs in, so there is no automatic fix: run `fleetx mcp login <name>`
+on any machine and open the URL it prints in any browser on the tailnet.
+
+**`mcp-toolhive-left`** — the hub serves these servers now, but ToolHive
+still runs them on this machine. The fix runs `thv stop` for them (marked as
+disrupting them until the hub serves them; sign in to OAuth servers first).
+`thv start` brings one back; `thv rm` removes them for good.
+
 ## Other common findings
 
 **A provider "will not start in T3"** — the T3 server launches providers with
@@ -59,11 +82,13 @@ one fleetx keeps current (a version manager's shim, a distribution package).
 Remove the other copy, or point T3 at `~/.local/bin/codex`.
 
 **"MCP server … does not answer: Token temporarily unavailable"** — the
-server's credential on the machine hosting it expired. Sign in again there
-(for ToolHive, its OAuth flow); fleetx cannot do this unattended.
+server's credential on the machine hosting it expired. With the fleetx hub,
+`fleetx mcp login <name>`; otherwise sign in again in the MCP runner there.
+Nobody can do this unattended.
 
 **A proposal never arrives** — only changes under `[fleet] auto_commit` paths
 are proposed, and only by `fleetx sync`. `fleetx review` on an authority lists
 what is waiting.
 
-**Logs** — `~/.local/state/fleetx/sync.log`, `listen.log`, `serve.log`.
+**Logs** — `~/.local/state/fleetx/sync.log`, `listen.log`, `serve.log` (the
+relay and its hub); the hub's call log is `~/.local/state/fleetx/hub/calls.jsonl`.
