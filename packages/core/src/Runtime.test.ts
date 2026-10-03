@@ -1,7 +1,6 @@
 // A plain test writing temp files; the effect under test runs with Node's services.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, writeFileSync } from "node:fs";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
