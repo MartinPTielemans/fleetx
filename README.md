@@ -130,6 +130,27 @@ nothing changed. Scheduled checks use this to stay quiet.
 Register it with Claude Code (`claude mcp add fleetx -- fleetx mcp`) or Codex,
 and any thread can be asked "what's wrong with my environments?".
 
+## In the browser
+
+```
+$ fleetx ui
+fleetx ui on http://127.0.0.1:8397/#token=…
+```
+
+A local web app in T3 Code's look, light and dark, with everything above:
+the environments table (each machine opens to its providers, agent CLIs, sync
+and model proxy), findings with their fixes, staged proposals with diffs,
+alerts, the MCP hub's servers and tool-call log, model traffic, and every
+machine's merged config. Applying a fix works as `fleetx fix` does: the exact
+commands, what each interrupts, an explicit confirmation, then a fresh check.
+It checks every minute while a browser is open and updates as the relay
+reports syncs.
+
+It listens on 127.0.0.1 only and answers only requests carrying the token in
+the link it opens, from its own address, so no other website can read your
+fleet or apply fixes. `--port` picks another port, `--no-open` prints the link
+instead of opening a browser. The app is built into the single `fleetx` file.
+
 ## Documentation
 
 - [Quickstart](docs/quickstart.md): one machine to two in five minutes
@@ -146,8 +167,9 @@ vite-plus), so its packages could move into T3's monorepo.
 ```sh
 pnpm install
 pnpm typecheck && pnpm test
-pnpm --filter fleetx build
+pnpm --filter fleetx build     # builds apps/ui into the bundle too
 node apps/cli/dist/bin.mjs status
+FLEETX_UI_FIXTURES=1 pnpm --filter @fleetx/ui dev   # the UI against a made-up fleet
 tests/integration/run.sh       # three throwaway nodes in Docker
 ```
 

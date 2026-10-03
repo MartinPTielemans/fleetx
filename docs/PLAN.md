@@ -71,6 +71,15 @@ Ticked items are done and in `main`.
 - [x] Integration tests with throwaway container nodes in CI
 - [x] Docs: quickstart, topologies, areas, troubleshooting kept complete by a test
 
+## Phase 6: companion (docs/design/companion.md)
+
+- [x] `fleetx ui`: a local web app in T3's look, embedded in the bundle; token,
+      Host and Origin checks; live through server-sent events
+- [ ] models: the model proxy and provider logins (the Models view shows them
+      once observations carry them)
+- [ ] hub: fleetx's own MCP hub on the relay (the MCP view talks to its `/hub`
+      endpoints once they exist)
+
 ## Migration (the author's own fleet)
 
 - [x] fleetx checks all machines alongside the bash fleet
