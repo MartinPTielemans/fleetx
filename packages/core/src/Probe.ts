@@ -19,6 +19,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
+import { AREAS } from "./Areas.ts";
 import { expandHome, type ProbeSettings } from "./Config.ts";
 import { exec, parseVersion } from "./Exec.ts";
 import {
@@ -378,6 +379,22 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     ],
     { concurrency: "unbounded" },
   );
+  const checkout = expandHome(settings.checkout ?? "~/fleet", home);
+  const areas: Record<string, unknown> = {};
+  yield* Effect.forEach(
+    AREAS,
+    (area) =>
+      Effect.gen(function* () {
+        const desired = yield* Schema.decodeUnknownEffect(area.desired)(settings.areas?.[area.id]).pipe(Effect.option);
+        if (Option.isNone(desired)) {
+          areas[area.id] = { invalidSettings: true };
+          return;
+        }
+        const observed = yield* area.observe(desired.value, { home, checkout, env });
+        areas[area.id] = yield* Schema.encodeUnknownEffect(area.observed)(observed).pipe(Effect.orElseSucceed(() => null));
+      }),
+    { concurrency: "unbounded" },
+  );
   return {
     protocol: PROBE_PROTOCOL,
     hostname,
@@ -388,6 +405,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     agents,
     t3,
     proxy,
+    areas,
     legacySync,
   } satisfies MachineObservation;
 });

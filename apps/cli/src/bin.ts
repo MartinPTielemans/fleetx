@@ -20,7 +20,8 @@ import { FleetToolkit, fleetHandlers } from "@fleetx/core/Mcp";
 import { compareWithLast } from "@fleetx/core/Memory";
 import { MachineObservation } from "@fleetx/core/Observation";
 import { probeMachine } from "@fleetx/core/Probe";
-import { renderChanges, renderFixPlan, renderFixResults, renderStatus } from "@fleetx/core/Render";
+import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderStatus } from "@fleetx/core/Render";
+import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -168,7 +169,7 @@ const fixCommand = Command.make("fix", {
         const go = yield* Prompt.run(Prompt.Confirm({ message: `Apply ${fixes.length} fix${fixes.length === 1 ? "" : "es"}?` }));
         if (!go) return;
       }
-      const outcomes = yield* runFixes(nodes, fixes);
+      const outcomes = yield* runFixes(nodes, fixes, config.checkout);
       const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name));
       const after = narrow(yield* checkNodes(config, bundle), (name) => touched.some((n) => n.name === name));
       yield* Console.log(renderFixResults(outcomes));
@@ -176,6 +177,42 @@ const fixCommand = Command.make("fix", {
       yield* Console.log(renderStatus(after.results, after.findings, after.latest, { verbose: false, elapsedMs: after.elapsedMs }));
     }).pipe(reportUserErrors),
   ),
+);
+
+const doctorCommand = Command.make("doctor", { node: nodeFlag }).pipe(
+  Command.withDescription("Check what fleetx and T3 run on: Node, git transport, PATH, fleetx's own git config."),
+  Command.withHandler(({ node }) =>
+    Effect.gen(function* () {
+      const { config, bundle, shown } = yield* prepare(node);
+      const report = narrow(yield* checkNodes(config, bundle), shown);
+      const findings = report.findings.filter((f) => f.area === "runtime" || f.area === "reach");
+      yield* Console.log(renderFindings("fleetx doctor", report.results.length, findings, report.elapsedMs));
+      if (findings.some((f) => f.severity === "error")) process.exitCode = 1;
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const configShowCommand = Command.make("show", {
+  node: Argument.String("node").pipe(Argument.withDescription("Machine to show; defaults to this one."), Argument.withDefault("")),
+}).pipe(
+  Command.withDescription("Print a machine's merged settings, and which layer each value comes from."),
+  Command.withHandler(({ node }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const name = node === "" ? config.self : node;
+      const found = config.nodes.find((n) => n.name === name);
+      if (found === undefined) return yield* Effect.fail(`unknown machine: ${name}`);
+      yield* Console.log(`${name}  roles: ${found.roles.join(", ")}  profiles: ${found.profiles.join(", ") || "none"}  ssh: ${found.ssh ?? "(this machine)"}`);
+      const rows = describeMerged(found.settings);
+      const width = Math.min(60, Math.max(0, ...rows.map((r) => r.path.length + r.value.length + 3)));
+      for (const row of rows) yield* Console.log(`  ${`${row.path} = ${row.value}`.padEnd(width)}  # ${row.source}`);
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const configCommand = Command.make("config").pipe(
+  Command.withDescription("Inspect the fleet's configuration."),
+  Command.withSubcommands([configShowCommand]),
 );
 
 /**
@@ -197,7 +234,7 @@ const mcpCommand = Command.make("mcp").pipe(
             const report = yield* checkNodes(config, bundle);
             return narrow(report, (name) => only.length === 0 || only.includes(name));
           }).pipe(Effect.provide(services)),
-        apply: (fixes) => runFixes(config.nodes, fixes).pipe(Effect.provide(services)),
+        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout).pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
       });
       return yield* Layer.launch(
@@ -212,7 +249,7 @@ const mcpCommand = Command.make("mcp").pipe(
 
 const cli = Command.make("fleetx").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
-  Command.withSubcommands([statusCommand, fixCommand, mcpCommand, probeCommand]),
+  Command.withSubcommands([statusCommand, fixCommand, doctorCommand, configCommand, mcpCommand, probeCommand]),
 );
 
 const RuntimeLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);

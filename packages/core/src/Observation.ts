@@ -9,7 +9,7 @@
  */
 import * as Schema from "effect/Schema";
 
-export const PROBE_PROTOCOL = 3;
+export const PROBE_PROTOCOL = 4;
 
 /** An agent CLI as fleet manages it, plus every other copy PATH can reach. */
 export const AgentObservation = Schema.Struct({
@@ -103,6 +103,8 @@ export const MachineObservation = Schema.Struct({
   agents: Schema.Array(AgentObservation),
   t3: T3Observation,
   proxy: Schema.NullOr(ProxyObservation),
+  /** Each registered area's facts, keyed by area id; decoded by the area itself. */
+  areas: Schema.Record(Schema.String, Schema.Unknown),
   legacySync: Schema.NullOr(LegacySyncObservation),
 });
 export type MachineObservation = typeof MachineObservation.Type;

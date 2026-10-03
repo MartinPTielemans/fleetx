@@ -34,7 +34,7 @@ const provider = (over: Partial<ProviderObservation> & { instanceId: string }): 
 });
 
 const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObservation["t3"]> = {}): MachineObservation => ({
-  protocol: 3,
+  protocol: 4,
   hostname: "h",
   platform: "linux",
   arch: "x64",
@@ -59,12 +59,13 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
     credentials: true,
     key: "accepted",
   },
+  areas: {},
   legacySync: { when: 1_791_000_000, result: "ok", message: "abc", streak: 0 },
   ...over,
 });
 
 const ok = (name: string, observation: MachineObservation): NodeResult => ({
-  node: { name, ssh: name },
+  node: { name, ssh: name, roles: ["member"], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } },
   ok: true,
   observation,
   ms: 1,
@@ -195,7 +196,7 @@ describe("diagnose", () => {
 
   it("reports a machine it could not reach without dropping the others", () => {
     const findings = diagnose(
-      [ok("a", machine()), { node: { name: "b", ssh: "b" }, ok: false, error: "ssh b failed: timeout", ms: 1 }],
+      [ok("a", machine()), { node: { name: "b", ssh: "b", roles: ["member"], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } }, ok: false, error: "ssh b failed: timeout", ms: 1 }],
       latest,
       settings,
     );

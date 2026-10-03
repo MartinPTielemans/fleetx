@@ -22,12 +22,13 @@ export interface CheckReport {
 export const checkNodes = (config: Config, bundle: string) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
-    const settings = probeSettings(config);
-    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, settings), { concurrency: "unbounded" });
+    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, probeSettings(config, n)), {
+      concurrency: "unbounded",
+    });
     const t3Versions = results
       .flatMap((r) => (r.ok ? [r.observation.t3.descriptor?.serverVersion ?? r.observation.t3.installedVersion ?? ""] : []))
       .filter((v) => v !== "");
     const latest = yield* lookupLatest(t3Versions);
-    const findings = applyAccepted(diagnose(results, latest, config.settings), config.settings.accept);
+    const findings = applyAccepted(diagnose(results, latest, config.settings, config.nodes), config.settings.accept);
     return { results, latest, findings, elapsedMs: (yield* Clock.currentTimeMillis) - started } satisfies CheckReport;
   });

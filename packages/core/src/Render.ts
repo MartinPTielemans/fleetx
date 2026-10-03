@@ -110,7 +110,7 @@ export const renderStatus = (
       lines.push(`  ${MARK[f.severity]} ${pad(f.node, nameWidth)}  ${f.severity === "info" ? c.dim(f.title) : f.title}`);
       const indent = " ".repeat(nameWidth + 6);
       if (f.detail) lines.push(`${indent}${c.dim(f.detail)}`);
-      if (f.fix) lines.push(`${indent}${c.cyan("fix")} ${f.fix.command}`);
+      if (f.fix) lines.push(`${indent}${c.cyan("fix")} ${f.fix.command.split("\n").join(`\n${indent}    `)}`);
     }
   }
   if (!options.verbose && notes > 0) {
@@ -183,4 +183,17 @@ export const renderChanges = (changes: Changes): string => {
   return lines.length === 0
     ? c.dim(`no change since ${since} UTC`)
     : [`${c.bold("Since")} ${since} UTC`, ...lines].join("\n");
+};
+
+/** A titled list of findings, for commands that show one area. */
+export const renderFindings = (title: string, machines: number, findings: ReadonlyArray<Finding>, elapsedMs: number): string => {
+  const lines = [`${c.bold(title)}  ${machines} environment${machines === 1 ? "" : "s"}  ${findings.length === 0 ? c.green("all good") : `${findings.length} finding${findings.length === 1 ? "" : "s"}`}  ${c.dim(`(${(elapsedMs / 1000).toFixed(1)}s)`)}`];
+  if (findings.length > 0) lines.push("");
+  const width = Math.max(0, ...findings.map((f) => f.node.length));
+  for (const f of findings) {
+    lines.push(`  ${MARK[f.severity]} ${pad(f.node, width)}  ${f.title}`);
+    if (f.detail) lines.push(`${" ".repeat(width + 6)}${c.dim(f.detail)}`);
+    if (f.fix) lines.push(`${" ".repeat(width + 6)}${c.cyan("fix")} ${f.fix.command.split("\n").join(`\n${" ".repeat(width + 10)}`)}`);
+  }
+  return lines.join("\n");
 };
