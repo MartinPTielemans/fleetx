@@ -3,6 +3,7 @@
  * Adding an area: implement Area (see Area.ts) in areas/ and list it here.
  */
 import type { AnyArea } from "./Area.ts";
+import { CodexPluginsArea } from "./areas/CodexPlugins.ts";
 import { DotfilesArea, InstructionsArea } from "./areas/Dotfiles.ts";
 import { EngineArea } from "./areas/Engine.ts";
 import { RuntimeArea } from "./areas/Runtime.ts";
@@ -12,4 +13,4 @@ import { SecretsArea } from "./areas/SecretsArea.ts";
 import { ServicesArea } from "./areas/Services.ts";
 import { SkillsArea } from "./areas/Skills.ts";
 
-export const AREAS: ReadonlyArray<AnyArea> = [RuntimeArea, EngineArea, SecretsArea, RelayArea, DotfilesArea, InstructionsArea, SkillsArea, McpArea, ServicesArea];
+export const AREAS: ReadonlyArray<AnyArea> = [RuntimeArea, EngineArea, SecretsArea, RelayArea, DotfilesArea, InstructionsArea, SkillsArea, McpArea, CodexPluginsArea, ServicesArea];

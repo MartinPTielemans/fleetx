@@ -68,3 +68,16 @@ pass "propose, review, approve, and the change returns cleanly"
 
 expect laptop "3 environments" 'fleetx status --all'
 pass "status --all reads every node's published state"
+
+# Skills from a git source, with provenance, reaching another node.
+on laptop 'mkdir -p /tmp/src/tools/vendored && cd /tmp/src && git init -q && printf -- "---\nname: vendored\ndescription: v\n---\nv1\n" > tools/vendored/SKILL.md && git add -A && git commit -qm v1 && git clone -q --bare /tmp/src /srv/remote/skills.git'
+expect laptop "added vendored: committed" 'fleetx skills add /srv/remote/skills.git'
+expect laptop '"tools/vendored"' 'cat ~/fleet/skills/SOURCES.json'
+on server 'fleetx sync' >/dev/null || true
+expect server "vendored" 'ls -la ~/.agents/skills/'
+pass "skills add vendors with provenance, and nodes link it on sync"
+
+on laptop 'cd /tmp/src && printf -- "---\nname: vendored\ndescription: v\n---\nv2\n" > tools/vendored/SKILL.md && git commit -qam v2 && git push -q /srv/remote/skills.git HEAD:main 2>/dev/null || git push -q /srv/remote/skills.git HEAD'
+expect laptop "committed and pushed" 'fleetx skills update --yes'
+expect laptop "v2" 'cat ~/fleet/skills/vendored/SKILL.md'
+pass "skills update re-pulls from the source"

@@ -225,6 +225,17 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
     return out;
   }
   t3.problems.forEach((problem, i) => out.push({ node, key: `t3-problem-${i + 1}`, severity: "warn", area: "t3", title: problem }));
+  // A CLI-installed server not under its service manager stops with the session that started it.
+  if (t3.runtime !== null && t3.runtime.alive && t3.runtimeBinary !== null && !t3.runtime.serviceManaged) {
+    out.push({
+      node,
+      key: "t3-not-a-service",
+      severity: "warn",
+      area: "t3",
+      title: "the T3 server is not running as a background service; it stops with the session that started it",
+      fix: { command: `${tilde(t3.runtimeBinary)} service install`, safe: false, disrupts: `restarts the T3 server on ${node}` },
+    });
+  }
   const version = t3.descriptor?.serverVersion ?? t3.installedVersion;
   if (version !== null && wantChannel !== null && cliReleaseChannelOf(version) !== wantChannel) {
     out.push({

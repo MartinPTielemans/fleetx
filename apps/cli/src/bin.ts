@@ -24,7 +24,7 @@ import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderS
 import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
-import { alertsCommand, approveCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
+import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
@@ -171,7 +171,7 @@ const configCommand = Command.make("config").pipe(
  * MCP over stdio for agents: register `fleetx mcp` with Claude Code or Codex
  * and every T3 thread can check and fix the user's environments.
  */
-const mcpCommand = Command.make("mcp").pipe(
+const mcpServeCommand = Command.make("mcp").pipe(
   Command.withDescription("Serve fleet_status and fleet_apply_fixes over MCP (stdio) for agents in T3 Code."),
   Command.withHandler(() =>
     Effect.gen(function* () {
@@ -222,7 +222,7 @@ const cli = Command.make("fleetx").pipe(
     configCommand,
     secretsCommand,
     skillsCommand,
-    mcpCommand,
+    mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand])),
     probeCommand,
   ]),
 );

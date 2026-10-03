@@ -9,7 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { Argument, Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
 import { expandHome, loadConfig, type Config } from "@fleetx/core/Config";
 import type { Finding } from "@fleetx/core/Diagnose";
@@ -17,6 +17,8 @@ import { exec } from "@fleetx/core/Exec";
 import { lookupLatest } from "@fleetx/core/Latest";
 import type { NodeResult } from "@fleetx/core/Remote";
 import { renderStatus } from "@fleetx/core/Render";
+import { commitAndPush } from "@fleetx/core/Git";
+import { addSkills, removeSkills, updateSkills } from "@fleetx/core/SkillSources";
 import { approve, listProposals, reject } from "@fleetx/core/Staging";
 import { readStates, syncRun, type Alert, type NodeState } from "@fleetx/core/Sync";
 
@@ -190,7 +192,130 @@ const adopt = Command.make("adopt", {
   ),
 );
 
+/** An authority commits and pushes; any other node leaves the change for its next sync to propose. */
+const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
+  Effect.gen(function* () {
+    if (config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
+      const rev = yield* commitAndPush(config.repo, paths, message);
+      return `committed and pushed (${rev})`;
+    }
+    return "the next sync proposes it for an authority's approval";
+  });
+
+const add = Command.make("add", {
+  source: Argument.String("source").pipe(Argument.withDescription("owner/repo or a git URL")),
+  skills: Argument.String("skill").pipe(Argument.variadic()),
+  as: Flag.String("as").pipe(Flag.withDescription("Vendor the one skill under another name (on a clash)."), Flag.optional),
+}).pipe(
+  Command.withDescription("Vendor skills from a git repository into the config repo, with provenance."),
+  Command.withHandler(({ source, skills, as }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const paths = yield* addSkills(config.repo, source, skills, as._tag === "Some" ? as.value : undefined);
+      const names = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
+      yield* Console.log(`added ${names.join(", ")}: ${yield* land(config, paths, `Add skill${names.length === 1 ? "" : "s"} ${names.join(", ")} from ${source}`)}`);
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const update = Command.make("update", {
+  skills: Argument.String("skill").pipe(Argument.variadic()),
+  yes: Flag.Boolean("yes").pipe(Flag.withAlias("y"), Flag.withDescription("Keep the changes without asking."), Flag.withDefault(false)),
+}).pipe(
+  Command.withDescription("Re-pull vendored skills from where they came from; shows what changed and asks."),
+  Command.withHandler(({ skills, yes }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const touched = yield* updateSkills(config.repo, skills);
+      const stat = yield* exec({ command: "git", args: ["-C", config.repo, "diff", "--stat", "--", ...touched], timeout: Duration.seconds(10) });
+      const changed = yield* exec({ command: "git", args: ["-C", config.repo, "status", "--porcelain", "--", ...touched], timeout: Duration.seconds(10) });
+      if (changed.stdout.trim() === "") {
+        yield* Console.log("every skill is current");
+        return;
+      }
+      yield* Console.log(stat.stdout.trim() || changed.stdout.trim());
+      const keep =
+        yes || (process.stdin.isTTY === true && (yield* Prompt.run(Prompt.Confirm({ message: "Keep these changes?" })).pipe(Effect.orElseSucceed(() => false))));
+      if (!keep) {
+        yield* exec({ command: "git", args: ["-C", config.repo, "checkout", "--", ...touched], timeout: Duration.seconds(10) });
+        yield* exec({ command: "git", args: ["-C", config.repo, "clean", "-qfd", "--", ...touched], timeout: Duration.seconds(10) });
+        yield* Console.log(process.stdin.isTTY === true ? "discarded" : "discarded; re-run with --yes to keep them");
+        return;
+      }
+      yield* Console.log(yield* land(config, touched, `Update skill${touched.length === 1 ? "" : "s"} from upstream`));
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const remove = Command.make("remove", { skills: Argument.String("skill").pipe(Argument.variadic({ min: 1 })) }).pipe(
+  Command.withDescription("Drop vendored skills; every node unlinks them on its next sync."),
+  Command.withHandler(({ skills }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const paths = yield* removeSkills(config.repo, skills);
+      yield* Console.log(`removed ${skills.join(", ")}: ${yield* land(config, paths, `Remove skill${skills.length === 1 ? "" : "s"} ${skills.join(", ")}`)}`);
+    }).pipe(reportUserErrors),
+  ),
+);
+
 export const skillsCommand = Command.make("skills").pipe(
   Command.withDescription("Skills vendored in the config repo."),
-  Command.withSubcommands([adopt]),
+  Command.withSubcommands([add, update, remove, adopt]),
+);
+
+/** Definitions are files people read and edit. */
+const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+
+/**
+ * Add `name` to a node file's MCP servers: into an existing `servers` or
+ * `"servers.add"` list under [mcp], or as a new `"servers.add"` entry.
+ */
+export const withMcpServer = (text: string, name: string) => {
+  const table = /^\[mcp\][ \t]*$/m.exec(text);
+  if (table !== null) {
+    const rest = text.slice(table.index);
+    const end = rest.slice(1).search(/^\[/m);
+    const body = end === -1 ? rest : rest.slice(0, end + 1);
+    const list = /^("servers\.add"|servers)[ \t]*=[ \t]*\[(.*)\][ \t]*$/m.exec(body);
+    const updated = list
+      ? body.replace(list[0], `${list[1]} = [${[list[2]?.trim(), JSON.stringify(name)].filter(Boolean).join(", ")}]`)
+      : body.replace(/^\[mcp\][ \t]*$/m, `[mcp]\n"servers.add" = [${JSON.stringify(name)}]`);
+    return text.slice(0, table.index) + updated + rest.slice(body.length);
+  }
+  return `${text.trimEnd()}\n\n[mcp]\n"servers.add" = [${JSON.stringify(name)}]\n`;
+};
+
+/** Declare an MCP server once; nodes listing it register it on their next sync. */
+export const mcpAddCommand = Command.make("add", {
+  name: Argument.String("name"),
+  url: Flag.String("url").pipe(Flag.withDescription("A server reached directly over HTTP."), Flag.optional),
+  command: Flag.String("command").pipe(Flag.withDescription("A stdio server: the command to run (use ~ for home)."), Flag.optional),
+  arg: Flag.String("arg").pipe(Flag.withDescription("An argument for --command (repeatable)."), Flag.atLeast(0)),
+  token: Flag.String("token-env").pipe(Flag.withDescription("Send this secret as a bearer token (set it with fleetx secrets set)."), Flag.optional),
+  node: Flag.String("node").pipe(Flag.withDescription("Register on this node (repeatable); default every node."), Flag.atLeast(0)),
+}).pipe(
+  Command.withDescription("Declare an MCP server in mcp/<name>.json and register it on nodes."),
+  Command.withHandler(({ name, url, command, arg, token, node }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* loadConfig;
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return yield* Effect.fail("names are lowercase letters, digits, - and _");
+      if ((url._tag === "Some") === (command._tag === "Some")) return yield* Effect.fail("give exactly one of --url or --command");
+      const definition =
+        url._tag === "Some"
+          ? { kind: "direct", url: url.value, ...(token._tag === "Some" ? { auth: { type: "bearer", token_env: token.value } } : {}) }
+          : { kind: "stdio", command: command._tag === "Some" ? command.value : "", args: arg };
+      yield* fs.writeFileString(`${config.repo}/mcp/${name}.json`, prettyJson(definition));
+      const targets = node.length > 0 ? node : config.nodes.map((n) => n.name);
+      const changed = [`mcp/${name}.json`];
+      for (const target of targets) {
+        const file = `${config.repo}/nodes/${target}.toml`;
+        const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => `unknown machine: ${target}`));
+        if (text.includes(`"${name}"`)) continue;
+        yield* fs.writeFileString(file, withMcpServer(text, name));
+        changed.push(`nodes/${target}.toml`);
+      }
+      yield* Console.log(`declared ${name} for ${targets.join(", ")}: ${yield* land(config, changed, `Add MCP server ${name}`)}`);
+    }).pipe(reportUserErrors),
+  ),
 );
