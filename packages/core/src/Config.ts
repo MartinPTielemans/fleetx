@@ -64,6 +64,12 @@ const FleetSection = Schema.Struct({
   interval: Schema.optionalKey(Schema.Number),
   /** Failures in a row before an alert. */
   alert_after: Schema.optionalKey(Schema.Number),
+  /** Areas whose safe fixes sync runs unattended. */
+  apply: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Repo paths whose local changes sync commits (authority) or proposes (others). */
+  auto_commit: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Path prefixes an authority's sync approves proposals under without review. */
+  auto_approve: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 const FleetFile = Schema.Struct({

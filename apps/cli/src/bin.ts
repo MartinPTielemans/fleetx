@@ -24,6 +24,7 @@ import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderS
 import { describeMerged } from "@fleetx/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
+import { alertsCommand, approveCommand, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
 import { secretsCommand } from "./secrets.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
@@ -54,6 +55,10 @@ const probeCommand = Command.make("probe", {
 const statusCommand = Command.make("status", {
   json: Flag.Boolean("json").pipe(Flag.withDescription("Print machine-readable JSON."), Flag.withDefault(false)),
   verbose: Flag.Boolean("verbose").pipe(Flag.withDescription("Also show notes."), Flag.withDefault(false)),
+  all: Flag.Boolean("all").pipe(
+    Flag.withDescription("Every machine as it last reported through the config repo; contacts none of them."),
+    Flag.withDefault(false),
+  ),
   changes: Flag.Boolean("changes").pipe(
     Flag.withDescription("Only what changed since the last --changes run (for scheduled checks)."),
     Flag.withDefault(false),
@@ -61,8 +66,12 @@ const statusCommand = Command.make("status", {
   node: nodeFlag,
 }).pipe(
   Command.withDescription("Check every environment: T3, the providers it launches, agent CLIs, sync."),
-  Command.withHandler(({ json, verbose, changes, node }) =>
+  Command.withHandler(({ json, verbose, all, changes, node }) =>
     Effect.gen(function* () {
+      if (all) {
+        yield* Console.log(yield* renderFleetFromStates(yield* loadConfig, verbose));
+        return;
+      }
       const { config, nodes, bundle, shown } = yield* prepare(node);
       const full = yield* checkNodes(config, bundle);
       const report = narrow(full, shown);
@@ -190,7 +199,21 @@ const mcpCommand = Command.make("mcp").pipe(
 
 const cli = Command.make("fleetx").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
-  Command.withSubcommands([statusCommand, fixCommand, doctorCommand, configCommand, secretsCommand, mcpCommand, probeCommand]),
+  Command.withSubcommands([
+    statusCommand,
+    fixCommand,
+    syncCommand,
+    reviewCommand,
+    approveCommand,
+    rejectCommand,
+    alertsCommand,
+    doctorCommand,
+    configCommand,
+    secretsCommand,
+    skillsCommand,
+    mcpCommand,
+    probeCommand,
+  ]),
 );
 
 const RuntimeLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);

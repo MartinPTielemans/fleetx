@@ -25,13 +25,17 @@ export const gitEnv = (home: string, env: Readonly<Record<string, string | undef
   ...(repo === undefined ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: repo }),
 });
 
-export const git = (dir: string, args: ReadonlyArray<string>, options: { readonly stdin?: string; readonly timeout?: Duration.Input } = {}) =>
+export const git = (
+  dir: string,
+  args: ReadonlyArray<string>,
+  options: { readonly stdin?: string; readonly timeout?: Duration.Input; readonly env?: Readonly<Record<string, string>> } = {},
+) =>
   Effect.gen(function* () {
     const home = process.env["HOME"] ?? "";
     return yield* exec({
       command: "git",
       args: ["-C", dir, ...args],
-      env: gitEnv(home, process.env, dir),
+      env: { ...gitEnv(home, process.env, dir), ...options.env },
       ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
       timeout: options.timeout ?? Duration.seconds(60),
     });
