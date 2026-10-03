@@ -135,6 +135,7 @@ export const BUILTIN_RECIPES: Readonly<Record<string, Recipe>> = {
 
 const DEFAULT_DIRECT = ["-v", "-V", "--version", "login", "logout", "auth"];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type Resolved =
   | { readonly _tag: "route"; readonly recipe: Recipe }
@@ -145,6 +146,11 @@ export type Resolved =
 export const resolveRecipe = (instanceId: string, driver: string, settings: ModelsSettings, upstreams: Upstreams): Resolved => {
   const declared = settings.providers?.[instanceId];
   if (declared?.route === false) return { _tag: "skip" };
+  // Everything here ends up in a shell script written through a heredoc; one line each, or none at all.
+  const fields = [instanceId, driver, declared?.upstream, declared?.command, declared?.token_env, ...Object.entries(declared?.env ?? {}).flat(), ...(declared?.args ?? [])];
+  if (fields.some((f) => f !== undefined && CONTROL.test(f))) {
+    return { _tag: "unroutable", reason: `the recipe for ${JSON.stringify(instanceId)} has a newline or control character in it, so no launcher is written` };
+  }
   const builtin = BUILTIN_RECIPES[driver];
   const bin = T3_DRIVERS[driver]?.bin;
   const env = { ...builtin?.env, ...declared?.env };

@@ -100,6 +100,21 @@ describe("upstreams and recipes", () => {
     const cursor = resolveRecipe("cursor", "cursor", {}, BUILTIN_UPSTREAMS);
     expect(cursor._tag === "unroutable" && cursor.reason).toContain("SDK provider");
     expect(resolveRecipe("codex", "codex", { providers: { codex: { route: false } } }, BUILTIN_UPSTREAMS)._tag).toBe("skip");
+  });
+  it("writes no launcher for a recipe with a newline or control character anywhere", () => {
+    const ok = { upstream: "openai", env: { X_BASE_URL: "{proxy}" } };
+    for (const providers of [
+      { "co\ndex": ok },
+      { codex: { ...ok, command: "codex\nFLEETX_LAUNCHER\nrm -rf ~" } },
+      { codex: { ...ok, env: { X_BASE_URL: "{proxy}\nFLEETX_LAUNCHER" } } },
+      { codex: { ...ok, args: ["-c", "a\rb"] } },
+      { codex: { ...ok, token_env: "T\u0000" } },
+    ]) {
+      const [id] = Object.keys(providers);
+      const r = resolveRecipe(id ?? "", "codex", { providers }, BUILTIN_UPSTREAMS);
+      expect(r._tag).toBe("unroutable");
+      expect(r._tag === "unroutable" && r.reason).toContain("newline or control character");
+    }
     expect(resolveRecipe("codex", "codex", { providers: { codex: { upstream: "gone" } } }, BUILTIN_UPSTREAMS)._tag).toBe("unroutable");
   });
 });
