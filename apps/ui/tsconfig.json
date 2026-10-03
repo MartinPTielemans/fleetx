@@ -1,0 +1,29 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite-plus/client", "node"],
+    // Browser code: the rules that route time, fetch and timers through
+    // Effect services are for the engine, not a React app.
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "namespaceImportPackages": ["effect"],
+        "diagnosticSeverity": {
+          "globalDate": "off",
+          "globalDateInEffect": "off",
+          "globalFetch": "off",
+          "globalFetchInEffect": "off",
+          "globalTimers": "off",
+          "globalTimersInEffect": "off",
+          "globalConsole": "off",
+          "globalRandom": "off"
+        }
+      }
+    ]
+  },
+  "include": ["src", "dev", "vite.config.ts"]
+}

@@ -31,6 +31,7 @@ import { modelsCommand } from "./models.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
 import { t3Command } from "./t3.ts";
+import { uiCommand } from "./ui.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(MachineObservation));
@@ -227,6 +228,7 @@ const cli = Command.make("fleetx").pipe(
     configCommand,
     secretsCommand,
     skillsCommand,
+    uiCommand,
     mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand, ...hubCommands])),
     probeCommand,
   ]),
