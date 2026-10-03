@@ -114,7 +114,7 @@ export const isAllowedRemote = (url: string) => {
   const u = URL.parse(url);
   if (u === null) return false;
   if (u.protocol === "https:") return true;
-  return u.protocol === "http:" && (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || u.hostname.endsWith(".ts.net"));
+  return u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
 };
 
 const decodeRaw = Schema.decodeUnknownOption(RawDefinition);
@@ -147,7 +147,7 @@ export const parseDefinition = (name: string, text: string): HubDefinition | { r
   switch (d.kind) {
     case "remote": {
       if (d.url === undefined) return { problem: "remote definition has no url" };
-      if (!isAllowedRemote(d.url)) return { problem: `remote url must be https (plain http only on loopback or a *.ts.net host): ${d.url}` };
+      if (!isAllowedRemote(d.url)) return { problem: `remote url must be https (plain http only on loopback): ${d.url}` };
       return { ...base, runner: { type: "remote", url: d.url }, upstream: d.url };
     }
     case "hosted-stdio": {

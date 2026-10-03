@@ -51,7 +51,7 @@ describe("hub definitions", () => {
     expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "i", network: "none" }))).toMatchObject({ problem: expect.stringMatching(/stdio/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://mcp.example.com/mcp" }))).toMatchObject({ problem: expect.stringMatching(/https/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://127.0.0.1:9/mcp" }))).toMatchObject({ runner: { type: "remote" } });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }))).toMatchObject({ runner: { type: "remote" } });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }))).toMatchObject({ problem: expect.stringMatching(/https/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc" } }))).toMatchObject({ problem: expect.stringMatching(/issuer/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "--privileged" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });
     expect(parseDefinition("x", JSON.stringify({ kind: "registry", image: "-v/:/host", transport: "stdio" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });

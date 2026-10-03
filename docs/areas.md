@@ -113,7 +113,7 @@ definition in `mcp/` and serves it at `<relay url>/mcp/<name>`:
 
 | kind | the hub |
 |---|---|
-| `remote` | proxies to `url` (https; plain http only on loopback or a `*.ts.net` host), adding the server's credential (OAuth, or a bearer secret) |
+| `remote` | proxies to `url` (https; plain http only on loopback), adding the server's credential (OAuth, or a bearer secret) |
 | `container` | runs `image` with Docker on a port from 18200–18299 and proxies to it (`target_port`, default 8080; `path`, default `/mcp`) |
 | `registry` | the same; `transport = "stdio"` (the default for registry) images are bridged |
 | `hosted-stdio` | runs `command` on the relay node and bridges it |
