@@ -84,6 +84,24 @@ describe("relay hub routes", () => {
     expect(calls[1]).toMatchObject({ method: "tools/call", tool: "echo", outcome: "ok" });
   });
 
+  it("checks the token before reading a body, and refuses bodies over 4 MB", async () => {
+    const huge = "x".repeat(5 * 1024 * 1024);
+    const before = ((await (await relay("/hub/calls?server=local&limit=1000")).json()) as Array<unknown>).length;
+    expect((await relay("/mcp/local", { method: "POST", token: "wrong", body: huge })).status).toBe(401);
+    const after = (await (await relay("/hub/calls?server=local&limit=1000")).json()) as Array<{ method: string; outcome: string }>;
+    expect(after.length).toBe(before + 1);
+    expect(after[0]).toMatchObject({ method: "POST", outcome: "unauthorized" });
+    expect((await relay("/mcp/local", { method: "POST", body: huge })).status).toBe(413);
+    // Without a content-length the reader stops at the limit too.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 6; i++) controller.enqueue(new Uint8Array(1024 * 1024));
+        controller.close();
+      },
+    });
+    expect((await relay("/mcp/local", { method: "POST", body: stream, duplex: "half" } as RequestInit)).status).toBe(413);
+  });
+
   it("manages client tokens and answers OAuth callbacks with a small page", async () => {
     const created = await relay("/hub/tokens/laptop", { method: "POST", body: JSON.stringify({ servers: ["local"] }) });
     const { token } = (await created.json()) as { token: string };

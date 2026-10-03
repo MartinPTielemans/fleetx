@@ -10,7 +10,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { makeCallLog } from "./Calls.ts";
 import { expandSecrets, parseDefinition } from "./Definitions.ts";
 import { makeSseParser } from "./JsonRpc.ts";
-import { constantTimeEqual, isDenied } from "./Policy.ts";
+import { caseVariantKey } from "./JsonRpc.ts";
+import { compileDeny, constantTimeEqual, isDenied } from "./Policy.ts";
 
 describe("hub definitions", () => {
   it("reads the existing JSON, ignoring ToolHive-only fields", () => {
@@ -70,6 +71,22 @@ describe("hub policy", () => {
     expect(isDenied([], "anything")).toBe(false);
   });
 
+  it("compiles patterns once and refuses over-long names", () => {
+    const denied = compileDeny(["delete_*", "drop"]);
+    expect(denied("delete_repo")).toBe(true);
+    expect(denied("list")).toBe(false);
+    expect(denied("a".repeat(129))).toBe(true);
+    expect(compileDeny([])("a".repeat(129))).toBe(true);
+    expect(compileDeny([])("list")).toBe(false);
+  });
+
+  it("finds keys that differ only in case from the ones the policy reads", () => {
+    expect(caseVariantKey({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "a", arguments: { Name: "fine" } } })).toBeNull();
+    expect(caseVariantKey({ method: "tools/call", params: { name: "a", NAME: "b" } } as never)).toBe("params.NAME");
+    expect(caseVariantKey({ method: "ping", Method: "tools/call" } as never)).toBe("Method");
+    expect(caseVariantKey({ method: "ping", PARAMS: {} } as never)).toBe("PARAMS");
+  });
+
   it("compares tokens in constant time without false positives", () => {
     expect(constantTimeEqual("abc", "abc")).toBe(true);
     expect(constantTimeEqual("abc", "abd")).toBe(false);
@@ -107,5 +124,15 @@ describe("hub call log", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
     );
     expect(reloaded[0]?.at).toBe(39);
+    const clipped = await Effect.runPromise(
+      Effect.gen(function* () {
+        const log = yield* makeCallLog(null);
+        yield* log.record({ ...call(1), method: "m".repeat(5000), tool: "t".repeat(5000), error: "e".repeat(5000) });
+        return (yield* log.list({}))[0];
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+    expect(clipped?.method.length).toBe(128);
+    expect(clipped?.tool?.length).toBe(128);
+    expect(clipped?.error?.length).toBe(200);
   });
 });

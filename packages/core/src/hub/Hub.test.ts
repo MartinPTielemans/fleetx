@@ -138,6 +138,12 @@ describe("hub OAuth", () => {
         expect(sealed).not.toContain("at-");
         expect(sealed).not.toContain("rt-");
 
+        // The upstream receives the messages the hub checked, re-serialized, not the raw body.
+        const rawBody = '{"jsonrpc":"2.0", "id":77, "method":"tools/call", "params":{"name":"search","name":"search","arguments":{}}}';
+        const sent = yield* hub.gateway("protected", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: rawBody });
+        yield* readBody(sent);
+        expect(mcp.lastBody()).toBe('{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"search","arguments":{}}}');
+
         // Fresh tokens are not refreshed; tokens close to expiry are, once, even under concurrency.
         yield* hub.check("protected");
         expect(as.refreshes()).toBe(0);
@@ -300,24 +306,52 @@ describe("hub gateway", () => {
         const token = yield* hub.createToken("laptop", ["local"]);
         expect(token).toMatch(/^fxh_/);
         expect(readFileSync(join(dir, "state/tokens.age"), "utf8")).not.toContain(token);
-        expect((yield* rpc(hub, "local", "ping", {}, { token, session })).status).toBe(200);
+        // A session belongs to the client that opened it.
+        expect((yield* rpc(hub, "local", "ping", {}, { token, session })).status).toBe(404);
+        const own = (yield* rpc(hub, "local", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "l", version: "1" } }, { token })).headers["mcp-session-id"] ?? "";
+        expect((yield* rpc(hub, "local", "ping", {}, { token, session: own })).status).toBe(200);
+        expect((yield* rpc(hub, "local", "ping", {}, { session: own })).status).toBe(404);
         expect((yield* rpc(hub, "other", "ping", {}, { token })).status).toBe(403);
         expect((yield* rpc(hub, "local", "ping", {}, { token: "wrong" })).status).toBe(401);
         expect((yield* hub.listTokens).map((t) => t.client)).toEqual(["laptop"]);
         expect(yield* hub.revokeToken("laptop")).toBe(true);
-        expect((yield* rpc(hub, "local", "ping", {}, { token, session })).status).toBe(401);
+        expect((yield* rpc(hub, "local", "ping", {}, { token, session: own })).status).toBe(401);
         expect((yield* hub.createToken("relay", null).pipe(Effect.flip))).toMatch(/not "relay"/);
 
         const calls = yield* hub.calls({ server: "local" });
         const outcome = (method: string, tool: string | null) => calls.find((c) => c.method === method && c.tool === tool)?.outcome;
         expect(outcome("tools/call", "delete_all")).toBe("denied");
         expect(outcome("tools/call", "echo")).toBe("ok");
-        expect(calls.filter((c) => c.method === "ping").map((c) => [c.client, c.outcome])).toEqual([
-          ["unknown", "unauthorized"],
-          ["unknown", "unauthorized"],
-          ["laptop", "ok"],
+        // A rejected request is one record, with only its HTTP method: its body is never read.
+        expect(calls.filter((c) => c.outcome === "unauthorized").map((c) => [c.client, c.method, c.tool])).toEqual([
+          ["unknown", "POST", null],
+          ["unknown", "POST", null],
         ]);
+        expect(calls.filter((c) => c.method === "ping").map((c) => [c.client, c.outcome])).toEqual([["laptop", "ok"]]);
         expect(toJson(calls)).not.toContain("private words");
+
+        // Keys differing only in case are refused; exact duplicates are read (last wins) and checked as read.
+        const raw = (body: string) =>
+          hub.gateway("local", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": session }, body }).pipe(
+            Effect.flatMap((r) => readBody(r).pipe(Effect.map((text) => ({ status: r.status, text })))),
+          );
+        const variant = yield* raw('{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"echo","Name":"delete_all","arguments":{}}}');
+        expect(variant.status).toBe(400);
+        expect(variant.text).toContain("differ only in case");
+        expect((yield* raw('{"jsonrpc":"2.0","id":51,"Method":"tools/call","method":"ping"}')).status).toBe(400);
+        const duplicate = yield* raw('{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"echo","name":"delete_all","arguments":{}}}');
+        expect(duplicate.text).toContain("-32003");
+        expect((yield* raw('{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":7}}')).status).toBe(400);
+        const long = yield* rpc(hub, "local", "tools/call", { name: "x".repeat(300), arguments: {} }, { session });
+        expect(long.message?.error).toMatchObject({ code: -32003 });
+
+        // Errors are logged by code, never by the server's message.
+        yield* rpc(hub, "local", "resources/read", { uri: "secret://echoed" }, { session });
+
+        const after = yield* hub.calls({ server: "local", limit: 100 });
+        expect(after.find((c) => c.method === "resources/read")).toMatchObject({ outcome: "error", error: "JSON-RPC error -32601" });
+        expect(after.every((c) => c.method.length <= 128 && (c.tool ?? "").length <= 128)).toBe(true);
+        expect(toJson(after)).not.toContain("unknown method");
 
         // Unknown servers are 404; the stdio-kind definition is not hosted.
         const missing = yield* hub.gateway("notes", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: {}, body: "{}" });

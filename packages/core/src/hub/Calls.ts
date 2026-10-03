@@ -17,6 +17,10 @@ import * as Schema from "effect/Schema";
 
 import { HubCall } from "../Api.ts";
 
+/** Every field a client controls is cut short before it is kept. */
+export const MAX_FIELD = 128;
+const clip = (text: string | null, max: number) => (text === null ? null : text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
 export interface CallLog {
   readonly record: (call: HubCall) => Effect.Effect<void>;
   readonly list: (filter: { readonly server?: string | undefined; readonly limit?: number | undefined }) => Effect.Effect<ReadonlyArray<HubCall>>;
@@ -63,8 +67,9 @@ export const makeCallLog = (file: string | null, options?: { readonly capacity?:
       }).pipe(Effect.ignore);
 
     const log: CallLog = {
-      record: (call) =>
+      record: (raw) =>
         Effect.suspend(() => {
+          const call: HubCall = { ...raw, server: clip(raw.server, MAX_FIELD) ?? "", client: clip(raw.client, MAX_FIELD) ?? "", method: clip(raw.method, MAX_FIELD) ?? "", tool: clip(raw.tool, MAX_FIELD), error: clip(raw.error, 200) };
           ring.push(call);
           if (ring.length > capacity) ring = ring.slice(-capacity);
           return write(call);

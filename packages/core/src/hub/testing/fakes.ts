@@ -149,6 +149,8 @@ export interface FakeMcpServer {
   readonly url: string;
   /** Requests for the resource metadata: at the well-known path, and at the path the 401 names. */
   readonly metadataHits: () => { readonly wellKnown: number; readonly hinted: number };
+  /** The last request body the server received, exactly as sent. */
+  readonly lastBody: () => string;
   readonly close: () => Promise<void>;
 }
 
@@ -160,6 +162,7 @@ export const fakeProtectedMcp = async (
 ): Promise<FakeMcpServer> => {
   let base = "";
   const hits = { wellKnown: 0, hinted: 0 };
+  let last = "";
   const { server, url } = await listen(async (req, res) => {
     const path = new URL(req.url ?? "/", base).pathname;
     if (req.method === "GET" && (path === "/.well-known/oauth-protected-resource/mcp" || path === "/meta/resource")) {
@@ -176,7 +179,9 @@ export const fakeProtectedMcp = async (
       res.writeHead(204);
       return res.end();
     }
-    const m = JSON.parse(await body(req)) as { id?: number | string; method: string; params?: { name?: string } };
+    const text = await body(req);
+    last = text;
+    const m = JSON.parse(text) as { id?: number | string; method: string; params?: { name?: string } };
     if (m.id === undefined) {
       res.writeHead(202);
       return res.end();
@@ -192,5 +197,6 @@ export const fakeProtectedMcp = async (
     res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: m.id, result })}\n\n`);
   });
   base = url;
-  return { url, metadataHits: () => ({ ...hits }), close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return { url, metadataHits: () => ({ ...hits }),
+    lastBody: () => last, close: () => new Promise((resolve) => server.close(() => resolve())) };
 };
