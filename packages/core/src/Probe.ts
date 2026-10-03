@@ -390,7 +390,15 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
           areas[area.id] = { invalidSettings: true };
           return;
         }
-        const observed = yield* area.observe(desired.value, { home, checkout, env, engine: settings.engine ?? null, node: settings.node ?? null });
+        const observed = yield* area.observe(desired.value, {
+          home,
+          checkout,
+          env,
+          engine: settings.engine ?? null,
+          node: settings.node ?? null,
+          roles: settings.roles ?? [],
+          relay: settings.relay ?? null,
+        });
         areas[area.id] = yield* Schema.encodeUnknownEffect(area.observed)(observed).pipe(Effect.orElseSucceed(() => null));
       }),
     { concurrency: "unbounded" },

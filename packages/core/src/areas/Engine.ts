@@ -21,6 +21,7 @@ import { defineArea, sh } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { sha256 } from "../Hash.ts";
+import { installedBundle, stableNode } from "../Runtime.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({ timer: Schema.optionalKey(Schema.Boolean), interval: Schema.optionalKey(Schema.Number) }),
@@ -50,8 +51,7 @@ const timerPaths = (platform: string, root: boolean, home: string) =>
       : { unit: `${home}/.config/systemd/user/fleetx-sync.service`, timer: `${home}/.config/systemd/user/fleetx-sync.timer` };
 
 /** The unit (and timer) text; for systemd both files joined with a separator line. */
-const timerUnits = (platform: string, home: string, nodePath: string, interval: number) => {
-  const bundle = `${home}/.local/share/fleetx/fleetx.mjs`;
+const timerUnits = (platform: string, home: string, nodePath: string, bundle: string, interval: number) => {
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
   const log = `${home}/.local/state/fleetx/sync.log`;
   if (platform === "darwin") {
@@ -160,7 +160,9 @@ export const EngineArea = defineArea({
             ? unitText.value
             : `${unitText.value}--- timer ---\n${timerText.value}`
           : null;
-      const want = desired?.timer === true ? timerUnits(platform, ctx.home, process.execPath, desired.interval ?? 900) : null;
+      const nodePath = yield* stableNode(ctx.home);
+      const bundle = yield* installedBundle(ctx.home);
+      const want = desired?.timer === true ? timerUnits(platform, ctx.home, nodePath, bundle, desired.interval ?? 900) : null;
       const check =
         platform === "darwin"
           ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`], timeout: Duration.seconds(5) })
@@ -171,7 +173,7 @@ export const EngineArea = defineArea({
         local,
         platform,
         root,
-        nodePath: process.execPath,
+        nodePath,
         timer: { installed: installedTimer, want, loaded: check.code === 0 },
       };
     }),

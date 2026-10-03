@@ -39,6 +39,10 @@ const script = (command: string, checkout: string, bundle: string) => {
           // A link that already points here (a development checkout) is left alone.
           '[ -e ~/.local/bin/fleetx ] && [ "$(readlink ~/.local/bin/fleetx)" != "$HOME/.local/share/fleetx/fleetx.mjs" ] && [ ! -L ~/.local/bin/fleetx ] && mv ~/.local/bin/fleetx ~/.local/bin/fleetx.fleetx-backup',
           "ln -sfn ~/.local/share/fleetx/fleetx.mjs ~/.local/bin/fleetx",
+          // Long-running fleetx services hold the old build until restarted.
+          'if [ "$(uname)" = Darwin ]; then for l in dev.fleetx.serve dev.fleetx.listen; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done',
+          'elif [ "$(id -u)" = 0 ]; then systemctl try-restart fleetx-serve.service fleetx-listen.service 2>/dev/null || true',
+          "else systemctl --user try-restart fleetx-serve.service fleetx-listen.service 2>/dev/null || true; fi",
           "echo installed fleetx",
         ].join("\n")
       : command;

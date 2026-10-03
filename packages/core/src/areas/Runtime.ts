@@ -15,6 +15,7 @@ import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { gitConfigPath, gitEnv } from "../Git.ts";
+import { MIN_NODE_MAJOR } from "../Runtime.ts";
 
 const Observed = Schema.Struct({
   node: Schema.String,
@@ -26,7 +27,6 @@ const Observed = Schema.Struct({
   fleetxGitConfig: Schema.Boolean,
 });
 
-const MIN_NODE_MAJOR = 24;
 
 /** The same file Git.ensureGitConfig writes, for a node fleetx is not installed on. */
 const GIT_CONFIG_SCRIPT = `mkdir -p ~/.config/fleetx && {

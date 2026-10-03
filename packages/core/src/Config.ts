@@ -72,8 +72,15 @@ const FleetSection = Schema.Struct({
   auto_approve: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
+/** The optional relay (see Relay.ts): where nodes reach it, and the port it listens on locally. */
+const RelaySection = Schema.Struct({
+  url: Schema.optionalKey(Schema.String),
+  port: Schema.optionalKey(Schema.Number),
+});
+
 const FleetFile = Schema.Struct({
   fleet: Schema.optionalKey(FleetSection),
+  relay: Schema.optionalKey(RelaySection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
   defaults: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
@@ -213,6 +220,8 @@ export const ProbeSettings = Schema.Struct({
   engine: Schema.optionalKey(Schema.String),
   /** The node's name. */
   node: Schema.optionalKey(Schema.String),
+  roles: Schema.optionalKey(Schema.Array(Schema.String)),
+  relay: Schema.optionalKey(Schema.Struct({ url: Schema.NullOr(Schema.String), port: Schema.Number })),
 });
 export type ProbeSettings = typeof ProbeSettings.Type;
 
@@ -221,6 +230,7 @@ export const probeSettings = (config: Config, node?: Node, engine?: string): Pro
   ...(config.settings.proxy === undefined
     ? {}
     : { proxy: { credentials: config.settings.proxy.credentials, launchers: config.settings.proxy.launchers } }),
-  ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name }),
+  ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name, roles: node.roles }),
+  ...(config.settings.relay === undefined ? {} : { relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 } }),
   checkout: config.checkout,
 });

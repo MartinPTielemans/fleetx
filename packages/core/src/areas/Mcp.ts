@@ -6,6 +6,8 @@
  *   servers = ["fetch", "executor"]     # which to register on this node
  *   origin = "server.tailnet.ts.net"    # host serving hosted servers
  *   ports = { fetch = 18100 }           # hosted server → port on the origin
+ *   gateway = "https://relay.tailnet.ts.net:8399"   # optional: reach hosted
+ *                                       # servers through the relay instead
  *
  * A definition's `kind` decides where clients connect:
  *
@@ -39,6 +41,7 @@ const Desired = Schema.UndefinedOr(
     servers: Schema.optionalKey(Schema.Array(Schema.String)),
     origin: Schema.optionalKey(Schema.String),
     ports: Schema.optionalKey(Schema.Record(Schema.String, Schema.Number)),
+    gateway: Schema.optionalKey(Schema.String),
   }),
 );
 
@@ -193,7 +196,10 @@ export const McpArea = defineArea({
                 else endpoint = { type: "http", url: d.url, tokenEnv };
               } else {
                 const port = desired?.ports?.[name];
-                if (desired?.origin === undefined || port === undefined) problem = `hosted server, but no [mcp] origin and port for ${name}`;
+                if (desired?.gateway !== undefined && port !== undefined) {
+                  // Through the relay: one endpoint, one token, for every hosted server.
+                  endpoint = { type: "http", url: `${desired.gateway.replace(/\/+$/, "")}/mcp/${name}`, tokenEnv: "FLEETX_RELAY_TOKEN" };
+                } else if (desired?.origin === undefined || port === undefined) problem = `hosted server, but no [mcp] origin and port for ${name}`;
                 else endpoint = { type: "http", url: `http://${desired.origin}:${port}/mcp`, tokenEnv };
               }
             }

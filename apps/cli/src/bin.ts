@@ -26,6 +26,7 @@ import { describeMerged } from "@fleetx/core/Settings";
 import packageJson from "../package.json" with { type: "json" };
 import { alertsCommand, approveCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
+import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
@@ -215,6 +216,8 @@ const cli = Command.make("fleetx").pipe(
     approveCommand,
     rejectCommand,
     alertsCommand,
+    listenCommand,
+    relayCommand,
     doctorCommand,
     configCommand,
     secretsCommand,

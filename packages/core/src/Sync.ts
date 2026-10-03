@@ -24,46 +24,13 @@ import { runFixes } from "./Fix.ts";
 import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
-import { MachineObservation } from "./Observation.ts";
 import { probeMachine } from "./Probe.ts";
+import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
+import { reportToRelay } from "./RelayClient.ts";
 import { approve, autoApprovable, listProposals, settleRejection, STAGING } from "./Staging.ts";
 
 export const STATE_PREFIX = "fleetx/state/";
-
-const FindingRecord = Schema.Struct({
-  node: Schema.String,
-  key: Schema.String,
-  severity: Schema.Literals(["error", "warn", "info"]),
-  area: Schema.String,
-  title: Schema.String,
-  detail: Schema.optionalKey(Schema.String),
-});
-
-const Alert = Schema.Struct({
-  at: Schema.Number,
-  node: Schema.String,
-  kind: Schema.Literals(["failing", "recovered", "problem", "resolved"]),
-  message: Schema.String,
-});
-export type Alert = typeof Alert.Type;
-
-/** What a node publishes on fleetx/state/<node>. */
-export const NodeState = Schema.Struct({
-  node: Schema.String,
-  at: Schema.Number,
-  result: Schema.Literals(["ok", "fail"]),
-  /** Failed runs in a row. */
-  streak: Schema.Number,
-  message: Schema.String,
-  rev: Schema.String,
-  observation: Schema.NullOr(MachineObservation),
-  findings: Schema.Array(FindingRecord),
-  applied: Schema.Array(Schema.Struct({ title: Schema.String, ok: Schema.Boolean, output: Schema.String })),
-  /** Newest last; bounded. */
-  alerts: Schema.Array(Alert),
-});
-export type NodeState = typeof NodeState.Type;
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
@@ -338,9 +305,12 @@ export const syncRun = (config: Config, options: { readonly apply: boolean } = {
         alerts: alerts.slice(-MAX_ALERTS),
       };
       yield* publishState(repo, state);
+      if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
       return { state, lines };
     });
 
     return yield* run.pipe(Effect.ensuring(fs.remove(lock, { recursive: true }).pipe(Effect.ignore)));
   });
 
+
+export { NodeState, type Alert } from "./State.ts";

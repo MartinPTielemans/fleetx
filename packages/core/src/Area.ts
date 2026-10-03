@@ -37,6 +37,10 @@ export interface ObserveContext {
   readonly engine: string | null;
   /** This node's name in the fleet; null when not given. */
   readonly node: string | null;
+  /** This node's roles. */
+  readonly roles: ReadonlyArray<string>;
+  /** The fleet's relay, when it has one. */
+  readonly relay: { readonly url: string | null; readonly port: number } | null;
 }
 
 export interface DiagnoseContext<D, O> {
