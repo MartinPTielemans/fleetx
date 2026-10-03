@@ -57,7 +57,7 @@ export const discover = Effect.gen(function* () {
   const mcp: Array<Discovery["mcp"][number]> = [];
   const claudeText = yield* fs.readFileString(path.join(home, ".claude.json")).pipe(Effect.option);
   const claude = Option.isSome(claudeText)
-    ? Option.getOrElse(Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({ mcpServers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)) })))(claudeText.value), () => ({}))
+    ? Option.getOrElse(Schema.decodeOption(Schema.fromJsonString(Schema.Struct({ mcpServers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)) })))(claudeText.value), () => ({}))
     : {};
   for (const [name, raw] of Object.entries((claude as { mcpServers?: Record<string, unknown> }).mcpServers ?? {})) {
     const e = raw as { url?: string; command?: string; args?: Array<string>; headers?: Record<string, string> };
@@ -96,6 +96,9 @@ export const discover = Effect.gen(function* () {
 });
 
 const tomlString = (s: string) => JSON.stringify(s);
+
+/** Definitions are written for people to read and edit. */
+const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
 /** Write a new config repository at `repo` from a discovery. */
 export const createRepo = (repo: string, found: Discovery) =>
@@ -144,7 +147,7 @@ export const createRepo = (repo: string, found: Discovery) =>
       if (copy.code !== 0) return yield* Effect.fail(`copying skill ${skill.name}: ${copy.stderr.trim()}`);
     }
     for (const m of found.mcp) {
-      yield* fs.writeFileString(path.join(repo, "mcp", `${m.name}.json`), `${JSON.stringify(m.definition, null, 2)}\n`);
+      yield* fs.writeFileString(path.join(repo, "mcp", `${m.name}.json`), prettyJson(m.definition));
     }
     for (const i of found.instructions) {
       yield* fs.makeDirectory(path.dirname(path.join(repo, i.src)), { recursive: true });
