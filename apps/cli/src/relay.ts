@@ -24,7 +24,7 @@ import { syncRun } from "@fleetx/core/Sync";
 
 import packageJson from "../package.json" with { type: "json" };
 
-import { reportUserErrors } from "./shared.ts";
+import { reportUserErrors, untilNewBuild } from "./shared.ts";
 
 const serve = Command.make("serve").pipe(
   Command.withDescription("Run the relay on 127.0.0.1:[relay] port. Publish it to the tailnet, never the internet."),
@@ -56,10 +56,12 @@ const serve = Command.make("serve").pipe(
           version: packageJson.version,
         },
       });
-      return yield* Layer.launch(
-        HttpRouter.serve(routes).pipe(
-          Layer.provide(FetchHttpClient.layer),
-          Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
+      return yield* untilNewBuild(
+        Layer.launch(
+          HttpRouter.serve(routes).pipe(
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
+          ),
         ),
       );
     }).pipe(reportUserErrors),
@@ -77,17 +79,19 @@ export const listenCommand = Command.make("listen").pipe(
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const log = (line: string) => DateTime.now.pipe(Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)));
-      return yield* listen(
-        config,
-        (rev) =>
-          Effect.gen(function* () {
-            const head = out(yield* git(config.repo, ["rev-parse", "--short", "HEAD"]));
-            if (rev !== "" && head.startsWith(rev)) return;
-            yield* log(`branch moved to ${rev}; syncing`);
-            const result = yield* syncRun(config, { apply: true }).pipe(Effect.result);
-            yield* log(result._tag === "Success" ? (result.success.state?.message ?? "done") : `sync failed: ${String(result.failure)}`);
-          }),
-        log,
+      return yield* untilNewBuild(
+        listen(
+          config,
+          (rev) =>
+            Effect.gen(function* () {
+              const head = out(yield* git(config.repo, ["rev-parse", "--short", "HEAD"]));
+              if (rev !== "" && head.startsWith(rev)) return;
+              yield* log(`branch moved to ${rev}; syncing`);
+              const result = yield* syncRun(config, { apply: true }).pipe(Effect.result);
+              yield* log(result._tag === "Success" ? (result.success.state?.message ?? "done") : `sync failed: ${String(result.failure)}`);
+            }),
+          log,
+        ),
       );
     }).pipe(reportUserErrors),
   ),
