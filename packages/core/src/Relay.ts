@@ -11,6 +11,8 @@
  *                       slept catches up
  *   *    /mcp/<name>    MCP gateway: forwards to a server hosted on this node,
  *                       so clients need one endpoint and one token
+ *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
+ *                       (models/Egress.ts; token in x-fleetx-relay-token)
  *   GET  /health
  *
  * Everything but /health needs `Authorization: Bearer $FLEETX_RELAY_TOKEN`.
@@ -34,6 +36,7 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import { git, out } from "./Git.ts";
+import { egressLayer } from "./models/Egress.ts";
 import { NodeState } from "./State.ts";
 
 export interface RelayEvent {
@@ -179,6 +182,6 @@ export const relayLayer = (options: RelayOptions) =>
         }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 }))),
       );
 
-      return Layer.mergeAll(health, report, fleet, eventStream, gateway);
+      return Layer.mergeAll(health, report, fleet, eventStream, gateway, egressLayer(options.token));
     }),
   );
