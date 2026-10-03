@@ -28,6 +28,7 @@ import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
+import { uiCommand } from "./ui.ts";
 import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
 
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(MachineObservation));
@@ -222,6 +223,7 @@ const cli = Command.make("fleetx").pipe(
     configCommand,
     secretsCommand,
     skillsCommand,
+    uiCommand,
     mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand])),
     probeCommand,
   ]),

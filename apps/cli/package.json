@@ -7,7 +7,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "vp pack"
+    "build": "vp build ../ui && vp pack"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
