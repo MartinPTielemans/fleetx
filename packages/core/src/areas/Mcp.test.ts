@@ -74,6 +74,12 @@ describe("mcp area: hub findings", () => {
     expect(findings[0]?.detail).toContain("fleetx mcp login posthog");
   });
 
+  it("re-registers a client that sends a different credential than the declared one", () => {
+    const stale = { ...registered, credential: false } as const;
+    const findings = diagnose({ servers: [{ ...server("ok"), claude: stale, codex: registered }], clients: { claude: true, codex: true }, hub: [] });
+    expect(findings.map((f) => [f.key, f.title])).toEqual([["mcp-posthog-unregistered", "MCP server posthog is not registered as declared in Claude"]]);
+  });
+
   it("asks to stop ToolHive workloads the hub serves, as a disrupting fix", () => {
     const findings = diagnose({ servers: [server("ok")], clients: { claude: true, codex: true }, toolhive: ["sentry", "fetch"] });
     expect(findings).toHaveLength(1);
