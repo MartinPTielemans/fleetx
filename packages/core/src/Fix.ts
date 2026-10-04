@@ -53,7 +53,9 @@ const script = (command: string, checkout: string, bundle: string) => {
           `echo installed ${PRODUCT}`,
         ].join("\n")
       : command;
-  return `export T3_FLEET_CHECKOUT=${shPath(checkout)} FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
+  // On a machine not upgraded yet only fleetx exists; fixes that call t3-fleet run it instead. Until 1.0.
+  const alias = `command -v ${CLI} >/dev/null 2>&1 || ${CLI}() { ${LEGACY_CLI} "$@"; }`;
+  return `export T3_FLEET_CHECKOUT=${shPath(checkout)} FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${alias}\n${body}\n`;
 };
 
 export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, checkout: string, bundle: string) =>

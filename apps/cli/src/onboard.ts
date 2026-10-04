@@ -19,6 +19,7 @@ import { ensureIdentity, installSecrets } from "@t3-fleet/core/Secrets";
 import { syncRun } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
+import { stateDir } from "@t3-fleet/core/Names";
 
 const INSTALL_URL = "https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh";
 
@@ -95,7 +96,7 @@ export const joinCommand = Command.make("join", {
       const home = process.env["HOME"] ?? "";
       const path = yield* Path.Path;
       yield* ensureGitConfig;
-      const scratch = path.join(home, ".local/state/t3-fleet/join-clone");
+      const scratch = path.join(stateDir(home), "join-clone");
       yield* exec({ command: "rm", args: ["-rf", scratch], timeout: Duration.seconds(30) });
       const clone = yield* git(home, ["clone", "-q", url, scratch], { timeout: Duration.minutes(5) });
       if (!ok(clone)) return yield* Effect.fail(`cloning ${url}: ${why(clone)} (is gh logged in? run: gh auth login)`);

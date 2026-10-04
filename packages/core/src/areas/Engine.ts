@@ -170,8 +170,13 @@ export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">)
   const move = (was: string, now: string) =>
     [
       `if [ -d "$HOME/${was}" ] && [ ! -L "$HOME/${was}" ]; then`,
-      // cp -n exits non-zero on macOS whenever it skips a file; the old directory is kept either way.
-      `  if [ -e "$HOME/${now}" ]; then cp -Rpn "$HOME/${was}/." "$HOME/${now}/" 2>/dev/null; mv "$HOME/${was}" "$HOME/${was}.migrated.$(date +%Y%m%d%H%M%S)"`,
+      // cp -n exits non-zero on macOS whenever it skips a file, so the merge is checked instead:
+      // every file of the old directory must be in the new one before the old one moves aside.
+      `  if [ -e "$HOME/${now}" ]; then`,
+      `    cp -Rpn "$HOME/${was}/." "$HOME/${now}/" 2>/dev/null`,
+      `    missing=$(cd "$HOME/${was}" && find . \\( -type f -o -type l \\) | while IFS= read -r f; do [ -e "$HOME/${now}/$f" ] || [ -L "$HOME/${now}/$f" ] || echo "$f"; done)`,
+      `    if [ -n "$missing" ] || [ ! -d "$HOME/${now}" ]; then echo "could not merge ~/${was} into ~/${now}; nothing was moved. Missing: $missing" >&2; exit 1; fi`,
+      `    mv "$HOME/${was}" "$HOME/${was}.migrated.$(date +%Y%m%d%H%M%S)"`,
       `  else mkdir -p "$(dirname "$HOME/${now}")" && mv "$HOME/${was}" "$HOME/${now}"; fi`,
       `  [ -e "$HOME/${was}" ] || { ln -s "$HOME/${now}" "$HOME/${was}" && echo "moved ~/${was} to ~/${now}"; }`,
       "fi",
@@ -288,6 +293,16 @@ export const EngineArea = defineArea({
         fix: { command: installTimer(observed.platform, observed.root, t.want), safe: true },
       });
     }
+    if (t.want === null && t.installed === null && t.legacy === true) {
+      out.push({
+        node,
+        key: "engine-timer-unwanted",
+        severity: "warn",
+        area: "engine",
+        title: "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
+        fix: { command: retireLegacyUnit(observed.platform, observed.root, "sync"), safe: true },
+      });
+    }
     if (t.want === null && t.installed !== null) {
       out.push({
         node,
@@ -295,7 +310,7 @@ export const EngineArea = defineArea({
         severity: "warn",
         area: "engine",
         title: "a sync timer is installed, but [engine] timer is not set for this machine",
-        fix: { command: removeTimer(observed.platform, observed.root), safe: true },
+        fix: { command: `${removeTimer(observed.platform, observed.root)}\n${retireLegacyUnit(observed.platform, observed.root, "sync")}`, safe: true },
       });
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {

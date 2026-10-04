@@ -22,6 +22,7 @@ import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import { readStates, syncRun, type Alert, type NodeState } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
+import { stateDir } from "@t3-fleet/core/Names";
 
 export const syncCommand = Command.make("sync", {
   noApply: Flag.Boolean("no-apply").pipe(Flag.withDescription("Report only; run no fixes."), Flag.withDefault(false)),
@@ -135,7 +136,7 @@ export const rejectCommand = Command.make("reject", { node: Argument.String("nod
   ),
 );
 
-const seenPath = (home: string) => `${home}/.local/state/t3-fleet/alerts-seen`;
+const seenPath = (home: string) => `${stateDir(home)}/alerts-seen`;
 
 /** Alerts every node published since the last call; marks them seen. */
 export const takeAlerts = (config: Config, peek = false) =>
@@ -150,7 +151,7 @@ export const takeAlerts = (config: Config, peek = false) =>
     alerts.sort((a, b) => a.at - b.at);
     const newest = Math.max(seen, ...states.flatMap((s) => s.alerts.map((a) => a.at)));
     if (!peek) {
-      yield* fs.makeDirectory(`${home}/.local/state/t3-fleet`, { recursive: true }).pipe(Effect.ignore);
+      yield* fs.makeDirectory(stateDir(home), { recursive: true }).pipe(Effect.ignore);
       yield* fs.writeFileString(seenPath(home), String(newest));
     }
     return alerts;
@@ -185,7 +186,7 @@ const adopt = Command.make("adopt", {
       if (yield* fs.exists(dest).pipe(Effect.orElseSucceed(() => false))) return yield* Effect.fail(`skills/${name} already exists in the repo`);
       const copy = yield* exec({ command: "cp", args: ["-R", src, dest], timeout: Duration.seconds(30) });
       if (copy.code !== 0) return yield* Effect.fail(`copying: ${copy.stderr.trim()}`);
-      const aside = path.join(home, ".local/state/t3-fleet/adopted", String(yield* Clock.currentTimeMillis));
+      const aside = path.join(stateDir(home), "adopted", String(yield* Clock.currentTimeMillis));
       yield* fs.makeDirectory(aside, { recursive: true });
       yield* fs.rename(src, path.join(aside, name));
       yield* Console.log(`skills/${name} is in the repo; the original is in ${aside}. The next sync links it and ${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? "commits" : "proposes"} it.`);

@@ -57,7 +57,7 @@ export const ensureGitConfig = Effect.gen(function* () {
   if (yield* fs.exists(path).pipe(Effect.orElseSucceed(() => false))) return path;
   const get = (key: string) => exec({ command: "git", args: ["config", "--global", key], timeout: Duration.seconds(5) }).pipe(Effect.map((r) => r.stdout.trim()));
   const name = (yield* get("user.name")) || "T3 Fleet";
-  const email = (yield* get("user.email")) || "T3 Fleet@localhost";
+  const email = (yield* get("user.email")) || "t3-fleet@localhost";
   const gh = yield* exec({ command: "sh", args: ["-c", "command -v gh"], timeout: Duration.seconds(5) });
   const lines = ["[user]", `\tname = ${name}`, `\temail = ${email}`];
   if (gh.code === 0) {

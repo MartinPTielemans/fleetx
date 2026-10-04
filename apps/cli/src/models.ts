@@ -30,6 +30,7 @@ import { providerPlans, readT3Settings } from "@t3-fleet/core/T3Settings";
 
 import packageJson from "../package.json" with { type: "json" };
 import { encodeJson, reportUserErrors, untilNewBuild } from "./shared.ts";
+import { stateDir } from "@t3-fleet/core/Names";
 
 /** This node's [models] settings; empty when T3 Fleet is not set up here (the proxy still serves). */
 const ownSettings = loadConfig.pipe(
@@ -59,7 +60,7 @@ const serve = Command.make("serve", {
         relay = { url: relayUrl, token };
       }
       const home = process.env["HOME"] ?? "";
-      yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(`${home}/.local/state/t3-fleet`, { recursive: true })), Effect.ignore);
+      yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(stateDir(home), { recursive: true })), Effect.ignore);
       // Upstreams follow the config repo as sync updates it, without a restart.
       let upstreams = upstreamsOf(models);
       yield* ownSettings.pipe(

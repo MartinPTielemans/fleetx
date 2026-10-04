@@ -16,6 +16,7 @@ import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { gitConfigPath, gitEnv } from "../Git.ts";
 import { MIN_NODE_MAJOR } from "../Runtime.ts";
+import { SH_CONFIG_DIR } from "../Names.ts";
 
 const Observed = Schema.Struct({
   node: Schema.String,
@@ -29,10 +30,10 @@ const Observed = Schema.Struct({
 
 
 /** The same file Git.ensureGitConfig writes, for a node T3 Fleet is not installed on. */
-const GIT_CONFIG_SCRIPT = `mkdir -p ~/.config/t3-fleet && {
-  printf '[user]\\n\\tname = %s\\n\\temail = %s\\n' "$(git config --global user.name || echo T3 Fleet)" "$(git config --global user.email || echo T3 Fleet@localhost)"
+const GIT_CONFIG_SCRIPT = `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && {
+  printf '[user]\\n\\tname = %s\\n\\temail = %s\\n' "$(git config --global user.name || echo "T3 Fleet")" "$(git config --global user.email || echo t3-fleet@localhost)"
   if gh=$(command -v gh); then printf '[credential "https://github.com"]\\n\\thelper =\\n\\thelper = !%s auth git-credential\\n' "$gh"; fi
-} > ~/.config/t3-fleet/gitconfig`;
+} > "$d/gitconfig"`;
 
 export const RuntimeArea = defineArea({
   id: "runtime",

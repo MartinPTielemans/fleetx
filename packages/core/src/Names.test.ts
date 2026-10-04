@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import { migrateDirs } from "./areas/Engine.ts";
+import { applyAccepted } from "./Memory.ts";
 import { requestHeaders } from "./models/Forward.ts";
 import { configDir, readHeader, SH_CONFIG_DIR, stateDir } from "./Names.ts";
 
@@ -85,6 +86,19 @@ describe("the migration", () => {
     expect(readFileSync(`${h}/.local/share/fleetx/fleetx.mjs`, "utf8")).toBe("new build");
   });
 
+  it("moves nothing when the merge comes up short", () => {
+    const h = home();
+    put(`${h}/.config/fleetx/age-key.txt`, "key");
+    put(`${h}/.config/fleetx/secrets.env`, "A=1\n");
+    put(`${h}/.config/t3-fleet/config.toml`, "new");
+    execFileSync("chmod", ["000", `${h}/.config/fleetx/secrets.env`]);
+    expect(() => migrate(h, ["config"])).toThrow();
+    execFileSync("chmod", ["600", `${h}/.config/fleetx/secrets.env`]);
+    expect(isLink(`${h}/.config/fleetx`)).toBe(false);
+    expect(readFileSync(`${h}/.config/fleetx/secrets.env`, "utf8")).toBe("A=1\n");
+    expect(configDir(h)).toBe(`${h}/.config/fleetx`);
+  });
+
   it("leaves an already linked directory alone", () => {
     const h = home();
     mkdirSync(`${h}/.config/t3-fleet`, { recursive: true });
@@ -100,3 +114,12 @@ describe("headers between machines", () => {
     expect(requestHeaders({ "x-t3-fleet-relay-token": "a", "x-fleetx-egress-base": "b", accept: "*/*" })).toEqual({ accept: "*/*" });
   });
 });
+
+describe("accepted differences from before the rename", () => {
+  it("still match the engine's renamed keys", () => {
+    const finding = { node: "box", key: "engine-outdated", severity: "warn" as const, area: "engine", title: "different build" };
+    const [noted] = applyAccepted([finding], [{ id: "box:fleetx-outdated", reason: "pinned on purpose" }]);
+    expect(noted).toMatchObject({ severity: "info", detail: "accepted: pinned on purpose" });
+  });
+});
+
