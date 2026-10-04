@@ -17,7 +17,7 @@ import { generateX25519Identity } from "age-encryption";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import type { HubServer } from "../Api.ts";
-import { makeHub, type Hub, type HubEvent } from "./Hub.ts";
+import { makeHub, type Hub, type HubConfig, type HubEvent } from "./Hub.ts";
 import { discover } from "./OAuth.ts";
 import { messagesInBody, toJson, type JsonRpcMessage } from "./JsonRpc.ts";
 import { fakeAuthServer, fakeProtectedMcp, type FakeAuthServer, type FakeMcpServer } from "./testing/fakes.ts";
@@ -50,7 +50,7 @@ const fixture = (definitions: Record<string, unknown>) => {
   return dir;
 };
 
-const startHub = (dir: string, secrets: Record<string, string> = {}) =>
+const startHub = (dir: string, secrets: Record<string, string> = {}, overrides: Partial<HubConfig> = {}) =>
   Effect.gen(function* () {
     const events: Array<HubEvent> = [];
     const hub = yield* makeHub(
@@ -67,6 +67,7 @@ const startHub = (dir: string, secrets: Record<string, string> = {}) =>
         checkEvery: Duration.hours(1),
         allowLoopbackHttp: true,
         secrets: Effect.succeed(secrets),
+        ...overrides,
       },
       (e) => Effect.sync(() => events.push(e)),
     );
@@ -357,6 +358,58 @@ describe("hub gateway", () => {
         const missing = yield* hub.gateway("notes", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: {}, body: "{}" });
         expect(missing.status).toBe(404);
         yield* missing.body.pipe(Stream.runDrain, Effect.ignore);
+      }),
+    );
+  }, 30_000);
+
+  it("refuses a session it has no owner for, and forgets a session once it is deleted", async () => {
+    const plain = await fakeProtectedMcp(() => as.url, () => true);
+    try {
+      const dir = fixture({});
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir, {}, { ports: { plain: Number(new URL(plain.url).port) } });
+          yield* waitFor(hub, "plain", "running");
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "made-up" })).status).toBe(404);
+          const session = (yield* rpc(hub, "plain", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } })).headers["mcp-session-id"] ?? "";
+          expect(session).toBe("s-1");
+          const token = yield* hub.createToken("laptop", null);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { token, session })).status).toBe(404);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(200);
+          const deleted = yield* hub.gateway("plain", `Bearer ${RELAY_TOKEN}`, { method: "DELETE", headers: { "mcp-session-id": session }, body: "" });
+          expect(deleted.status).toBe(204);
+          // The proxy fails reading a 204's empty body (Upstream.ts); only the status matters here.
+          yield* readBody(deleted).pipe(Effect.ignore);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(404);
+        }),
+      );
+    } finally {
+      await plain.close();
+    }
+  }, 30_000);
+});
+
+describe("hub health checks", () => {
+  it("keeps checking when a server answers nonsense, and restarts one that stops answering", async () => {
+    const dir = fixture({
+      nonsense: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer, "--null-tools"] },
+      fine: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer] },
+      silent: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer, "--silent-tools"] },
+    });
+    await run(
+      Effect.gen(function* () {
+        const { hub, events } = yield* startHub(dir, {}, { checkEvery: Duration.millis(300) });
+        const fine = yield* waitFor(hub, "fine", "running");
+        const nonsense = yield* waitFor(hub, "nonsense", "error");
+        expect(nonsense.detail).toMatch(/tools\/list/);
+        yield* Effect.sleep(Duration.millis(1500));
+        expect((yield* server(hub, "fine")).lastCheckAt).toBeGreaterThan(fine.lastCheckAt ?? Infinity);
+        // A definition added later is still picked up.
+        writeFileSync(join(dir, "repo/mcp", "later.json"), toJson({ kind: "hosted-stdio", command: process.execPath, args: [stdioServer] }));
+        yield* waitFor(hub, "later", "running");
+        // Three checks without an answer: the process is started again.
+        const silent = events.filter((e) => e.server === "silent").map((e) => e.state);
+        expect(silent.slice(silent.indexOf("error"))).toContain("starting");
       }),
     );
   }, 30_000);

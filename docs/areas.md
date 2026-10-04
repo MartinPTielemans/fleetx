@@ -129,7 +129,12 @@ private env file that is removed once docker has read it), and can be
 cut off with `network = "none"` (stdio images). The hub adopts a matching
 running container after a restart and restarts one that dies, with backoff.
 One stdio process serves every client: the bridge gives each its own session,
-and a session belongs to the client token that opened it.
+and a session belongs to the client token that opened it (one the hub has no
+record of is refused). A session without an open event stream ends after 15
+idle minutes, and at 1000 sessions a new one replaces the least recently used,
+so clients that never close theirs cannot lock others out. The hub checks
+every server each minute; a process or container that misses three checks in
+a row is restarted.
 
 Optional fields in a definition:
 

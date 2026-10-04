@@ -147,7 +147,19 @@ a server that dies, with backoff.
 A **stdio bridge** turns one stdio process into a streamable HTTP endpoint for
 many clients: it caches the server's `initialize` result, gives each client
 its own `Mcp-Session-Id`, rewrites JSON-RPC ids so responses reach the right
-client, and fans out notifications.
+client, and fans out notifications. Clients rarely close their sessions (the
+MCP TypeScript SDK's `close()` does not), so a session with no open GET
+stream expires after 15 idle minutes, and at 1000 sessions the least recently
+used one makes room for a new one instead of the new one being refused. The
+fleet's own live check deletes the session its `initialize` opened. A request
+whose client goes away, or that waits 10 minutes, is forgotten and the server
+gets `notifications/cancelled`. Stopping a bridge fails its outstanding
+requests and ends every session's stream.
+
+Starting, stopping, restarting and reloading servers take turns under one
+lock, so the minute's reload cannot start a second copy of a server that is
+being restarted. A failed `docker run` removes the container only when it
+carries that run's own label.
 
 ### OAuth
 
@@ -184,9 +196,11 @@ to some servers. Denied calls get a JSON-RPC error and are logged.
 Every JSON-RPC request through the gateway is recorded as a `HubCall`
 (server, client, method, tool name, duration, outcome; never arguments or
 results), in a ring buffer and `~/.local/state/t3-fleet/hub/calls.jsonl`. The
-hub runs an `initialize` against each server every minute; `HubServer.state`
-is `starting`, `running`, `needs-login`, `error` or `stopped`. State changes
-are emitted on `/events` as `hub` events.
+hub runs an `initialize` and `tools/list` against each server every minute;
+`HubServer.state` is `starting`, `running`, `needs-login`, `error` or
+`stopped`. Each server's check is isolated, so one server answering nonsense
+cannot stop the loop, and a process or container that misses three checks in
+a row is restarted. State changes are emitted on `/events` as `hub` events.
 
 ### Relay endpoints added
 

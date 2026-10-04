@@ -9,7 +9,11 @@
  *             the upstream, and log every JSON-RPC request as a HubCall
  *   health    every minute: re-read the definitions (starting, replacing or
  *             stopping servers), refresh OAuth logins ahead of expiry, and
- *             run an initialize and tools/list against each server
+ *             run an initialize and tools/list against each server. One
+ *             server's check cannot stop the others'; a process or container
+ *             that misses three checks in a row is restarted
+ *   lifecycle starting, stopping, restarting and reloading take turns, so a
+ *             server never runs twice
  *   logins    start and finish OAuth sign-ins; sign out
  *   tokens    create, list and revoke per-client gateway tokens
  *
@@ -23,8 +27,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -150,6 +157,8 @@ interface Entry {
   oauthDetected: boolean;
   /** The definition's deny patterns, compiled once. */
   readonly denied: (tool: string) => boolean;
+  /** Health checks in a row that got no answer. */
+  missed: number;
 }
 
 /** Parse dotenv text: KEY=value lines, optional `export`, simple quotes. */
@@ -165,6 +174,16 @@ export const parseDotenv = (text: string) => {
 };
 
 const CLIENT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
+/** Health checks in a row without an answer before a process or container is restarted. */
+const MISSED_CHECKS = 3;
+
+/** What a health check reads from initialize and tools/list. */
+const decodeInitializeResult = Schema.decodeUnknownOption(Schema.Struct({ protocolVersion: Schema.String }));
+const decodeToolList = Schema.decodeUnknownOption(Schema.Struct({ tools: Schema.Array(Schema.Unknown) }));
+const isNamedTool = Schema.is(Schema.Struct({ name: Schema.String }));
+const errorText = (error: unknown) =>
+  Option.match(Schema.decodeUnknownOption(Schema.Struct({ message: Schema.String }))(error), { onNone: () => "an error", onSome: (e) => e.message.slice(0, 200) });
 
 /** Sent under its fleetx name too, for a controller on a build from before the rename. Until 1.0. */
 const stateHeaders = (state: string) => ({ [header("hub-state")]: state, [legacyHeader("hub-state")]: state });
@@ -212,6 +231,49 @@ export const makeHub = (
 
     const entries = new Map<string, Entry>();
     let problems: ReadonlyArray<{ readonly name: string; readonly problem: string }> = [];
+    /** Starting, stopping, restarting and reloading take turns. */
+    const lifecycle = yield* Semaphore.make(1);
+    const checkEvery = Duration.fromInputUnsafe(config.checkEvery ?? Duration.minutes(1));
+    /** A check gets half the period between checks, and never more than 30 seconds. */
+    const checkTimeout = Duration.min(Duration.seconds(30), Duration.divideUnsafe(checkEvery, 2));
+
+    /**
+     * Upstream session ids and the client that opened each: one client cannot
+     * use another's session, and a session without a known owner is refused.
+     * A record ends with its session: a DELETE or a 404 from the upstream, the
+     * bridge ending it, a day unused, or the 10,000 more recently used ones.
+     * The map is kept least recently used first.
+     */
+    const sessionOwners = new Map<string, { readonly client: string; lastSeen: number }>();
+    const MAX_SESSIONS = 10_000;
+    const OWNER_IDLE = 24 * 60 * 60_000;
+    const sessionKey = (server: string, session: string) => `${server}\u0000${session}`;
+    const ownsSession = (server: string, session: string, client: string, now: number) => {
+      const key = sessionKey(server, session);
+      const owner = sessionOwners.get(key);
+      if (owner === undefined || owner.client !== client) return false;
+      sessionOwners.delete(key);
+      if (now - owner.lastSeen > OWNER_IDLE) return false;
+      owner.lastSeen = now;
+      sessionOwners.set(key, owner);
+      return true;
+    };
+    const recordSession = (server: string, session: string, client: string, now: number) => {
+      const key = sessionKey(server, session);
+      if (sessionOwners.has(key)) return;
+      for (const oldest of sessionOwners.keys()) {
+        if (sessionOwners.size < MAX_SESSIONS) break;
+        sessionOwners.delete(oldest);
+      }
+      sessionOwners.set(key, { client, lastSeen: now });
+    };
+    const endSession = (server: string, session: string) => sessionOwners.delete(sessionKey(server, session));
+    const pruneSessions = (now: number) => {
+      for (const [key, owner] of sessionOwners) {
+        if (now - owner.lastSeen <= OWNER_IDLE) break;
+        sessionOwners.delete(key);
+      }
+    };
 
     const setState = (entry: Entry, state: HubServerState, detail: string | null) =>
       Effect.gen(function* () {
@@ -256,6 +318,9 @@ export const makeHub = (
 
     const start = (def: HubDefinition, key: string) =>
       Effect.gen(function* () {
+        // Never two entries for one server: whatever runs under this name stops first.
+        const previous = entries.get(def.name);
+        if (previous !== undefined) yield* stop(previous, false);
         const scope = yield* Scope.fork(hubScope);
         const env = resolvedEnv("env" in def.runner ? def.runner.env : {}, yield* secrets);
         let entry: Entry;
@@ -294,11 +359,14 @@ export const makeHub = (
               version: config.version,
               // Report the process's state as it changes, not only at the next check.
               onStatus: () => Effect.suspend(() => (entry === undefined ? Effect.void : check(entry))).pipe(Effect.forkIn(scope), Effect.asVoid),
+              onSessionEnd: (session) => {
+                endSession(def.name, session);
+              },
             }),
           );
           upstream = bridge;
         }
-        entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false, denied: compileDeny(def.deny) };
+        entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false, denied: compileDeny(def.deny), missed: 0 };
         entries.set(def.name, entry);
         yield* emit({ server: def.name, state: "starting", detail: null });
 
@@ -346,6 +414,14 @@ export const makeHub = (
         if (remove && entry.def.runner.type === "docker-http") yield* removeContainer(containerName(entry.def.name)).pipe(Effect.provide(services));
       });
 
+    /** Stop a container server and start it again, unless something replaced it meanwhile. */
+    const restartContainer = (entry: Entry) =>
+      Effect.gen(function* () {
+        if (entries.get(entry.def.name) !== entry) return;
+        yield* stop(entry, true);
+        yield* start(entry.def, entry.key);
+      }).pipe(lifecycle.withPermit);
+
     /** Bring the running servers in line with the repo's definitions. */
     const reload = Effect.gen(function* () {
       const loaded = config.enabled ? yield* loadDefinitions(config.repo).pipe(Effect.provide(services)) : { definitions: [], problems: [] };
@@ -370,7 +446,7 @@ export const makeHub = (
         }
         yield* start(def, key);
       }
-    });
+    }).pipe(lifecycle.withPermit);
 
     // ── health ──────────────────────────────────────────────────────────
 
@@ -387,7 +463,8 @@ export const makeHub = (
         if (init.status < 200 || init.status >= 300) return yield* new UpstreamError({ message: `initialize answered HTTP ${init.status}` });
         const initReply = messagesInBody(init.headers["content-type"], initText).find((m) => isResponse(m));
         if (initReply === undefined) return yield* new UpstreamError({ message: "initialize got no answer" });
-        if (initReply.error !== undefined) return yield* new UpstreamError({ message: `initialize failed: ${String((initReply.error as { message?: unknown }).message).slice(0, 200)}` });
+        if (initReply.error != null) return yield* new UpstreamError({ message: `initialize failed: ${errorText(initReply.error)}` });
+        if (Option.isNone(decodeInitializeResult(initReply.result))) return yield* new UpstreamError({ message: "initialize answered without a protocol version" });
         const session = init.headers["mcp-session-id"];
         const headers = { "content-type": "application/json", accept, "mcp-protocol-version": "2025-06-18", ...(session === undefined ? {} : { "mcp-session-id": session }) };
         yield* entry.upstream.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", method: "notifications/initialized" }) }).pipe(
@@ -396,12 +473,36 @@ export const makeHub = (
         );
         const list = yield* entry.upstream.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
         const listText = yield* readBody(list).pipe(Effect.orElseSucceed(() => ""));
-        const tools = (messagesInBody(list.headers["content-type"], listText).find((m) => isResponse(m))?.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
+        const listReply = messagesInBody(list.headers["content-type"], listText).find((m) => isResponse(m));
         if (session !== undefined) yield* entry.upstream.forward({ method: "DELETE", headers, body: "" }).pipe(Effect.flatMap(readBody), Effect.ignore);
-        return tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
+        return yield* countTools(entry, listReply?.result).pipe(Effect.mapError((message) => new UpstreamError({ message })));
       });
 
-    const check = (entry: Entry): Effect.Effect<void> =>
+    /** The tools a client may call, from a tools/list result; null when the server has none to list. */
+    const countTools = (entry: Entry, result: unknown): Effect.Effect<number | null, string> => {
+      if (result === undefined) return Effect.succeed(null);
+      return Option.match(decodeToolList(result), {
+        onNone: () => Effect.fail("tools/list answered something that is not a list of tools"),
+        onSome: ({ tools }) => Effect.succeed(tools.filter(isNamedTool).filter((t) => !entry.denied(t.name)).length),
+      });
+    };
+
+    /** A check got no answer; after a few in a row, the process or container is started again. */
+    const missed = (entry: Entry) =>
+      Effect.gen(function* () {
+        if (entry.bridge === null && entry.def.runner.type !== "docker-http") return;
+        entry.missed++;
+        if (entry.missed < MISSED_CHECKS) return;
+        entry.missed = 0;
+        yield* Effect.logWarning(`hub: ${entry.def.name} missed ${MISSED_CHECKS} health checks in a row; restarting it`);
+        if (entry.bridge !== null) yield* entry.bridge.restart;
+        // Forked into the hub's scope: stopping the entry closes the scope this check may run in.
+        else if (entry.def.runner.type === "docker-http") yield* restartContainer(entry).pipe(Effect.forkIn(hubScope));
+      });
+
+    const noAnswer = `no answer within ${Duration.format(checkTimeout)}`;
+
+    const checkOnce = (entry: Entry): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (entries.get(entry.def.name) !== entry) return;
         if (entry.bridge !== null) {
@@ -409,38 +510,61 @@ export const makeHub = (
           if (status.state !== "running") {
             yield* setState(entry, status.state, status.detail);
           } else {
-            const list = yield* entry.bridge.request("tools/list").pipe(Effect.result);
-            if (list._tag === "Failure") yield* setState(entry, "error", list.failure);
-            else {
-              const tools = (list.success.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
-              entry.tools = tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
-              yield* setState(entry, "running", null);
+            const list = yield* entry.bridge.request("tools/list").pipe(
+              Effect.timeoutOption(checkTimeout),
+              Effect.flatMap((o) => (o._tag === "Some" ? Effect.succeed(o.value) : Effect.fail(noAnswer))),
+              Effect.result,
+            );
+            if (list._tag === "Failure") {
+              yield* setState(entry, "error", list.failure);
+              yield* missed(entry);
+            } else {
+              entry.missed = 0;
+              const tools = yield* countTools(entry, list.success.result).pipe(Effect.result);
+              entry.tools = tools._tag === "Success" ? tools.success : null;
+              yield* setState(entry, tools._tag === "Success" ? "running" : "error", tools._tag === "Success" ? null : tools.failure);
             }
           }
         } else if (entry.def.runner.type === "docker-http" && entry.port === null) {
           // The container supervisor reports its own state.
         } else {
-          const result = yield* handshake(entry).pipe(Effect.timeout(Duration.seconds(30)), Effect.result);
+          const result = yield* handshake(entry).pipe(Effect.timeout(checkTimeout), Effect.result);
           if (result._tag === "Success") {
+            entry.missed = 0;
             entry.tools = result.success;
             yield* setState(entry, "running", null);
           } else {
             const e = result.failure;
             if (e._tag === "NeedsLogin") yield* setState(entry, "needs-login", e.message);
-            else if (e._tag === "TimeoutError") yield* setState(entry, "error", "no answer within 30s");
-            else yield* setState(entry, "error", e.message);
+            else if (e._tag === "TimeoutError") {
+              yield* setState(entry, "error", noAnswer);
+              yield* missed(entry);
+            } else yield* setState(entry, "error", e.message);
           }
         }
         entry.lastCheckAt = yield* Clock.currentTimeMillis;
       });
 
+    /** One server's check, whatever happens in it, never stops another's or the loop. */
+    const check = (entry: Entry): Effect.Effect<void> =>
+      checkOnce(entry).pipe(
+        Effect.catchDefect((defect) =>
+          Effect.gen(function* () {
+            yield* Effect.logError(`hub: checking ${entry.def.name} failed: ${String(defect)}`);
+            yield* setState(entry, "error", "the health check failed; see the relay's log");
+            entry.lastCheckAt = yield* Clock.currentTimeMillis;
+          }),
+        ),
+      );
+
     const checkAll = Effect.gen(function* () {
       yield* reload.pipe(Effect.catchCause((cause) => Effect.logError(`hub: reloading definitions failed: ${String(cause)}`)));
+      pruneSessions(yield* Clock.currentTimeMillis);
       yield* Effect.forEach([...entries.values()], check, { concurrency: 8, discard: true });
-    });
+    }).pipe(Effect.catchDefect((defect) => Effect.logError(`hub: the health check failed: ${String(defect)}`)));
 
     yield* reload;
-    yield* checkAll.pipe(Effect.delay(config.checkEvery ?? Duration.minutes(1)), Effect.repeat(Schedule.spaced(config.checkEvery ?? Duration.minutes(1))), Effect.forkScoped);
+    yield* checkAll.pipe(Effect.delay(checkEvery), Effect.repeat(Schedule.spaced(checkEvery)), Effect.forkScoped);
 
     // ── gateway ─────────────────────────────────────────────────────────
 
@@ -528,11 +652,6 @@ export const makeHub = (
         return textResponse(response.status, toJson(parsed.batch ? parsed.messages.map(filter) : filter(parsed.messages[0] as JsonRpcMessage)), response.headers);
       });
 
-    /** Upstream session ids and the client that opened each: one client cannot use another's session. */
-    const sessionOwners = new Map<string, string>();
-    const MAX_SESSIONS = 10_000;
-    const sessionKey = (server: string, session: string) => `${server}\u0000${session}`;
-
     const authorize: Hub["authorize"] = (name, authorization, method) =>
       Effect.gen(function* () {
         const startedAt = yield* Clock.currentTimeMillis;
@@ -552,8 +671,7 @@ export const makeHub = (
         const entry = entries.get(name);
         if (entry === undefined) return textResponse(404, `No MCP server named ${name}`, { "content-type": "text/plain" });
         const session = request.headers["mcp-session-id"];
-        const owner = session === undefined ? undefined : sessionOwners.get(sessionKey(name, session));
-        if (owner !== undefined && owner !== client) return textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
+        if (session !== undefined && !ownsSession(name, session, client, startedAt)) return textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
 
         const parsed = request.method === "POST" ? parseMessages(request.body) : null;
         if (request.method === "POST" && parsed === null) return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
@@ -601,14 +719,8 @@ export const makeHub = (
           return jsonRpcFailure(502, `T3 Fleet hub: ${e.message}`, stateHeaders(entry.state));
         }
         const opened = result.success.headers["mcp-session-id"];
-        if (opened !== undefined && !sessionOwners.has(sessionKey(name, opened))) {
-          if (sessionOwners.size >= MAX_SESSIONS) {
-            const oldest = sessionOwners.keys().next();
-            if (oldest.done !== true) sessionOwners.delete(oldest.value);
-          }
-          sessionOwners.set(sessionKey(name, opened), client);
-        }
-        if (request.method === "DELETE" && session !== undefined && result.success.status < 300) sessionOwners.delete(sessionKey(name, session));
+        if (opened !== undefined) recordSession(name, opened, client, startedAt);
+        if (session !== undefined && ((request.method === "DELETE" && result.success.status < 300) || result.success.status === 404)) endSession(name, session);
         const response = entry.def.deny.length > 0 && requested.some((r) => r.method === "tools/list") ? yield* filterToolLists(result.success, requested, entry.denied) : result.success;
         return logged(response, requested, name, client, startedAt);
       });
@@ -681,8 +793,7 @@ export const makeHub = (
           const entry = yield* need(name);
           if (entry.bridge !== null) yield* entry.bridge.restart;
           else if (entry.def.runner.type === "docker-http") {
-            yield* stop(entry, true);
-            yield* start(entry.def, entry.key);
+            yield* restartContainer(entry);
             return;
           }
           yield* check(entry).pipe(Effect.delay(Duration.seconds(1)), Effect.forkIn(entry.scope));

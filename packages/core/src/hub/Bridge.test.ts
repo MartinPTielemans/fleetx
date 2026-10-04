@@ -1,8 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import type * as Scope from "effect/Scope";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -16,10 +17,12 @@ const server = new URL("./testing/fake-stdio-server.mjs", import.meta.url).pathn
 const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | NodeServices.NodeServices>) =>
   Effect.runPromise(effect.pipe(Effect.scoped, Effect.provide(NodeServices.layer)));
 
-const bridged = Effect.gen(function* () {
-  const services = yield* Effect.context<NodeServices.NodeServices>();
-  return yield* makeBridge({ name: "fake", spawn: spawnStdio({ command: process.execPath, args: [server], env: {} }).pipe(Effect.provide(services)) });
-});
+const bridgedWith = (options: { readonly sessionIdle?: Duration.Input } = {}) =>
+  Effect.gen(function* () {
+    const services = yield* Effect.context<NodeServices.NodeServices>();
+    return yield* makeBridge({ name: "fake", spawn: spawnStdio({ command: process.execPath, args: [server], env: {} }).pipe(Effect.provide(services)), ...options });
+  });
+const bridged = bridgedWith();
 
 const post = (bridge: Bridge, body: unknown, session?: string, accept = "application/json, text/event-stream") =>
   bridge.forward({
@@ -127,6 +130,88 @@ describe("stdio bridge", () => {
         }
         expect(answer.at(-1)).toMatchObject({ id: 3, result: { content: [{ text: "again (init 1)" }] } });
         expect((yield* bridge.request("ping")).result).toEqual({});
+      }),
+    );
+  }, 20_000);
+
+  it("answers a server's ping with an empty result", async () => {
+    await run(
+      Effect.gen(function* () {
+        const bridge = yield* bridged;
+        const { session } = yield* initialize(bridge, 1);
+        const answer = yield* post(bridge, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ping_me" } }, session).pipe(Effect.flatMap(messages));
+        expect(answer.at(-1)).toMatchObject({ id: 2, result: { content: [{ text: "pong {}" }] } });
+      }),
+    );
+  }, 20_000);
+
+  it("makes room for a new session by evicting the least recently seen one", async () => {
+    await run(
+      Effect.gen(function* () {
+        const bridge = yield* bridged;
+        const sessions: Array<string> = [];
+        for (let i = 0; i < 1000; i++) sessions.push((yield* initialize(bridge, i)).session);
+        // The first session is used again, so the second is now the least recently seen.
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" }, sessions[0])).status).toBe(200);
+        const newest = yield* initialize(bridge, 1001);
+        expect(newest.message).toMatchObject({ id: 1001, result: { serverInfo: { name: "fake" } } });
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 2, method: "ping" }, newest.session)).status).toBe(200);
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 3, method: "ping" }, sessions[1])).status).toBe(404);
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 4, method: "ping" }, sessions[0])).status).toBe(200);
+      }),
+    );
+  }, 30_000);
+
+  it("expires idle sessions without an open stream, and keeps those with one", async () => {
+    await run(
+      Effect.gen(function* () {
+        const bridge = yield* bridgedWith({ sessionIdle: Duration.millis(300) });
+        const idle = yield* initialize(bridge, 1);
+        const watched = yield* initialize(bridge, 2);
+        const stream = yield* bridge.forward({ method: "GET", headers: { accept: "text/event-stream", "mcp-session-id": watched.session }, body: "" });
+        yield* stream.body.pipe(Stream.runDrain, Effect.forkScoped);
+        yield* Effect.sleep(Duration.millis(600));
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" }, idle.session)).status).toBe(404);
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 2, method: "ping" }, watched.session)).status).toBe(200);
+      }),
+    );
+  }, 20_000);
+
+  it("tells the server when a client gives up on a request", async () => {
+    await run(
+      Effect.gen(function* () {
+        const bridge = yield* bridged;
+        const { session } = yield* initialize(bridge, 1);
+        const slow = yield* post(bridge, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "echo", arguments: { text: "slow", delayMs: 10_000 } } }, session);
+        const reading = yield* slow.body.pipe(Stream.runDrain, Effect.forkScoped);
+        yield* Effect.sleep(Duration.millis(200));
+        yield* Fiber.interrupt(reading);
+        const answer = yield* post(bridge, { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "cancelled" } }, session).pipe(Effect.flatMap(messages));
+        const text = (answer.at(-1)?.result as { content?: Array<{ text: string }> } | undefined)?.content?.[0]?.text ?? "";
+        expect(parseJson(text)).toHaveLength(1);
+      }),
+    );
+  }, 20_000);
+
+  it("fails pending requests and ends streams when it stops, and answers at once afterwards", async () => {
+    await run(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        const bridge = yield* bridged.pipe(Scope.provide(scope));
+        const { session } = yield* initialize(bridge, 1);
+        const stream = yield* bridge.forward({ method: "GET", headers: { accept: "text/event-stream", "mcp-session-id": session }, body: "" });
+        const streaming = yield* stream.body.pipe(Stream.runDrain, Effect.forkScoped);
+        const pending = yield* call(bridge, session, 2, "never", 60_000).pipe(Effect.forkScoped);
+        yield* Effect.sleep(Duration.millis(200));
+        yield* Scope.close(scope, Exit.void);
+        const failed = yield* Fiber.join(pending).pipe(Effect.timeout(Duration.seconds(2)));
+        expect(failed.at(-1)).toMatchObject({ id: 2, error: { code: -32603 } });
+        yield* Fiber.join(streaming).pipe(Effect.timeout(Duration.seconds(2)), Effect.ignore);
+        expect(streaming.pollUnsafe()).toBeDefined();
+        // The stale bridge answers new requests at once instead of leaving them hanging.
+        const after = yield* post(bridge, { jsonrpc: "2.0", id: 3, method: "tools/list" }, session).pipe(Effect.flatMap(messages), Effect.timeout(Duration.seconds(2)));
+        expect(after[0]?.error ?? after[0]?.result).toBeDefined();
+        expect(yield* bridge.request("ping").pipe(Effect.flip, Effect.timeout(Duration.seconds(2)))).toMatch(/stopped|not running/);
       }),
     );
   }, 20_000);
