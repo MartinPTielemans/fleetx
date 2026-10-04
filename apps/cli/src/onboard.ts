@@ -11,12 +11,12 @@ import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import { expandHome, loadConfig, loadConfigFrom } from "@fleetx/core/Config";
-import { exec } from "@fleetx/core/Exec";
-import { ensureGitConfig, git, ok, out, why } from "@fleetx/core/Git";
-import { addNode, createRepo, discover, writeLocalConfig } from "@fleetx/core/Init";
-import { ensureIdentity, installSecrets } from "@fleetx/core/Secrets";
-import { syncRun } from "@fleetx/core/Sync";
+import { expandHome, loadConfig, loadConfigFrom } from "@t3-fleet/core/Config";
+import { exec } from "@t3-fleet/core/Exec";
+import { ensureGitConfig, git, ok, out, why } from "@t3-fleet/core/Git";
+import { addNode, createRepo, discover, writeLocalConfig } from "@t3-fleet/core/Init";
+import { ensureIdentity, installSecrets } from "@t3-fleet/core/Secrets";
+import { syncRun } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -57,7 +57,7 @@ export const initCommand = Command.make("init", {
       } else {
         yield* Console.log("Next: push it to a private repository, for example\n  gh repo create <you>/fleet --private --source " + target + " --push");
       }
-      yield* Console.log("Then add another machine with: fleetx invite <name>");
+      yield* Console.log("Then add another machine with: t3-fleet invite <name>");
     }).pipe(reportUserErrors),
   ),
 );
@@ -95,7 +95,7 @@ export const joinCommand = Command.make("join", {
       const home = process.env["HOME"] ?? "";
       const path = yield* Path.Path;
       yield* ensureGitConfig;
-      const scratch = path.join(home, ".local/state/fleetx/join-clone");
+      const scratch = path.join(home, ".local/state/t3-fleet/join-clone");
       yield* exec({ command: "rm", args: ["-rf", scratch], timeout: Duration.seconds(30) });
       const clone = yield* git(home, ["clone", "-q", url, scratch], { timeout: Duration.minutes(5) });
       if (!ok(clone)) return yield* Effect.fail(`cloning ${url}: ${why(clone)} (is gh logged in? run: gh auth login)`);
@@ -117,7 +117,7 @@ export const joinCommand = Command.make("join", {
       yield* Console.log(
         secrets._tag === "Some"
           ? "Secrets installed."
-          : "Secrets follow once an authority's next sync adds this machine's key (or run there: fleetx secrets add-node " + name + " " + recipient + ").",
+          : "Secrets follow once an authority's next sync adds this machine's key (or run there: t3-fleet secrets add-node " + name + " " + recipient + ").",
       );
     }).pipe(reportUserErrors),
   ),

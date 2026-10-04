@@ -27,7 +27,7 @@ describe("skillDescription", () => {
 });
 
 describe("updating vendored skills", () => {
-  const root = mkdtempSync(join(tmpdir(), "fleetx-skills-"));
+  const root = mkdtempSync(join(tmpdir(), "t3-fleet-skills-"));
   const source = join(root, "upstream");
   const repo = join(root, "fleet");
   const skill = (text: string) => writeFileSync(join(source, "review", "SKILL.md"), `---\ndescription: Reviews\n---\n${text}\n`);

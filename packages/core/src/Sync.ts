@@ -10,7 +10,7 @@
  *   4. report   this node's observation and findings to fleetx/state/<node>
  *   5. alert    record health transitions there too, for whoever relays them
  *
- * Every branch fleetx writes belongs to one node, so pushes never race.
+ * Every branch T3 Fleet writes belongs to one node, so pushes never race.
  */
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -30,6 +30,7 @@ import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
 import { approve, autoApprovable, listProposals, settleRejection, STAGING } from "./Staging.ts";
+import { stateDir } from "./Names.ts";
 
 export const STATE_PREFIX = "fleetx/state/";
 
@@ -95,7 +96,7 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
       return null;
     }
     // A scratch index: the working tree and the real index stay untouched.
-    const env = { GIT_INDEX_FILE: `${repo}/.git/fleetx-propose-index` };
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-propose-index` };
     const read = yield* git(repo, ["read-tree", `origin/${branch}`], { env });
     if (!ok(read)) return yield* Effect.fail(`proposing: ${why(read)}`);
     yield* git(repo, ["add", "-A", "--", ...files], { env });
@@ -318,7 +319,7 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
     return yield* run.pipe(Effect.ensuring(releaseSyncLock));
   });
 
-const syncLock = () => `${process.env["HOME"] ?? ""}/.local/state/fleetx/sync.lock`;
+const syncLock = () => `${stateDir(process.env["HOME"] ?? "")}/sync.lock`;
 
 /** One run at a time; a lock older than an hour belongs to a dead run. False when another run holds it. */
 const takeSyncLock = Effect.gen(function* () {

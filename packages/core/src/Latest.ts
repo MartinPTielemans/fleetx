@@ -4,7 +4,7 @@
  * controller, never by the machines themselves.
  *
  * Every lookup degrades to "unknown" instead of failing: being offline must
- * not stop fleetx from reporting what it can see.
+ * not stop T3 Fleet from reporting what it can see.
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";

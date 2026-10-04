@@ -1,10 +1,10 @@
 /**
  * The relay's long-running pieces, when the fleet has a relay ([relay] in
- * fleetx.toml):
+ * the fleet's settings):
  *
- *   on the node with the relay role   `fleetx relay serve` as a service, its
+ *   on the node with the relay role   `t3-fleet relay serve` as a service, its
  *                                     port published to the tailnet only
- *   on every other node               `fleetx listen` as a service, so it
+ *   on every other node               `t3-fleet listen` as a service, so it
  *                                     syncs as soon as the branch moves
  *
  * Services run the absolute node binary and bundle with a fixed PATH, like
@@ -19,7 +19,8 @@ import * as Schema from "effect/Schema";
 import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
-import { installedBundle, stableNode } from "../Runtime.ts";
+import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
+import { installedBundle, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
 
 const Observed = Schema.Struct({
   /** "serve", "listen", or null when this node runs neither. */
@@ -32,10 +33,12 @@ const Observed = Schema.Struct({
   /** Relay node: whether the port is published on the tailnet. */
   published: Schema.NullOr(Schema.Boolean),
   port: Schema.Number,
+  /** Still installed under its fleetx name. Until 1.0. */
+  legacy: Schema.optionalKey(Schema.Boolean),
 });
 
-const label = (role: string) => `dev.fleetx.${role}`;
-const unitName = (role: string) => `fleetx-${role}`;
+const label = launchdLabel;
+const unitName = systemdUnit;
 
 const unitPath = (platform: string, root: boolean, home: string, role: string) =>
   platform === "darwin"
@@ -47,7 +50,7 @@ const unitPath = (platform: string, root: boolean, home: string, role: string) =
 const unitText = (platform: string, root: boolean, home: string, nodePath: string, bundle: string, role: "serve" | "listen") => {
   const args = role === "serve" ? ["relay", "serve"] : ["listen"];
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
-  const log = `${home}/.local/state/fleetx/${role}.log`;
+  const log = `${home}/${STATE_DIR}/${role}.log`;
   if (platform === "darwin") {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -64,7 +67,7 @@ const unitText = (platform: string, root: boolean, home: string, nodePath: strin
 `;
   }
   return `[Unit]
-Description=fleetx ${role === "serve" ? "relay" : "listener"}
+Description=T3 Fleet ${role === "serve" ? "relay" : "listener"}
 After=network-online.target
 Wants=network-online.target
 
@@ -84,11 +87,12 @@ WantedBy=${root ? "multi-user.target" : "default.target"}
 };
 
 const install = (platform: string, root: boolean, role: "serve" | "listen", text: string) => {
-  const write = (file: string) => `cat > ${file} <<'FLEETX_UNIT'\n${text}FLEETX_UNIT`;
+  const write = (file: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text}T3_FLEET_UNIT`;
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${label(role)}.plist"`;
     return [
-      'mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.local/state/fleetx"',
+      retireLegacyUnit(platform, root, role),
+      `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       write(plist),
       `launchctl bootout "gui/$(id -u)/${label(role)}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
     ].join("\n");
@@ -96,7 +100,8 @@ const install = (platform: string, root: boolean, role: "serve" | "listen", text
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
   return [
-    `mkdir -p ${dir} "$HOME/.local/state/fleetx"`,
+    retireLegacyUnit(platform, root, role),
+    `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     write(`${dir}/${unitName(role)}.service`),
     ...(root ? [] : ['[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"']),
     `${ctl} daemon-reload && ${ctl} enable ${unitName(role)}.service && ${ctl} restart ${unitName(role)}.service`,
@@ -128,7 +133,7 @@ export const RelayArea = defineArea({
         const serve = yield* exec({ command: "tailscale", args: ["serve", "status"], env: ctx.env, timeout: Duration.seconds(10) });
         published = serve.code === 0 && serve.stdout.includes(`:${port}`) && serve.stdout.includes(`127.0.0.1:${port}`);
       }
-      return { role, platform, root, installed, want, running, published, port };
+      return { role, platform, root, installed, want, running, published, port, legacy: yield* legacyUnitInstalled(platform, root, ctx.home, role) };
     }),
   diagnose: ({ node, observed }) => {
     const out: Array<Finding> = [];
@@ -140,7 +145,7 @@ export const RelayArea = defineArea({
         key: `relay-${observed.role}`,
         severity: "warn",
         area: "relay",
-        title: observed.installed === null ? `the ${what} is not installed` : observed.installed !== observed.want ? `the ${what} is out of date` : `the ${what} is not running`,
+        title: observed.installed === null ? notInstalledTitle(what, observed.legacy) : observed.installed !== observed.want ? `the ${what} is out of date` : `the ${what} is not running`,
         fix: { command: install(observed.platform, observed.root, observed.role, observed.want), safe: true },
       });
     }

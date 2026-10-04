@@ -1,5 +1,5 @@
 {
-  "name": "@fleetx/ui",
+  "name": "@t3-fleet/ui",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@base-ui/react": "catalog:",
-    "@fleetx/core": "workspace:*",
+    "@t3-fleet/core": "workspace:*",
     "class-variance-authority": "catalog:",
     "effect": "catalog:",
     "lucide-react": "catalog:",

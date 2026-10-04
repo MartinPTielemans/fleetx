@@ -20,6 +20,7 @@ import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
 import { commitAndPush, git, ok, why } from "./Git.ts";
 import { sha256 } from "./Hash.ts";
+import { stateDir } from "./Names.ts";
 
 const Source = Schema.Struct({
   type: Schema.String,
@@ -97,7 +98,7 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url, name: sourceName } = parseSource(spec);
-    const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
     const available = yield* fetchSource(url, scratch);
     if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
     const wanted = names.length > 0 ? names : available.size === 1 ? [...available.keys()] : [];
@@ -139,7 +140,7 @@ export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
     for (const [, source] of Object.entries(sources.sources ?? {})) {
       const mine = source.skills.filter((s) => only.length === 0 || only.includes(s));
       if (mine.length === 0) continue;
-      const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+      const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
       const available = yield* fetchSource(source.url, scratch);
       for (const local of mine) {
         const upstream = source.renamed?.[local] ?? local;
@@ -211,7 +212,7 @@ export const lookupSource = (repo: string, spec: string) =>
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url } = parseSource(spec);
-    const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
     const available = yield* fetchSource(url, scratch);
     if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
     const skills: Array<{ name: string; exists: boolean }> = [];

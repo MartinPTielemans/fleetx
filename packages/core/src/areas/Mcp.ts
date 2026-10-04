@@ -47,6 +47,7 @@ import { expandHome } from "../Config.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { isHosted } from "../hub/Definitions.ts";
+import { configDir, readHeader, SH_CONFIG_DIR } from "../Names.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({
@@ -128,11 +129,10 @@ const INITIALIZE = JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
   method: "initialize",
-  params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fleetx", version: "1" } },
+  params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3-fleet", version: "1" } },
 });
 
 /** The hub's gateway names a server's state in this header when it cannot serve it. */
-const HUB_STATE_HEADER = "x-fleetx-hub-state";
 const NEEDS_LOGIN = "needs-login";
 
 /**
@@ -199,7 +199,7 @@ const liveCheck = (url: string, token: string | undefined) =>
     if (token) request = HttpClientRequest.bearerToken(request, token);
     const result = yield* client.execute(request).pipe(
       Effect.flatMap((r) =>
-        r.headers[HUB_STATE_HEADER] === "needs-login"
+        readHeader(r.headers, "hub-state") === "needs-login"
           ? Effect.succeed(NEEDS_LOGIN)
           : r.status >= 200 && r.status < 300
             ? Effect.succeed("ok")
@@ -300,8 +300,8 @@ export const McpArea = defineArea({
         return { type: "other" };
       };
 
-      // Secrets for live checks: the node's fleetx secrets file, then the environment.
-      const secretsText = yield* fs.readFileString(path.join(ctx.home, ".config/fleetx/secrets.env")).pipe(Effect.orElseSucceed(() => ""));
+      // Secrets for live checks: the node's t3-fleet secrets file, then the environment.
+      const secretsText = yield* fs.readFileString(path.join(configDir(ctx.home), "secrets.env")).pipe(Effect.orElseSucceed(() => ""));
       const secrets: Record<string, string> = {};
       for (const line of secretsText.split("\n")) {
         const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
@@ -358,7 +358,7 @@ export const McpArea = defineArea({
         key: `mcp-${name}-needs-login`,
         severity: "error",
         title: `MCP server ${name} needs a sign-in on the hub`,
-        detail: `${detail === null ? "" : `${detail}; `}sign in from any machine: fleetx mcp login ${name}`,
+        detail: `${detail === null ? "" : `${detail}; `}sign in from any machine: t3-fleet mcp login ${name}`,
       });
     }
     if (observed.toolhive !== undefined && observed.toolhive.length > 0) {
@@ -368,12 +368,12 @@ export const McpArea = defineArea({
         area: "mcp",
         key: "mcp-toolhive-left",
         severity: "warn",
-        title: `ToolHive still runs ${names.join(", ")}, which the fleetx hub serves now`,
+        title: `ToolHive still runs ${names.join(", ")}, which the T3 Fleet hub serves now`,
         detail: "stopping them leaves them in ToolHive (thv start brings one back); remove them with thv rm once the hub serves them",
-        fix: { command: `thv stop ${names.map(sh).join(" ")}`, safe: false, disrupts: `${names.join(", ")} through ToolHive on ${node}, until the hub serves them (sign in with fleetx mcp login where needed)` },
+        fix: { command: `thv stop ${names.map(sh).join(" ")}`, safe: false, disrupts: `${names.join(", ")} through ToolHive on ${node}, until the hub serves them (sign in with t3-fleet mcp login where needed)` },
       });
     }
-    const loadSecrets = "set -a; [ -f ~/.config/fleetx/secrets.env ] && . ~/.config/fleetx/secrets.env; set +a";
+    const loadSecrets = `set -a; secrets="${SH_CONFIG_DIR}/secrets.env"; [ -f "$secrets" ] && . "$secrets"; set +a`;
     for (const s of observed.servers) {
       const base = { node, area: "mcp" as const };
       if (s.endpoint === null) {
@@ -420,7 +420,7 @@ export const McpArea = defineArea({
           title: `MCP server ${s.name} does not answer: ${s.live}`,
           ...(tokenGone
             ? {
-                detail: `its credential has expired or was revoked; with the fleetx hub, sign in with \`fleetx mcp login ${s.name}\`, otherwise sign in again in the MCP runner on the host`,
+                detail: `its credential has expired or was revoked; with the T3 Fleet hub, sign in with \`t3-fleet mcp login ${s.name}\`, otherwise sign in again in the MCP runner on the host`,
               }
             : {}),
         });

@@ -75,7 +75,7 @@ export function ErrorState({ error, onRetry, what }: { error: unknown; onRetry?:
   if (isUnauthorized(error)) {
     return (
       <Empty icon={<PlugZapIcon />} title="This page has an old token">
-        Each run of <code className="text-foreground">fleetx ui</code> makes a new one. Open the link it printed in your terminal.
+        Each run of <code className="text-foreground">t3-fleet ui</code> makes a new one. Open the link it printed in your terminal.
       </Empty>
     );
   }

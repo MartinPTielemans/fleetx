@@ -11,15 +11,15 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
-import { expandHome, loadConfig, type Config } from "@fleetx/core/Config";
-import type { Finding } from "@fleetx/core/Diagnose";
-import { exec } from "@fleetx/core/Exec";
-import { lookupLatest } from "@fleetx/core/Latest";
-import type { NodeResult } from "@fleetx/core/Remote";
-import { renderStatus } from "@fleetx/core/Render";
-import { addSkills, land, removeSkills, updateSkills } from "@fleetx/core/SkillSources";
-import { approve, listProposals, reject } from "@fleetx/core/Staging";
-import { readStates, syncRun, type Alert, type NodeState } from "@fleetx/core/Sync";
+import { expandHome, loadConfig, type Config } from "@t3-fleet/core/Config";
+import type { Finding } from "@t3-fleet/core/Diagnose";
+import { exec } from "@t3-fleet/core/Exec";
+import { lookupLatest } from "@t3-fleet/core/Latest";
+import type { NodeResult } from "@t3-fleet/core/Remote";
+import { renderStatus } from "@t3-fleet/core/Render";
+import { addSkills, land, removeSkills, updateSkills } from "@t3-fleet/core/SkillSources";
+import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
+import { readStates, syncRun, type Alert, type NodeState } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -50,7 +50,7 @@ export const fleetFromStates = (config: Config) =>
     for (const node of config.nodes) {
       const state = states.find((s) => s.node === node.name);
       if (state === undefined || state.observation === null) {
-        results.push({ node, ok: false, error: "has not published any state yet (no fleetx sync has run there)", ms: 0 });
+        results.push({ node, ok: false, error: "has not published any state yet (no t3-fleet sync has run there)", ms: 0 });
         continue;
       }
       results.push({
@@ -101,7 +101,7 @@ export const reviewCommand = Command.make("review").pipe(
       for (const p of proposals) {
         yield* Console.log(`${p.node}  (${p.commit.slice(0, 7)})\n${p.stat.split("\n").map((l) => `  ${l}`).join("\n")}\n`);
       }
-      yield* Console.log("fleetx approve <node>   or   fleetx reject <node>");
+      yield* Console.log("t3-fleet approve <node>   or   t3-fleet reject <node>");
     }).pipe(reportUserErrors),
   ),
 );
@@ -135,7 +135,7 @@ export const rejectCommand = Command.make("reject", { node: Argument.String("nod
   ),
 );
 
-const seenPath = (home: string) => `${home}/.local/state/fleetx/alerts-seen`;
+const seenPath = (home: string) => `${home}/.local/state/t3-fleet/alerts-seen`;
 
 /** Alerts every node published since the last call; marks them seen. */
 export const takeAlerts = (config: Config, peek = false) =>
@@ -150,7 +150,7 @@ export const takeAlerts = (config: Config, peek = false) =>
     alerts.sort((a, b) => a.at - b.at);
     const newest = Math.max(seen, ...states.flatMap((s) => s.alerts.map((a) => a.at)));
     if (!peek) {
-      yield* fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true }).pipe(Effect.ignore);
+      yield* fs.makeDirectory(`${home}/.local/state/t3-fleet`, { recursive: true }).pipe(Effect.ignore);
       yield* fs.writeFileString(seenPath(home), String(newest));
     }
     return alerts;
@@ -171,7 +171,7 @@ const adopt = Command.make("adopt", {
   name: Argument.String("skill"),
   from: Flag.String("from").pipe(Flag.withDescription("Directory the skill was installed into.")),
 }).pipe(
-  Command.withDescription("Move a skill installed outside fleetx into the config repo; sync proposes or commits it."),
+  Command.withDescription("Move a skill installed outside T3 Fleet into the config repo; sync proposes or commits it."),
   Command.withHandler(({ name, from }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -185,7 +185,7 @@ const adopt = Command.make("adopt", {
       if (yield* fs.exists(dest).pipe(Effect.orElseSucceed(() => false))) return yield* Effect.fail(`skills/${name} already exists in the repo`);
       const copy = yield* exec({ command: "cp", args: ["-R", src, dest], timeout: Duration.seconds(30) });
       if (copy.code !== 0) return yield* Effect.fail(`copying: ${copy.stderr.trim()}`);
-      const aside = path.join(home, ".local/state/fleetx/adopted", String(yield* Clock.currentTimeMillis));
+      const aside = path.join(home, ".local/state/t3-fleet/adopted", String(yield* Clock.currentTimeMillis));
       yield* fs.makeDirectory(aside, { recursive: true });
       yield* fs.rename(src, path.join(aside, name));
       yield* Console.log(`skills/${name} is in the repo; the original is in ${aside}. The next sync links it and ${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? "commits" : "proposes"} it.`);
@@ -282,7 +282,7 @@ export const mcpAddCommand = Command.make("add", {
   url: Flag.String("url").pipe(Flag.withDescription("A server reached directly over HTTP."), Flag.optional),
   command: Flag.String("command").pipe(Flag.withDescription("A stdio server: the command to run (use ~ for home)."), Flag.optional),
   arg: Flag.String("arg").pipe(Flag.withDescription("An argument for --command (repeatable)."), Flag.atLeast(0)),
-  token: Flag.String("token-env").pipe(Flag.withDescription("Send this secret as a bearer token (set it with fleetx secrets set)."), Flag.optional),
+  token: Flag.String("token-env").pipe(Flag.withDescription("Send this secret as a bearer token (set it with t3-fleet secrets set)."), Flag.optional),
   node: Flag.String("node").pipe(Flag.withDescription("Register on this node (repeatable); default every node."), Flag.atLeast(0)),
 }).pipe(
   Command.withDescription("Declare an MCP server in mcp/<name>.json and register it on nodes."),

@@ -3,7 +3,7 @@
  * Api.ts. Views list whatever this returns, per provider instance, and never
  * name a provider themselves.
  */
-import type { ProviderAuth } from "@fleetx/core/Api";
+import type { ProviderAuth } from "@t3-fleet/core/Api";
 
 export type LoginStatus = "authenticated" | "unauthenticated" | "unknown";
 

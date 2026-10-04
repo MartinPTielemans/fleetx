@@ -1,9 +1,9 @@
 /**
- * Talking to `fleetx ui`. Every answer is decoded with the same Api.ts schema
+ * Talking to `t3-fleet ui`. Every answer is decoded with the same Api.ts schema
  * the server encoded it with, so a shape the two disagree on fails here,
  * loudly, instead of rendering half a page.
  *
- * The server wants this run's token on every request. `fleetx ui` opens the
+ * The server wants this run's token on every request. `t3-fleet ui` opens the
  * app with it in the URL fragment; it is kept in localStorage (readable only
  * by this origin) so reloads and new tabs keep working until the next run.
  */
@@ -22,12 +22,12 @@ import {
   UiSkillsLookup,
   UiSkillsPreview,
   UiStatus,
-} from "@fleetx/core/Api";
+} from "@t3-fleet/core/Api";
 import * as Schema from "effect/Schema";
 
-const TOKEN_KEY = "fleetx:token";
+const TOKEN_KEY = "t3-fleet:token";
 
-/** Take the token from the fragment `fleetx ui` opened, and drop it from the address bar. */
+/** Take the token from the fragment `t3-fleet ui` opened, and drop it from the address bar. */
 export function adoptToken(): void {
   const match = /(?:^#|&)token=([0-9a-f]+)/.exec(window.location.hash);
   if (match?.[1] === undefined) return;
@@ -54,11 +54,11 @@ async function request(method: "GET" | "POST", path: string, body?: unknown): Pr
   try {
     response = await fetch(path, {
       method,
-      headers: { "x-fleetx-token": token(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      headers: { "x-t3-fleet-token": token(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
-    throw new ApiError(0, "fleetx ui is not answering; is it still running?");
+    throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
   }
   const text = await response.text();
   if (!response.ok) throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
@@ -146,5 +146,5 @@ export type {
   UiSkillsLookup as UiSkillsLookupT,
   UiSkillsPreview as UiSkillsPreviewT,
   UiStatus,
-} from "@fleetx/core/Api";
+} from "@t3-fleet/core/Api";
 export type UiAlertT = typeof UiAlert.Type;

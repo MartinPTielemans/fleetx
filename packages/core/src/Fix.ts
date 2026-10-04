@@ -11,6 +11,7 @@ import { shPath } from "./Area.ts";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
 import type { Node } from "./Config.ts";
+import { BUNDLE_FILE, CLI, LEGACY_CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
 
 export interface FixOutcome {
   readonly finding: Finding & { readonly fix: Fix };
@@ -23,30 +24,36 @@ const lastLine = (text: string) =>
   text.trim().split("\n").map((l) => l.trim()).filter((l) => l !== "").pop() ?? "";
 
 /**
- * Every fix runs with FLEETX_CHECKOUT set to that node's clone of the config
- * repo, and ~/.local/bin on PATH, where fleetx and the agent CLIs live.
- * ENGINE_INSTALL is replaced by this build, streamed inline as base64.
+ * Every fix runs with T3_FLEET_CHECKOUT (and FLEETX_CHECKOUT, until 1.0) set
+ * to that node's clone of the config repo, and ~/.local/bin on PATH, where
+ * t3-fleet and the agent CLIs live. ENGINE_INSTALL is replaced by this build,
+ * streamed inline as base64, and linked as t3-fleet and, until 1.0, fleetx.
  */
 const script = (command: string, checkout: string, bundle: string) => {
+  const share = `~/${SHARE_DIR}`;
+  // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
+  const link = (name: string) => [
+    `[ -e ~/.local/bin/${name} ] && [ ! -L ~/.local/bin/${name} ] && mv ~/.local/bin/${name} ~/.local/bin/${name}.t3-fleet-backup`,
+    `ln -sfn ${share}/${BUNDLE_FILE} ~/.local/bin/${name}`,
+  ];
   const body =
     command === ENGINE_INSTALL
       ? [
-          "mkdir -p ~/.local/share/fleetx ~/.local/bin",
-          "base64 -d > ~/.local/share/fleetx/fleetx.mjs.tmp <<'FLEETX_BUNDLE'",
+          `mkdir -p ${share} ~/.local/bin`,
+          `base64 -d > ${share}/${BUNDLE_FILE}.tmp <<'T3_FLEET_BUNDLE'`,
           Buffer.from(bundle).toString("base64").replace(/(.{76})/g, "$1\n"),
-          "FLEETX_BUNDLE",
-          "chmod 755 ~/.local/share/fleetx/fleetx.mjs.tmp && mv ~/.local/share/fleetx/fleetx.mjs.tmp ~/.local/share/fleetx/fleetx.mjs",
-          // A link that already points here (a development checkout) is left alone.
-          '[ -e ~/.local/bin/fleetx ] && [ "$(readlink ~/.local/bin/fleetx)" != "$HOME/.local/share/fleetx/fleetx.mjs" ] && [ ! -L ~/.local/bin/fleetx ] && mv ~/.local/bin/fleetx ~/.local/bin/fleetx.fleetx-backup',
-          "ln -sfn ~/.local/share/fleetx/fleetx.mjs ~/.local/bin/fleetx",
-          // Long-running fleetx services hold the old build until restarted.
-          'if [ "$(uname)" = Darwin ]; then for l in dev.fleetx.serve dev.fleetx.listen; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done',
-          'elif [ "$(id -u)" = 0 ]; then systemctl try-restart fleetx-serve.service fleetx-listen.service 2>/dev/null || true',
-          "else systemctl --user try-restart fleetx-serve.service fleetx-listen.service 2>/dev/null || true; fi",
-          "echo installed fleetx",
+          "T3_FLEET_BUNDLE",
+          `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
+          ...link(CLI),
+          ...link(LEGACY_CLI),
+          // Long-running services hold the old build until restarted.
+          `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
+          `elif [ "$(id -u)" = 0 ]; then systemctl try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true`,
+          `else systemctl --user try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true; fi`,
+          `echo installed ${PRODUCT}`,
         ].join("\n")
       : command;
-  return `export FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
+  return `export T3_FLEET_CHECKOUT=${shPath(checkout)} FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
 };
 
 export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, checkout: string, bundle: string) =>

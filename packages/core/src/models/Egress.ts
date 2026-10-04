@@ -6,10 +6,10 @@
  *   *   /egress/<upstream>/*   → the upstream base the node resolved
  *
  * The node resolves the upstream itself, from its own [models.upstreams],
- * and sends the base in x-fleetx-egress-base; the relay only forwards to
+ * and sends the base in x-t3-fleet-egress-base; the relay only forwards to
  * https. It forwards once and streams the answer back; the node's own proxy
  * does the retrying and keeps the stats. The relay token comes in its own
- * header (x-fleetx-relay-token), because Authorization carries the client's
+ * header (x-t3-fleet-relay-token), because Authorization carries the client's
  * own credential, which passes through unchanged like everything else.
  */
 import * as Effect from "effect/Effect";
@@ -20,14 +20,13 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import {
-  EGRESS_BASE_HEADER,
-  RELAY_TOKEN_HEADER,
   requestHeaders,
   responseHeaders,
   splitPath,
 } from "./Forward.ts";
 import { constantTimeEqual, hashToken } from "../hub/Policy.ts";
 import { sendUpstream } from "./Proxy.ts";
+import { readHeader } from "../Names.ts";
 
 /** `allowInsecure` lets tests use a plain-HTTP fake upstream. */
 export const egressLayer = (token: string, options: { readonly allowInsecure?: boolean } = {}) =>
@@ -40,11 +39,11 @@ export const egressLayer = (token: string, options: { readonly allowInsecure?: b
         "/egress/*",
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          const given = request.headers[RELAY_TOKEN_HEADER] ?? "";
+          const given = readHeader(request.headers, "relay-token") ?? "";
           if (token === "" || !constantTimeEqual(yield* hashToken(given), yield* hashToken(token)))
             return HttpServerResponse.text("Unauthorized", { status: 401 });
           const split = splitPath(request.url, "/egress");
-          const base = request.headers[EGRESS_BASE_HEADER] ?? "";
+          const base = readHeader(request.headers, "egress-base") ?? "";
           if (
             split === null ||
             !(

@@ -1,10 +1,10 @@
 /**
- * A made-up fleet for `FLEETX_UI_FIXTURES=1 vp dev`: three machines, a few
+ * A made-up fleet for `T3_FLEET_UI_FIXTURES=1 vp dev`: three machines, a few
  * findings, a proposal, skills, a hub with servers and calls, model proxy traffic.
  * Typed against Api.ts so it stays in step with the real server. Writes
  * succeed and change nothing.
  */
-import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@fleetx/core/Api";
+import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@t3-fleet/core/Api";
 
 const now = Date.now();
 const min = 60_000;
@@ -35,7 +35,7 @@ const session: UiSession = { version: "0.4.0", self: "laptop", authority: true, 
 const status: UiStatus = {
   checkedAt: now - 20_000,
   elapsedMs: 3200,
-  summary: "fleetx  3 environments  2 warnings  (3.2s)",
+  summary: "T3 Fleet  3 environments  2 warnings  (3.2s)",
   environments: [
     {
       name: "laptop",
@@ -48,7 +48,7 @@ const status: UiStatus = {
         { name: "codex", version: "0.160.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/fleetx-claude", viaModels: true },
+        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
         { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.160.0", runs: "~/.local/bin/codex", viaModels: false },
       ],
       sync: { at: now - 2 * min, result: "ok", streak: 0, message: "converged" },
@@ -69,7 +69,7 @@ const status: UiStatus = {
         { name: "codex", version: "0.159.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/fleetx-claude", viaModels: true },
+        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
         { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.159.0", runs: "~/.local/bin/codex", viaModels: false },
       ],
       sync: { at: now - 7 * min, result: "ok", streak: 0, message: "converged" },
@@ -118,9 +118,9 @@ const status: UiStatus = {
       node: "laptop",
       severity: "warn",
       area: "skills",
-      title: "skill scratchpad was installed in ~/.codex/skills outside fleetx",
+      title: "skill scratchpad was installed in ~/.codex/skills outside T3 Fleet",
       detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
-      fix: { command: "fleetx skills adopt scratchpad --from ~/.codex/skills", safe: true },
+      fix: { command: "t3-fleet skills adopt scratchpad --from ~/.codex/skills", safe: true },
     },
     { id: "laptop:claude-other-copies", node: "laptop", severity: "info", area: "agents", title: "another claude on PATH", accepted: "the distribution ships its own package" },
   ],

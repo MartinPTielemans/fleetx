@@ -5,7 +5,7 @@ Topology is configuration. Every node has one or more roles:
 | role | does |
 |---|---|
 | `authority` | approves proposals, changes secrets; its own changes under `auto_commit` paths are committed directly |
-| `relay` | runs `fleetx relay serve`: events, published state, the MCP hub (optional) |
+| `relay` | runs `t3-fleet relay serve`: events, published state, the MCP hub (optional) |
 | `member` | converges, reports, proposes |
 
 Git is always the hub. A relay only makes things faster.
@@ -17,7 +17,7 @@ Git is always the hub. A relay only makes things faster.
 roles = ["authority"]
 ```
 
-`fleetx init` writes exactly this. The repository is backup, history, and the
+`t3-fleet init` writes exactly this. The repository is backup, history, and the
 place your skills and MCP servers are declared.
 
 ## Laptop and an always-on server
@@ -36,9 +36,9 @@ url = "https://server.tailnet.ts.net:8399"
 port = 8399
 ```
 
-Add the relay token once: `fleetx secrets set FLEETX_RELAY_TOKEN=$(openssl rand -hex 32)`.
-The relay area installs `fleetx relay serve` on the server and publishes it on
-the tailnet; every other node runs `fleetx listen` and syncs seconds after the
+Add the relay token once: `t3-fleet secrets set FLEETX_RELAY_TOKEN=$(openssl rand -hex 32)`.
+The relay area installs `t3-fleet relay serve` on the server and publishes it on
+the tailnet; every other node runs `t3-fleet listen` and syncs seconds after the
 branch moves. A laptop that slept catches up on the events it missed.
 
 ### The MCP hub
@@ -56,7 +56,7 @@ servers = ["fetch", "posthog"]
 
 The hub runs every definition in `mcp/` with a hosted kind (`remote`,
 `container`, `registry`, `hosted-stdio`) on the relay node, with Docker for
-images. Sign in to OAuth servers once with `fleetx mcp login <name>`; the
+images. Sign in to OAuth servers once with `t3-fleet mcp login <name>`; the
 callback goes to the relay, so it works from any browser on the tailnet. See
 [areas](areas.md#the-hub).
 
@@ -74,10 +74,10 @@ ports = { fetch = 18100 }      # where each hosted server listens on the server
 1. Set `hub = true` and `gateway` in `[defaults.mcp]`; `ports` and `origin`
    are no longer needed. Sync: clients are re-registered at
    `<gateway>/mcp/<name>`.
-2. `fleetx mcp servers` shows which servers need a sign-in; run
-   `fleetx mcp login <name>` for each.
-3. `fleetx status` reports `mcp-toolhive-left` on machines where ToolHive
-   still runs those servers; `fleetx fix --area mcp` stops them.
+2. `t3-fleet mcp servers` shows which servers need a sign-in; run
+   `t3-fleet mcp login <name>` for each.
+3. `t3-fleet status` reports `mcp-toolhive-left` on machines where ToolHive
+   still runs those servers; `t3-fleet fix --area mcp` stops them.
 
 ## Two laptops, no server
 
@@ -119,4 +119,4 @@ profiles = ["workstation"]
 
 Layers apply in order: `[defaults]` in fleetx.toml, then each profile, then the
 node. Tables merge; lists are replaced unless a layer uses `.add` or `.remove`.
-`fleetx config show <node>` prints the result and where each value came from.
+`t3-fleet config show <node>` prints the result and where each value came from.

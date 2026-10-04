@@ -1,8 +1,9 @@
 {
-  "name": "fleetx",
+  "name": "t3-fleet",
   "private": false,
   "type": "module",
   "bin": {
+    "t3-fleet": "./dist/bin.mjs",
     "fleetx": "./dist/bin.mjs"
   },
   "scripts": {
@@ -13,7 +14,7 @@
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "vite-plus": "catalog:",
-    "@fleetx/core": "workspace:*",
+    "@t3-fleet/core": "workspace:*",
     "effect": "catalog:",
     "@effect/platform-node": "catalog:"
   },

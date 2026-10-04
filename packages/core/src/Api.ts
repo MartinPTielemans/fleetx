@@ -1,5 +1,5 @@
 /**
- * Shapes shared between fleetx's long-running parts and the UI (see
+ * Shapes shared between T3 Fleet's long-running parts and the UI (see
  * docs/design/companion.md). The model proxy and the hub produce these; the
  * UI server serves them; the UI reads them. One schema per shape, decoded on
  * both ends, so they agree by construction.
@@ -8,7 +8,7 @@
  *   relay (hub)  GET /hub/servers              HubServer[]
  *                POST /hub/servers/<n>/login   HubLoginStart
  *                GET /hub/calls                HubCall[]
- *   fleetx ui    GET  /api/status              UiStatus
+ *   t3-fleet ui    GET  /api/status              UiStatus
  *                POST /api/fixes               UiApplyRequest → UiApplyResult
  *                GET  /api/proposals           UiProposal[]
  *                POST /api/proposals/<node>/approve | /reject
@@ -160,7 +160,7 @@ export const UiProvider = Schema.Struct({
   startsInT3: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
   runs: Schema.NullOr(Schema.String),
-  /** Whether T3 launches it through the fleetx model proxy. */
+  /** Whether T3 launches it through the T3 Fleet model proxy. */
   viaModels: Schema.Boolean,
 });
 
@@ -182,7 +182,7 @@ export type UiEnvironment = typeof UiEnvironment.Type;
 export const UiStatus = Schema.Struct({
   checkedAt: Schema.Number,
   elapsedMs: Schema.Number,
-  /** The same text `fleetx status` prints. */
+  /** The same text `t3-fleet status` prints. */
   summary: Schema.String,
   environments: Schema.Array(UiEnvironment),
   findings: Schema.Array(UiFinding),
@@ -240,7 +240,7 @@ export const UiSkillsNode = Schema.Struct({
   at: Schema.NullOr(Schema.Number),
   store: Schema.NullOr(Schema.String),
   links: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String, state: UiSkillLinkState })),
-  /** Skills installed outside fleetx: name and directory. */
+  /** Skills installed outside T3 Fleet: name and directory. */
   strays: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
   dangling: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
   /** [skills] ignore on this machine. */

@@ -1,5 +1,5 @@
 /**
- * The model proxy: `fleetx models serve`, on 127.0.0.1:8398 on every node,
+ * The model proxy: `t3-fleet models serve`, on 127.0.0.1:8398 on every node,
  * between T3's providers and the model providers (docs/design/companion.md).
  *
  *   *   /<upstream>/*  → that upstream's url (Recipes.ts): /anthropic/* to
@@ -68,12 +68,13 @@ import {
 } from "./Forward.ts";
 import { BUILTIN_UPSTREAMS, MODELS_PORT, type Upstreams } from "./Recipes.ts";
 import { appendRecord, loadFallbacks, loadRecords, MAX_RECORDS, proxyStats, WINDOWS, type RequestRecord } from "./Stats.ts";
+import { legacyHeader } from "../Names.ts";
 
 export { MODELS_PORT };
 
 export interface ModelProxyOptions {
   readonly home: string;
-  /** fleetx's version, reported in /stats. */
+  /** T3 Fleet's version, reported in /stats. */
   readonly version: string;
   readonly egress: "direct" | "relay";
   /** Where egress = "relay" sends requests, and the token it needs. */
@@ -146,7 +147,7 @@ export const withKeepalive = <E>(stream: Stream.Stream<Uint8Array, E>, every: Du
 export const proxyRefusal = (headers: Readonly<Record<string, string | undefined>>, port: number): { readonly status: number; readonly message: string } | null => {
   const allowed = ["127.0.0.1", "localhost"].map((h) => `${h}:${port}`);
   const host = headers["host"];
-  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "the fleetx model proxy answers only on its loopback address" };
+  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "the T3 Fleet model proxy answers only on its loopback address" };
   const origin = headers["origin"];
   if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
   return null;
@@ -203,7 +204,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
         const split = splitPath(request.url);
         if (split === null) return HttpServerResponse.text("Not Found", { status: 404 });
         if ((request.headers["upgrade"] ?? "").toLowerCase() === "websocket") {
-          return HttpServerResponse.text("The fleetx model proxy speaks HTTP only", { status: 426 });
+          return HttpServerResponse.text("The T3 Fleet model proxy speaks HTTP only", { status: 426 });
         }
         const { upstream, rest } = split;
         const direct = targetUrl(upstreams(), upstream, rest, request.headers);
@@ -213,8 +214,9 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
         if (options.egress === "relay" && options.relay !== undefined) {
           // The relay forwards to the base this node resolved; the rest of the path follows.
           url = `${options.relay.url.replace(/\/+$/, "")}/egress/${upstream}${rest}`;
-          headers[RELAY_TOKEN_HEADER] = options.relay.token;
-          headers[EGRESS_BASE_HEADER] = direct.slice(0, direct.length - rest.length);
+          // A relay on a build from before the rename reads only the fleetx names. Until 1.0.
+          headers[RELAY_TOKEN_HEADER] = headers[legacyHeader("relay-token")] = options.relay.token;
+          headers[EGRESS_BASE_HEADER] = headers[legacyHeader("egress-base")] = direct.slice(0, direct.length - rest.length);
         }
         const body = request.method === "GET" || request.method === "HEAD" ? null : new Uint8Array(yield* request.arrayBuffer);
         const host = new URL(url).host;
@@ -240,7 +242,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) =>
               continue;
             }
             yield* record({ status: null, attempts: attempt + 1, ttfbMs: null, failure: timedOut ? "timeout" : "connect", error: message });
-            return HttpServerResponse.text(`fleetx model proxy: ${message}`, { status: timedOut ? 504 : 502 });
+            return HttpServerResponse.text(`T3 Fleet model proxy: ${message}`, { status: timedOut ? 504 : 502 });
           }
           const response = result.success.value;
           const delay = retryDelay({

@@ -365,7 +365,7 @@ export const makeOAuthManager = (options: {
             message: `${discovery.issuer} offers no dynamic client registration; register a client there with redirect URI ${options.redirectUri} and add oauth = { client_id = "…", client_secret_env = "…" } to mcp/${definition.name}.json`,
           });
         }
-        const registered = yield* provide(register(discovery.metadata, discovery.issuer, options.redirectUri, options.clientName ?? "fleetx hub"));
+        const registered = yield* provide(register(discovery.metadata, discovery.issuer, options.redirectUri, options.clientName ?? "T3 Fleet hub"));
         yield* options.store.update((s) => [undefined, withServer(s, definition.name, { ...s.servers[definition.name], client: registered })]);
         return registered;
       });

@@ -44,7 +44,7 @@ afterAll(async () => {
 });
 
 const fixture = (definitions: Record<string, unknown>) => {
-  const dir = mkdtempSync(join(tmpdir(), "fleetx-hub-"));
+  const dir = mkdtempSync(join(tmpdir(), "t3-fleet-hub-"));
   mkdirSync(join(dir, "repo/mcp"), { recursive: true });
   for (const [name, d] of Object.entries(definitions)) writeFileSync(join(dir, "repo/mcp", `${name}.json`), JSON.stringify(d));
   return dir;
@@ -109,7 +109,7 @@ describe("hub OAuth", () => {
         // A call before signing in is refused with a clear state, never the upstream's 401.
         const refused = yield* rpc(hub, "protected", "tools/list", {});
         expect(refused.status).toBe(503);
-        expect(refused.headers["x-fleetx-hub-state"]).toBe("needs-login");
+        expect(refused.headers["x-t3-fleet-hub-state"]).toBe("needs-login");
 
         const url = new URL(yield* hub.login("protected"));
         expect(mcp.metadataHits().wellKnown).toBe(1);

@@ -12,16 +12,16 @@ import { McpProtocol, McpServer } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
-import { checkNodes, type CheckReport } from "@fleetx/core/Check";
-import type { Finding, Fix } from "@fleetx/core/Diagnose";
-import { runFixes } from "@fleetx/core/Fix";
-import { loadConfig, ProbeSettings, type Config } from "@fleetx/core/Config";
-import { FleetToolkit, fleetHandlers } from "@fleetx/core/Mcp";
-import { compareWithLast } from "@fleetx/core/Memory";
-import { MachineObservation } from "@fleetx/core/Observation";
-import { probeMachine } from "@fleetx/core/Probe";
-import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderStatus } from "@fleetx/core/Render";
-import { describeMerged } from "@fleetx/core/Settings";
+import { checkNodes, type CheckReport } from "@t3-fleet/core/Check";
+import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
+import { runFixes } from "@t3-fleet/core/Fix";
+import { loadConfig, ProbeSettings, type Config } from "@t3-fleet/core/Config";
+import { FleetToolkit, fleetHandlers } from "@t3-fleet/core/Mcp";
+import { compareWithLast } from "@t3-fleet/core/Memory";
+import { MachineObservation } from "@t3-fleet/core/Observation";
+import { probeMachine } from "@t3-fleet/core/Probe";
+import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderStatus } from "@t3-fleet/core/Render";
+import { describeMerged } from "@t3-fleet/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
 import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
@@ -136,13 +136,13 @@ const fixCommand = Command.make("fix", {
 );
 
 const doctorCommand = Command.make("doctor", { node: nodeFlag }).pipe(
-  Command.withDescription("Check what fleetx and T3 run on: Node, git transport, PATH, fleetx's own git config."),
+  Command.withDescription("Check what T3 Fleet and T3 run on: Node, git transport, PATH, T3 Fleet's own git config."),
   Command.withHandler(({ node }) =>
     Effect.gen(function* () {
       const { config, bundle, shown } = yield* prepare(node);
       const report = narrow(yield* checkNodes(config, bundle), shown);
       const findings = report.findings.filter((f) => f.area === "runtime" || f.area === "reach");
-      yield* Console.log(renderFindings("fleetx doctor", report.results.length, findings, report.elapsedMs));
+      yield* Console.log(renderFindings("t3-fleet doctor", report.results.length, findings, report.elapsedMs));
       if (findings.some((f) => f.severity === "error")) process.exitCode = 1;
     }).pipe(reportUserErrors),
   ),
@@ -172,7 +172,7 @@ const configCommand = Command.make("config").pipe(
 );
 
 /**
- * MCP over stdio for agents: register `fleetx mcp` with Claude Code or Codex
+ * MCP over stdio for agents: register `t3-fleet mcp` with Claude Code or Codex
  * and every T3 thread can check and fix the user's environments.
  */
 const mcpServeCommand = Command.make("mcp").pipe(
@@ -200,14 +200,14 @@ const mcpServeCommand = Command.make("mcp").pipe(
       return yield* Layer.launch(
         McpServer.toolkit(FleetToolkit).pipe(
           Layer.provide(handlers),
-          Layer.provide(McpServer.layerStdio({ name: "fleetx", version: packageJson.version, protocols: [McpProtocol.v2025_06_18] })),
+          Layer.provide(McpServer.layerStdio({ name: "t3-fleet", version: packageJson.version, protocols: [McpProtocol.v2025_06_18] })),
         ),
       );
     }).pipe(reportUserErrors),
   ),
 );
 
-const cli = Command.make("fleetx").pipe(
+const cli = Command.make("t3-fleet").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
   Command.withSubcommands([
     initCommand,

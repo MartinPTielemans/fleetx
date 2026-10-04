@@ -1,5 +1,5 @@
 /**
- * What fleetx remembers between runs, so a scheduled check can say "nothing
+ * What T3 Fleet remembers between runs, so a scheduled check can say "nothing
  * changed" instead of repeating the same report every day.
  *
  * Also how intended differences apply. A finding listed in fleetx.toml
@@ -14,6 +14,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type { Finding } from "./Diagnose.ts";
+import { stateDir } from "./Names.ts";
 
 /** "laptop:t3-behind": the machine and what is wrong there, stable across checks. */
 export const findingId = (f: Finding) => `${f.node}:${f.key}`;
@@ -24,7 +25,7 @@ const Remembered = Schema.Struct({
 });
 type Remembered = typeof Remembered.Type;
 
-const statePath = () => `${process.env["HOME"] ?? ""}/.local/state/fleetx/last-check.json`;
+const statePath = () => `${stateDir(process.env["HOME"] ?? "")}/last-check.json`;
 
 /** Findings with accepted differences (fleetx.toml `[[accept]]`) turned into notes. */
 export const applyAccepted = (findings: ReadonlyArray<Finding>, accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }> = []) => {

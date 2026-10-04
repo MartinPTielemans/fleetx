@@ -6,9 +6,9 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Flag } from "effect/unstable/cli";
 
-import type { CheckReport } from "@fleetx/core/Check";
-import { loadConfig } from "@fleetx/core/Config";
-import { newBuild } from "@fleetx/core/Runtime";
+import type { CheckReport } from "@t3-fleet/core/Check";
+import { loadConfig } from "@t3-fleet/core/Config";
+import { newBuild } from "@t3-fleet/core/Runtime";
 
 /**
  * The bundle that gets streamed to other machines. Running from dist/bin.mjs
@@ -63,7 +63,7 @@ export const userMessage = (error: unknown): string =>
 export const reportUserErrors = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.catchIf(isUserError, (error) =>
-      Console.error(`fleetx: ${userMessage(error)}`).pipe(
+      Console.error(`T3 Fleet: ${userMessage(error)}`).pipe(
         Effect.andThen(Effect.sync(() => {
           process.exitCode = 1;
         })),
@@ -84,5 +84,5 @@ export const nodeFlag = Flag.String("node").pipe(
 export const untilNewBuild = <A, E, R>(service: Effect.Effect<A, E, R>) =>
   Effect.raceFirst(
     service,
-    newBuild(process.argv[1] ?? "").pipe(Effect.flatMap(() => Console.log("a new fleetx build is installed; exiting so the service restarts on it"))),
+    newBuild(process.argv[1] ?? "").pipe(Effect.flatMap(() => Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it"))),
   );

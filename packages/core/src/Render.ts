@@ -91,7 +91,7 @@ export const renderStatus = (
     notes > 0 ? c.dim(`${notes} note${notes === 1 ? "" : "s"}`) : "",
   ].filter(Boolean);
   const summary = errors + warns === 0 ? [c.green("everything matches"), ...counts].join(", ") : counts.join(", ");
-  lines.push(`${c.bold("fleetx")}  ${results.length} environment${results.length === 1 ? "" : "s"}  ${summary}  ${c.dim(`(${(options.elapsedMs / 1000).toFixed(1)}s)`)}`);
+  lines.push(`${c.bold("T3 Fleet")}  ${results.length} environment${results.length === 1 ? "" : "s"}  ${summary}  ${c.dim(`(${(options.elapsedMs / 1000).toFixed(1)}s)`)}`);
   lines.push("");
 
   const header = ["", "T3", "CLAUDE", "CODEX", "PROVIDERS IN T3", "SYNC"];
@@ -135,10 +135,10 @@ export const renderFixPlan = (
   const lines: Array<string> = [];
   const manual = findings.filter((f) => f.fix === undefined && f.severity !== "info");
   if (fixes.length === 0) {
-    lines.push(`${c.bold("fleetx fix")}  nothing to apply`);
+    lines.push(`${c.bold("t3-fleet fix")}  nothing to apply`);
   } else {
     const machines = new Set(fixes.map((f) => f.node)).size;
-    lines.push(`${c.bold("fleetx fix")}  ${fixes.length} fix${fixes.length === 1 ? "" : "es"} on ${machines} machine${machines === 1 ? "" : "s"}`);
+    lines.push(`${c.bold("t3-fleet fix")}  ${fixes.length} fix${fixes.length === 1 ? "" : "es"} on ${machines} machine${machines === 1 ? "" : "s"}`);
     for (const [node, items] of groupByNode(fixes)) {
       lines.push("");
       for (const f of items) {

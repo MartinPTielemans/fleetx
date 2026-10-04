@@ -1,5 +1,5 @@
 /**
- * The server behind `fleetx ui`: the built app and its /api, on 127.0.0.1.
+ * The server behind `t3-fleet ui`: the built app and its /api, on 127.0.0.1.
  *
  *   GET  /api/session, /api/status, /api/proposals, /api/alerts,
  *        /api/models, /api/config/<node>, /api/hub/servers, /api/hub/calls,
@@ -14,7 +14,7 @@
  *
  * Other websites in the same browser must not be able to read the fleet or
  * drive fixes. Every /api request needs this run's token (the browser gets it
- * in the URL fragment `fleetx ui` opens, and sends it as a header; a page on
+ * in the URL fragment `t3-fleet ui` opens, and sends it as a header; a page on
  * another origin cannot read it or set that header without a CORS preflight,
  * which is never granted). The Host header must name this loopback port, so a
  * DNS-rebinding page cannot pose as the same origin, and an Origin, when sent,
@@ -24,7 +24,7 @@
  * Applying fixes follows fleet_apply_fixes: it checks again first and runs
  * only fixes that check still proposes.
  *
- * Skill changes edit the config repo the way `fleetx skills` does, one at a
+ * Skill changes edit the config repo the way `t3-fleet skills` does, one at a
  * time: an authority commits them, any other machine's next sync proposes
  * them. Linking them on each machine stays a fix, shown before it runs. An
  * update is previewed first and kept only if upstream still gives the same
@@ -84,6 +84,7 @@ import type { MachineObservation } from "./Observation.ts";
 import { renderStatus } from "./Render.ts";
 import type { NodeState } from "./State.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
+import { isLauncher } from "./Names.ts";
 
 /** A full check, with what it needs to be shown: published sync states and accepted differences. */
 export interface UiCheck {
@@ -92,7 +93,7 @@ export interface UiCheck {
   readonly accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
 }
 
-/** What the server does on the fleet; `fleetx ui` wires these to the real engine, tests to fakes. */
+/** What the server does on the fleet; `t3-fleet ui` wires these to the real engine, tests to fakes. */
 export interface UiActions {
   readonly check: Effect.Effect<UiCheck, string>;
   readonly apply: (fixes: ReadonlyArray<Finding & { readonly fix: Fix }>) => Effect.Effect<ReadonlyArray<FixOutcome>>;
@@ -136,13 +137,13 @@ export interface UiServerOptions {
 
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
-/** The models area's launchers are ~/.local/bin/fleetx-<provider> (docs/design/companion.md). */
-const viaModelsLauncher = (binaryPath: string | null) => binaryPath !== null && basename(binaryPath).startsWith("fleetx-");
+/** The models area's launchers are ~/.local/bin/t3-fleet-<provider> (docs/design/companion.md). */
+const viaModelsLauncher = (binaryPath: string | null) => binaryPath !== null && isLauncher(basename(binaryPath));
 
 /**
  * The model proxy's stats, as the models area reports them in an observation:
  * read loosely, as top-level `models` or the area's `stats`, so a node on an
- * older fleetx is "not reported" rather than an error.
+ * older T3 Fleet is "not reported" rather than an error.
  */
 const observed = <S extends Schema.Top & { readonly DecodingServices: never }>(obs: MachineObservation, key: string, schema: S): S["Type"] | null => {
   const top = (obs as unknown as Readonly<Record<string, unknown>>)[key];
@@ -284,12 +285,12 @@ export const refusal = (
 ): { readonly status: number; readonly message: string } | null => {
   const allowed = LOOPBACK.map((h) => `${h}:${options.port}`);
   const host = request.headers["host"];
-  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "fleetx ui answers only on its loopback address" };
+  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "t3-fleet ui answers only on its loopback address" };
   const origin = request.headers["origin"];
   if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
   if (options.token === null) return null;
-  const token = request.headers["x-fleetx-token"] ?? query.get("token") ?? "";
-  if (!constantTimeEqual(token, options.token)) return { status: 401, message: "missing or stale token: open the link `fleetx ui` printed" };
+  const token = request.headers["x-t3-fleet-token"] ?? query.get("token") ?? "";
+  if (!constantTimeEqual(token, options.token)) return { status: 401, message: "missing or stale token: open the link `t3-fleet ui` printed" };
   return null;
 };
 
@@ -317,7 +318,7 @@ const jsonResponse = <S extends Schema.Top & { readonly EncodingServices: never 
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-/** What `fleetx skills add` takes: owner/repo, or an https or ssh git URL. */
+/** What `t3-fleet skills add` takes: owner/repo, or an https or ssh git URL. */
 const SKILL_SOURCE = /^(?:[\w.-]+\/[\w.-]+|https:\/\/[^\s]+|git@[\w.-]+:[^\s]+|ssh:\/\/[^\s]+)$/;
 
 interface ServerEvent {
@@ -660,7 +661,7 @@ export const uiLayer = (options: UiServerOptions) =>
           const asset = options.assets.get(path);
           const served = asset ?? (/\.[a-z0-9]+$/i.test(path) ? undefined : options.assets.get("/index.html"));
           if (served === undefined) {
-            return plain(options.assets.size === 0 ? "this build of fleetx has no UI; build it with `pnpm --filter fleetx build`" : "not found", 404);
+            return plain(options.assets.size === 0 ? "this build of T3 Fleet has no UI; build it with `pnpm --filter t3-fleet build`" : "not found", 404);
           }
           return HttpServerResponse.uint8Array(served.body, {
             contentType: served.type,

@@ -69,6 +69,7 @@ import {
   type Upstream,
   type UpstreamResponse,
 } from "./Upstream.ts";
+import { configDir, header, legacyHeader, stateDir as fleetStateDir } from "../Names.ts";
 
 export interface HubEvent {
   readonly server: string;
@@ -91,7 +92,7 @@ export interface HubConfig {
   /** The shared relay token; accepted by the gateway as client "relay". */
   readonly relayToken: string;
   readonly version: string;
-  /** Default ~/.local/state/fleetx/hub. */
+  /** Default ~/.local/state/t3-fleet/hub. */
   readonly stateDir?: string;
   readonly checkEvery?: Duration.Input;
   /** Tests only: accept plain-HTTP OAuth URLs on loopback. Never set in the relay. */
@@ -165,7 +166,8 @@ export const parseDotenv = (text: string) => {
 
 const CLIENT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
-const STATE_HEADER = "x-fleetx-hub-state";
+/** Sent under its fleetx name too, for a controller on a build from before the rename. Until 1.0. */
+const stateHeaders = (state: string) => ({ [header("hub-state")]: state, [legacyHeader("hub-state")]: state });
 
 const jsonRpcFailure = (status: number, message: string, headers: Readonly<Record<string, string>> = {}) =>
   textResponse(status, toJson(errorMessage(null, -32001, message)), headers);
@@ -196,17 +198,17 @@ export const makeHub = (
     const path = yield* Path.Path;
     const services = yield* Effect.context<FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>();
     const hubScope = yield* Effect.scope;
-    const stateDir = config.stateDir ?? path.join(config.home, ".local/state/fleetx/hub");
+    const stateDir = config.stateDir ?? path.join(fleetStateDir(config.home), "hub");
     const secrets =
       config.secrets ??
-      fs.readFileString(path.join(config.home, ".config/fleetx/secrets.env")).pipe(
+      fs.readFileString(path.join(configDir(config.home), "secrets.env")).pipe(
         Effect.map(parseDotenv),
         Effect.orElseSucceed(() => ({}) as Record<string, string>),
       );
     const store: TokenStore = yield* makeTokenStore({ file: config.stateDir === undefined ? tokenStorePath(config.home) : path.join(stateDir, "tokens.age"), identity: config.identity });
     const log = yield* makeCallLog(path.join(stateDir, "calls.jsonl"));
     const redirectUri = config.relayUrl === null ? "" : `${config.relayUrl.replace(/\/+$/, "")}/oauth/callback`;
-    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "fleetx hub", allowLoopbackHttp: config.allowLoopbackHttp === true });
+    const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "T3 Fleet hub", allowLoopbackHttp: config.allowLoopbackHttp === true });
 
     const entries = new Map<string, Entry>();
     let problems: ReadonlyArray<{ readonly name: string; readonly problem: string }> = [];
@@ -218,7 +220,7 @@ export const makeHub = (
         entry.state = state;
         entry.detail = detail;
         if (!changed) return;
-        if (state === "needs-login") yield* Effect.logWarning(`hub: ${entry.def.name} needs a sign-in: fleetx mcp login ${entry.def.name}`);
+        if (state === "needs-login") yield* Effect.logWarning(`hub: ${entry.def.name} needs a sign-in: t3-fleet mcp login ${entry.def.name}`);
         if (state === "error") yield* Effect.logWarning(`hub: ${entry.def.name}: ${detail ?? "error"}`);
         yield* emit({ server: entry.def.name, state, detail });
       });
@@ -379,7 +381,7 @@ export const makeHub = (
         const init = yield* entry.upstream.forward({
           method: "POST",
           headers: { "content-type": "application/json", accept, "mcp-protocol-version": "2025-06-18" },
-          body: toJson({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fleetx-hub", version: config.version } } }),
+          body: toJson({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3-fleet-hub", version: config.version } } }),
         });
         const initText = yield* readBody(init).pipe(Effect.orElseSucceed(() => ""));
         if (init.status < 200 || init.status >= 300) return yield* new UpstreamError({ message: `initialize answered HTTP ${init.status}` });
@@ -567,11 +569,11 @@ export const makeHub = (
 
         // Keys that differ only in case would let the server see another tool than the policy did.
         if (messages.some((m) => caseVariantKey(m) !== null)) {
-          return yield* refuse(400, -32600, () => "fleetx hub: refused a message with keys that differ only in case", () => "denied");
+          return yield* refuse(400, -32600, () => "T3 Fleet hub: refused a message with keys that differ only in case", () => "denied");
         }
         // A tools/call must name its tool plainly.
         const unnamed = requests.some((m) => m.method === "tools/call" && toolOf(m) === null);
-        if (unnamed) return yield* refuse(400, -32602, () => "fleetx hub: tools/call needs a string params.name", () => "denied");
+        if (unnamed) return yield* refuse(400, -32602, () => "T3 Fleet hub: tools/call needs a string params.name", () => "denied");
 
         // Tool policy: a batch with any denied call is refused as a whole. Over-long names are denied.
         const denied = requested.filter((r) => r.tool !== null && entry.denied(r.tool));
@@ -579,7 +581,7 @@ export const makeHub = (
           return yield* refuse(
             200,
             -32003,
-            (r) => (denied.includes(r) ? "fleetx hub: this tool is not allowed on this server" : "fleetx hub: refused with a denied tool call in the same batch"),
+            (r) => (denied.includes(r) ? "T3 Fleet hub: this tool is not allowed on this server" : "T3 Fleet hub: refused with a denied tool call in the same batch"),
             (r) => (denied.includes(r) ? "denied" : "error"),
           );
         }
@@ -591,12 +593,12 @@ export const makeHub = (
           const e = result.failure;
           if (e._tag === "NeedsLogin") {
             yield* setState(entry, "needs-login", e.message);
-            const message = `fleetx hub: ${name} needs a sign-in (fleetx mcp login ${name})`;
+            const message = `T3 Fleet hub: ${name} needs a sign-in (t3-fleet mcp login ${name})`;
             yield* recordAll(requested, name, client, "error", "needs-login", startedAt);
-            return jsonRpcFailure(503, message, { [STATE_HEADER]: "needs-login" });
+            return jsonRpcFailure(503, message, stateHeaders("needs-login"));
           }
           yield* recordAll(requested, name, client, "error", "upstream unreachable", startedAt);
-          return jsonRpcFailure(502, `fleetx hub: ${e.message}`, { [STATE_HEADER]: entry.state });
+          return jsonRpcFailure(502, `T3 Fleet hub: ${e.message}`, stateHeaders(entry.state));
         }
         const opened = result.success.headers["mcp-session-id"];
         if (opened !== undefined && !sessionOwners.has(sessionKey(name, opened))) {
