@@ -381,11 +381,30 @@ export const snapshot = (repo: string, paths: ReadonlyArray<string>) =>
   });
 
 /**
+ * What the index has under `paths` now (`ls-files --stage -z`), for
+ * restorePaths to put back. Callers refuse unresolved merges there first:
+ * only resolved entries can be put back.
+ */
+export const indexEntries = (repo: string, paths: ReadonlyArray<string>) =>
+  git(repo, ["ls-files", "--stage", "-z", "--", ...paths], { env: literal }).pipe(
+    Effect.flatMap((r) =>
+      ok(r) ? Effect.succeed(r.stdout) : Effect.fail(`reading the index: ${why(r)}`),
+    ),
+  );
+
+/**
  * Put `paths` back as `tree` (a snapshot) has them, HEAD by default, new
  * files removed: for undoing what a refused command wrote. Edits made before
  * the snapshot stay; without one, `paths` must be files the command wrote.
+ * Their index entries go back to HEAD's, or to `index` (indexEntries) when
+ * given, so what was staged before stays staged.
  */
-export const restorePaths = (repo: string, paths: ReadonlyArray<string>, tree = "HEAD") =>
+export const restorePaths = (
+  repo: string,
+  paths: ReadonlyArray<string>,
+  tree = "HEAD",
+  index?: string,
+) =>
   Effect.gen(function* () {
     if (paths.length === 0) return;
     const fs = yield* FileSystem.FileSystem;
@@ -406,6 +425,13 @@ export const restorePaths = (repo: string, paths: ReadonlyArray<string>, tree = 
       if (!ok(back)) return yield* Effect.fail(`putting ${paths.join(", ")} back: ${why(back)}`);
       // checkout stages what it writes: the index goes back to HEAD's.
       yield* git(repo, ["reset", "-q", "--", ...kept], { env: literal });
+    }
+    if (index !== undefined) {
+      yield* git(repo, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...paths], {
+        env: literal,
+      });
+      const back = yield* git(repo, ["update-index", "-z", "--index-info"], { stdin: index });
+      if (!ok(back)) return yield* Effect.fail(`putting the index back: ${why(back)}`);
     }
   });
 

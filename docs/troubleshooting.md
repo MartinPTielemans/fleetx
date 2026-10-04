@@ -158,11 +158,54 @@ is missing, invalid, or cannot be resolved (a hosted server with neither
 `[mcp] hub = true` and `gateway`, nor an `origin` and port).
 
 **`mcp-<name>-unregistered`** — Claude or Codex has the server registered
-differently from the definition, or not at all. The fix re-registers it. When
-the existing registration has settings a definition cannot express (an `env`,
-headers besides Authorization, Codex's per-server options such as
-`startup_timeout_sec`), the detail names them and sync leaves the fix to a
-person, since re-registering would drop them.
+differently from the definition, or not at all: another URL or command, a
+declared `env` variable or header with another value (a rotated secret), or
+an SSE server registered as streamable HTTP. The fix re-registers it. When the
+existing registration has settings the replacement would not write (a variable
+or header it does not declare, an Authorization header or
+`bearer_token_env_var` without bearer `auth` in the definition, Codex's
+per-server options such as `startup_timeout_sec`), the detail names them and sync leaves the fix to a
+person, since re-registering would drop them; add them to the definition
+(`env`, `headers`) to keep them.
+
+**`mcp-<name>-secret-missing`** — the definition refers to a fleet secret
+(`"$NAME"` in its `env` or `headers`, `$NAME` in its `url` or `args`, or its
+`auth` token) that this machine has neither in
+`~/.config/t3-fleet/secrets.env` nor in its environment. Set it on an
+authority with `t3-fleet secrets set NAME=…`; every machine gets it on its
+next sync. Claude stores the value, so its registration waits until then.
+
+**`mcp-<name>-not-in-codex`** — Codex cannot use the server, so it is
+registered in Claude alone. Either it speaks only the older SSE transport
+(`"transport": "sse"`), which Codex lacks: point the definition's `url` at a
+streamable HTTP endpoint if the server has one, and drop `transport`. Or its
+`url` holds a secret (`?apiKey=$KEY`), which Codex could only keep literally
+in config.toml: if the server also accepts the credential as a header,
+declare it in `headers` instead.
+
+**`mcp-claude-config-exposed`** — Claude's config, or one of the backups
+Claude keeps of it (`~/.claude/backups/.claude.json.backup.<time>`), holds one
+of this machine's secrets and other users can read it: Claude copies the
+config's mode into its backups, so a config created 644 left every
+credential readable. The fix makes those files 600. Only regular files others
+can read are looked into, within bounds, and only for the values the node's
+definitions resolve to (its secrets, then its environment) and its other
+secrets; the detail says when some copies were not looked into.
+
+**`mcp-claude-config-unchecked`** — some of Claude's config backups others
+can read were not looked into for secrets: more than 50 of them, one larger
+than 4 MB or not a regular file, a directory or file that could not be read,
+or the whole scan took longer than ten seconds. Nothing is known
+to be exposed; `chmod 600` any that may hold credentials, or remove old ones.
+
+**`mcp-undeclared`** — Claude or Codex on this machine has MCP servers (at
+user scope) that its `[mcp] servers` does not list, so the fleet neither keeps
+them in step nor carries them to other machines. T3 Fleet leaves them alone.
+To bring one in, `t3-fleet mcp add <name> …` with its URL or command (its
+credentials go into the fleet's secrets), or `t3-fleet setup` for all of them;
+one the fleet already defines in `mcp/` only needs listing in the machine's
+`[mcp] servers`. One that belongs to this machine alone (an app installed it)
+goes in its `[mcp] "ignore.add" = ["<name>"]`, and is not reported again.
 
 **`mcp-<name>-down`** — the server did not answer an `initialize`. With the
 hub, `t3-fleet mcp servers` on any machine shows why; a 401 means its

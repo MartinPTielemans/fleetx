@@ -9,12 +9,14 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type { PlatformError } from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
-import { expandHome, loadConfig, type Config } from "@t3-fleet/core/Config";
+import { expandHome, loadConfig, loadConfigFrom, type Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { exec } from "@t3-fleet/core/Exec";
-import { snapshot } from "@t3-fleet/core/Git";
+import { indexEntries, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
@@ -25,7 +27,23 @@ import {
   previewUpdate,
   removeSkills,
 } from "@t3-fleet/core/SkillSources";
+import {
+  Endpoint,
+  endpointProblem,
+  parseSecrets,
+  registerInClaude,
+  secretRef,
+} from "@t3-fleet/core/areas/Mcp";
+import { NAME_PATTERN } from "@t3-fleet/core/hub/Definitions";
 import { isSkillBackup } from "@t3-fleet/core/areas/Skills";
+import {
+  encryptedPath,
+  installSecrets,
+  localSecretsPath,
+  readSecrets,
+  setVar,
+  writeSecrets,
+} from "@t3-fleet/core/Secrets";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -36,7 +54,7 @@ import {
 } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
-import { stateDir } from "@t3-fleet/core/Names";
+import { FLEET_FILE, stateDir } from "@t3-fleet/core/Names";
 
 export const syncCommand = Command.make("sync", {
   noApply: Flag.Boolean("no-apply").pipe(
@@ -436,23 +454,328 @@ const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
  * Add `name` to a node file's MCP servers: into an existing `servers` or
  * `"servers.add"` list under [mcp], or as a new `"servers.add"` entry.
  */
-export const withMcpServer = (text: string, name: string) => {
-  const table = /^\[mcp\][ \t]*$/m.exec(text);
-  if (table !== null) {
-    const rest = text.slice(table.index);
-    const end = rest.slice(1).search(/^\[/m);
-    const body = end === -1 ? rest : rest.slice(0, end + 1);
-    const list = /^("servers\.add"|servers)[ \t]*=[ \t]*\[(.*)\][ \t]*$/m.exec(body);
-    const updated = list
-      ? body.replace(
-          list[0],
-          `${list[1]} = [${[list[2]?.trim(), JSON.stringify(name)].filter(Boolean).join(", ")}]`,
-        )
-      : body.replace(/^\[mcp\][ \t]*$/m, `[mcp]\n"servers.add" = [${JSON.stringify(name)}]`);
-    return text.slice(0, table.index) + updated + rest.slice(body.length);
-  }
-  return `${text.trimEnd()}\n\n[mcp]\n"servers.add" = [${JSON.stringify(name)}]\n`;
+export const withMcpServer = (text: string, name: string) =>
+  withMcpListItem(text, ["servers", '"servers.add"'], '"servers.add"', name);
+
+/** The [mcp] table of a node file: where its body starts and ends, or null. */
+const MCP_HEADER = /^\[mcp\][ \t]*(?:#.*)?$/m;
+
+const mcpTable = (text: string) => {
+  const table = MCP_HEADER.exec(text);
+  if (table === null) return null;
+  const rest = text.slice(table.index);
+  const end = rest.slice(1).search(/^\[/m);
+  return { start: table.index, end: end === -1 ? text.length : table.index + end + 1 };
 };
+
+/** A one-line list `key = [ … ]`, a comment after it kept. Anything else is left to the check. */
+const listLine = (key: string) =>
+  new RegExp(
+    `^(${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})[ \\t]*=[ \\t]*\\[([^\\]]*)\\]([ \\t]*#.*)?[ \\t]*$`,
+    "m",
+  );
+
+/** A list's items, with an empty one from a trailing comma dropped. */
+const listItems = (inner: string | undefined) =>
+  (inner ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+
+/**
+ * Add `name` to a list under a node file's [mcp]: the first of `keys` it has,
+ * or a new `add` entry (a new [mcp] table if need be).
+ */
+const withMcpListItem = (text: string, keys: ReadonlyArray<string>, add: string, name: string) => {
+  const table = mcpTable(text);
+  if (table === null) return `${text.trimEnd()}\n\n[mcp]\n${add} = [${JSON.stringify(name)}]\n`;
+  const body = text.slice(table.start, table.end);
+  const list = keys.map((k) => listLine(k).exec(body)).find((m) => m !== null);
+  const updated = list
+    ? body.replace(
+        list[0],
+        `${list[1]} = [${[...listItems(list[2]), JSON.stringify(name)].join(", ")}]${list[3] ?? ""}`,
+      )
+    : body.replace(MCP_HEADER, (header) => `${header}\n${add} = [${JSON.stringify(name)}]`);
+  return text.slice(0, table.start) + updated + text.slice(table.end);
+};
+
+/** Take `name` out of a list under a node file's [mcp], when it has one. */
+const withoutMcpListItem = (text: string, key: string, name: string) => {
+  const table = mcpTable(text);
+  if (table === null) return text;
+  const body = text.slice(table.start, table.end);
+  const list = listLine(key).exec(body);
+  if (list === null) return text;
+  const items = listItems(list[2]).filter(
+    (item) => item !== JSON.stringify(name) && item !== `'${name}'`,
+  );
+  return (
+    text.slice(0, table.start) +
+    body.replace(list[0], `${list[1]} = [${items.join(", ")}]${list[3] ?? ""}`) +
+    text.slice(table.end)
+  );
+};
+
+/**
+ * Stop a node file's [mcp] from ignoring `name`: out of its own `ignore` and
+ * `"ignore.add"`, and, unless its own `ignore` replaces what lower layers say,
+ * into `"ignore.remove"` for a defaults or profile entry.
+ */
+export const withoutMcpIgnore = (text: string, name: string) => {
+  const table = mcpTable(text);
+  const replaces = table !== null && listLine("ignore").test(text.slice(table.start, table.end));
+  const out = withoutMcpListItem(withoutMcpListItem(text, "ignore", name), '"ignore.add"', name);
+  return replaces ? out : withMcpListItem(out, ['"ignore.remove"'], '"ignore.remove"', name);
+};
+
+/** Words in a variable's or header's name that make its value a credential. */
+const CREDENTIAL_WORDS = new Set([
+  "TOKEN",
+  "SECRET",
+  "KEY",
+  "APIKEY",
+  "PASSWORD",
+  "PASSWD",
+  "PAT",
+  "AUTH",
+  "AUTHORIZATION",
+  "CREDENTIAL",
+  "CREDENTIALS",
+  "COOKIE",
+  "BEARER",
+  "SESSION",
+]);
+
+/** Whether a variable's or header's name says it holds a credential. */
+const credentialName = (name: string) =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .some((word) => CREDENTIAL_WORDS.has(word));
+
+/**
+ * Whether a value is clearly no credential: nothing, a number, a boolean, a
+ * path, or a URL without one (no user, password or credential-named query
+ * parameter).
+ */
+export const isHarmless = (value: string) => {
+  if (value === "" || /^-?\d+(\.\d+)?$/.test(value)) return true;
+  if (/^(true|false|yes|no|on|off)$/i.test(value)) return true;
+  if (/^(\/|~\/|\.\.?\/)/.test(value)) return true;
+  const url = URL.parse(value);
+  return (
+    url !== null &&
+    /^(https?|wss?):$/.test(url.protocol) &&
+    url.username === "" &&
+    url.password === "" &&
+    ![...url.searchParams.keys()].some(credentialName)
+  );
+};
+
+/**
+ * Whether a value goes into the fleet's secrets: any value is, unless it is
+ * clearly harmless, and even then when its name says it is a credential.
+ */
+export const isCredential = (name: string, value: string) =>
+  credentialName(name) || /^(basic|bearer|token)\s/i.test(value) || !isHarmless(value);
+
+/**
+ * The name a server's credential is kept under in the fleet's secrets: the
+ * variable's or header's own name, prefixed with the server's unless it starts
+ * with it, and numbered when the name holds another value already.
+ */
+export const secretName = (
+  server: string,
+  key: string,
+  value: string,
+  secrets: Readonly<Record<string, string>>,
+) => {
+  const upper = (s: string) =>
+    s
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  const prefix = upper(server);
+  const own = upper(key);
+  const joined = own === prefix || own.startsWith(`${prefix}_`) ? own : `${prefix}_${own}`;
+  const base = /^[A-Z_]/.test(joined) ? joined : `MCP_${joined}`;
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base}_${n}`;
+    const held = secrets[name];
+    if (held === undefined || held === value) return name;
+  }
+};
+
+/**
+ * A definition from `mcp add`'s flags. A credential's value goes into the
+ * fleet's secrets (`store`) and the definition refers to it as `$NAME`;
+ * `$NAME` given on the command line already is such a reference, and a name
+ * given to --literal keeps its value as it is.
+ */
+export const mcpDefinition = (input: {
+  readonly name: string;
+  readonly url: string | undefined;
+  readonly command: string | undefined;
+  readonly args: ReadonlyArray<string>;
+  readonly tokenEnv: string | undefined;
+  readonly env: ReadonlyArray<string>;
+  readonly headers: ReadonlyArray<string>;
+  readonly literal: ReadonlyArray<string>;
+  readonly sse: boolean;
+  readonly secrets: Readonly<Record<string, string>>;
+}):
+  | { readonly problem: string }
+  | {
+      readonly definition: Record<string, unknown>;
+      readonly store: ReadonlyArray<{ readonly name: string; readonly value: string }>;
+      readonly refs: ReadonlyArray<string>;
+    } => {
+  if ((input.url === undefined) === (input.command === undefined))
+    return { problem: "give exactly one of --url or --command" };
+  if (input.url !== undefined && input.env.length > 0)
+    return { problem: "--env is for --command servers; an HTTP server takes --header" };
+  if (input.command !== undefined && (input.headers.length > 0 || input.sse))
+    return { problem: "--header and --sse are for --url servers" };
+  const pairs: Array<readonly [string, string]> = [];
+  for (const e of input.env) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(e);
+    if (m?.[1] === undefined) return { problem: `not KEY=VALUE: ${e.split("=")[0]}` };
+    pairs.push([m[1], m[2] ?? ""]);
+  }
+  for (const h of input.headers) {
+    const m = /^([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*(.*)$/s.exec(h);
+    if (m?.[1] === undefined) return { problem: `not 'Name: value': ${h.split(":")[0]}` };
+    pairs.push([m[1], m[2] ?? ""]);
+  }
+  const literal = (key: string) => input.literal.some((l) => l.toLowerCase() === key.toLowerCase());
+  const stray = input.literal.find(
+    (l) => !pairs.some(([key]) => key.toLowerCase() === l.toLowerCase()),
+  );
+  if (stray !== undefined) return { problem: `--literal ${stray} names no --env or --header` };
+  const known: Record<string, string> = { ...input.secrets };
+  const store: Array<{ name: string; value: string }> = [];
+  const refs: Array<string> = [];
+  const values: Record<string, string> = {};
+  for (const [key, value] of pairs) {
+    const ref = secretRef(value);
+    if (ref !== null) refs.push(ref);
+    if (ref !== null || literal(key) || !isCredential(key, value)) {
+      values[key] = value;
+      continue;
+    }
+    const name = secretName(input.name, key, value, known);
+    known[name] = value;
+    if (!store.some((s) => s.name === name)) store.push({ name, value });
+    values[key] = `$${name}`;
+  }
+  const filled = Object.keys(values).length > 0;
+  const definition =
+    input.url !== undefined
+      ? {
+          kind: "direct",
+          url: input.url,
+          ...(input.sse ? { transport: "sse" } : {}),
+          ...(filled ? { headers: values } : {}),
+          ...(input.tokenEnv === undefined
+            ? {}
+            : { auth: { type: "bearer", token_env: input.tokenEnv } }),
+        }
+      : {
+          kind: "stdio",
+          command: input.command,
+          args: [...input.args],
+          ...(filled ? { env: values } : {}),
+        };
+  return { definition, store, refs };
+};
+
+/** A failure after the commit: the change is in the repo, and the next sync pushes it. */
+const landedAnyway = (e: unknown) => typeof e === "string" && e.startsWith("committed");
+
+/** JSON with every object's keys sorted: two tables are the same when this is. */
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : typeof value === "object" && value !== null
+      ? `{${Object.keys(value)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
+          .join(",")}}`
+      : JSON.stringify(value);
+
+/**
+ * Edits to node files, checked before any is written: in a scratch copy of
+ * the fleet's settings, every node's merged settings must come out exactly as
+ * they were, but with `name` in each edited node's [mcp] servers and out of
+ * its ignore. Text edits cannot see every TOML form (a multi-line list, an
+ * escaped name); when one goes wrong, this says what to edit by hand.
+ */
+const checkNodeEdits = (
+  config: Config,
+  before: Config,
+  edits: ReadonlyArray<{ readonly target: string; readonly rel: string; readonly text: string }>,
+  name: string,
+) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      if (edits.length === 0) return;
+      const fs = yield* FileSystem.FileSystem;
+      // A node file that is a symlink, or under one, would be written outside the checkout.
+      const root = yield* fs.realPath(config.repo);
+      for (const edit of edits)
+        if ((yield* fs.realPath(`${config.repo}/${edit.rel}`)) !== `${root}/${edit.rel}`)
+          return yield* Effect.fail(
+            `${edit.rel} is a symlink, or in a linked directory; add "${name}" to its [mcp] servers by hand, then run this again. Nothing was changed.`,
+          );
+      // The scratch copy holds the settings' contents, never a link back into the checkout.
+      const copy = (from: string, to: string): Effect.Effect<void, PlatformError> =>
+        Effect.gen(function* () {
+          const info = yield* fs.stat(from);
+          if (info.type === "Directory") {
+            yield* fs.makeDirectory(to);
+            for (const entry of yield* fs.readDirectory(from))
+              yield* copy(`${from}/${entry}`, `${to}/${entry}`);
+          } else if (info.type === "File")
+            yield* fs.writeFileString(to, yield* fs.readFileString(from));
+        });
+      const scratch = yield* fs.makeTempDirectoryScoped();
+      for (const entry of [FLEET_FILE, "profiles", "nodes"])
+        if (yield* fs.exists(`${config.repo}/${entry}`))
+          yield* copy(`${config.repo}/${entry}`, `${scratch}/${entry}`);
+      for (const edit of edits) yield* fs.writeFileString(`${scratch}/${edit.rel}`, edit.text);
+      const by = (target: string) =>
+        `${edits.map((e) => e.rel).join(", ")} cannot be edited safely${target}. Add "${name}" to [mcp] servers there by hand (and take it off [mcp] ignore), then run this again. Nothing was changed.`;
+      const after = yield* loadConfigFrom(scratch, config.self).pipe(
+        Effect.mapError((e) => by(` (the result would not load: ${String(e).split("\n")[0]})`)),
+      );
+      const normal = (table: Readonly<Record<string, unknown>>, edited: boolean) => {
+        const mcp = (table["mcp"] ?? {}) as Readonly<Record<string, unknown>>;
+        const list = (key: string) =>
+          (Array.isArray(mcp[key]) ? (mcp[key] as Array<unknown>) : []).filter(
+            (item) => !(edited && item === name),
+          );
+        return canonical({
+          ...table,
+          mcp: {
+            ...mcp,
+            servers: [...list("servers"), ...(edited ? [name] : [])].map(String).sort(),
+            ignore: list("ignore").map(String).sort(),
+          },
+        });
+      };
+      for (const node of before.nodes) {
+        const edited = edits.some((e) => e.target === node.name);
+        const now = after.nodes.find((n) => n.name === node.name);
+        if (
+          now === undefined ||
+          normal(now.settings.table, false) !== normal(node.settings.table, edited)
+        )
+          return yield* Effect.fail(by(""));
+      }
+    }),
+  );
 
 /** Declare an MCP server once; nodes listing it register it on their next sync. */
 export const mcpAddCommand = Command.make("add", {
@@ -469,6 +792,28 @@ export const mcpAddCommand = Command.make("add", {
     Flag.withDescription("An argument for --command (repeatable)."),
     Flag.atLeast(0),
   ),
+  env: Flag.String("env").pipe(
+    Flag.withDescription(
+      "KEY=VALUE for a --command server's environment (repeatable). $NAME is the fleet secret NAME; any other value but a number, boolean, path or plain URL is stored as one.",
+    ),
+    Flag.atLeast(0),
+  ),
+  header: Flag.String("header").pipe(
+    Flag.withDescription(
+      "'Name: value' sent to a --url server (repeatable). $NAME is the fleet secret NAME; any other value but a number, boolean, path or plain URL is stored as one.",
+    ),
+    Flag.atLeast(0),
+  ),
+  literal: Flag.String("literal").pipe(
+    Flag.withDescription(
+      "Keep this --env or --header value in the definition as it is, not as a secret (repeatable).",
+    ),
+    Flag.atLeast(0),
+  ),
+  sse: Flag.Boolean("sse").pipe(
+    Flag.withDescription("The --url server speaks the older SSE transport (Claude only)."),
+    Flag.withDefault(false),
+  ),
   token: Flag.String("token-env").pipe(
     Flag.withDescription("Send this secret as a bearer token (set it with t3-fleet secrets set)."),
     Flag.optional,
@@ -479,43 +824,167 @@ export const mcpAddCommand = Command.make("add", {
   ),
 }).pipe(
   Command.withDescription("Declare an MCP server in mcp/<name>.json and register it on nodes."),
-  Command.withHandler(({ name, url, command, arg, token, node }) =>
+  Command.withHandler(({ name, url, command, arg, env, header, literal, sse, token, node }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const config = yield* loadConfig;
-      if (!/^[a-z0-9][a-z0-9_-]*$/.test(name))
+      if (!NAME_PATTERN.test(name))
         return yield* Effect.fail("names are lowercase letters, digits, - and _");
-      if ((url._tag === "Some") === (command._tag === "Some"))
-        return yield* Effect.fail("give exactly one of --url or --command");
-      const definition =
-        url._tag === "Some"
-          ? {
-              kind: "direct",
-              url: url.value,
-              ...(token._tag === "Some"
-                ? { auth: { type: "bearer", token_env: token.value } }
-                : {}),
-            }
-          : { kind: "stdio", command: command._tag === "Some" ? command.value : "", args: arg };
-      const targets = node.length > 0 ? node : config.nodes.map((n) => n.name);
-      const landed = yield* underSyncLock(
+      const authority =
+        config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
+      const targets = [...new Set(node.length > 0 ? node : config.nodes.map((n) => n.name))];
+      const done = yield* underSyncLock(
         Effect.gen(function* () {
-          const before = yield* snapshot(config.repo, ["mcp", "nodes"]);
-          yield* fs.writeFileString(`${config.repo}/mcp/${name}.json`, prettyJson(definition));
-          const changed = [`mcp/${name}.json`];
+          // Decided under the lock, from the secrets as they are now: a concurrent change is not lost.
+          // An authority changes them; anywhere else the installed copy says which names are taken.
+          const secretsText = authority
+            ? yield* readSecrets(config.repo)
+            : yield* fs
+                .readFileString(localSecretsPath(process.env["HOME"] ?? ""))
+                .pipe(Effect.orElseSucceed(() => ""));
+          const secrets = parseSecrets(secretsText);
+          const built = mcpDefinition({
+            name,
+            url: Option.getOrUndefined(url),
+            command: Option.getOrUndefined(command),
+            args: arg,
+            tokenEnv: Option.getOrUndefined(token),
+            env,
+            headers: header,
+            literal,
+            sse,
+            secrets,
+          });
+          if ("problem" in built) return yield* Effect.fail(built.problem);
+          // Every check before the first change, against the nodes' settings as they are now.
+          const fresh = yield* loadConfigFrom(config.repo, config.self);
+          const nodeFiles: Array<{
+            readonly target: string;
+            readonly rel: string;
+            readonly text: string;
+          }> = [];
           for (const target of targets) {
-            const file = `${config.repo}/nodes/${target}.toml`;
+            const settings = fresh.nodes.find((n) => n.name === target)?.settings.table["mcp"];
+            if (settings === undefined && !fresh.nodes.some((n) => n.name === target))
+              return yield* Effect.fail(`unknown machine: ${target}`);
+            const list = (key: string) => {
+              const value = (settings as Readonly<Record<string, unknown>> | undefined)?.[key];
+              return Array.isArray(value) ? value : [];
+            };
+            const rel = `nodes/${target}.toml`;
             const text = yield* fs
-              .readFileString(file)
-              .pipe(Effect.mapError(() => `unknown machine: ${target}`));
-            if (text.includes(`"${name}"`)) continue;
-            yield* fs.writeFileString(file, withMcpServer(text, name));
-            changed.push(`nodes/${target}.toml`);
+              .readFileString(`${config.repo}/${rel}`)
+              .pipe(Effect.mapError((e) => `cannot read ${rel}: ${e.message}`));
+            let next = list("servers").includes(name) ? text : withMcpServer(text, name);
+            // Adopting a server this machine ignored: it stops ignoring it.
+            if (list("ignore").includes(name)) next = withoutMcpIgnore(next, name);
+            if (next !== text) nodeFiles.push({ target, rel, text: next });
           }
-          return yield* land(config, changed, `Add MCP server ${name}`, before);
+          yield* checkNodeEdits(config, fresh, nodeFiles, name);
+          const stored = authority ? built.store : [];
+          const touched = [
+            ...(stored.length > 0
+              ? [encryptedPath(config.repo).slice(config.repo.length + 1)]
+              : []),
+            `mcp/${name}.json`,
+            ...nodeFiles.map((f) => f.rel),
+          ];
+          // Only resolved index entries can be put back on a refusal: a merge in progress stops here.
+          const conflicted = yield* unmergedHits(config.repo, touched);
+          if (conflicted.length > 0)
+            return yield* Effect.fail(
+              `${conflicted.map((c) => c.file).join(", ")} ${conflicted.length === 1 ? "has" : "have"} an unresolved merge conflict; resolve it first. Nothing was changed.`,
+            );
+          // What is there now, edits and staged changes too, for putting back when the change does not land.
+          const dirs: Array<string> = [];
+          for (const dir of ["mcp", "nodes", "secrets"])
+            if (yield* fs.exists(`${config.repo}/${dir}`)) dirs.push(dir);
+          const before = yield* snapshot(config.repo, dirs);
+          const index = yield* indexEntries(config.repo, touched);
+          const landed = yield* Effect.gen(function* () {
+            if (stored.length > 0) {
+              let text = secretsText;
+              for (const s of stored) text = setVar(text, s.name, s.value);
+              yield* writeSecrets(config.repo, text);
+            }
+            yield* fs.writeFileString(
+              `${config.repo}/mcp/${name}.json`,
+              prettyJson(built.definition),
+            );
+            for (const f of nodeFiles) yield* fs.writeFileString(`${config.repo}/${f.rel}`, f.text);
+            return yield* land(config, touched, `Add MCP server ${name}`, before, index);
+          }).pipe(
+            // Refused or failed before the commit: everything goes back, the index too.
+            Effect.catchIf(
+              (e) => !landedAnyway(e),
+              (e) =>
+                restorePaths(config.repo, touched, before, index).pipe(
+                  Effect.ignore,
+                  Effect.andThen(Effect.fail(e)),
+                ),
+            ),
+            // Committed, and only the push failed: the change stands, and so does this machine's copy.
+            Effect.tapError((e) =>
+              landedAnyway(e) && stored.length > 0
+                ? installSecrets(config.repo).pipe(Effect.ignore)
+                : Effect.void,
+            ),
+          );
+          // This machine's own copy only once the change has landed.
+          if (stored.length > 0) yield* installSecrets(config.repo);
+          return { landed, built, stored, secrets };
         }),
       );
+      const { landed, built, stored, secrets } = done;
       yield* Console.log(`declared ${name} for ${targets.join(", ")}: ${landed}`);
+      if (stored.length > 0)
+        yield* Console.log(
+          `kept ${stored.map((s) => s.name).join(", ")} in the fleet's secrets; the definition refers to ${stored.length === 1 ? "it" : "them"}`,
+        );
+      // Not an authority: the definition names the secrets, and someone sets them where secrets change.
+      const unset = [
+        ...new Set([
+          ...(authority ? [] : built.store.map((s) => s.name)),
+          ...built.refs.filter((r) => secrets[r] === undefined),
+        ]),
+      ];
+      if (unset.length > 0)
+        yield* Console.log(
+          `${name} needs ${unset.join(", ")} in the fleet's secrets before it can connect; on an authority: t3-fleet secrets set ${unset.map((n) => `${n}=…`).join(" ")}`,
+        );
+    }).pipe(reportUserErrors),
+  ),
+);
+
+/** What a fix runs to register a server in Claude; its secrets never reach a command line. */
+export const mcpRegisterClaudeCommand = Command.make("register-claude", {
+  name: Argument.String("name"),
+  endpoint: Argument.String("endpoint").pipe(
+    Argument.withDescription("The server's resolved definition, as `t3-fleet status` shows it."),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Run by fixes: register an MCP server in Claude, filling its secrets in from this machine's.",
+  ),
+  Command.withHandler(({ name, endpoint }) =>
+    Effect.gen(function* () {
+      if (!NAME_PATTERN.test(name)) return yield* Effect.fail(`${name} is not a server name`);
+      const resolved = yield* Schema.decodeEffect(Schema.fromJsonString(Endpoint))(endpoint).pipe(
+        Effect.mapError(() => "not a resolved MCP definition"),
+      );
+      const problem = endpointProblem(resolved);
+      if (problem !== null) return yield* Effect.fail(problem);
+      const { file, tightened } = yield* registerInClaude(
+        process.env["HOME"] ?? "",
+        name,
+        resolved,
+        process.env,
+      );
+      yield* Console.log(`registered ${name} in Claude`);
+      if (tightened !== null)
+        yield* Console.log(
+          `${file} holds secrets now, so it is readable by its owner alone (600, was ${tightened.toString(8)})`,
+        );
     }).pipe(reportUserErrors),
   ),
 );
