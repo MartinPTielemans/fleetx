@@ -61,6 +61,10 @@ const script = (command: string, checkout: string, bundle: string) => {
 
 export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, checkout: string, bundle: string) =>
   Effect.gen(function* () {
+    // Installing an empty bundle would leave the node without T3 Fleet.
+    if (finding.fix.command === ENGINE_INSTALL && bundle === "") {
+      return { finding, ok: false, summary: `no ${PRODUCT} build to install was given; nothing was changed` } satisfies FixOutcome;
+    }
     const run = yield* exec(
       node.ssh === null
         ? { command: "bash", args: ["-l", "-s"], stdin: script(finding.fix.command, checkout, bundle), timeout: Duration.minutes(10) }

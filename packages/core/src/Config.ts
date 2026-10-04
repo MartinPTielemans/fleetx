@@ -24,6 +24,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
+import { BuildId } from "./Build.ts";
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
 import { configDir, FLEET_FILE, LEGACY_FLEET_FILE, repoRenamed } from "./Names.ts";
 
@@ -223,6 +224,8 @@ export const ProbeSettings = Schema.Struct({
   checkout: Schema.optionalKey(Schema.String),
   /** SHA-256 of the controller's T3 Fleet build. */
   engine: Schema.optionalKey(Schema.String),
+  /** Which build that is (Build.ts). */
+  build: Schema.optionalKey(BuildId),
   /** The node's name. */
   node: Schema.optionalKey(Schema.String),
   roles: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -231,8 +234,9 @@ export const ProbeSettings = Schema.Struct({
 });
 export type ProbeSettings = typeof ProbeSettings.Type;
 
-export const probeSettings = (config: Config, node?: Node, engine?: string): ProbeSettings => ({
+export const probeSettings = (config: Config, node?: Node, engine?: string, build?: BuildId | null): ProbeSettings => ({
   ...(engine === undefined ? {} : { engine }),
+  ...(build === undefined || build === null ? {} : { build }),
   ...(config.settings.proxy === undefined
     ? {}
     : { proxy: { credentials: config.settings.proxy.credentials, launchers: config.settings.proxy.launchers } }),

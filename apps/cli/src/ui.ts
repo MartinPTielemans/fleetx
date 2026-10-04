@@ -31,7 +31,6 @@ import type { UiAlert, UiProposal } from "@t3-fleet/core/Api";
 import { checkNodes } from "@t3-fleet/core/Check";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
-import { runFixes } from "@t3-fleet/core/Fix";
 import { git } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
@@ -42,7 +41,7 @@ import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
 import { uiLayer, type UiAsset, type UiServerOptions } from "@t3-fleet/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
-import { ownBundle, reportUserErrors } from "./shared.ts";
+import { applyLive, liveController, reportUserErrors, withoutStaleInstalls } from "./shared.ts";
 
 /** The built app, gzipped and base64-encoded per file, put here by `vp pack` (vite.config.ts). */
 declare const __T3_FLEET_UI_ASSETS__: string | undefined;
@@ -194,7 +193,8 @@ export const uiCommand = Command.make("ui", {
   Command.withHandler(({ port: asked, noOpen }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
+      // Every action reads the config again, and checks and fixes notice a newer build installed meanwhile.
+      const current = yield* liveController;
       const assets = yield* loadAssets.pipe(Effect.mapError(() => "the UI bundled in this build could not be read"));
       if (assets.size === 0) yield* Console.error("T3 Fleet: this build has no UI; run `pnpm --filter t3-fleet build` (the API still works)");
       const crypto = yield* Crypto.Crypto;
@@ -207,6 +207,9 @@ export const uiCommand = Command.make("ui", {
           Effect.provide(services),
           Effect.mapError((e) => (typeof e === "string" ? e : typeof e === "object" && e !== null && "message" in e ? String(e.message) : String(e))),
         );
+      /** An action run against the config as it is now, not as it was at start. */
+      const live = <A, E>(action: (config: Config) => Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>) =>
+        closed(current.pipe(Effect.flatMap(({ config }) => action(config))));
 
       const options = {
         ticket,
@@ -222,25 +225,27 @@ export const uiCommand = Command.make("ui", {
         actions: {
           check: closed(
             Effect.gen(function* () {
+              const { config, bundle, stale } = yield* current;
               const [report, states] = yield* Effect.all([checkNodes(config, bundle), statesOf(config)], { concurrency: "unbounded" });
-              return { report, states, accepted: config.settings.accept ?? [] };
+              return { report: withoutStaleInstalls(report, stale, "ui"), states, accepted: config.settings.accept ?? [] };
             }),
           ),
-          apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle, config.repo).pipe(Effect.provide(services)),
-          proposals: closed(proposalsOf(config)),
+          apply: (fixes) => applyLive(current, fixes, "ui").pipe(Effect.provide(services)),
+          proposals: live(proposalsOf),
           approve: (node, change) =>
-            closed(proposalFrom(config, node, change).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
-          reject: (node, change) => closed(proposalFrom(config, node, change).pipe(Effect.flatMap((p) => reject(config.repo, p)))),
-          alerts: closed(alertsOf(config)),
-          config: (node) => {
-            const found = config.nodes.find((n) => n.name === node);
-            return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
-          },
+            live((config) => proposalFrom(config, node, change).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
+          reject: (node, change) => live((config) => proposalFrom(config, node, change).pipe(Effect.flatMap((p) => reject(config.repo, p)))),
+          alerts: live(alertsOf),
+          config: (node) =>
+            live((config) => {
+              const found = config.nodes.find((n) => n.name === node);
+              return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
+            }),
           skills: {
-            list: closed(listSkills(config.repo)),
-            lookup: (source) => closed(lookupSource(config.repo, source)),
+            list: live((config) => listSkills(config.repo)),
+            lookup: (source) => live((config) => lookupSource(config.repo, source)),
             add: (source, names, as) =>
-              closed(
+              live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* addSkills(config.repo, source, names, as);
@@ -249,9 +254,9 @@ export const uiCommand = Command.make("ui", {
                   }),
                 ),
               ),
-            preview: (names) => closed(underSyncLock(previewUpdate(config.repo, names))),
+            preview: (names) => live((config) => underSyncLock(previewUpdate(config.repo, names))),
             update: (names, digest) =>
-              closed(
+              live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* keepUpdate(config.repo, names, digest);
@@ -260,7 +265,7 @@ export const uiCommand = Command.make("ui", {
                 ),
               ),
             remove: (names) =>
-              closed(
+              live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* removeSkills(config.repo, names);

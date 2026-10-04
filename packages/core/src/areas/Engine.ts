@@ -1,7 +1,9 @@
 /**
  * T3 Fleet itself, installed on each node, so timers and fixes there can run
  * it. The node's copy must be the controller's exact build; the fix streams
- * that build over the same ssh connection, so no release has to exist.
+ * that build over the same ssh connection, so no release has to exist. It is
+ * only offered when the controller's build is the newer one (Build.ts): an
+ * older controller says so instead of putting its build back.
  *
  *   ~/.local/share/t3-fleet/t3-fleet.mjs   the bundle
  *   ~/.local/bin/t3-fleet                  link to it (and ~/.local/bin/fleetx until 1.0)
@@ -21,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { defineArea, sh } from "../Area.ts";
+import { BuildId, buildOf, compareBuilds, describeBuild } from "../Build.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { sha256 } from "../Hash.ts";
@@ -51,6 +54,15 @@ const Observed = Schema.Struct({
   /** SHA-256 of the controller's build; null when not told (a local probe). */
   wanted: Schema.NullOr(Schema.String),
   installed: Schema.NullOr(Schema.String),
+  /** Which builds those are; null for one from before builds had identities. Absent from older probes. */
+  wantedBuild: Schema.optionalKey(Schema.NullOr(BuildId)),
+  installedBuild: Schema.optionalKey(Schema.NullOr(BuildId)),
+  /**
+   * T3 Fleet's services installed here that installing a build restarts,
+   * cutting what they carry. The model proxy is not one: it drains on its own.
+   * Absent from older probes.
+   */
+  services: Schema.optionalKey(Schema.Array(Schema.Literals(["serve", "listen"]))),
   /** What ~/.config/t3-fleet/config.toml should say, and whether it does. */
   local: Schema.NullOr(Schema.Struct({ want: Schema.String, matches: Schema.Boolean })),
   platform: Schema.String,
@@ -251,6 +263,60 @@ export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">)
   return steps.join("\n");
 };
 
+const SERVICE_NAMES: Readonly<Record<"serve" | "listen", string>> = { serve: "the relay", listen: "the listener" };
+
+/**
+ * The installed build differs from the controller's. Installing the
+ * controller's is only right when it is the newer one; a node ahead of the
+ * controller means the controller needs upgrading, not the node downgrading.
+ * A build without an identity predates identities, so it is the older one.
+ */
+const engineFinding = (node: string, observed: typeof Observed.Type): Finding => {
+  const wanted = observed.wantedBuild ?? null;
+  const installed = observed.installedBuild ?? null;
+  // null: neither is known to be newer.
+  const order = observed.installed === null ? 1 : wanted === null ? (installed === null ? null : -1) : installed === null ? 1 : compareBuilds(wanted, installed);
+  const here = installed === null ? "" : ` (${describeBuild(installed)})`;
+  const controller = wanted === null ? "" : ` (${describeBuild(wanted)})`;
+  if (order !== null && order < 0) {
+    return {
+      node,
+      key: "engine-newer-here",
+      severity: "warn",
+      area: "engine",
+      title: `T3 Fleet here is a newer build${here} than the controller's${controller}`,
+      detail: "upgrade T3 Fleet on the machine you run it from; installing the controller's build here would downgrade this machine",
+    };
+  }
+  const services = observed.services ?? [];
+  const install = {
+    command: ENGINE_INSTALL,
+    // Asked first unless the controller's build is known to be the newer one.
+    safe: order !== null && order > 0,
+    ...(services.length === 0 ? {} : { disrupts: `restarts ${services.map((s) => SERVICE_NAMES[s]).join(", ").replace(/, ([^,]*)$/, " and $1")} on ${node}` }),
+  };
+  const sameVersion = wanted !== null && installed !== null && wanted.version === installed.version;
+  return {
+    node,
+    key: "engine-outdated",
+    severity: "warn",
+    area: "engine",
+    title:
+      observed.installed === null
+        ? "T3 Fleet is not installed here"
+        : order !== null && order > 0
+          ? `T3 Fleet here is an older build${here} than the controller's${controller}`
+          : `T3 Fleet here is a different build${here} than the controller's${controller}, and neither is known to be newer`,
+    detail:
+      order === null
+        ? sameVersion
+          ? "both are the same version built from different commits, so installing the controller's could take this machine back; install it only if the controller has the build you want"
+          : "one of the builds does not say what it is; install the controller's only if it has the build you want"
+        : "timers and fixes on this machine run its own copy",
+    fix: install,
+  };
+};
+
 export const EngineArea = defineArea({
   id: "engine",
   description: "this build of T3 Fleet installed on every node",
@@ -262,6 +328,7 @@ export const EngineArea = defineArea({
       const at = yield* installedBundle(ctx.home).pipe(Effect.map(Option.some));
       const bytes = Option.isSome(at) ? yield* fs.readFile(at.value).pipe(Effect.option) : Option.none();
       const installed = Option.isSome(bytes) ? yield* Effect.promise(() => sha256(bytes.value)) : null;
+      const installedBuild = Option.isSome(bytes) ? buildOf(new TextDecoder().decode(bytes.value)) : null;
       let local: typeof Observed.Type["local"] = null;
       if (ctx.node !== null) {
         const checkout = ctx.checkout.startsWith(`${ctx.home}/`) ? `~${ctx.checkout.slice(ctx.home.length)}` : ctx.checkout;
@@ -305,6 +372,16 @@ export const EngineArea = defineArea({
           Effect.map(() => false),
           Effect.catch(() => fs.stat(`${ctx.home}/${rel}`).pipe(Effect.map((s) => s.type === "Directory"), Effect.orElseSucceed(() => false))),
         );
+      const services: Array<"serve" | "listen"> = [];
+      for (const role of ["serve", "listen"] as const) {
+        const unit =
+          platform === "darwin"
+            ? `${ctx.home}/Library/LaunchAgents/${launchdLabel(role)}.plist`
+            : root
+              ? `/etc/systemd/system/${systemdUnit(role)}.service`
+              : `${ctx.home}/.config/systemd/user/${systemdUnit(role)}.service`;
+        if (yield* fs.exists(unit).pipe(Effect.orElseSucceed(() => false))) services.push(role);
+      }
       // A pending reload's marker names the sync that deferred it: this one (its fix just ran) or one still running is not stuck.
       const pendingPid = yield* fs.readFileString(`${ctx.home}/${STATE_DIR}/${RELOAD_PENDING}`).pipe(
         Effect.map((text) => Number(text.trim())),
@@ -323,6 +400,9 @@ export const EngineArea = defineArea({
         repoRenamed: repoRenamed(ctx.checkout),
         wanted: ctx.engine,
         installed,
+        wantedBuild: ctx.engine === null ? null : ctx.engineBuild,
+        installedBuild,
+        services,
         local,
         platform,
         root,
@@ -395,15 +475,7 @@ export const EngineArea = defineArea({
       });
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {
-      out.push({
-        node,
-        key: "engine-outdated",
-        severity: "warn",
-        area: "engine",
-        title: observed.installed === null ? "T3 Fleet is not installed here" : "T3 Fleet here is a different build than the controller's",
-        detail: "timers and fixes on this machine run its own copy",
-        fix: { command: ENGINE_INSTALL, safe: true },
-      });
+      out.push(engineFinding(node, observed));
     }
     // After the install, so the bundle directory can move in the same run.
     const legacy = observed.legacy ?? [];

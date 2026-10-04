@@ -157,7 +157,10 @@ fleet or apply fixes. The link works once: if it was already used, the page
 says so (someone else on the machine may have opened it), and `t3-fleet ui`
 prints a new one for each further tab. `--port` pins the port, `--no-open`
 prints the link instead of opening a browser. The app is built into the single
-`t3-fleet` file.
+`t3-fleet` file. It reads the config again for every check, fix and action;
+when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
+does too), it stops installing its build on other machines until you restart
+it, since that would put the old build back.
 
 ## Renamed from fleetx
 

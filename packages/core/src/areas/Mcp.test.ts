@@ -147,7 +147,7 @@ describe("mcp area: re-registering", () => {
     writeFileSync(join(scratch, "fleet/mcp/docs.json"), JSON.stringify({ kind: "stdio", command: "docs-mcp", args: ["--new"] }));
     writeFileSync(join(scratch, ".claude.json"), JSON.stringify({ mcpServers: { docs: claudeEntry } }));
     writeFileSync(join(scratch, ".codex/config.toml"), `[mcp_servers.docs]\ncommand = "docs-mcp"\nargs = ["--old"]\n${codexEntry}`);
-    const ctx = { home: scratch, checkout: join(scratch, "fleet"), env: { HOME: scratch, PATH: `${join(scratch, "bin")}:/usr/bin:/bin` }, engine: null, node: "m", roles: [], relay: null };
+    const ctx = { home: scratch, checkout: join(scratch, "fleet"), env: { HOME: scratch, PATH: `${join(scratch, "bin")}:/usr/bin:/bin` }, engine: null, engineBuild: null, node: "m", roles: [], relay: null };
     const desired = { servers: ["docs"] };
     return Effect.runPromise(McpArea.observe(desired, ctx).pipe(Effect.provide(services))).then((observed) =>
       McpArea.diagnose({ node: "m", desired, observed, fleet: [], authority: null }).find((f) => f.key === "mcp-docs-unregistered"),

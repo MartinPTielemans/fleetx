@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { probeSettings, type Config } from "../Config.ts";
-import { EngineArea } from "./Engine.ts";
+import { ENGINE_INSTALL, EngineArea } from "./Engine.ts";
 
 const observed = (over: Record<string, unknown> = {}) => ({
   wanted: "abc",
@@ -52,6 +52,56 @@ describe("engine-repo-names", () => {
 
   it("says nothing once the repo is renamed", () => {
     expect(repoNames([{ node: "mac", observed: observed({ repoRenamed: true }) }], ["mac"])).toBeUndefined();
+  });
+});
+
+const outdated = (over: Record<string, unknown>) =>
+  EngineArea.diagnose({
+    node: "box",
+    desired: undefined,
+    observed: observed({ wanted: "new", installed: "old", repoRenamed: true, ...over }),
+    fleet: [],
+    authority: null,
+  }).find((f) => f.key === "engine-outdated" || f.key === "engine-newer-here");
+
+const build = (version: string, builtAt: number, commit = "abc1234") => ({ version, builtAt, commit });
+
+describe("engine-outdated", () => {
+  it("installs the controller's build, as a safe fix, when it is the newer one", () => {
+    const f = outdated({ wantedBuild: build("0.6.2", 2), installedBuild: build("0.6.1", 1) });
+    expect(f).toMatchObject({ key: "engine-outdated", fix: { command: ENGINE_INSTALL, safe: true } });
+    expect(f?.title).toContain("older build (0.6.1 built");
+    expect(f?.fix?.disrupts).toBeUndefined();
+  });
+
+  it("treats a build from before identities as older", () => {
+    expect(outdated({ wantedBuild: build("0.6.2", 2), installedBuild: null })).toMatchObject({ key: "engine-outdated", fix: { safe: true } });
+    expect(outdated({ installed: null, wantedBuild: build("0.6.2", 2) })).toMatchObject({ title: "T3 Fleet is not installed here", fix: { safe: true } });
+  });
+
+  it("never offers to downgrade a node that runs a newer build than the controller", () => {
+    const f = outdated({ wantedBuild: build("0.6.1", 9), installedBuild: build("0.6.2", 1) });
+    expect(f).toMatchObject({ key: "engine-newer-here", severity: "warn" });
+    expect(f?.fix).toBeUndefined();
+    expect(f?.detail).toContain("upgrade T3 Fleet on the machine you run it from");
+    // A rebuild of the same version is newer by its build time.
+    expect(outdated({ wantedBuild: build("0.6.2", 1), installedBuild: build("0.6.2", 2) })?.key).toBe("engine-newer-here");
+  });
+
+  it("asks before installing when neither build is known to be newer", () => {
+    expect(outdated({ wantedBuild: build("0.6.2", 1), installedBuild: build("0.6.2", 1) })).toMatchObject({ fix: { safe: false } });
+  });
+
+  it("asks before installing a build of the same version from another commit, however recent", () => {
+    const f = outdated({ wantedBuild: build("0.6.1", 9, "old0001"), installedBuild: build("0.6.1", 1, "new0002") });
+    expect(f).toMatchObject({ key: "engine-outdated", fix: { command: ENGINE_INSTALL, safe: false } });
+    expect(f?.title).toContain("neither is known to be newer");
+    expect(f?.detail).toContain("same version built from different commits");
+  });
+
+  it("says which services the install restarts", () => {
+    const f = outdated({ wantedBuild: build("0.6.2", 2), installedBuild: build("0.6.1", 1), services: ["serve", "listen"] });
+    expect(f?.fix?.disrupts).toBe("restarts the relay and the listener on box");
   });
 });
 

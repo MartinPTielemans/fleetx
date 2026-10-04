@@ -397,6 +397,7 @@ export const observeAreas = (
             area.observe(desired.value, {
               ...base,
               engine: settings.engine ?? null,
+              engineBuild: settings.build ?? null,
               node: settings.node ?? null,
               roles: settings.roles ?? [],
               relay: settings.relay ?? null,

@@ -97,3 +97,23 @@ pass "skills update re-pulls from the source"
 # The MCP server starts and lists its tools (an invalid tool schema stops it at startup).
 expect laptop "fleet_alerts" "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | (cat; sleep 4) | t3-fleet mcp"
 pass "the MCP server starts and lists its tools"
+
+# Installing the build on a member over ssh, as `t3-fleet fix` does after an upgrade.
+on server 'rm -f ~/.local/bin/t3-fleet ~/.local/bin/fleetx'
+expect laptop "T3 Fleet is not installed here" 't3-fleet status --node server'
+expect laptop "installed T3 Fleet" 't3-fleet fix --yes --area engine --node server'
+[ "$(on server 'readlink ~/.local/bin/t3-fleet')" = "$(on server 'echo ~/.local/share/t3-fleet/t3-fleet.mjs')" ] || fail "server should run the installed copy"
+[ "$(on server 't3-fleet --version')" = "$(on laptop 't3-fleet --version')" ] || fail "server should have the controller's build: $(on server 't3-fleet --version')"
+on laptop 't3-fleet status --node server' | grep -q "engine" && fail "no engine finding should remain on server: $(on laptop 't3-fleet status --node server')"
+pass "fix installs the controller's build on a member over ssh"
+
+# An older controller (the same bundle, marked as an earlier version) reports newer
+# builds as newer and installs nothing, rather than putting its own build back.
+on laptop "sed -E 's/t3-fleet-build:[0-9]+\.[0-9]+\.[0-9]+:/t3-fleet-build:0.0.1:/' /t3-fleet/bin.mjs > /tmp/old.mjs"
+on laptop 'node /tmp/old.mjs --version' | grep -q "^t3-fleet v0.0.1 built" || fail "the older bundle should say it is 0.0.1: $(on laptop 'node /tmp/old.mjs --version')"
+expect laptop "newer build" 'node /tmp/old.mjs status --node server'
+before=$(on server 'sha256sum ~/.local/share/t3-fleet/t3-fleet.mjs')
+out=$(on laptop 'node /tmp/old.mjs fix --yes --area engine' 2>&1) || true
+printf '%s' "$out" | grep -q "older build\|install-self\|installed T3 Fleet" && fail "an older controller should offer no install: $out"
+[ "$(on server 'sha256sum ~/.local/share/t3-fleet/t3-fleet.mjs')" = "$before" ] || fail "server's build should be unchanged after an older controller's fix"
+pass "an older controller offers no downgrade"

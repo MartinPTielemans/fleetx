@@ -10,6 +10,7 @@ import { McpProtocol, McpServer } from "effect/unstable/ai";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
+import { describeBuild, runningBuild } from "@t3-fleet/core/Build";
 import { checkNodes } from "@t3-fleet/core/Check";
 import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
 import { runFixes } from "@t3-fleet/core/Fix";
@@ -30,7 +31,7 @@ import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
 import { t3Command } from "./t3.ts";
 import { uiCommand } from "./ui.ts";
-import { encodeJson, narrow, nodeFlag, ownBundle, prepare, reportUserErrors } from "./shared.ts";
+import { applyLive, encodeJson, isUserError, liveController, narrow, nodeFlag, prepare, reportUserErrors, userMessage, withoutStaleInstalls } from "./shared.ts";
 
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(MachineObservation));
 
@@ -124,7 +125,7 @@ const fixCommand = Command.make("fix", {
         if (!go) return;
       }
       const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle, config.repo);
-      const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name));
+      const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name || f.fix.on === n.name));
       const after = narrow(yield* checkNodes(config, bundle), (name) => touched.some((n) => n.name === name));
       yield* Console.log(renderFixResults(outcomes));
       yield* Console.log("");
@@ -177,22 +178,24 @@ const mcpServeCommand = Command.make("mcp").pipe(
   Command.withDescription("Serve fleet_status and fleet_apply_fixes over MCP (stdio) for agents in T3 Code."),
   Command.withHandler(() =>
     Effect.gen(function* () {
-      const config = yield* loadConfig;
-      const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
+      // The config is read again for every call, and a newer build installed meanwhile is noticed.
+      const current = yield* liveController;
       const services = yield* Effect.context<NodeServices.NodeServices | HttpClient.HttpClient>();
+      const userError = (e: unknown) => (isUserError(e) ? userMessage(e) : String(e));
       const handlers = fleetHandlers({
         check: (only) =>
           Effect.gen(function* () {
+            const { config, bundle, stale } = yield* current.pipe(Effect.mapError(userError));
             const unknown = only.filter((name) => !config.nodes.some((n) => n.name === name));
             if (unknown.length > 0) return yield* Effect.fail(`unknown machine: ${unknown.join(", ")}`);
-            const report = yield* checkNodes(config, bundle);
+            const report = withoutStaleInstalls(yield* checkNodes(config, bundle), stale, "mcp");
             return narrow(report, (name) => only.length === 0 || only.includes(name));
           }).pipe(Effect.provide(services)),
-        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle, config.repo).pipe(Effect.provide(services)),
+        apply: (fixes) => applyLive(current, fixes, "mcp").pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
-        alerts: (peek) => takeAlerts(config, peek).pipe(
+        alerts: (peek) => current.pipe(Effect.flatMap(({ config }) => takeAlerts(config, peek))).pipe(
           Effect.provide(services),
-          Effect.mapError((e) => (typeof e === "string" ? e : "reading alerts failed")),
+          Effect.mapError((e) => (isUserError(e) ? userMessage(e) : "reading alerts failed")),
         ),
       });
       return yield* Layer.launch(
@@ -235,7 +238,9 @@ const cli = Command.make("t3-fleet").pipe(
 
 const RuntimeLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
 
-Command.run(cli, { version: packageJson.version }).pipe(
+const build = runningBuild();
+
+Command.run(cli, { version: build === null ? packageJson.version : describeBuild(build) }).pipe(
   Effect.scoped,
   Effect.provide(RuntimeLayer),
   NodeRuntime.runMain,

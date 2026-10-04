@@ -1,4 +1,5 @@
 // Build configuration runs in Node, outside the Effect rules.
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -45,19 +46,46 @@ const uiAssets = (): string | undefined => {
 
 const assets = uiAssets();
 
+/**
+ * This build's identity, which Build.ts reads back out of any bundle's text:
+ * the version, the time of the build, and the commit (with -dirty for
+ * uncommitted changes). The marker format is Build.ts's buildMarker.
+ */
+const buildMarker = (): string => {
+  const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")) as { version: string };
+  const git = (...args: Array<string>) => {
+    try {
+      return execFileSync("git", args, { cwd: new URL(".", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    } catch {
+      return "";
+    }
+  };
+  const commit = git("rev-parse", "--short=12", "HEAD");
+  const dirty = commit !== "" && git("status", "--porcelain", "--untracked-files=no") !== "" ? "-dirty" : "";
+  // SOURCE_DATE_EPOCH makes the build reproducible (Nix sets it).
+  const epoch = process.env["SOURCE_DATE_EPOCH"];
+  const builtAt = epoch !== undefined && /^\d+$/.test(epoch) ? Number(epoch) * 1000 : Date.now();
+  return `t3-fleet-build:${pkg.version}:${builtAt}:${commit}${dirty}`;
+};
+
 export default mergeConfig(
   baseConfig,
   defineConfig({
     pack: {
       // One self-contained file: the controller streams it over ssh into
       // `node -` on machines that have nothing installed, so every
-      // dependency is inlined, and so is the UI.
+      // dependency is inlined, and so is the UI. Minified, since every
+      // check sends it to every machine that does not have it yet.
       entry: ["src/bin.ts"],
       outDir: "dist",
       clean: true,
       platform: "node",
+      minify: true,
       deps: { alwaysBundle: () => true, onlyBundle: false },
-      ...(assets === undefined ? {} : { define: { __T3_FLEET_UI_ASSETS__: assets } }),
+      define: {
+        __T3_FLEET_BUILD__: JSON.stringify(buildMarker()),
+        ...(assets === undefined ? {} : { __T3_FLEET_UI_ASSETS__: assets }),
+      },
     },
   }),
 );

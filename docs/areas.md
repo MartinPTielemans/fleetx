@@ -29,7 +29,10 @@ repo's remote reachable without a terminal, `~/.local/bin` on PATH.
 ## engine
 
 This build of T3 Fleet installed on every node, the node's
-`~/.config/t3-fleet/config.toml`, and the sync timer:
+`~/.config/t3-fleet/config.toml`, and the sync timer. Only a newer build is
+installed: a node ahead of the controller is reported (`engine-newer-here`),
+never downgraded. A node that already has the controller's exact build runs
+its own copy for checks, so the bundle is only sent to the others.
 
 ```toml
 [engine]

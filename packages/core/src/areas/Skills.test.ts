@@ -31,7 +31,7 @@ describe("skills", () => {
     skill(join(home, ".claude/skills/foo"), "local copy");
     skill(join(home, ".claude/skills/bar.t3-fleet-backup.20261001120000"), "old backup");
     const desired = { store: "~/.agents/skills", clients: ["~/.claude/skills"] };
-    const ctx = { home, checkout, env: { ...process.env, HOME: home }, engine: null, node: "laptop", roles: [], relay: null };
+    const ctx = { home, checkout, env: { ...process.env, HOME: home }, engine: null, engineBuild: null, node: "laptop", roles: [], relay: null };
     const round = async () => {
       const observed = await Effect.runPromise(SkillsArea.observe(desired, ctx).pipe(Effect.provide(services)));
       return SkillsArea.diagnose({ node: "laptop", desired, observed, fleet: [], authority: null });
