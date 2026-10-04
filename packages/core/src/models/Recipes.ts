@@ -136,6 +136,7 @@ export const BUILTIN_RECIPES: Readonly<Record<string, Recipe>> = {
 
 const DEFAULT_DIRECT = ["-v", "-V", "--version", "login", "logout", "auth"];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type Resolved =
