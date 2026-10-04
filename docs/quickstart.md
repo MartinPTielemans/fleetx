@@ -8,7 +8,7 @@ From one machine to two, with what each already has.
 curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
 ```
 
-Or `brew install martinptielemans/tap/fleetx`, or `nix run github:MartinPTielemans/fleetx`.
+Or `brew install martinptielemans/tap/t3-fleet`, or `nix run github:MartinPTielemans/fleetx`.
 T3 Fleet is one file run by Node 24 or newer. With `gh` installed, the installer
 checks the download against the release's build attestation.
 
