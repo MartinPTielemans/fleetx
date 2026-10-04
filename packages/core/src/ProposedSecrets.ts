@@ -134,7 +134,6 @@ export const mergeProposedSecrets = (repo: string, files: ReadonlyArray<string> 
       );
       const values = parseDotenv(plain.value);
       for (const name of take) text = setVar(text, name, values.get(name) ?? "");
-      yield* fs.remove(`${repo}/${file}`);
       merged.push(file);
       lines.push(
         `${node}'s secrets: ${take.length > 0 ? `merged ${take.join(", ")}` : "none merged"}${refused.length > 0 ? `; refused ${refused.join(", ")}` : ""}`,
@@ -143,12 +142,20 @@ export const mergeProposedSecrets = (repo: string, files: ReadonlyArray<string> 
     if (merged.length === 0) return lines;
     yield* writeSecrets(repo, text);
     yield* installSecrets(repo);
+    // The merge is committed first: until it is, every proposal stays, and a retry (the
+    // authority's next sync) finds them. Merging again takes nothing twice.
     const rev = yield* commitAndPush(
       repo,
-      ["secrets", PROPOSED_SECRETS],
+      ["secrets"],
       `Merge proposed secrets\n\n${lines.join("\n")}`,
     );
-    return [...lines, `committed ${rev}`];
+    for (const file of merged) yield* fs.remove(`${repo}/${file}`);
+    const dropped = yield* commitAndPush(
+      repo,
+      ["secrets", ...merged],
+      `Drop the merged proposed secrets\n\n${merged.join("\n")}`,
+    );
+    return [...lines, `committed ${rev}`, `removed ${merged.join(", ")} (${dropped})`];
   });
 
 /** Before approving: the names a proposal's secrets file holds, and what merging would do with each. */

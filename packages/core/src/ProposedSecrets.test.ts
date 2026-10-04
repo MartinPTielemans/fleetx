@@ -105,8 +105,54 @@ describe("mergeProposedSecrets", () => {
     expect(secrets).not.toContain("NODE_OPTIONS");
     expect(fs.existsSync(join(repo, "secrets-proposed/desktop.env.age"))).toBe(false);
     expect(fs.existsSync(join(repo, "secrets-proposed/server.env.age"))).toBe(true);
-    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("Merge proposed secrets");
+    expect(git(origin, "log", "-2", "--format=%s", "main").split("\n")).toEqual([
+      "Drop the merged proposed secrets",
+      "Merge proposed secrets",
+    ]);
   });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "keeps the proposal until the merge is committed; the next try finishes it",
+    async () => {
+      const origin = join(home, "retry.git");
+      const checkout = join(home, "retry");
+      git(home, "init", "-q", "--bare", "-b", "main", origin);
+      git(home, "clone", "-q", origin, checkout);
+      const { recipient } = await run(ensureIdentity);
+      fs.mkdirSync(join(checkout, "mcp"));
+      fs.writeFileSync(
+        join(checkout, "mcp/notes.json"),
+        JSON.stringify({ kind: "direct", url: "https://n", headers: { "X-Key": "$NOTES_KEY" } }),
+      );
+      await run(writeRecipients(checkout, { laptop: recipient }));
+      await run(writeSecrets(checkout, "FLEET_A=1\n"));
+      fs.mkdirSync(join(checkout, "secrets-proposed"));
+      fs.writeFileSync(
+        join(checkout, "secrets-proposed/desktop.env.age"),
+        await run(encryptFor([recipient], "NOTES_KEY=n-value\n")),
+      );
+      git(checkout, "add", "-A");
+      git(checkout, "commit", "-qm", "start");
+      git(checkout, "push", "-q", "-u", "origin", "main");
+
+      // The remote refuses the push: the merge is committed here, the proposal stays.
+      fs.chmodSync(join(origin, "objects"), 0o555);
+      try {
+        expect(await run(Effect.flip(mergeProposedSecrets(checkout)))).toContain("push failed");
+      } finally {
+        fs.chmodSync(join(origin, "objects"), 0o755);
+      }
+      expect(fs.existsSync(join(checkout, "secrets-proposed/desktop.env.age"))).toBe(true);
+      expect(await run(readSecrets(checkout))).toContain("NOTES_KEY=n-value");
+
+      // The retry: nothing merged twice, the proposal removed, both commits pushed.
+      const lines = await run(mergeProposedSecrets(checkout));
+      expect(lines.join("\n")).toContain("desktop's secrets: none merged");
+      expect(fs.existsSync(join(checkout, "secrets-proposed/desktop.env.age"))).toBe(false);
+      expect(git(origin, "ls-tree", "-r", "--name-only", "main")).not.toContain("secrets-proposed");
+      expect(git(origin, "log", "--format=%s", "main")).toContain("Merge proposed secrets");
+    },
+  );
 });
 
 /** An authority's checkout and a member's, of a fresh origin holding `fleet` as t3-fleet.toml. */
