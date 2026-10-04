@@ -5,7 +5,6 @@
 // files leave writes are parsed back.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync, spawnSync } from "node:child_process";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs";
