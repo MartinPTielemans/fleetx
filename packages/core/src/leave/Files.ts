@@ -66,7 +66,14 @@ export const writeAtomically = (
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const real = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file));
+    // A link is followed; a link to nothing is refused, never replaced by a file.
+    const link = yield* linkTarget(file);
+    const resolved = yield* fs.realPath(file).pipe(Effect.option);
+    if (Option.isSome(link) && Option.isNone(resolved))
+      return yield* Effect.fail(
+        `${file} is a link to ${link.value}, which is missing; it was left as it is`,
+      );
+    const real = Option.getOrElse(resolved, () => file);
     const dir = path.dirname(real);
     yield* fs.makeDirectory(dir, { recursive: true });
     const info = yield* fs.stat(real).pipe(Effect.option);
@@ -79,6 +86,7 @@ export const writeAtomically = (
     yield* Effect.gen(function* () {
       yield* fs.writeFileString(tmp, text, { mode });
       yield* fs.chmod(tmp, mode);
+      // Checked last, right before the rename, so the window for a write to be lost is as small as it can be without a lock.
       const now = yield* fs.readFileString(real).pipe(Effect.option);
       if (Option.getOrNull(now) !== before)
         return yield* Effect.fail(`${file} changed while T3 Fleet was editing it; run leave again`);
@@ -123,11 +131,12 @@ export const Marker = Schema.Struct({
   how: Schema.Literals(["copy", "move"]),
   /** The copy is complete (always true for a move). */
   ready: Schema.Boolean,
+  /** Where the link being replaced pointed; null when nothing was there. */
+  link: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type Marker = typeof Marker.Type;
 const decodeMarker = Schema.decodeUnknownOption(Schema.fromJsonString(Marker));
 const encodeMarker = Schema.encodeSync(Schema.fromJsonString(Marker));
-
 /** Staging directories beside `at` that are ours and for `at`. */
 export const stagingFor = (at: string) =>
   Effect.gen(function* () {
@@ -184,8 +193,13 @@ const present = (p: string) =>
 
 /**
  * Finishes what a staging directory was for, from wherever the run that made
- * it stopped, then removes it. Its `link` is the link that was at the path,
- * moved aside; it goes back when the replacement is not ready.
+ * it stopped, then removes it; returns why it was left instead, if it was.
+ * Its `link` is the link that was at the path, moved aside: it goes back
+ * when the replacement is not ready. The directory is removed only when
+ * nothing in it is needed any more: its replacement went into place, or the
+ * path still has the very link it was made to replace (a copy of the repo
+ * is made again from the repo). Anything else at the path is someone's, and
+ * the staging directory, with whatever it holds, stays.
  */
 export const finishStaging = (staging: string, marker: Marker) =>
   Effect.gen(function* () {
@@ -199,57 +213,73 @@ export const finishStaging = (staging: string, marker: Marker) =>
         ? marker.ready && (yield* present(copy))
           ? copy
           : null
-        : marker.source;
-    const atPresent = yield* present(at);
-    if (!atPresent) {
-      if (replacement !== null && (yield* present(replacement))) yield* fs.rename(replacement, at);
+        : (yield* present(marker.source))
+          ? marker.source
+          : null;
+    if (!(yield* present(at))) {
+      if (replacement !== null) yield* fs.rename(replacement, at);
       else if (yield* present(link)) yield* fs.rename(link, at);
-    } else if (replacement !== null && (yield* present(link)) && (yield* present(replacement))) {
-      // The link was moved aside, and something came back at the path since: leave both, say so.
-      return yield* Effect.fail(
-        `${at} has something new in it; the replacement is left in ${staging}`,
-      );
+      else return `${at} is missing, and ${staging} has nothing to put there; it is left as it is`;
+    } else {
+      const now = yield* linkTarget(at);
+      const unchanged =
+        Option.isSome(now) && marker.link !== undefined && now.value === marker.link;
+      if (!unchanged || (yield* present(link)))
+        return `${at} has something new in it, so ${staging} and what it holds are left as they are`;
     }
     yield* fs.remove(staging, { recursive: true, force: true });
+    return null;
   }).pipe(Effect.mapError((e) => (typeof e === "string" ? e : errorText(e))));
 
 /**
  * Replaces `at`, a link or nothing, with `source`: a copy of it (`how` copy;
- * `prepare` then edits the copy in place, before it goes in) or `source`
- * itself, moved (`how` move). `stillWanted` is asked right before the link
- * goes, so a change made meanwhile is never overwritten.
+ * `prepare` then edits the copy in place, with a scratch directory of its
+ * own outside the copy, before it goes in) or `source` itself, moved (`how`
+ * move). `stillWanted` is asked right before the link goes, so a change made
+ * meanwhile is never overwritten.
  *
  * A file replaces the link in one rename. A directory cannot replace a link
- * atomically on POSIX, so the link is moved into the staging directory first
- * and the directory renamed into its place; a run interrupted between the two
- * is finished by the next (finishStaging).
+ * atomically on POSIX: the link is moved into the staging directory and the
+ * directory renamed into its place right after, so the path is missing only
+ * between those two renames; a run interrupted there is finished by the next
+ * (finishStaging).
  */
 export const replaceWith = <E = never, R = never, E2 = never, R2 = never>(input: {
   readonly at: string;
   readonly source: string;
   readonly how: "copy" | "move";
-  readonly prepare?: (copy: string) => Effect.Effect<void, E, R>;
+  readonly prepare?: (copy: string, scratch: string) => Effect.Effect<void, E, R>;
   readonly stillWanted: Effect.Effect<boolean, E2, R2>;
 }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const { at } = input;
+    const original = Option.getOrNull(yield* linkTarget(at));
     const staging = yield* fs.makeTempDirectory({
       directory: path.dirname(at),
       prefix: `.${path.basename(at)}${STAGING_INFIX}`,
     });
+    const marker = (ready: boolean): Marker => ({
+      path: at,
+      source: input.source,
+      how: input.how,
+      ready,
+      link: original,
+    });
     const writeMarker = (ready: boolean) =>
-      fs.writeFileString(
-        path.join(staging, "marker.json"),
-        encodeMarker({ path: at, source: input.source, how: input.how, ready }),
-      );
+      fs.writeFileString(path.join(staging, "marker.json"), encodeMarker(marker(ready)));
     const copy = path.join(staging, "copy");
     const work = Effect.gen(function* () {
       yield* writeMarker(input.how === "move");
       if (input.how === "copy") {
         yield* fs.copy(input.source, copy);
-        if (input.prepare !== undefined) yield* input.prepare(copy);
+        if (input.prepare !== undefined) {
+          const scratch = path.join(staging, "scratch");
+          yield* fs.makeDirectory(scratch);
+          yield* input.prepare(copy, scratch);
+          yield* fs.remove(scratch, { recursive: true });
+        }
         yield* writeMarker(true);
       }
       if (!(yield* input.stillWanted)) return false;
@@ -264,9 +294,8 @@ export const replaceWith = <E = never, R = never, E2 = never, R2 = never>(input:
       Effect.mapError(errorText),
       Effect.tapError(() =>
         Effect.gen(function* () {
-          const marker: Marker = { path: at, source: input.source, how: input.how, ready: false };
           if (input.how === "copy") yield* fs.remove(copy, { recursive: true, force: true });
-          yield* finishStaging(staging, marker);
+          yield* finishStaging(staging, marker(false));
         }).pipe(Effect.ignore),
       ),
     );

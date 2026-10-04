@@ -43,22 +43,25 @@ export const removeService = (
 ) => {
   if (platform === "darwin") {
     const job = `"gui/$(id -u)/${launchdLabel(role)}"`;
+    // launchctl print answers 113 for a job it does not have; any other answer is not that.
     return [
       `launchctl bootout ${job} 2>/dev/null`,
       `i=0; while launchctl print ${job} >/dev/null 2>&1 && [ "$i" -lt ${wait} ]; do sleep 1; i=$((i + 1)); done`,
-      `if launchctl print ${job} >/dev/null 2>&1; then echo "launchd still has ${launchdLabel(role)} loaded; its plist is kept" >&2; exit 1; fi`,
+      `launchctl print ${job} >/dev/null 2>&1; status=$?`,
+      `if [ "$status" -ne 113 ]; then if [ "$status" -eq 0 ]; then echo "launchd still has ${launchdLabel(role)} loaded; its plist is kept" >&2; else echo "could not tell whether launchd unloaded ${launchdLabel(role)} (launchctl print: exit $status); its plist is kept" >&2; fi; exit 1; fi`,
       `rm -f "$HOME/Library/LaunchAgents/${launchdLabel(role)}.plist"`,
     ].join("\n");
   }
   const ctl = scope === "system" ? "systemctl" : "systemctl --user";
   const dir = scope === "system" ? systemDir : '"$HOME/.config/systemd/user"';
   const units = unitFiles(role);
+  // Only states systemd reported are trusted: a failed probe (no bus, say) prints none, and keeps the unit.
   return [
     `${ctl} disable --now ${units.join(" ")} 2>/dev/null`,
     ...units.map(
       (u) =>
-        `if ${ctl} is-active --quiet ${u}; then echo "${u} is still running; its unit is kept" >&2; exit 1; fi\n` +
-        `if [ "$(${ctl} is-enabled ${u} 2>/dev/null)" = enabled ]; then echo "${u} is still enabled; its unit is kept" >&2; exit 1; fi`,
+        `state=$(${ctl} is-active ${u} 2>/dev/null); case "$state" in inactive|failed) ;; active|activating|deactivating|reloading) echo "${u} is still running; its unit is kept" >&2; exit 1 ;; *) echo "could not tell whether ${u} stopped (systemctl is-active: \${state:-no answer}); its unit is kept" >&2; exit 1 ;; esac\n` +
+        `enabled=$(${ctl} is-enabled ${u} 2>/dev/null); case "$enabled" in disabled|static|not-found) ;; enabled|enabled-runtime|linked|linked-runtime|alias|indirect) echo "${u} is still enabled; its unit is kept" >&2; exit 1 ;; *) echo "could not tell whether ${u} is disabled (systemctl is-enabled: \${enabled:-no answer}); its unit is kept" >&2; exit 1 ;; esac`,
     ),
     `rm -f ${units.map((u) => `${dir}/${u}`).join(" ")}`,
     `${ctl} daemon-reload`,

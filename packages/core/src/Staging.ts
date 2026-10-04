@@ -33,7 +33,7 @@ import { proposalTrailer } from "./Approved.ts";
 import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
 import { readAllowed, refusal } from "./SecretScan.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
-import { departureOf, removeNode } from "./leave/Fleet.ts";
+import { isDeparture, removeNode } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { PROPOSED_SECRETS } from "./setup/Plan.ts";
@@ -176,17 +176,14 @@ export const approve = (
   underSyncLock(
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
-      // A machine leaving the fleet: removed from this authority's own current repo and secrets.
-      const departing = yield* departureOf(repo, tip);
-      if (departing !== null) {
-        if (departing !== proposal.node)
-          return yield* Effect.fail(`${proposal.node}'s proposal removes ${departing}, not itself`);
+      // A machine leaving the fleet, by what the proposal changes: removed from this authority's own current repo and secrets.
+      if (yield* isDeparture(repo, tip, proposal.node)) {
         const removed = yield* removeNode(
           repo,
           branch,
-          departing,
+          proposal.node,
           process.env["HOME"] ?? "",
-          `Approve ${departing}'s departure from the fleet (by ${by})`,
+          `Approve ${proposal.node}'s departure from the fleet (by ${by})`,
         );
         yield* dropStaging(repo, proposal, tip);
         return removed.rev ?? out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
@@ -387,7 +384,15 @@ export const reject = (repo: string, proposal: Proposal, expected?: string) =>
 
 /** Under one of the auto-approve prefixes, every file. */
 export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<string>) =>
-  prefixes.length > 0 && proposal.files.every((f) => prefixes.some((p) => f.startsWith(p)));
+  prefixes.length > 0 &&
+  proposal.files.every((f) => prefixes.some((p) => f.startsWith(p))) &&
+  // A machine's departure needs a person's approve, whatever the prefixes trust.
+  !(
+    proposal.files.includes(`nodes/${proposal.node}.toml`) &&
+    proposal.files.every(
+      (f) => f === `nodes/${proposal.node}.toml` || f === "secrets/recipients.toml",
+    )
+  );
 
 /**
  * On the proposing node: if its proposal was rejected, set aside its local

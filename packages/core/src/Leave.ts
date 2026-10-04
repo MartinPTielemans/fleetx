@@ -31,19 +31,29 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import { identityToRecipient } from "age-encryption";
+import { parse as parseToml } from "smol-toml";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { shPath } from "./Area.ts";
-import { expandHome, loadConfig, type Config } from "./Config.ts";
-import { proposeDeparture, removeNode, standing, type Standing } from "./leave/Fleet.ts";
+import { expandHome, loadConfig, localConfigPath, type Config } from "./Config.ts";
+import { git, ok, out } from "./Git.ts";
+import { leaveFleet, standing, type Standing } from "./leave/Fleet.ts";
 import { linkTarget, replaceWith, tilde, within, writeAtomically } from "./leave/Files.ts";
-import { convert, finishUnfinished, planLinks, repoRoots } from "./leave/Links.ts";
+import {
+  convert,
+  expectedTargets,
+  finishUnfinished,
+  installedTargets,
+  planLinks,
+  repoRoots,
+} from "./leave/Links.ts";
 import { applyMcp, planMcp } from "./leave/Mcp.ts";
 import { applyModels, planModels } from "./leave/Models.ts";
 import { findServices, stopService } from "./leave/Services.ts";
 import { branchPrefix, CLI, configDir, SHARE_DIR, stateDir } from "./Names.ts";
-import { localSecretsPath, varNames } from "./Secrets.ts";
+import { keyPath, localSecretsPath, varNames } from "./Secrets.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
 /** What setup recorded before it changed anything (written by `t3-fleet setup`). */
@@ -74,6 +84,18 @@ export const setupSnapshotPath = (home: string) => `${stateDir(home)}/setup/befo
 
 // ---- the departure, recorded ------------------------------------------------
 
+/**
+ * Which enrollment a departure is of: the config repo's origin and this
+ * machine's key. A record of another enrollment (the machine left one fleet
+ * halfway and joined another) is never resumed.
+ */
+export const Enrollment = Schema.Struct({
+  remote: Schema.NullOr(Schema.String),
+  /** This machine's public age key. */
+  key: Schema.NullOr(Schema.String),
+});
+export type Enrollment = typeof Enrollment.Type;
+
 /** What leaving needs to know about this machine, kept for as long as leaving takes. */
 export const Departure = Schema.Struct({
   node: Schema.String,
@@ -84,6 +106,8 @@ export const Departure = Schema.Struct({
   settings: Schema.Record(Schema.String, Schema.Unknown),
   /** Every step has run; a later `leave` only purges. */
   finished: Schema.Boolean,
+  /** Recorded with the departure, when it first runs. */
+  enrollment: Schema.optionalKey(Enrollment),
 });
 export type Departure = typeof Departure.Type;
 
@@ -106,6 +130,40 @@ export const departureOf = (config: Config): Departure => {
   };
 };
 
+/** The enrollment of the repo at `repo` and this machine's key, as they are now. */
+export const enrollmentOf = (home: string, repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const remote = yield* git(repo, ["remote", "get-url", "origin"]);
+    const identity = (yield* fs.readFileString(keyPath(home)).pipe(Effect.orElseSucceed(() => "")))
+      .split("\n")
+      .find((l) => l.startsWith("AGE-SECRET-KEY-"));
+    const key =
+      identity === undefined
+        ? null
+        : yield* Effect.tryPromise(() => identityToRecipient(identity)).pipe(
+            Effect.orElseSucceed(() => null),
+          );
+    return { remote: ok(remote) ? out(remote) : null, key } satisfies Enrollment;
+  });
+
+/** Which repo and node this machine's local config names, whether or not the repo still has the node. */
+const localEnrollment = (home: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(localConfigPath(home)).pipe(Effect.option);
+    const raw = Option.isSome(text)
+      ? yield* Effect.try(() => parseToml(text.value) as Record<string, unknown>).pipe(
+          Effect.orElseSucceed(() => ({}) as Record<string, unknown>),
+        )
+      : {};
+    const repo = process.env["T3_FLEET_CONFIG_REPO"] ?? raw["repo"];
+    const node = process.env["T3_FLEET_NODE"] ?? raw["node"];
+    return typeof repo === "string" && typeof node === "string"
+      ? { repo: expandHome(repo, home), node }
+      : null;
+  });
+
 const readDeparture = (home: string) =>
   FileSystem.FileSystem.pipe(
     Effect.flatMap((fs) => fs.readFileString(departurePath(home))),
@@ -122,15 +180,46 @@ const writeDeparture = (home: string, departure: Departure) =>
   });
 
 /**
- * The departure to plan: an unfinished one recorded here goes on; otherwise
- * this machine as its config says; otherwise (its node file is gone) a
- * finished one recorded here, for `--purge`.
+ * Why a recorded departure is not this machine's current enrollment, or
+ * null when it is (or nothing says otherwise: the local config is gone).
+ */
+const otherEnrollment = (home: string, recorded: Departure) =>
+  Effect.gen(function* () {
+    const local = yield* localEnrollment(home);
+    const now = yield* enrollmentOf(home, local?.repo ?? recorded.repo);
+    const was = recorded.enrollment;
+    const differs: Array<string> = [];
+    if (local !== null && local.node !== recorded.node)
+      differs.push(`it is ${local.node} now, not ${recorded.node}`);
+    if (
+      was !== undefined &&
+      was.remote !== null &&
+      now.remote !== null &&
+      was.remote !== now.remote
+    )
+      differs.push(`its config repo is ${now.remote} now, not ${was.remote}`);
+    if (was !== undefined && was.key !== null && now.key !== null && was.key !== now.key)
+      differs.push("its key is a new one");
+    return differs.length === 0 ? null : differs.join("; ");
+  });
+
+/**
+ * The departure to plan: an unfinished one recorded here goes on, when it is
+ * of this machine's current enrollment; otherwise this machine as its config
+ * says; otherwise (its node file is gone) a finished one recorded here, for
+ * `--purge`.
  */
 export const currentDeparture = (home: string) =>
   Effect.gen(function* () {
     const recorded = yield* readDeparture(home);
-    if (Option.isSome(recorded) && !recorded.value.finished)
-      return { departure: recorded.value, resumed: true };
+    if (Option.isSome(recorded)) {
+      const other = yield* otherEnrollment(home, recorded.value);
+      if (other !== null)
+        return yield* Effect.fail(
+          `${tilde(departurePath(home), home)} records ${recorded.value.finished ? "" : "an unfinished "}departure of ${recorded.value.node} from another enrollment (${other}), so it is not resumed. If that departure is over, remove the file and run leave again.`,
+        );
+      if (!recorded.value.finished) return { departure: recorded.value, resumed: true };
+    }
     const config = yield* loadConfig.pipe(Effect.result);
     if (
       config._tag === "Success" &&
@@ -182,14 +271,19 @@ export interface LeaveOptions {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Where the departure stands in the fleet, and the step that takes it further. */
+/**
+ * Where the departure stands in the fleet, and the step that takes it
+ * further. The role is origin's, not the one recorded: a machine promoted or
+ * demoted since leaves as what it is now, and the step decides again when it
+ * runs (leaveFleet).
+ */
 const fleetStep = (d: Departure, home: string, at: Standing) => {
   const notes: Array<string> = [];
-  const authority = d.roles.includes("authority");
   if (at._tag === "out") {
     notes.push(`${d.node} is out of the fleet's config repo`);
     return { step: null, refusal: null, notes };
   }
+  const authority = at._tag === "in" ? at.authority : d.roles.includes("authority");
   if (at._tag === "in" && authority && at.authorities.length === 0)
     return {
       step: null,
@@ -206,37 +300,37 @@ const fleetStep = (d: Departure, home: string, at: Standing) => {
     notes.push(
       `the config repo's origin cannot be reached now (${at.why}); it is tried again when leaving runs`,
     );
-  const step: LeaveStep = authority
-    ? {
-        title: `Remove ${d.node} from the fleet (as an authority, on ${d.branch})`,
-        lines: [
+  const step: LeaveStep = {
+    title: authority
+      ? `Remove ${d.node} from the fleet (as an authority, on ${d.branch})`
+      : `Propose removing ${d.node} from the fleet (members cannot push to ${d.branch})`,
+    lines: authority
+      ? [
           `on origin's ${d.branch}: delete nodes/${d.node}.toml, drop ${d.node} from secrets/recipients.toml, re-encrypt the secrets for the others`,
           "checked under the sync lock against origin's current authorities, and again in the commit before it is pushed",
           `delete ${["state", "staging", "rejected"].map((k) => `${branchPrefix(k as "state")}${d.node}`).join(", ")}`,
-        ],
-        apply: removeNode(d.repo, d.branch, d.node, home, `Remove ${d.node} from the fleet`).pipe(
-          Effect.map((r) => [
-            r.rev === null
-              ? `${d.node} was already out of the fleet`
-              : `${d.node} is out of the fleet (${r.rev})`,
-            ...r.notes,
-          ]),
-        ),
-      }
-    : {
-        title: `Propose removing ${d.node} from the fleet (members cannot push to ${d.branch})`,
-        lines: [
+        ]
+      : [
           `propose on ${branchPrefix("staging")}${d.node}: delete nodes/${d.node}.toml and drop ${d.node} from secrets/recipients.toml`,
           "an authority approves it with t3-fleet approve, and re-encrypts the secrets from its own copy then",
         ],
-        apply: proposeDeparture(d.repo, d.branch, d.node, home).pipe(
-          Effect.map((commit) =>
-            commit === null
-              ? [`${d.node} was already out of the fleet`]
-              : [`proposed ${commit}; on an authority run: t3-fleet approve ${d.node} ${commit}`],
-          ),
-        ),
-      };
+    apply: leaveFleet(d.repo, d.branch, d.node, home).pipe(
+      Effect.map((left) =>
+        left._tag === "removed"
+          ? [
+              left.rev === null
+                ? `${d.node} was already out of the fleet`
+                : `${d.node} is out of the fleet (${left.rev})`,
+              ...left.notes,
+            ]
+          : left.commit === null
+            ? [`${d.node} was already out of the fleet`]
+            : [
+                `proposed ${left.commit}; on an authority run: t3-fleet approve ${d.node} ${left.commit}`,
+              ],
+      ),
+    ),
+  };
   return { step, refusal: null, notes };
 };
 
@@ -244,11 +338,12 @@ const fleetStep = (d: Departure, home: string, at: Standing) => {
 const planBackups = (d: Departure, home: string, snapshot: SetupSnapshot | null) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const roots = yield* repoRoots(d.repo);
+    const installed = installedTargets(d.settings, home, yield* repoRoots(d.repo));
+    // Only over the very link T3 Fleet put there, or into nothing: a link of the user's own, even into the repo, stays.
     const restorable = (at: string) =>
       Effect.gen(function* () {
         const target = yield* linkTarget(at);
-        if (Option.isSome(target)) return roots.some((r) => within(target.value, r));
+        if (Option.isSome(target)) return expectedTargets(installed, at).includes(target.value);
         return !(yield* fs.exists(at).pipe(Effect.orElseSucceed(() => true)));
       });
     const back: Array<{ at: string; backup: string }> = [];
@@ -297,6 +392,11 @@ const planBackups = (d: Departure, home: string, snapshot: SetupSnapshot | null)
     return {
       step,
       kept,
+      restoring: back,
+      moved: (snapshot?.moved ?? []).map((m) => ({
+        at: expandHome(m.path, home),
+        backup: expandHome(m.backup, home),
+      })),
       notes,
       skip: new Set((snapshot?.moved ?? []).map((m) => expandHome(m.path, home))),
     };
@@ -305,9 +405,16 @@ const planBackups = (d: Departure, home: string, snapshot: SetupSnapshot | null)
 /** Directories in the state dir that hold the user's own files: purge keeps them. */
 export const KEPT = ["skill-backups", "setup-backups"];
 
+/**
+ * Purging. Every backup setup made that is still on disk when purge runs is
+ * kept: whichever the plan expected to restore, a restore skipped because
+ * the destination changed meanwhile leaves its backup, and that one is kept
+ * too. They move to setup-backups, which purge never removes.
+ */
 const purgeStep = (
   home: string,
-  unrestored: ReadonlyArray<{ readonly at: string; readonly backup: string }>,
+  moved: ReadonlyArray<{ readonly at: string; readonly backup: string }>,
+  restoring: ReadonlySet<string>,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -316,13 +423,14 @@ const purgeStep = (
     const state = stateDir(home);
     const notes: Array<string> = [];
     // Backups of the user's files that purge would otherwise take with the state dir.
-    const rescued = unrestored
+    const rescued = moved
       .filter(
         (u) => within(u.backup, state) && !KEPT.some((k) => within(u.backup, `${state}/${k}`)),
       )
       .map((u) => ({ from: u.backup, to: `${state}/setup-backups/${path.basename(u.at)}` }));
     for (const r of rescued)
-      notes.push(`setup's backup ${tilde(r.from, home)} is kept, moved to ${tilde(r.to, home)}`);
+      if ((yield* exists(r.from)) && !restoring.has(r.from))
+        notes.push(`setup's backup ${tilde(r.from, home)} is kept, moved to ${tilde(r.to, home)}`);
     for (const k of KEPT)
       if (k !== "setup-backups" && (yield* exists(`${state}/${k}`)))
         notes.push(`kept ${tilde(`${state}/${k}`, home)}: your files from before joining`);
@@ -346,7 +454,9 @@ const purgeStep = (
       title:
         "Remove T3 Fleet's local state: this machine's key, the decrypted secrets, logs and the installed bundle",
       lines: [
-        ...rescued.map((r) => `$ mv ${shPath(tilde(r.from, home))} ${shPath(tilde(r.to, home))}`),
+        ...(rescued.length > 0
+          ? ["every backup setup made that is still there is moved to setup-backups first"]
+          : []),
         ...remove.map((p) => `$ rm -rf ${shPath(tilde(p, home))}`),
       ],
       apply: Effect.gen(function* () {
@@ -405,66 +515,23 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
         );
     }
 
-    if (services.length > 0)
-      steps.push({
-        title: `Stop and remove ${services.map((s) => s.what).join(", ")}`,
-        lines: [
-          "each is checked stopped before its unit is removed",
-          ...services.flatMap((s) => s.script.split("\n")).map((l) => `$ ${l}`),
-        ],
-        apply: Effect.forEach(services, (s) => stopService(s, home)),
-      });
-
-    const snapshotText = yield* fs.readFileString(setupSnapshotPath(home)).pipe(Effect.option);
-    const snapshot = Option.isSome(snapshotText)
-      ? Option.getOrNull(decodeSnapshot(snapshotText.value))
-      : null;
-    if (Option.isSome(snapshotText) && snapshot === null)
-      notes.push(`${tilde(setupSnapshotPath(home), home)} is not a setup snapshot; ignored`);
-    const backups = yield* planBackups(d, home, snapshot);
-
-    const links = yield* planLinks(d.repo, d.settings, home, backups.skip);
-    for (const b of links.broken)
-      notes.push(
-        `${tilde(b.at, home)} points into the config repo at ${tilde(b.target, home)}, which is gone; it is left as it is`,
-      );
-    for (const c of links.conversions)
-      for (const inner of c.brokenInside)
-        notes.push(
-          `${tilde(inner, home)} points into the config repo at something gone; its copy keeps the link as it is`,
-        );
-    const linkCount = links.conversions.length + links.unfinished.length;
-    if (linkCount > 0)
-      steps.push({
-        title: `Turn ${plural(linkCount, "link")} into the config repo into real copies`,
-        lines: [
-          ...links.unfinished.map(
-            (u) => `${tilde(u.marker.path, home)}  ← finish what an interrupted run left half-done`,
-          ),
-          ...links.conversions.map(
-            (c) =>
-              `${tilde(c.at, home)}  ← copy of ${tilde(c.target, home)}${c.nested > 0 ? ` (and ${plural(c.nested, "link")} into the repo inside it)` : ""}`,
-          ),
-        ],
-        apply: Effect.gen(function* () {
-          for (const u of links.unfinished) yield* finishUnfinished(u.dir, u.marker);
-          let changed = 0;
-          for (const c of links.conversions) if (yield* convert(c, d.repo)) changed++;
-          const skipped = links.conversions.length - changed;
-          return [
-            `copied ${plural(changed + links.unfinished.length, "link")} into place`,
-            ...(skipped > 0
-              ? [
-                  `${plural(skipped, "link")} changed meanwhile and ${skipped === 1 ? "was" : "were"} left alone`,
-                ]
-              : []),
-          ];
-        }),
-      });
-    if (backups.step !== null) steps.push(backups.step);
-    notes.push(...backups.notes);
-
+    const stopServices: LeaveStep | null =
+      services.length === 0
+        ? null
+        : {
+            title: `Stop and remove ${services.map((s) => s.what).join(", ")}`,
+            lines: [
+              "each is checked stopped before its unit is removed",
+              ...services.flatMap((s) => s.script.split("\n")).map((l) => `$ ${l}`),
+            ],
+            apply: Effect.forEach(services, (s) => stopService(s, home)),
+          };
+    // T3's providers go back before the model proxy stops, so T3 never starts one through a stopped proxy.
     const models = yield* planModels(home);
+    if (models.routed.length > 0 && models.t3._tag === "running" && models.t3.cli === null)
+      return refuse(
+        "T3 is running, but its CLI could not be found from the server's command line, so its providers cannot be pointed back through T3 while it runs; quit T3 and run leave again",
+      );
     if (models.unreadable)
       notes.push(
         "T3's settings.json is not valid JSON, so model routing and the launchers are left as they are",
@@ -494,6 +561,73 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
         );
     }
 
+    if (stopServices !== null) steps.push(stopServices);
+
+    const snapshotText = yield* fs.readFileString(setupSnapshotPath(home)).pipe(Effect.option);
+    const snapshot = Option.isSome(snapshotText)
+      ? Option.getOrNull(decodeSnapshot(snapshotText.value))
+      : null;
+    if (Option.isSome(snapshotText) && snapshot === null)
+      notes.push(`${tilde(setupSnapshotPath(home), home)} is not a setup snapshot; ignored`);
+    const backups = yield* planBackups(d, home, snapshot);
+
+    const links = yield* planLinks(
+      d.repo,
+      d.settings,
+      home,
+      backups.skip,
+      backups.moved.map((m) => m.at),
+    );
+    for (const c of links.cycles)
+      notes.push(
+        `${tilde(c.at, home)} is left a link: ${tilde(c.loop, home)} inside it links back to a directory it is in, so a copy would never end`,
+      );
+    for (const b of links.broken)
+      notes.push(
+        `${tilde(b.at, home)} points into the config repo at ${tilde(b.target, home)}, which is gone; it is left as it is`,
+      );
+    for (const c of links.conversions)
+      for (const inner of c.brokenInside)
+        notes.push(
+          `${tilde(inner, home)} points into the config repo at something gone; its copy keeps the link as it is`,
+        );
+    const linkCount = links.conversions.length + links.unfinished.length;
+    if (linkCount > 0)
+      steps.push({
+        title: `Turn ${plural(linkCount, "link")} into the config repo into real copies`,
+        lines: [
+          "a directory cannot replace a link in one step: its link is moved aside and the copy renamed into place right after, and a run interrupted between the two is finished by the next",
+          ...links.unfinished.map(
+            (u) => `${tilde(u.marker.path, home)}  ← finish what an interrupted run left half-done`,
+          ),
+          ...links.conversions.map(
+            (c) =>
+              `${tilde(c.at, home)}  ← copy of ${tilde(c.target, home)}${c.nested > 0 ? ` (and ${plural(c.nested, "link")} into the repo inside it)` : ""}`,
+          ),
+        ],
+        apply: Effect.gen(function* () {
+          const kept: Array<string> = [];
+          for (const u of links.unfinished) {
+            const left = yield* finishUnfinished(u.dir, u.marker);
+            if (left !== null) kept.push(left);
+          }
+          let changed = 0;
+          for (const c of links.conversions) if (yield* convert(c, d.repo)) changed++;
+          const skipped = links.conversions.length - changed;
+          return [
+            `copied ${plural(changed + links.unfinished.length - kept.length, "link")} into place`,
+            ...kept,
+            ...(skipped > 0
+              ? [
+                  `${plural(skipped, "link")} changed meanwhile and ${skipped === 1 ? "was" : "were"} left alone`,
+                ]
+              : []),
+          ];
+        }),
+      });
+    if (backups.step !== null) steps.push(backups.step);
+    notes.push(...backups.notes);
+
     const mcp = yield* planMcp(
       home,
       d.repo,
@@ -517,7 +651,11 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
       });
 
     if (options.purge) {
-      const purge = yield* purgeStep(home, backups.kept);
+      const purge = yield* purgeStep(
+        home,
+        backups.moved,
+        new Set(backups.restoring.map((b) => b.backup)),
+      );
       steps.push(purge.step);
       notes.push(...purge.notes);
     } else
@@ -556,7 +694,11 @@ export const applyLeave = (plan: LeavePlan) =>
     if (plan.refusal !== null) return [] as Array<LeaveOutcome>;
     const outcomes = yield* underSyncLock(
       Effect.gen(function* () {
-        yield* writeDeparture(home, plan.departure);
+        const departure: Departure = {
+          ...plan.departure,
+          enrollment: plan.departure.enrollment ?? (yield* enrollmentOf(home, plan.departure.repo)),
+        };
+        yield* writeDeparture(home, departure);
         const outcomes: Array<LeaveOutcome> = [];
         for (const step of plan.steps) {
           const result = yield* step.apply.pipe(Effect.result);
@@ -568,7 +710,7 @@ export const applyLeave = (plan: LeavePlan) =>
           }
         }
         if (outcomes.length === plan.steps.length && outcomes.every((o) => o.ok) && !plan.purge)
-          yield* writeDeparture(home, { ...plan.departure, finished: true });
+          yield* writeDeparture(home, { ...departure, finished: true });
         return outcomes;
       }),
     );

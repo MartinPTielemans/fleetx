@@ -83,6 +83,8 @@ export const leaveCommand = Command.make("leave", {
       const plan = yield* planLeave(departure, { home, purge });
       yield* Console.log(renderLeavePlan(plan));
       if (plan.refusal === null && plan.steps.length === 0) {
+        // Recorded as finished, so a later run does not take it for one still going.
+        if (!dryRun) yield* applyLeave(plan);
         yield* Console.log("\nNothing left to do.");
         return;
       }

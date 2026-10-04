@@ -1,12 +1,18 @@
 /**
  * T3 Fleet's links into the config repo, turned into real copies of what they
- * point to so the machine keeps working once the checkout is gone: entries of
- * the skills store, client and watched directories, and dotfile and
- * instruction destinations.
+ * point to so the machine keeps working once the checkout is gone.
+ *
+ * A link counts as T3 Fleet's only when it points exactly where T3 Fleet
+ * installs it (installedTargets): a skill in the store at the repo's
+ * skills/<name>, a client's skill at the store's (or, as older versions did,
+ * the repo's), a dotfile or instruction at its `src`. A link of the user's to
+ * some other file, in the repo or not, is theirs and is left alone.
  *
  * Links inside a copied directory that point into the repo are copied in too
- * (a skill linking a shared file). A link into the repo whose target is gone
- * is reported and left as it is, never dropped from the plan.
+ * (a skill linking a shared file). One pointing back at a directory the copy
+ * is already inside would copy forever: that link is refused, and left as a
+ * link. A link into the repo whose target is gone is reported and left as it
+ * is, never dropped from the plan.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -40,8 +46,10 @@ export interface LinksPlan {
   readonly conversions: ReadonlyArray<Conversion>;
   /** Replacements an interrupted run left half-done. */
   readonly unfinished: ReadonlyArray<{ readonly dir: string; readonly marker: Marker }>;
-  /** Links into the repo pointing at nothing: where, and what they name. */
+  /** T3 Fleet's links pointing at nothing: where, and what they name. */
   readonly broken: ReadonlyArray<{ readonly at: string; readonly target: string }>;
+  /** Links that would copy themselves forever: where, and the link inside that loops. */
+  readonly cycles: ReadonlyArray<{ readonly at: string; readonly loop: string }>;
 }
 
 const strings = (v: unknown): Array<string> =>
@@ -55,40 +63,76 @@ export const repoRoots = (repo: string) =>
     Effect.orElseSucceed(() => [repo]),
   );
 
-/** Where T3 Fleet puts links, from a node's merged settings. */
-export const linkCandidates = (table: Record<string, unknown>, home: string) => {
+/**
+ * Where T3 Fleet installs a link, from a node's merged settings: each path,
+ * and the targets it may point to. A directory entry is matched by name
+ * (`dir/*`), with `*` standing for that name in its targets.
+ */
+export const installedTargets = (
+  table: Record<string, unknown>,
+  home: string,
+  roots: ReadonlyArray<string>,
+) => {
   const skills = isObject(table["skills"]) ? table["skills"] : {};
-  const dirs = [
+  const store = expandHome(
     typeof skills["store"] === "string" ? skills["store"] : "~/.agents/skills",
-    ...strings(skills["clients"]),
-    ...strings(skills["watch"]),
-  ].map((d) => expandHome(d, home));
-  const files: Array<string> = [];
-  for (const area of ["dotfiles", "instructions"]) {
+    home,
+  );
+  const dirs = new Map<string, Array<string>>();
+  dirs.set(
+    store,
+    roots.map((r) => `${r}/skills/*`),
+  );
+  for (const client of strings(skills["clients"]).map((c) => expandHome(c, home)))
+    if (!dirs.has(client)) dirs.set(client, [`${store}/*`, ...roots.map((r) => `${r}/skills/*`)]);
+  const files = new Map<string, Array<string>>();
+  for (const [area, base] of [
+    ["dotfiles", "dotfiles/"],
+    ["instructions", ""],
+  ] as const) {
     const entries = Array.isArray(table[area]) ? (table[area] as Array<unknown>) : [];
     for (const e of entries)
-      if (isObject(e) && typeof e["dest"] === "string") files.push(expandHome(e["dest"], home));
+      if (isObject(e) && typeof e["dest"] === "string" && typeof e["src"] === "string")
+        files.set(
+          expandHome(e["dest"], home),
+          roots.map((r) => `${r}/${base}${e["src"] as string}`.replace(/\/\.\//g, "/")),
+        );
   }
-  return { dirs: [...new Set(dirs)], files: [...new Set(files)] };
+  return { dirs, files };
+};
+
+/** The targets T3 Fleet would have given the link at `at`, or none when it puts no link there. */
+export const expectedTargets = (
+  installed: ReturnType<typeof installedTargets>,
+  at: string,
+): ReadonlyArray<string> => {
+  const direct = installed.files.get(at);
+  if (direct !== undefined) return direct;
+  const slash = at.lastIndexOf("/");
+  const name = at.slice(slash + 1);
+  return (installed.dirs.get(at.slice(0, slash)) ?? []).map((t) => t.replace(/\*$/, name));
 };
 
 /**
- * Walks `dir` (not following links) for links into the repo: `onLink` gets
- * each one with its resolved target, or null when that is gone. Directories
- * already walked (by real path) are skipped, so a cycle ends.
+ * Walks `dir` (not following links) for links into the repo. `source` is the
+ * real directory `dir` was copied from, and `ancestors` the real directories
+ * the walk is inside of, so a link back up to one of them is a loop.
+ * `onLink` gets each link, its resolved target (null when gone), and whether
+ * it loops; it says whether to walk into the target.
  */
 const walkLinks = <E, R>(
   dir: string,
+  ancestors: ReadonlyArray<string>,
   inRepo: (p: string) => boolean,
-  onLink: (at: string, target: string | null) => Effect.Effect<boolean, E, R>,
-  seen: Set<string> = new Set(),
+  onLink: (
+    at: string,
+    target: string | null,
+    loops: boolean,
+  ) => Effect.Effect<boolean, E, R | FileSystem.FileSystem | Path.Path>,
 ): Effect.Effect<void, E, R | FileSystem.FileSystem | Path.Path> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const real = yield* fs.realPath(dir).pipe(Effect.orElseSucceed(() => dir));
-    if (seen.has(real) || seen.size > 10_000) return;
-    seen.add(real);
     for (const name of yield* fs
       .readDirectory(dir)
       .pipe(Effect.orElseSucceed(() => [] as Array<string>))) {
@@ -96,36 +140,39 @@ const walkLinks = <E, R>(
       const target = yield* linkTarget(at);
       if (Option.isSome(target)) {
         if (!inRepo(target.value)) continue;
-        const resolved = yield* fs.realPath(at).pipe(Effect.option);
-        const descend = yield* onLink(at, Option.getOrNull(resolved));
-        if (descend && Option.isSome(resolved)) {
-          const info = yield* fs.stat(at).pipe(Effect.option);
-          if (Option.isSome(info) && info.value.type === "Directory")
-            yield* walkLinks(at, inRepo, onLink, seen);
-        }
+        const resolved = Option.getOrNull(yield* fs.realPath(at).pipe(Effect.option));
+        const loops = resolved !== null && ancestors.some((a) => within(a, resolved));
+        if (!(yield* onLink(at, resolved, loops)) || resolved === null || loops) continue;
+        const info = yield* fs.stat(at).pipe(Effect.option);
+        if (Option.isSome(info) && info.value.type === "Directory")
+          yield* walkLinks(at, [...ancestors, resolved], inRepo, onLink);
         continue;
       }
       const info = yield* fs.stat(at).pipe(Effect.option);
-      if (Option.isSome(info) && info.value.type === "Directory")
-        yield* walkLinks(at, inRepo, onLink, seen);
+      if (Option.isSome(info) && info.value.type === "Directory") {
+        const real = yield* fs.realPath(at).pipe(Effect.orElseSucceed(() => at));
+        yield* walkLinks(at, [...ancestors, real], inRepo, onLink);
+      }
     }
   });
 
-/** Every link of T3 Fleet's into the repo, the ones that point at nothing, and unfinished replacements. */
+/** T3 Fleet's links into the repo, the ones that point at nothing, loops, and unfinished replacements. */
 export const planLinks = (
   repo: string,
   table: Record<string, unknown>,
   home: string,
   skip: ReadonlySet<string>,
+  /** More directories where an interrupted run may have left staging (setup's backups' places). */
+  more: ReadonlyArray<string> = [],
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const roots = yield* repoRoots(repo);
     const inRepo = (p: string) => roots.some((r) => within(p, r));
-    const { dirs, files } = linkCandidates(table, home);
-    const candidates: Array<string> = [...files];
-    for (const dir of dirs)
+    const installed = installedTargets(table, home, roots);
+    const candidates: Array<string> = [...installed.files.keys()];
+    for (const dir of installed.dirs.keys())
       for (const name of yield* fs
         .readDirectory(dir)
         .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
@@ -133,50 +180,63 @@ export const planLinks = (
 
     const conversions: Array<Conversion> = [];
     const broken: Array<{ at: string; target: string }> = [];
+    const cycles: Array<{ at: string; loop: string }> = [];
     for (const at of new Set(candidates)) {
       if (skip.has(at)) continue;
       const target = yield* linkTarget(at);
-      if (Option.isNone(target)) continue;
-      // Through another link (a client's link into the store) as much as straight into the repo.
+      if (Option.isNone(target) || !expectedTargets(installed, at).includes(target.value)) continue;
       const resolved = yield* fs.realPath(at).pipe(Effect.option);
       if (Option.isNone(resolved)) {
-        if (inRepo(target.value)) broken.push({ at, target: target.value });
+        broken.push({ at, target: target.value });
         continue;
       }
       if (!inRepo(resolved.value)) continue;
       let nested = 0;
+      let loop: string | null = null;
       const brokenInside: Array<string> = [];
       const info = yield* fs.stat(resolved.value).pipe(Effect.option);
       if (Option.isSome(info) && info.value.type === "Directory")
-        yield* walkLinks(resolved.value, inRepo, (inner, innerTarget) =>
+        yield* walkLinks(resolved.value, [resolved.value], inRepo, (inner, innerTarget, loops) =>
           Effect.sync(() => {
-            if (innerTarget === null) brokenInside.push(inner);
+            if (loops) loop ??= inner;
+            else if (innerTarget === null) brokenInside.push(inner);
             else nested++;
             return true;
           }),
         );
-      conversions.push({ at, link: target.value, target: resolved.value, nested, brokenInside });
+      if (loop !== null) cycles.push({ at, loop });
+      else
+        conversions.push({ at, link: target.value, target: resolved.value, nested, brokenInside });
     }
     const unfinished: Array<{ dir: string; marker: Marker }> = [];
-    for (const dir of new Set([...dirs, ...files.map((f) => path.dirname(f))]))
-      unfinished.push(...(yield* stagingIn(dir)));
-    return { conversions, unfinished, broken } satisfies LinksPlan;
+    const dirs = [
+      ...installed.dirs.keys(),
+      ...[...installed.files.keys(), ...more].map((f) => path.dirname(f)),
+    ];
+    for (const dir of new Set(dirs)) unfinished.push(...(yield* stagingIn(dir)));
+    return { conversions, unfinished, broken, cycles } satisfies LinksPlan;
   });
 
-/** Copies in, inside `copy`, every link into the repo whose target exists; reports the rest. */
-const materialize = (copy: string, roots: ReadonlyArray<string>) =>
+/**
+ * Copies in, inside `copy`, every link into the repo whose target exists,
+ * each staged in `scratch` (outside the copy, so nothing in it is ever in
+ * the way); a link back up to a directory it is inside fails it.
+ */
+const materialize = (copy: string, source: string, scratch: string, roots: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const inRepo = (p: string) => roots.some((r) => within(p, r));
-    yield* walkLinks(copy, inRepo, (at, target) =>
+    yield* walkLinks(copy, [source], inRepo, (at, target, loops) =>
       Effect.gen(function* () {
+        if (loops) return yield* Effect.fail(`${at} links back to a directory it is inside`);
         if (target === null) return false;
+        const tmp = yield* fs.makeTempDirectory({ directory: scratch });
+        yield* fs.copy(target, path.join(tmp, "item"));
         // A file replaces its link in one rename; a directory goes in once the link is gone.
-        const tmp = `${at}.t3-fleet-leave-nested`;
-        yield* fs.copy(target, tmp);
-        const isDir = (yield* fs.stat(tmp)).type === "Directory";
-        if (isDir) yield* fs.remove(at);
-        yield* fs.rename(tmp, at);
+        if ((yield* fs.stat(path.join(tmp, "item"))).type === "Directory") yield* fs.remove(at);
+        yield* fs.rename(path.join(tmp, "item"), at);
+        yield* fs.remove(tmp, { recursive: true });
         return true;
       }),
     );
@@ -191,9 +251,10 @@ export const convert = (c: Conversion, repo: string) =>
       at: c.at,
       source: c.target,
       how: "copy",
-      prepare: (copy) =>
+      prepare: (copy, scratch) =>
         Effect.gen(function* () {
-          if ((yield* fs.stat(copy)).type === "Directory") yield* materialize(copy, roots);
+          if ((yield* fs.stat(copy)).type === "Directory")
+            yield* materialize(copy, c.target, scratch, roots);
         }),
       // The link as planned; what it resolves to may have become a copy already (a client link into the store).
       stillWanted: linkTarget(c.at).pipe(Effect.map((now) => Option.getOrNull(now) === c.link)),

@@ -20,9 +20,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
-import { resolveEndpoint, type Endpoint, type McpDesired } from "../areas/Mcp.ts";
+import { RELAY_TOKEN_ENV, resolveEndpoint, type Endpoint, type McpDesired } from "../areas/Mcp.ts";
+import { localSecretsPath } from "../Secrets.ts";
 import { CLI } from "../Names.ts";
-import { editFile, isObject, prettyJson } from "./Files.ts";
+import { claudeConfigPath, updateClaudeConfig, updateCodexConfig } from "./ClientConfig.ts";
+import { isObject, prettyJson } from "./Files.ts";
 
 type Json = Record<string, unknown>;
 export type Client = "claude" | "codex";
@@ -191,31 +193,77 @@ const decodeDefinition = Schema.decodeUnknownOption(Schema.fromJsonString(Defini
 
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
-/** T3 Fleet's own MCP server (`t3-fleet mcp`). */
+/** The entry's fields, without empty ones (an `env = {}` says nothing). */
+const fields = (entry: Json) =>
+  Object.fromEntries(
+    Object.entries(entry).filter(
+      ([, v]) =>
+        v !== undefined &&
+        v !== null &&
+        !(Array.isArray(v) && v.length === 0) &&
+        !(isObject(v) && Object.keys(v).length === 0),
+    ),
+  );
+
+const onlyKeys = (entry: Json, allowed: ReadonlyArray<string>) =>
+  Object.keys(fields(entry)).every((k) => allowed.includes(k));
+
+/** T3 Fleet's own MCP server (`t3-fleet mcp`), exactly as it is registered. */
 export const isSelf = (entry: unknown) =>
   isObject(entry) &&
   typeof entry["command"] === "string" &&
   basename(entry["command"]) === CLI &&
-  Array.isArray(entry["args"]) &&
-  entry["args"][0] === "mcp";
+  sameValue(entry["args"], ["mcp"]) &&
+  onlyKeys(entry, ["type", "command", "args"]);
 
-/** Whether an entry is still what T3 Fleet registers for `name`. */
+/**
+ * Whether an entry is still exactly what T3 Fleet registers for an endpoint
+ * (Mcp.ts's fixes): the same endpoint, the same credential (Claude stores the
+ * token itself, Codex the variable's name), and nothing T3 Fleet does not
+ * write. Anything else in it is the user's, and the entry is theirs. A token
+ * T3 Fleet cannot read here (no secrets.env) cannot be checked: such an entry
+ * is kept.
+ */
 export const isFleets = (
+  client: Client,
   entry: unknown,
-  name: string,
   endpoint: Endpoint | null,
-  gateway: string | null,
   home: string,
+  secrets: Readonly<Record<string, string>>,
 ) => {
-  if (!isObject(entry)) return false;
+  if (!isObject(entry) || endpoint === null) return false;
   const norm = (s: unknown) =>
     typeof s === "string" ? s.replace(/^(\$HOME|\$\{HOME\}|~)(?=\/)/, home) : s;
-  const url = entry["url"];
-  if (gateway !== null && url === `${gateway}/mcp/${name}`) return true;
-  if (endpoint === null) return false;
-  if (endpoint.type === "http") return url === endpoint.url;
-  const args = Array.isArray(entry["args"]) ? entry["args"].map(norm) : [];
-  return norm(entry["command"]) === endpoint.command && sameValue(args, endpoint.args.map(norm));
+  const e = fields(entry);
+  if (endpoint.type === "http") {
+    if (e["url"] !== endpoint.url) return false;
+    if (client === "codex")
+      return (
+        onlyKeys(e, ["url", "bearer_token_env_var"]) &&
+        (e["bearer_token_env_var"] ?? null) === endpoint.tokenEnv
+      );
+    if (!onlyKeys(e, ["type", "url", "headers"]) || e["type"] !== "http") return false;
+    if (endpoint.tokenEnv === null) return e["headers"] === undefined;
+    const token = secrets[endpoint.tokenEnv];
+    return token !== undefined && sameValue(e["headers"], { Authorization: `Bearer ${token}` });
+  }
+  const args = Array.isArray(e["args"]) ? e["args"].map(norm) : [];
+  return (
+    onlyKeys(e, client === "claude" ? ["type", "command", "args"] : ["command", "args"]) &&
+    (client === "codex" || e["type"] === "stdio") &&
+    norm(e["command"]) === endpoint.command &&
+    sameValue(args, endpoint.args.map(norm))
+  );
+};
+
+/** KEY=value lines of the node's secrets.env. */
+const parseSecrets = (text: string) => {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (m?.[1] !== undefined) out[m[1]] = (m[2] ?? "").replace(/^["']|["']$/g, "");
+  }
+  return out;
 };
 
 export interface McpChange {
@@ -239,7 +287,8 @@ export interface McpPlan {
 export const readRegistrations = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const claudeText = yield* fs.readFileString(`${home}/.claude.json`).pipe(Effect.option);
+    const claudeFile = yield* claudeConfigPath(home, process.env);
+    const claudeText = yield* fs.readFileString(claudeFile).pipe(Effect.option);
     const claudeJson = Option.isSome(claudeText)
       ? Option.getOrUndefined(decodeJson(claudeText.value))
       : undefined;
@@ -280,15 +329,29 @@ export const planMcp = (
         .readFileString(path.join(repo, "mcp", `${name}.json`))
         .pipe(Effect.option);
       const def = Option.isSome(text) ? decodeDefinition(text.value) : Option.none();
+      const resolved = Option.isSome(def)
+        ? resolveEndpoint(name, def.value, mcp, home).endpoint
+        : null;
+      // Without its definition, a server on the hub is still known by the hub's URL for it.
       endpoints.set(
         name,
-        Option.isSome(def) ? resolveEndpoint(name, def.value, mcp, home).endpoint : null,
+        resolved ??
+          (gateway === null
+            ? null
+            : {
+                type: "http",
+                url: `${gateway}/mcp/${name}`,
+                tokenEnv: typeof mcp?.token_env === "string" ? mcp.token_env : RELAY_TOKEN_ENV,
+              }),
       );
     }
-    const owned = (_client: Client, name: string, entry: unknown) =>
+    const secrets = parseSecrets(
+      yield* fs.readFileString(localSecretsPath(home)).pipe(Effect.orElseSucceed(() => "")),
+    );
+    const owned = (client: Client, name: string, entry: unknown) =>
       isSelf(entry) ||
       (declared.includes(name) &&
-        isFleets(entry, name, endpoints.get(name) ?? null, gateway, home));
+        isFleets(client, entry, endpoints.get(name) ?? null, home, secrets));
     const current = yield* readRegistrations(home);
     const changes: Array<McpChange> = [];
     const notes: Array<string> = [];
@@ -375,47 +438,50 @@ export const applyMcp = (home: string, plan: McpPlan) =>
     for (const client of ["claude", "codex"] as const) {
       const mine = plan.changes.filter((c) => c.client === client);
       if (mine.length === 0) continue;
-      const file = client === "claude" ? `${home}/.claude.json` : `${home}/.codex/config.toml`;
       let applied: Array<string> = [];
       let skipped: Array<string> = [];
-      yield* editFile(
-        file,
-        (text) =>
+      /** The edits still wanted against `servers` as they are now; empty when none. */
+      const editsFor = (servers: Json) => {
+        const edits: Record<string, Json | null> = {};
+        applied = [];
+        skipped = [];
+        for (const c of mine) {
+          const is = servers[c.name];
+          if (is === undefined ? c.entry === null : sameValue(is, c.entry)) continue;
+          // What the plan saw missing came back, or what was T3 Fleet's is someone's now.
+          if (is === undefined ? !c.wasMissing : c.wasMissing || !plan.owned(client, c.name, is)) {
+            skipped.push(c.name);
+            continue;
+          }
+          edits[c.name] = c.entry;
+          applied.push(c.name);
+        }
+        return edits;
+      };
+      if (client === "claude")
+        yield* updateClaudeConfig(home, process.env, (config) => {
+          const servers = isObject(config["mcpServers"]) ? config["mcpServers"] : {};
+          const next = { ...servers };
+          for (const [name, entry] of Object.entries(editsFor(servers))) {
+            if (entry === null) delete next[name];
+            else next[name] = entry;
+          }
+          return { ...config, mcpServers: next };
+        });
+      else
+        yield* updateCodexConfig(home, (text) =>
           Effect.gen(function* () {
             const config =
               text === null
                 ? {}
-                : client === "claude"
-                  ? (Option.getOrUndefined(decodeJson(text)) ?? {})
-                  : yield* Effect.try(() => parseToml(text) as Json).pipe(
-                      Effect.orElseSucceed(() => ({}) as Json),
-                    );
-            const key = client === "claude" ? "mcpServers" : "mcp_servers";
-            const servers = isObject(config) && isObject(config[key]) ? config[key] : {};
-            const edits: Record<string, Json | null> = {};
-            applied = [];
-            skipped = [];
-            for (const c of mine) {
-              const is = servers[c.name];
-              if (is === undefined ? c.entry === null : sameValue(is, c.entry)) continue;
-              // What the plan saw missing came back, or what was T3 Fleet's is someone's now.
-              if (
-                is === undefined ? !c.wasMissing : c.wasMissing || !plan.owned(client, c.name, is)
-              ) {
-                skipped.push(c.name);
-                continue;
-              }
-              edits[c.name] = c.entry;
-              applied.push(c.name);
-            }
+                : yield* Effect.try(() => parseToml(text) as Json).pipe(
+                    Effect.orElseSucceed(() => ({}) as Json),
+                  );
+            const edits = editsFor(isObject(config["mcp_servers"]) ? config["mcp_servers"] : {});
             if (Object.keys(edits).length === 0) return null;
-            return client === "claude"
-              ? yield* editClaudeServers(text, edits)
-              : yield* editCodexServers(text ?? "", edits);
+            return yield* editCodexServers(text ?? "", edits);
           }),
-        // A config holding tokens is created private.
-        { mode: 0o600 },
-      );
+        );
       if (applied.length > 0) done.push(`${CLIENT_NAMES[client]}: ${applied.join(", ")}`);
       if (skipped.length > 0)
         done.push(`${CLIENT_NAMES[client]}: left alone, changed meanwhile: ${skipped.join(", ")}`);

@@ -152,7 +152,7 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
     const ref = `refs/heads/${branchPrefix("staging")}${node}`;
     // This machine is leaving the fleet: its departure waits for an authority, whatever changes here.
     const pending = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
-    if (pending !== "" && (yield* isDepartureProposal(repo, ref, pending))) return null;
+    if (pending !== "" && (yield* isDepartureProposal(repo, node, pending))) return null;
     if (files.length === 0) {
       const exists = yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]);
       if (ok(exists)) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);

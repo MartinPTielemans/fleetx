@@ -38,9 +38,9 @@ import {
 } from "./Leave.ts";
 import { writeAtomically } from "./leave/Files.ts";
 import { editCodexServers } from "./leave/Mcp.ts";
-import { settingsUpdates } from "./leave/Models.ts";
+import { settingsUpdates, throughT3, unrouted } from "./leave/Models.ts";
 import { removeService } from "./leave/Services.ts";
-import { approve, listProposals } from "./Staging.ts";
+import { approve, autoApprovable, listProposals } from "./Staging.ts";
 import { exchange } from "./Sync.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -82,13 +82,23 @@ const planText = (plan: LeavePlan) =>
 
 let savedPath: string | undefined;
 let savedHome: string | undefined;
+// Claude's config moves with these; the tests' must stay in their temp HOME.
+const CLAUDE_ENV = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_CUSTOM_OAUTH_URL"];
+const savedClaude: Record<string, string | undefined> = {};
 beforeEach(() => {
   savedPath = process.env["PATH"];
   savedHome = process.env["HOME"];
+  for (const k of CLAUDE_ENV) {
+    savedClaude[k] = process.env[k];
+    delete process.env[k];
+  }
 });
 afterEach(() => {
   process.env["PATH"] = savedPath;
   process.env["HOME"] = savedHome;
+  for (const k of CLAUDE_ENV)
+    if (savedClaude[k] === undefined) delete process.env[k];
+    else process.env[k] = savedClaude[k];
 });
 
 /**
@@ -110,7 +120,7 @@ echo "systemctl $*" >> "${root}/calls"
 [ "$1" = --user ] && shift
 case "$1" in
   disable) shift; [ "$1" = --now ] && shift; [ -e "${root}/stuck" ] || for u in "$@"; do rm -f "${root}/active/$u"; done; exit 0 ;;
-  is-active) [ "$2" = --quiet ] && u="$3" || u="$2"; [ -e "${root}/active/$u" ] && exit 0; exit 3 ;;
+  is-active) [ "$2" = --quiet ] && u="$3" || u="$2"; [ -e "${root}/active/$u" ] && { echo active; exit 0; }; echo inactive; exit 3 ;;
   is-enabled) echo disabled; exit 1 ;;
 esac
 exit 0
@@ -175,6 +185,7 @@ const makeFleet = async (
   put(box, "nodes/laptop.toml", options.node ?? LAPTOP);
   put(box, "skills/a/SKILL.md", "a from the repo\n");
   put(box, "skills/shared/ref.md", "shared from the repo\n");
+  put(box, "skills/b/SKILL.md", "b from the repo\n");
   // A skill linking a shared file in the repo, by a relative link.
   fs.symlinkSync("../shared/ref.md", join(box, "skills/a/ref.md"));
   put(box, "dotfiles/zshrc", "export FLEET=1\n");
@@ -267,6 +278,7 @@ const setUpLaptop = (f: Fleet) => {
   put(home, ".local/bin/t3-fleet-claude", "#!/bin/sh\n", 0o755);
   put(home, ".local/bin/t3-fleet-codex", "#!/bin/sh\n", 0o755);
   put(home, ".local/bin/t3-fleet", "bundle\n", 0o755);
+  put(home, ".config/t3-fleet/secrets.env", "T3_FLEET_RELAY_TOKEN=relay-token\n", 0o600);
   put(
     home,
     ".claude.json",
@@ -311,7 +323,7 @@ const setUpLaptop = (f: Fleet) => {
     0o640,
   );
   put(home, ".local/state/t3-fleet/setup/moved/b/SKILL.md", "b before setup\n");
-  fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/b"));
+  fs.symlinkSync(join(f.repo, "skills/b"), join(home, ".agents/skills/b"));
   put(home, ".local/state/t3-fleet/setup/moved/zprofile", "my zprofile\n");
   fs.symlinkSync(join(home, "elsewhere/mine"), join(home, ".zprofile"));
   const fetchBefore = {
@@ -345,10 +357,11 @@ describe("a member leaving", () => {
     expect(plan.refusal).toBeNull();
     expect(titles(plan)).toEqual([
       "Propose removing laptop from the fleet (members cannot push to main)",
+      // Routing goes back before the model proxy stops.
+      "Point T3's providers back at what they ran before, and remove the launchers",
       "Stop and remove the sync timer, the listener, the model proxy",
       "Turn 3 links into the config repo into real copies",
       "Put back what setup moved aside",
-      "Point T3's providers back at what they ran before, and remove the launchers",
       "Put back the MCP servers Claude and Codex had before setup",
     ]);
     const text = planText(plan);
@@ -422,9 +435,9 @@ describe("a member leaving", () => {
     const staging = "t3-fleet/staging/laptop";
     expect(onBranch(f.origin, "nodes/laptop.toml", staging)).toBeNull();
     expect(onBranch(f.origin, "secrets/recipients.toml", staging)).not.toContain("laptop");
-    expect(git(f.origin, "log", "-1", "--format=%B", staging)).toContain(
-      "T3-Fleet-Departure: laptop",
-    );
+    expect(
+      git(f.origin, "diff", "--name-status", `${staging}^`, staging).trim().split("\n"),
+    ).toEqual(["D\tnodes/laptop.toml", "M\tsecrets/recipients.toml"]);
     expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
     expect(git(f.repo, "status", "--porcelain")).toBe("");
     // Recorded as finished; local state kept without --purge.
@@ -446,9 +459,8 @@ describe("a member leaving", () => {
     const node = f.config.nodes.find((n) => n.name === "laptop");
     if (node === undefined) throw new Error("no laptop");
     await run(underSyncLock(exchange(f.config, node, [])));
-    expect(git(f.origin, "log", "-1", "--format=%B", "t3-fleet/staging/laptop")).toContain(
-      "T3-Fleet-Departure: laptop",
-    );
+    expect(onBranch(f.origin, "nodes/laptop.toml", "t3-fleet/staging/laptop")).toBeNull();
+    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).not.toBeNull();
     // The secrets change before an authority approves; the member is long gone by then.
     const boxHome = join(f.root, "box-home");
     process.env["HOME"] = boxHome;
@@ -516,7 +528,7 @@ describe("Codex's config.toml", () => {
   it("refuses, changing nothing, a server it cannot edit table by table", async () => {
     const f = await makeFleet();
     setUpLaptop(f);
-    const inline = `mcp_servers = { fetch = { url = "${GATEWAY}/mcp/fetch" } }\n`;
+    const inline = `mcp_servers = { fetch = { url = "${GATEWAY}/mcp/fetch", bearer_token_env_var = "T3_FLEET_RELAY_TOKEN" } }\n`;
     put(f.home, ".codex/config.toml", inline);
     const outcomes = await run(applyLeave(await f.plan()));
     expect(outcomes.at(-1)).toMatchObject({ ok: false });
@@ -550,9 +562,9 @@ describe("links", () => {
     fs.symlinkSync(join(f.repo, "skills/a"), join(staging, "link"));
     put(staging, "marker.json", markerFor(f, at, true));
     const plan = await f.plan();
-    expect(plan.steps.find((s) => s.title.startsWith("Turn"))?.lines).toEqual([
+    expect(plan.steps.find((s) => s.title.startsWith("Turn"))?.lines).toContain(
       "~/.agents/skills/a  ← finish what an interrupted run left half-done",
-    ]);
+    );
     await run(applyLeave(plan));
     expect(isLink(at)).toBe(false);
     expect(read(f.home, ".agents/skills/a/SKILL.md")).toBe("a copied\n");
@@ -773,7 +785,7 @@ describe("services", () => {
 });
 
 describe("model routing", () => {
-  it("does not write T3's settings itself while T3 runs, and keeps the launchers", async () => {
+  it("refuses up front when T3 runs but its CLI cannot be found, and changes nothing", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
     const settings = JSON.stringify({
       providers: { claudeAgent: { binaryPath: "t3-fleet-claude" } },
@@ -786,12 +798,11 @@ describe("model routing", () => {
       ".t3/userdata/server-runtime.json",
       JSON.stringify({ pid: process.pid, origin: "http://127.0.0.1:1" }),
     );
+    // Refused when it plans, before anything (the proxy above all) is stopped.
     const plan = await f.plan();
-    expect(planText(plan)).toContain("through T3 (server.updateSettings");
-    const outcomes = await run(applyLeave(plan));
-    const models = outcomes.find((o) => o.title.startsWith("Point T3's providers"));
-    expect(models).toMatchObject({ ok: false });
-    expect(models?.lines.join("")).toContain("quit T3 and run leave again");
+    expect(plan.refusal).toContain("quit T3 and run leave again");
+    expect(plan.steps).toEqual([]);
+    expect(await run(applyLeave(plan))).toEqual([]);
     expect(read(f.home, ".t3/userdata/settings.json")).toBe(settings);
     expect(exists(f.home, ".local/bin/t3-fleet-claude")).toBe(true);
   });
@@ -833,6 +844,7 @@ describe("writing the user's files", () => {
 describe("T3's settings, through T3", () => {
   it("patches the legacy field and upserts an instance as it is on disk, binaryPath aside", () => {
     const settings = {
+      providers: { claudeAgent: { binaryPath: "t3-fleet-claude" } },
       providerInstances: {
         codexMain: {
           driver: "codex",
@@ -860,5 +872,342 @@ describe("T3's settings, through T3", () => {
         },
       },
     ]);
+  });
+});
+
+// ---- review, round two: each of these failed before its fix ----------------
+
+describe("round two", () => {
+  it("keeps a backup whose restore was skipped because its destination changed after planning", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, ".zshrc");
+    fs.symlinkSync(join(f.repo, "dotfiles/zshrc"), at);
+    put(f.home, ".local/state/t3-fleet/setup/moved/zshrc", "original user data");
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({
+        takenAt: 1,
+        moved: [{ path: at, backup: join(f.home, ".local/state/t3-fleet/setup/moved/zshrc") }],
+      }),
+    );
+    const plan = await f.plan(true);
+    expect(titles(plan)).toContain("Put back what setup moved aside");
+    fs.unlinkSync(at);
+    fs.writeFileSync(at, "new user data");
+    const outcomes = await run(applyLeave(plan));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(read(f.home, ".zshrc")).toBe("new user data");
+    expect(read(f.home, ".local/state/t3-fleet/setup-backups/.zshrc")).toBe("original user data");
+  });
+
+  it("stages nested copies outside the copy, so a file named like the staging is left alone", async () => {
+    const f = await makeFleet();
+    put(f.repo, "skills/a/ref.md.t3-fleet-leave-nested", "legitimate sibling");
+    fs.mkdirSync(join(f.home, ".agents/skills"), { recursive: true });
+    fs.symlinkSync(join(f.repo, "skills/a"), join(f.home, ".agents/skills/a"));
+    const outcomes = await run(applyLeave(await f.plan()));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(read(f.home, ".agents/skills/a/ref.md.t3-fleet-leave-nested")).toBe(
+      "legitimate sibling",
+    );
+    expect(read(f.home, ".agents/skills/a/ref.md")).toBe("shared from the repo\n");
+  });
+
+  it("waits for Claude's lock and keeps what Claude wrote while holding it", async () => {
+    const f = await makeFleet();
+    const { fetchBefore } = setUpLaptop(f);
+    const plan = await f.plan();
+    const lock = join(f.home, ".claude.json.lock");
+    fs.mkdirSync(lock);
+    // Claude, holding its lock, writes a setting of its own, then lets go.
+    // @effect-diagnostics-next-line globalTimers:off
+    setTimeout(() => {
+      const config = JSON.parse(read(f.home, ".claude.json")) as Record<string, unknown>;
+      put(f.home, ".claude.json", JSON.stringify({ ...config, written: "by Claude" }, null, 2));
+      fs.rmSync(lock, { recursive: true });
+    }, 300);
+    const outcomes = await run(applyLeave(plan));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    const claude = JSON.parse(read(f.home, ".claude.json")) as Record<string, unknown>;
+    expect(claude["written"]).toBe("by Claude");
+    expect((claude["mcpServers"] as Record<string, unknown>)["fetch"]).toEqual(fetchBefore);
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it("does not take a commit message for a departure: approval, auto-approval and sync go by the change", async () => {
+    const f = await makeFleet();
+    put(f.repo, "skills/new/SKILL.md", "new");
+    git(f.repo, "add", "skills");
+    git(f.repo, "commit", "-qm", "ordinary skills edit\n\nT3-Fleet-Departure: laptop");
+    git(f.repo, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) throw new Error("no proposal");
+    // A skills-only change, approved as what it is: laptop stays.
+    expect(autoApprovable(proposal, ["skills/"])).toBe(true);
+    await run(approve(f.box, "main", proposal, "box"));
+    expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
+    expect(onBranch(f.origin, "skills/new/SKILL.md")).toBe("new");
+  });
+
+  it("never auto-approves a real departure, and sync protects only that", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    await run(applyLeave(await f.plan()));
+    const [departure] = await run(listProposals(f.box, "main"));
+    if (departure === undefined) throw new Error("no proposal");
+    expect(autoApprovable(departure, ["nodes/", "secrets/"])).toBe(false);
+    // A marked proposal that is not a departure gets no protection from sync.
+    git(f.repo, "fetch", "-q", "origin");
+    git(f.repo, "reset", "-q", "--hard", "origin/main");
+    put(f.repo, "skills/new/SKILL.md", "new");
+    git(f.repo, "add", "skills");
+    git(f.repo, "commit", "-qm", "not a departure\n\nT3-Fleet-Departure: laptop");
+    git(f.repo, "push", "-q", "--force", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    git(f.repo, "reset", "-q", "--hard", "origin/main");
+    const node = f.config.nodes.find((n) => n.name === "laptop");
+    if (node === undefined) throw new Error("no laptop");
+    await run(underSyncLock(exchange(f.config, node, [])));
+    expect(
+      spawnSync("git", ["rev-parse", "--verify", "-q", "t3-fleet/staging/laptop"], {
+        cwd: f.origin,
+      }).status,
+    ).not.toBe(0);
+  });
+
+  it("goes by origin's role: a member since promoted to the only authority is refused, planned or running", async () => {
+    const f = await makeFleet();
+    const recorded = departureOf(f.config);
+    put(f.box, "nodes/box.toml", 'roles = ["member"]\n');
+    put(f.box, "nodes/laptop.toml", 'roles = ["authority"]\n');
+    commitAll(f.box, "laptop is the only authority");
+    const plan = await f.planFor(recorded);
+    expect(plan.refusal).toContain("only authority");
+    // Planned while box was an authority too, demoted before it runs.
+    put(f.box, "nodes/box.toml", 'roles = ["authority"]\n');
+    commitAll(f.box, "box again");
+    const ok = await f.planFor(recorded);
+    expect(ok.refusal).toBeNull();
+    put(f.box, "nodes/box.toml", 'roles = ["member"]\n');
+    commitAll(f.box, "box demoted");
+    const outcomes = await run(applyLeave(ok));
+    expect(outcomes[0]).toMatchObject({ ok: false });
+    expect(outcomes[0]?.lines.join("")).toContain("only authority");
+    expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
+    expect(
+      spawnSync("git", ["rev-parse", "--verify", "-q", "t3-fleet/staging/laptop"], {
+        cwd: f.origin,
+      }).status,
+    ).not.toBe(0);
+  });
+
+  it("refuses to resume a departure recorded for another enrollment", async () => {
+    const f = await makeFleet();
+    const old = {
+      ...departureOf(f.config),
+      enrollment: {
+        remote: "https://example.com/old-fleet.git",
+        key: f.recipients["laptop"] ?? null,
+      },
+    };
+    put(f.home, ".local/state/t3-fleet/leave.json", JSON.stringify(old));
+    const result = await run(currentDeparture(f.home).pipe(Effect.flip));
+    expect(result).toContain("another enrollment");
+    expect(result).toContain("old-fleet.git");
+    // The same enrollment resumes.
+    const remote = git(f.repo, "remote", "get-url", "origin").trim();
+    put(
+      f.home,
+      ".local/state/t3-fleet/leave.json",
+      JSON.stringify({ ...old, enrollment: { remote, key: f.recipients["laptop"] ?? null } }),
+    );
+    expect((await run(currentDeparture(f.home))).resumed).toBe(true);
+  });
+
+  it("records a departure with nothing left to do as finished", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    await run(applyLeave(await f.plan()));
+    put(
+      f.home,
+      ".local/state/t3-fleet/leave.json",
+      read(f.home, ".local/state/t3-fleet/leave.json").replace(
+        '"finished":true',
+        '"finished":false',
+      ),
+    );
+    const { departure } = await run(currentDeparture(f.home));
+    const plan = await f.planFor(departure);
+    expect(plan.steps).toEqual([]);
+    await run(applyLeave(plan));
+    expect(JSON.parse(read(f.home, ".local/state/t3-fleet/leave.json")).finished).toBe(true);
+  });
+
+  it("restores T3's settings only where they still name the planned launcher", () => {
+    const routed = [
+      {
+        where: "legacy" as const,
+        id: "codex",
+        launcher: "t3-fleet-codex",
+        restore: "/old/user/choice",
+      },
+    ];
+    const newer = { providers: { codex: { binaryPath: "/new/user/choice" } } };
+    expect(settingsUpdates(newer, routed)).toEqual([]);
+    expect(unrouted(newer, routed)).toEqual(newer);
+  });
+
+  it("keeps a unit whose state systemctl could not report", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(
+      f.root,
+      "bin/systemctl",
+      '#!/bin/sh\n[ "$1" = --user ] && shift\n[ "$1" = daemon-reload ] && exit 0\necho "Failed to connect to bus" >&2\nexit 1\n',
+      0o755,
+    );
+    put(f.home, ".config/systemd/user/t3-fleet-models.service", "unit");
+    const outcomes = await run(applyLeave(await f.plan(false, "linux")));
+    const services = outcomes.find((o) => o.title.startsWith("Stop and remove"));
+    expect(services).toMatchObject({ ok: false });
+    expect(services?.lines.join("")).toContain(
+      "could not tell whether t3-fleet-models.service stopped",
+    );
+    expect(exists(f.home, ".config/systemd/user/t3-fleet-models.service")).toBe(true);
+  });
+
+  it("keeps a launchd plist when launchctl cannot say the job is gone", () => {
+    const root = fs.mkdtempSync(join(tmpdir(), "t3-fleet-launchd-"));
+    put(root, "bin/launchctl", '#!/bin/sh\n[ "$1" = print ] && exit 5\nexit 0\n', 0o755);
+    put(root, "Library/LaunchAgents/dev.t3-fleet.sync.plist", "<plist/>");
+    const r = spawnSync("sh", ["-c", removeService("darwin", "user", "sync", 1)], {
+      env: { ...process.env, HOME: root, PATH: `${root}/bin:${process.env["PATH"] ?? ""}` },
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("could not tell whether launchd unloaded dev.t3-fleet.sync");
+    expect(fs.existsSync(join(root, "Library/LaunchAgents/dev.t3-fleet.sync.plist"))).toBe(true);
+  });
+
+  it("keeps an MCP entry whose fields the user changed, though its URL is T3 Fleet's", async () => {
+    const f = await makeFleet();
+    setUpLaptop(f);
+    const config = JSON.parse(read(f.home, ".claude.json")) as {
+      mcpServers: Record<string, Record<string, unknown>>;
+    };
+    config.mcpServers["fetch"] = {
+      ...config.mcpServers["fetch"],
+      headers: { Authorization: "Bearer user-new-token" },
+      disabled: true,
+    };
+    put(f.home, ".claude.json", JSON.stringify(config));
+    const plan = await f.plan();
+    expect(planText(plan)).toContain("fetch in Claude was changed since T3 Fleet registered it");
+    await run(applyLeave(plan));
+    const after = (JSON.parse(read(f.home, ".claude.json")) as typeof config).mcpServers["fetch"];
+    expect(after).toMatchObject({
+      disabled: true,
+      headers: { Authorization: "Bearer user-new-token" },
+    });
+  });
+
+  it("does not restore a backup over the user's own link to another repo file", async () => {
+    const f = await makeFleet();
+    setUpLaptop(f);
+    const at = join(f.home, ".zprofile");
+    fs.unlinkSync(at);
+    fs.symlinkSync(join(f.repo, "skills/shared/ref.md"), at);
+    await run(applyLeave(await f.plan()));
+    expect(fs.readlinkSync(at)).toBe(join(f.repo, "skills/shared/ref.md"));
+    expect(read(f.home, ".local/state/t3-fleet/setup/moved/zprofile")).toBe("my zprofile\n");
+  });
+
+  it("leaves a skill that links back into itself as a link, and says so", async () => {
+    const f = await makeFleet();
+    fs.symlinkSync(join(f.repo, "skills/a"), join(f.repo, "skills/a/self"));
+    fs.mkdirSync(join(f.home, ".agents/skills"), { recursive: true });
+    fs.symlinkSync(join(f.repo, "skills/a"), join(f.home, ".agents/skills/a"));
+    const plan = await f.plan();
+    expect(planText(plan)).toContain("~/.agents/skills/a is left a link");
+    expect(plan.steps.some((s) => s.title.startsWith("Turn"))).toBe(false);
+    await run(applyLeave(plan));
+    expect(isLink(join(f.home, ".agents/skills/a"))).toBe(true);
+  });
+
+  it("reports a failed session revoke, even when sending failed too", async () => {
+    const dir = fs.mkdtempSync(join(tmpdir(), "t3-fleet-t3-"));
+    put(
+      dir,
+      "t3",
+      '#!/bin/sh\ncase "$3" in issue) echo \'{"sessionId":"s1","token":"tok"}\' ;; revoke) echo "no such session" >&2; exit 1 ;; esac\n',
+      0o755,
+    );
+    const result = await run(
+      throughT3(
+        {
+          _tag: "running",
+          origin: "http://127.0.0.1:1",
+          cli: { command: join(dir, "t3"), args: [], env: {} },
+        },
+        [{ patch: { providers: { codex: { binaryPath: "codex" } } } }],
+      ).pipe(Effect.flip),
+    );
+    expect(result).toContain("did not answer");
+    expect(result).toContain("revoking T3 session s1 failed");
+    expect(result).toContain("t3 auth session revoke s1");
+  });
+
+  it("refuses to replace a Claude config that is a link to nothing", async () => {
+    const f = await makeFleet();
+    setUpLaptop(f);
+    fs.rmSync(join(f.home, ".claude.json"));
+    fs.symlinkSync(join(f.home, "dotfiles/claude.json"), join(f.home, ".claude.json"));
+    const outcomes = await run(applyLeave(await f.plan()));
+    const mcp = outcomes.find((o) => o.title.startsWith("Put back the MCP servers"));
+    expect(mcp).toMatchObject({ ok: false });
+    expect(mcp?.lines.join("")).toContain("which is missing; it was left as it is");
+    expect(isLink(join(f.home, ".claude.json"))).toBe(true);
+  });
+
+  it("finishes moving a backup back after its destination's link went into staging", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, "custom/data");
+    const backup = join(f.home, ".local/state/t3-fleet/setup/moved/data");
+    const staging = join(f.home, "custom/.data.t3-fleet-leave-ABC123");
+    put(
+      staging,
+      "marker.json",
+      JSON.stringify({ path: at, source: backup, how: "move", ready: true }),
+    );
+    fs.symlinkSync(join(f.repo, "skills/a"), join(staging, "link"));
+    put(backup, "mine", "original user data");
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({ takenAt: 1, moved: [{ path: at, backup }] }),
+    );
+    const outcomes = await run(applyLeave(await f.plan(true)));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(read(f.home, "custom/data/mine")).toBe("original user data");
+    expect(fs.existsSync(staging)).toBe(false);
+  });
+
+  it("keeps an unfinished copy when someone else's directory is at its destination now", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, ".agents/skills/a");
+    const staging = join(f.home, ".agents/skills/.a.t3-fleet-leave-ABC123");
+    put(staging, "copy/SKILL.md", "a copied");
+    put(staging, "copy/unsaved", "only copy of user edit");
+    put(
+      staging,
+      "marker.json",
+      JSON.stringify({ path: at, source: join(f.repo, "skills/a"), how: "copy", ready: true }),
+    );
+    put(at, "new", "new user directory");
+    const outcomes = await run(applyLeave(await f.plan()));
+    expect(outcomes.find((o) => o.title.startsWith("Turn"))?.lines.join("\n")).toContain(
+      "are left as they are",
+    );
+    expect(read(f.home, ".agents/skills/.a.t3-fleet-leave-ABC123/copy/unsaved")).toBe(
+      "only copy of user edit",
+    );
+    expect(read(f.home, ".agents/skills/a/new")).toBe("new user directory");
   });
 });

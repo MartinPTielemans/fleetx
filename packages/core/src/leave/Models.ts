@@ -100,8 +100,8 @@ export const unrouted = (settings: Json, routed: ReadonlyArray<Routed>): Json =>
     const group = next[r.where === "legacy" ? "providers" : "providerInstances"];
     const entry = isObject(group) ? group[r.id] : undefined;
     const holder = r.where === "legacy" ? entry : isObject(entry) ? entry["config"] : undefined;
-    // Only a path that still names the launcher: anything else is someone's newer choice.
-    if (!isObject(holder) || !isLauncherPath(holder["binaryPath"])) continue;
+    // Only a path that still names the planned launcher: anything else is someone's newer choice.
+    if (!isObject(holder) || holder["binaryPath"] !== r.launcher) continue;
     if (r.restore === null) delete holder["binaryPath"];
     else holder["binaryPath"] = r.restore;
   }
@@ -176,9 +176,13 @@ export const settingsUpdates = (settings: Json, routed: ReadonlyArray<Routed>) =
   const instances: Array<{ id: string; instance: Json }> = [];
   for (const r of routed) {
     if (r.where === "legacy") {
+      // Only a path that still names the planned launcher: anything else is a newer choice.
+      if (legacyPath(settings, r.id) !== r.launcher) continue;
       // T3's patch cannot remove the field; its default command is what an absent one means.
       legacy[r.id] = { binaryPath: r.restore ?? T3_DRIVERS[r.id]?.bin ?? "" };
     } else {
+      if (instancePath(settings, r.id) !== r.launcher) continue;
+      // T3 takes an instance whole; it is the one T3 has now, with only binaryPath changed.
       const instance = structuredClone((settings["providerInstances"] as Json)[r.id] as Json);
       const config = { ...(instance["config"] as Json) };
       if (r.restore === null) delete config["binaryPath"];
@@ -188,7 +192,7 @@ export const settingsUpdates = (settings: Json, routed: ReadonlyArray<Routed>) =
   }
   const updates: Array<{ patch: Json; providerInstanceMutation?: Json }> = [];
   const patch = Object.keys(legacy).length === 0 ? {} : { providers: legacy };
-  if (instances.length === 0) updates.push({ patch });
+  if (instances.length === 0 && Object.keys(legacy).length > 0) updates.push({ patch });
   instances.forEach((m, i) =>
     updates.push({
       patch: i === 0 ? patch : {},
@@ -199,7 +203,7 @@ export const settingsUpdates = (settings: Json, routed: ReadonlyArray<Routed>) =
 };
 
 /** Sends the updates to the running T3 with a two-minute session, revoked afterwards. */
-const throughT3 = (
+export const throughT3 = (
   t3: Extract<RunningT3, { _tag: "running" }>,
   updates: ReadonlyArray<{ patch: Json; providerInstanceMutation?: Json }>,
 ) =>
@@ -209,6 +213,7 @@ const throughT3 = (
       return yield* Effect.fail(
         "T3 is running, but its CLI could not be found from the server's command line; quit T3 and run leave again",
       );
+    if (updates.length === 0) return;
     const run = (args: ReadonlyArray<string>) =>
       exec({
         command: cli.command,
@@ -216,7 +221,7 @@ const throughT3 = (
         env: { ...process.env, ...cli.env },
         timeout: Duration.seconds(60),
       });
-    const issued = yield* run([
+    const issue = run([
       "auth",
       "session",
       "issue",
@@ -225,58 +230,74 @@ const throughT3 = (
       "--label",
       "T3 Fleet leave",
       "--json",
-    ]);
-    const session = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Issued))(
-      issued.stdout.trim(),
-    ).pipe(
-      Effect.mapError(
-        () =>
-          `t3 auth session issue failed: ${(issued.stderr || issued.stdout).trim().split("\n").at(-1) ?? `exit ${issued.code}`}`,
+    ]).pipe(
+      Effect.flatMap((issued) =>
+        Schema.decodeUnknownEffect(Schema.fromJsonString(Issued))(issued.stdout.trim()).pipe(
+          Effect.mapError(
+            () =>
+              `t3 auth session issue failed: ${(issued.stderr || issued.stdout).trim().split("\n").at(-1) ?? `exit ${issued.code}`}`,
+          ),
+        ),
       ),
     );
-    const send = Effect.gen(function* () {
-      const client = yield* HttpClient.HttpClient;
-      const response = yield* client
-        .execute(
-          HttpClientRequest.post(new URL("/api/auth/websocket-ticket", t3.origin).toString()).pipe(
-            HttpClientRequest.bearerToken(session.token),
-          ),
-        )
-        .pipe(
-          Effect.timeout(Duration.seconds(5)),
-          Effect.mapError(() => `T3 at ${t3.origin} did not answer`),
+    const send = (session: typeof Issued.Type) =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const response = yield* client
+          .execute(
+            HttpClientRequest.post(
+              new URL("/api/auth/websocket-ticket", t3.origin).toString(),
+            ).pipe(HttpClientRequest.bearerToken(session.token)),
+          )
+          .pipe(
+            Effect.timeout(Duration.seconds(5)),
+            Effect.mapError(() => `T3 at ${t3.origin} did not answer`),
+          );
+        const ticket = yield* response.text.pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Ticket))),
+          Effect.mapError(() => `T3 refused a WebSocket ticket (HTTP ${response.status})`),
         );
-      const ticket = yield* response.text.pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Ticket))),
-        Effect.mapError(() => `T3 refused a WebSocket ticket (HTTP ${response.status})`),
-      );
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const rpc = yield* RpcClient.make(T3SettingsRpcs);
-          for (const update of updates) yield* rpc["server.updateSettings"](update);
-        }),
-      ).pipe(
-        Effect.provide(
-          RpcClient.layerProtocolSocket().pipe(
-            Layer.provide(
-              Socket.layerWebSocket(wsUrl(t3.origin, ticket.ticket), {
-                openTimeout: Duration.seconds(5),
-              }),
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const rpc = yield* RpcClient.make(T3SettingsRpcs);
+            for (const update of updates) yield* rpc["server.updateSettings"](update);
+          }),
+        ).pipe(
+          Effect.provide(
+            RpcClient.layerProtocolSocket().pipe(
+              Layer.provide(
+                Socket.layerWebSocket(wsUrl(t3.origin, ticket.ticket), {
+                  openTimeout: Duration.seconds(5),
+                }),
+              ),
+              Layer.provide(Socket.layerWebSocketConstructorGlobal),
+              Layer.provide(RpcSerialization.layerJson),
             ),
-            Layer.provide(Socket.layerWebSocketConstructorGlobal),
-            Layer.provide(RpcSerialization.layerJson),
           ),
-        ),
-        Effect.timeout(Duration.seconds(20)),
-        Effect.mapError(
-          (e) =>
-            `server.updateSettings failed: ${String(isObject(e) && "message" in e ? e["message"] : e).slice(0, 200)}`,
+          Effect.timeout(Duration.seconds(20)),
+          Effect.mapError(
+            (e) =>
+              `server.updateSettings failed: ${String(isObject(e) && "message" in e ? e["message"] : e).slice(0, 200)}`,
+          ),
+        );
+      });
+    // The session is revoked however sending went; a revoke that fails is reported, never passed over.
+    let revokeFailed: string | null = null;
+    const revoke = (session: typeof Issued.Type) =>
+      run(["auth", "session", "revoke", session.sessionId]).pipe(
+        Effect.flatMap((r) =>
+          Effect.sync(() => {
+            if (r.code !== 0 || !r.stdout.includes("Revoked session"))
+              revokeFailed = `revoking T3 session ${session.sessionId} failed (${(r.stderr || r.stdout).trim().split("\n").at(-1) ?? `exit ${r.code}`}); revoke it with: t3 auth session revoke ${session.sessionId}`;
+          }),
         ),
       );
-    });
-    yield* send.pipe(
-      Effect.ensuring(run(["auth", "session", "revoke", session.sessionId]).pipe(Effect.ignore)),
-    );
+    const sent = yield* Effect.acquireUseRelease(issue, send, revoke).pipe(Effect.result);
+    const failures = [
+      ...(sent._tag === "Failure" ? [sent.failure] : []),
+      ...(revokeFailed === null ? [] : [revokeFailed]),
+    ];
+    if (failures.length > 0) return yield* Effect.fail(failures.join("; "));
   });
 
 // ---- the plan ----------------------------------------------------------------
