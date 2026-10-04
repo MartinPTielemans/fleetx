@@ -150,6 +150,20 @@ WantedBy=timers.target
 `;
 };
 
+/**
+ * Whether a systemd timer, from `systemctl show <unit>.timer`, will run its
+ * service again. An active timer can still have nothing scheduled (it
+ * "elapsed"): that one never runs again. While its service is running, as
+ * when a sync observes its own timer, it has nothing scheduled either, but
+ * schedules the next run once that one ends; taking it for elapsed made each
+ * sync reinstall its timer, and run again a minute later.
+ */
+export const systemdTimerScheduled = (text: string) => {
+  const prop = (name: string) => new RegExp(`^${name}=(.*)$`, "m").exec(text)?.[1]?.trim() ?? "";
+  const mono = prop("NextElapseUSecMonotonic");
+  return prop("ActiveState") === "active" && (prop("SubState") === "running" || (mono !== "" && mono !== "infinity") || prop("NextElapseUSecRealtime") !== "");
+};
+
 export const ENGINE_INSTALL = "t3-fleet:install-self";
 
 const heredoc = (file: string, text: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
@@ -358,15 +372,9 @@ export const EngineArea = defineArea({
           ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`], timeout: Duration.seconds(5) })
           : yield* exec({
               command: "systemctl",
-              args: [...(root ? [] : ["--user"]), "show", `${UNIT}.timer`, "-p", "ActiveState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
+              args: [...(root ? [] : ["--user"]), "show", `${UNIT}.timer`, "-p", "ActiveState", "-p", "SubState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
               timeout: Duration.seconds(5),
             });
-      // An active timer can still have nothing scheduled (it "elapsed"): that one never runs again.
-      const scheduled = (text: string) => {
-        const prop = (name: string) => new RegExp(`^${name}=(.*)$`, "m").exec(text)?.[1]?.trim() ?? "";
-        const mono = prop("NextElapseUSecMonotonic");
-        return prop("ActiveState") === "active" && ((mono !== "" && mono !== "infinity") || prop("NextElapseUSecRealtime") !== "");
-      };
       const realDir = (rel: string) =>
         fs.readLink(`${ctx.home}/${rel}`).pipe(
           Effect.map(() => false),
@@ -410,7 +418,7 @@ export const EngineArea = defineArea({
         timer: {
           installed: installedTimer,
           want,
-          loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)),
+          loaded: check.code === 0 && (platform === "darwin" || systemdTimerScheduled(check.stdout)),
           legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
           reloadPending,
           inJob: platform === "darwin" && (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL || ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
