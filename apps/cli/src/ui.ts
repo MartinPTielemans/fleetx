@@ -35,7 +35,7 @@ import { git } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
 import { addSkills, keepUpdate, land, listSkills, lookupSource, previewUpdate, removeSkills } from "@t3-fleet/core/SkillSources";
-import { approve, autoApprovable, listProposals, reject, STAGING } from "@t3-fleet/core/Staging";
+import { approve, autoApprovable, listProposals, reject } from "@t3-fleet/core/Staging";
 import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
 import { uiLayer, type UiAsset } from "@t3-fleet/core/UiServer";
 
@@ -109,7 +109,7 @@ const proposalsOf = (config: Config) =>
         const diff = yield* git(config.repo, ["diff", `origin/${config.branch}`, p.commit, "--", ...p.files]);
         return {
           node: p.node,
-          branch: `${STAGING}${p.node}`,
+          branch: p.branch,
           summary: p.stat.split("\n").pop()?.trim() ?? "",
           files: p.files,
           diff: diff.stdout,

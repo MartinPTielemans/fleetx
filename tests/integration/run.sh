@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test on throwaway containers: init on laptop, invite and join
-# server and desktop, check them over ssh, sync, propose and approve.
+# server and desktop, check them over ssh, sync, rename the repo from fleetx's
+# names, propose and approve.
 # Usage: tests/integration/run.sh   (needs Docker; builds the bundle first)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -35,7 +36,8 @@ done
 # A skill to discover, then init.
 on laptop 'mkdir -p ~/.agents/skills/demo && printf -- "---\nname: demo\ndescription: d\n---\nhi\n" > ~/.agents/skills/demo/SKILL.md'
 expect laptop "Created" 't3-fleet init --repo ~/fleet'
-on laptop 'grep -q "timer = true" ~/fleet/fleetx.toml && sed -i "s/timer = true/timer = false/" ~/fleet/fleetx.toml && git -C ~/fleet commit -qam "No timers in tests"'
+# The repo starts with fleetx's names, as one set up before 0.5 has, and is renamed further down.
+on laptop 'grep -q "timer = true" ~/fleet/t3-fleet.toml && sed -i "s/timer = true/timer = false/" ~/fleet/t3-fleet.toml && git -C ~/fleet mv t3-fleet.toml fleetx.toml && git -C ~/fleet commit -qam "No timers in tests; fleetx names"'
 on laptop 'git init -q --bare /srv/remote/fleet.git && git -C ~/fleet remote add origin /srv/remote/fleet.git && git -C ~/fleet push -q -u origin main'
 pass "init on laptop, pushed to the shared remote"
 
@@ -57,6 +59,16 @@ expect laptop "synced" 't3-fleet sync'
 on desktop 't3-fleet sync' >/dev/null || true
 [ "$(on desktop 'grep -c TEST_SECRET ~/.config/t3-fleet/secrets.env')" = 1 ] || fail "desktop should have the secret after the authority added its key"
 pass "an authority's sync lets joined nodes read the secrets"
+
+on laptop 'git ls-remote /srv/remote/fleet.git' | grep -q "refs/heads/fleetx/state/server" || fail "before the rename, state is published under fleetx/state"
+expect laptop "still uses fleetx's names" 't3-fleet status'
+expect laptop "fleetx.toml → t3-fleet.toml" 't3-fleet repo rename'
+for n in server desktop laptop; do on "$n" 't3-fleet sync' >/dev/null || true; done
+refs=$(on laptop 'git ls-remote /srv/remote/fleet.git')
+printf '%s' "$refs" | grep -q "refs/heads/fleetx/" && fail "no fleetx/ branches should remain after the rename and a sync: $refs"
+printf '%s' "$refs" | grep -q "refs/heads/t3-fleet/state/desktop" || fail "desktop should publish under t3-fleet/state: $refs"
+[ "$(on desktop 'grep -c TEST_SECRET ~/.config/t3-fleet/secrets.env')" = 1 ] || fail "desktop should still read the secrets after the rename"
+pass "repo rename: t3-fleet.toml and t3-fleet/ branches, every node following on its next sync"
 
 on desktop 'mkdir -p ~/fleet/skills/proposed && printf -- "---\nname: proposed\ndescription: p\n---\nx\n" > ~/fleet/skills/proposed/SKILL.md'
 expect desktop "proposed 1 file" 't3-fleet sync'

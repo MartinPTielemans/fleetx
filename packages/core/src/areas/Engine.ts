@@ -31,7 +31,9 @@ import {
   LEGACY_CONFIG_DIR,
   LEGACY_SHARE_DIR,
   LEGACY_STATE_DIR,
+  repoRenamed,
   BUNDLE_FILE,
+  CLI,
   launchdLabel,
   SH_CONFIG_DIR,
   SHARE_DIR,
@@ -64,6 +66,8 @@ const Observed = Schema.Struct({
   }),
   /** fleetx's directories still to move: config, state, share (Names.ts). Absent from older probes. */
   legacy: Schema.optionalKey(Schema.Array(Schema.Literals(["config", "state", "share"]))),
+  /** Whether this node's checkout of the config repo has T3 Fleet's names (Names.ts). Absent from older probes. */
+  repoRenamed: Schema.optionalKey(Schema.Boolean),
 });
 
 const LAUNCHD_LABEL = launchdLabel("sync");
@@ -255,6 +259,7 @@ export const EngineArea = defineArea({
       if (yield* realDir(LEGACY_SHARE_DIR)) legacy.push("share");
       return {
         legacy,
+        repoRenamed: repoRenamed(ctx.checkout),
         wanted: ctx.engine,
         installed,
         local,
@@ -269,7 +274,7 @@ export const EngineArea = defineArea({
         },
       };
     }),
-  diagnose: ({ node, observed }) => {
+  diagnose: ({ node, observed, fleet, authority, nodes }) => {
     const out: Array<Finding> = [];
     if (observed.local !== null && !observed.local.matches) {
       out.push({
@@ -335,6 +340,24 @@ export const EngineArea = defineArea({
         title: `fleetx's ${legacy.map((d) => `~/.${d === "config" ? "config" : `local/${d}`}/fleetx`).join(", ")} still to move to T3 Fleet's`,
         detail: "the old names stay as links to the new ones, so nothing using them breaks",
         fix: { command: migrateDirs(legacy), safe: true },
+      });
+    }
+    // The config repo's names move once, on the authority, when every machine reads both. Until 1.0.
+    if (node === authority && observed.repoRenamed === false) {
+      // Every configured machine, so one that cannot be reached right now is not taken as ready.
+      const ready =
+        nodes !== undefined &&
+        nodes.every((name) => fleet.some((e) => e.node === name && e.observed.wanted !== null && e.observed.installed === e.observed.wanted && e.observed.repoRenamed !== undefined));
+      out.push({
+        node,
+        key: "engine-repo-names",
+        severity: ready ? "warn" : "info",
+        area: "engine",
+        title: "the config repo still uses fleetx's names",
+        detail: ready
+          ? "fleetx.toml, the fleetx/ branches and FLEETX_ secrets; every machine reads T3 Fleet's names now"
+          : "fleetx.toml, the fleetx/ branches and FLEETX_ secrets move once every machine runs this build",
+        ...(ready ? { fix: { command: `${CLI} repo rename`, safe: false } } : {}),
       });
     }
     return out;

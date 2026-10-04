@@ -528,7 +528,7 @@ const areaFindings = (
     }
     const authority = nodes.find((n) => n.roles.includes("authority"))?.name ?? null;
     for (const entry of fleet) {
-      out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority }));
+      out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority, nodes: nodes.map((n) => n.name) }));
     }
   }
   return out;

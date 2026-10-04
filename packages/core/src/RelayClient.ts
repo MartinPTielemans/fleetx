@@ -14,21 +14,27 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { Config } from "./Config.ts";
+import { legacySecretName } from "./Names.ts";
 import { localSecretsPath } from "./Secrets.ts";
 import { NodeState } from "./State.ts";
 
-export const RELAY_TOKEN = "FLEETX_RELAY_TOKEN";
+export const RELAY_TOKEN = "T3_FLEET_RELAY_TOKEN";
 
-/** A variable from this node's installed secrets, or the environment. */
+/**
+ * A variable from this node's installed secrets, or the environment. A
+ * T3_FLEET_ secret not set yet is read under its fleetx name. Until 1.0.
+ */
 export const secretVar = (name: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(localSecretsPath(process.env["HOME"] ?? "")).pipe(Effect.orElseSucceed(() => ""));
+    const values = new Map<string, string>();
     for (const line of text.split("\n")) {
       const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-      if (m?.[1] === name) return (m[2] ?? "").replace(/^"(.*)"$/, "$1").replace(/\\(.)/g, "$1");
+      if (m?.[1] !== undefined) values.set(m[1], (m[2] ?? "").replace(/^"(.*)"$/, "$1").replace(/\\(.)/g, "$1"));
     }
-    return process.env[name] ?? "";
+    const legacy = legacySecretName(name);
+    return values.get(name) ?? process.env[name] ?? (legacy === null ? undefined : (values.get(legacy) ?? process.env[legacy])) ?? "";
   });
 
 const relayOf = (config: Config) => config.settings.relay?.url?.replace(/\/+$/, "") ?? null;
@@ -58,7 +64,7 @@ export const reportToRelay = (config: Config, state: NodeState) =>
 export const listen = <E, R>(config: Config, onPull: (rev: string) => Effect.Effect<void, E, R>, log: (line: string) => Effect.Effect<void>) =>
   Effect.gen(function* () {
     const url = relayOf(config);
-    if (url === null) return yield* Effect.fail("no [relay] url in fleetx.toml");
+    if (url === null) return yield* Effect.fail("no [relay] url in t3-fleet.toml");
     const token = yield* secretVar(RELAY_TOKEN);
     if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets`);
     const client = yield* HttpClient.HttpClient;

@@ -30,13 +30,13 @@ roles = ["authority"]
 roles = ["relay", "member"]
 ssh = "server"
 
-# fleetx.toml
+# t3-fleet.toml
 [relay]
 url = "https://server.tailnet.ts.net:8399"
 port = 8399
 ```
 
-Add the relay token once: `t3-fleet secrets set FLEETX_RELAY_TOKEN=$(openssl rand -hex 32)`.
+Add the relay token once: `t3-fleet secrets set T3_FLEET_RELAY_TOKEN=$(openssl rand -hex 32)`.
 The relay area installs `t3-fleet relay serve` on the server and publishes it on
 the tailnet; every other node runs `t3-fleet listen` and syncs seconds after the
 branch moves. A laptop that slept catches up on the events it missed.
@@ -47,7 +47,7 @@ The relay can host your MCP servers too, so every machine reaches them through
 one endpoint and one token, and OAuth logins live in one place:
 
 ```toml
-# fleetx.toml
+# t3-fleet.toml
 [defaults.mcp]
 hub = true
 gateway = "https://server.tailnet.ts.net:8399"
@@ -117,6 +117,6 @@ profiles = ["workstation"]
 "ignore.add" = ["something-local"]
 ```
 
-Layers apply in order: `[defaults]` in fleetx.toml, then each profile, then the
+Layers apply in order: `[defaults]` in t3-fleet.toml, then each profile, then the
 node. Tables merge; lists are replaced unless a layer uses `.add` or `.remove`.
 `t3-fleet config show <node>` prints the result and where each value came from.

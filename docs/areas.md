@@ -5,7 +5,7 @@ machine read-only, diagnoses against what the node's settings say (and what the
 other nodes look like), and proposes fixes. `t3-fleet sync` runs a fix unattended
 only when it is marked safe and its area is in `[fleet] apply`.
 
-Settings below go in a node file, a profile, or `[defaults]` in fleetx.toml.
+Settings below go in a node file, a profile, or `[defaults]` in t3-fleet.toml.
 
 ## Built in, always on
 
@@ -17,7 +17,7 @@ channel; each enabled provider launched with the T3 server's own environment.
 (npm under `~/.local`). `[agents.claude] policy = "track"` (default),
 `"pin:2.1.288"`, or `"manual"`.
 
-**Proxy.** If `[proxy]` is declared in fleetx.toml: whether each node's key is
+**Proxy.** If `[proxy]` is declared in t3-fleet.toml: whether each node's key is
 accepted, and which providers skip the launcher. See the README.
 
 ## runtime
@@ -44,7 +44,7 @@ Every node can read the fleet's secrets and has the current ones.
 
 ## relay
 
-With `[relay]` in fleetx.toml: the relay service on the node with the relay
+With `[relay]` in t3-fleet.toml: the relay service on the node with the relay
 role (published to the tailnet), and a listener on every other node.
 
 ## dotfiles
@@ -91,7 +91,7 @@ the same, and shows each skill's links on every machine.
 servers = ["fetch", "context7", "posthog"]       # registered in Claude and Codex
 hub = true                                       # the relay's MCP hub serves hosted kinds
 gateway = "https://server.tailnet.ts.net:8399"   # the relay
-token_env = "FLEETX_MCP_TOKEN_LAPTOP"            # optional: a client token instead of the relay token
+token_env = "T3_FLEET_MCP_TOKEN_LAPTOP"            # optional: a client token instead of the relay token
 ```
 
 Each server is defined once in the repo's `mcp/<name>.json`. Its `kind`
@@ -167,7 +167,7 @@ t3-fleet mcp token list | revoke <client>
 The call log never holds arguments or results. Denied tools are hidden from
 `tools/list` and refused with a JSON-RPC error. Client tokens are stored only
 as digests on the relay; on an authority, `token create` keeps the token in
-the fleet's secrets as `FLEETX_MCP_TOKEN_<CLIENT>`.
+the fleet's secrets as `T3_FLEET_MCP_TOKEN_<CLIENT>`.
 
 ## models
 
@@ -240,7 +240,7 @@ deploys.
 ## Plugins
 
 ```toml
-# fleetx.toml
+# t3-fleet.toml
 [plugins]
 areas = ["plugins/brew.mjs"]
 ```

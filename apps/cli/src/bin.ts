@@ -24,7 +24,7 @@ import { renderChanges, renderFindings, renderFixPlan, renderFixResults, renderS
 import { describeMerged } from "@t3-fleet/core/Settings";
 
 import packageJson from "../package.json" with { type: "json" };
-import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand, renderFleetFromStates, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
+import { alertsCommand, approveCommand, mcpAddCommand, takeAlerts, rejectCommand, renderFleetFromStates, repoCommand, reviewCommand, skillsCommand, syncCommand } from "./fleet.ts";
 import { hubCommands } from "./hub.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
 import { modelsCommand } from "./models.ts";
@@ -219,6 +219,7 @@ const cli = Command.make("t3-fleet").pipe(
     reviewCommand,
     approveCommand,
     rejectCommand,
+    repoCommand,
     alertsCommand,
     listenCommand,
     relayCommand,

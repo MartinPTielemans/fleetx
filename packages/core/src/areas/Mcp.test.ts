@@ -17,10 +17,12 @@ describe("mcp area: where clients connect", () => {
   it("sends every hosted kind to the hub's gateway, without ports, when the hub is on", () => {
     const desired: McpDesired = { hub: true, gateway };
     for (const [name, d] of [["r", remote], ["c", container], ["g", registry], ["h", { kind: "hosted-stdio", command: "x" }]] as const) {
-      expect(resolveEndpoint(name, d, desired, home)).toEqual({ endpoint: { type: "http", url: `https://relay.tailnet.ts.net:8399/mcp/${name}`, tokenEnv: "FLEETX_RELAY_TOKEN" }, problem: null });
+      expect(resolveEndpoint(name, d, desired, home)).toEqual({ endpoint: { type: "http", url: `https://relay.tailnet.ts.net:8399/mcp/${name}`, tokenEnv: "T3_FLEET_RELAY_TOKEN" }, problem: null });
     }
     expect(resolveEndpoint("r", remote, { ...desired, token_env: "FLEETX_MCP_TOKEN_LAPTOP" }, home).endpoint).toMatchObject({ tokenEnv: "FLEETX_MCP_TOKEN_LAPTOP" });
     expect(resolveEndpoint("r", remote, { hub: true }, home).problem).toMatch(/no \[mcp\] gateway/);
+    // A fleet that has the relay token under its fleetx name keeps using it.
+    expect(resolveEndpoint("r", remote, desired, home, "FLEETX_RELAY_TOKEN").endpoint).toMatchObject({ tokenEnv: "FLEETX_RELAY_TOKEN" });
   });
 
   it("keeps the ports path for fleets without the hub", () => {
@@ -28,7 +30,7 @@ describe("mcp area: where clients connect", () => {
     expect(resolveEndpoint("c", container, { gateway, ports: { c: 18100 } }, home).endpoint).toEqual({
       type: "http",
       url: "https://relay.tailnet.ts.net:8399/mcp/c",
-      tokenEnv: "FLEETX_RELAY_TOKEN",
+      tokenEnv: "T3_FLEET_RELAY_TOKEN",
     });
     expect(resolveEndpoint("c", container, { gateway }, home).problem).toMatch(/no \[mcp\] origin and port/);
   });
@@ -53,7 +55,7 @@ describe("mcp area: hub findings", () => {
   const registered = { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/posthog", auth: true } as const;
   const server = (live: string) => ({
     name: "posthog",
-    endpoint: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/posthog", tokenEnv: "FLEETX_RELAY_TOKEN" },
+    endpoint: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/posthog", tokenEnv: "T3_FLEET_RELAY_TOKEN" },
     problem: null,
     claude: registered,
     codex: registered,

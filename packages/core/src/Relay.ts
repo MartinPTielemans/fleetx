@@ -19,7 +19,7 @@
  *   GET  /health
  *
  * Everything but /health and /oauth/callback needs `Authorization: Bearer
- * $FLEETX_RELAY_TOKEN` (the gateway also takes per-client tokens).
+ * $T3_FLEET_RELAY_TOKEN` (the gateway also takes per-client tokens).
  * It listens on 127.0.0.1; publish it to the tailnet (tailscale serve), never
  * to the internet.
  */

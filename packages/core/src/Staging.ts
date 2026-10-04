@@ -1,24 +1,28 @@
 /**
  * Proposals: changes a non-authority node made under the auto-commit paths,
- * waiting on fleetx/staging/<node> for an authority.
+ * waiting on t3-fleet/staging/<node> for an authority.
  *
  *   approve  the proposal's files land on the branch (one commit), and the
  *            staging branch is deleted
- *   reject   the proposal moves to fleetx/rejected/<node>; on its next sync
+ *   reject   the proposal moves to t3-fleet/rejected/<node>; on its next sync
  *            the proposing node stashes its local copies and deletes it
  *
  * `[fleet] auto_approve = ["skills/"]` approves proposals whose files are all
  * under those prefixes during the authority's own sync.
+ *
+ * Until 1.0 the fleetx/staging and fleetx/rejected branches are read too
+ * (Names.ts): a repo not renamed yet uses them, and so does a machine that has
+ * not pulled the rename.
  */
 import * as Effect from "effect/Effect";
 
 import { git, ok, out, why } from "./Git.ts";
-
-export const STAGING = "fleetx/staging/";
-export const REJECTED = "fleetx/rejected/";
+import { branchPrefix, branchPrefixes } from "./Names.ts";
 
 export interface Proposal {
   readonly node: string;
+  /** The branch it waits on: t3-fleet/staging/<node>, or fleetx/staging/<node>. */
+  readonly branch: string;
   readonly commit: string;
   readonly files: ReadonlyArray<string>;
   readonly stat: string;
@@ -27,18 +31,19 @@ export interface Proposal {
 /** Every pending proposal, fetched from the remote. */
 export const listProposals = (repo: string, branch: string) =>
   Effect.gen(function* () {
-    yield* git(repo, ["fetch", "-q", "--prune", "origin", `+refs/heads/${STAGING}*:refs/remotes/origin/${STAGING}*`, branch]);
-    const refs = out(yield* git(repo, ["for-each-ref", "--format=%(refname:strip=3)", `refs/remotes/origin/${STAGING}`]))
+    const prefixes = branchPrefixes("staging");
+    yield* git(repo, ["fetch", "-q", "--prune", "origin", ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`), branch]);
+    const refs = out(yield* git(repo, ["for-each-ref", "--format=%(refname:strip=3)", ...prefixes.map((p) => `refs/remotes/origin/${p}`)]))
       .split("\n")
       .filter(Boolean);
     const proposals: Array<Proposal> = [];
     for (const ref of refs) {
-      const node = ref.slice(STAGING.length);
+      const node = ref.slice((prefixes.find((p) => ref.startsWith(p)) ?? "").length);
       const commit = out(yield* git(repo, ["rev-parse", `origin/${ref}`]));
       const files = out(yield* git(repo, ["diff", "--name-only", `origin/${branch}`, commit])).split("\n").filter(Boolean);
       if (files.length === 0) continue;
       const stat = out(yield* git(repo, ["diff", "--stat", `origin/${branch}`, commit]));
-      proposals.push({ node, commit, files, stat });
+      proposals.push({ node, branch: ref, commit, files, stat });
     }
     return proposals;
   });
@@ -64,13 +69,13 @@ export const approve = (repo: string, branch: string, proposal: Proposal, by: st
     if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
     const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
     if (!ok(push)) return yield* Effect.fail(`push failed: ${why(push)}`);
-    yield* git(repo, ["push", "-q", "origin", `:refs/heads/${STAGING}${proposal.node}`]);
+    yield* git(repo, ["push", "-q", "origin", `:refs/heads/${proposal.branch}`]);
     return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
   });
 
 export const reject = (repo: string, proposal: Proposal) =>
   Effect.gen(function* () {
-    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${proposal.commit}:refs/heads/${REJECTED}${proposal.node}`, `:refs/heads/${STAGING}${proposal.node}`]);
+    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${proposal.commit}:refs/heads/${branchPrefix(repo, "rejected")}${proposal.node}`, `:refs/heads/${proposal.branch}`]);
     if (!ok(push)) return yield* Effect.fail(`reject failed: ${why(push)}`);
   });
 
@@ -85,9 +90,13 @@ export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<strin
  */
 export const settleRejection = (repo: string, node: string, branch: string) =>
   Effect.gen(function* () {
-    const ref = `refs/heads/${REJECTED}${node}`;
-    const remote = yield* git(repo, ["ls-remote", "origin", ref]);
-    const commit = out(remote).split(/\s+/)[0] ?? "";
+    let ref = "";
+    let commit = "";
+    for (const prefix of branchPrefixes("rejected")) {
+      ref = `refs/heads/${prefix}${node}`;
+      commit = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
+      if (commit !== "") break;
+    }
     if (commit === "") return [] as Array<string>;
     yield* git(repo, ["fetch", "-q", "origin", ref]);
     const files = out(yield* git(repo, ["diff", "--name-only", `origin/${branch}`, commit])).split("\n").filter(Boolean);

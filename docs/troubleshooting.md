@@ -57,6 +57,17 @@ already exist, the old directory's files are copied over without replacing
 any, and it is kept beside the new one as `<dir>.migrated.<time>`. The share
 directory moves once the new build is installed (`engine-outdated` first).
 
+**`engine-repo-names`** — on the authority: the config repo still uses
+fleetx's names (`fleetx.toml`, `fleetx/state|staging|rejected/<node>`
+branches, `FLEETX_*` secrets). It is a note until every configured machine
+runs the controller's build, then a warning with the fix `t3-fleet repo
+rename`: it moves `fleetx.toml` to `t3-fleet.toml`, renames `FLEETX_RELAY_TOKEN`
+and `FLEETX_MCP_TOKEN_*` in the settings, adds every `FLEETX_*` secret under
+its `T3_FLEET_*` name (keeping the old one until 1.0), commits, pushes, and
+moves the branches. Each step is skipped when done, so it can run again.
+Machines that have not pulled yet keep working: until 1.0 every build reads
+both names.
+
 Installing the sync timer, the relay's services and the model proxy also
 stops and removes the units they had under their fleetx names
 (`dev.fleetx.*`, `fleetx-*`).

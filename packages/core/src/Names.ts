@@ -18,14 +18,18 @@
  * behind, so both names reach the same place from then on. Whatever is
  * written to the new name before that is merged in by the migration.
  *
- * The config repo's own names (fleetx.toml, the fleetx/state and
- * fleetx/staging branches, FLEETX_* secrets) are shared by every machine and
- * move separately, once every machine runs T3 Fleet.
+ * The config repo's own names are shared by every machine and move together,
+ * in one authority fix (`t3-fleet repo rename`), once every machine runs a
+ * build that reads both (see repoRenamed below):
+ *
+ *   t3-fleet.toml                     was fleetx.toml
+ *   t3-fleet/{state,staging,rejected}/<node>   were fleetx/…   (branches)
+ *   T3_FLEET_RELAY_TOKEN, T3_FLEET_MCP_TOKEN_*  were FLEETX_…   (secrets)
  */
 // Resolving a directory has to be synchronous: paths are built in plain
 // functions all over, and this is a cheap, read-only check.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { lstatSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 
 export const PRODUCT = "T3 Fleet";
 export const CLI = "t3-fleet";
@@ -84,3 +88,26 @@ export const header = (name: string) => `x-t3-fleet-${name}`;
 export const legacyHeader = (name: string) => `x-fleetx-${name}`;
 /** A header's value under its name, or else its old name. */
 export const readHeader = (headers: Readonly<Record<string, string | undefined>>, name: string) => headers[header(name)] ?? headers[legacyHeader(name)];
+
+export const FLEET_FILE = "t3-fleet.toml";
+export const LEGACY_FLEET_FILE = "fleetx.toml";
+
+/**
+ * Whether a config repo has its T3 Fleet names: it holds t3-fleet.toml.
+ * Writers use the names the repo has; readers take both until 1.0, for a
+ * machine that has not pulled the rename yet.
+ */
+export const repoRenamed = (repo: string) => existsSync(`${repo}/${FLEET_FILE}`);
+
+export type BranchKind = "state" | "staging" | "rejected";
+/** The prefix this repo's branches of one kind are written under: "t3-fleet/state/". */
+export const branchPrefix = (repo: string, kind: BranchKind) => `${repoRenamed(repo) ? "t3-fleet" : "fleetx"}/${kind}/`;
+/** Every prefix branches of one kind are read from, the current one first. Until 1.0. */
+export const branchPrefixes = (kind: BranchKind) => [`t3-fleet/${kind}/`, `fleetx/${kind}/`] as const;
+
+export const SECRET_PREFIX = "T3_FLEET_";
+export const LEGACY_SECRET_PREFIX = "FLEETX_";
+/** A fleet secret's name in this repo: T3_FLEET_RELAY_TOKEN, or FLEETX_RELAY_TOKEN before the rename. */
+export const secretName = (repo: string, name: string) => `${repoRenamed(repo) ? SECRET_PREFIX : LEGACY_SECRET_PREFIX}${name}`;
+/** The fleetx name of a T3_FLEET_ secret, read when the new one is not set; null for any other name. Until 1.0. */
+export const legacySecretName = (name: string) => (name.startsWith(SECRET_PREFIX) ? `${LEGACY_SECRET_PREFIX}${name.slice(SECRET_PREFIX.length)}` : null);

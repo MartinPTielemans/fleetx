@@ -1,4 +1,4 @@
-/** What each node publishes about itself: on fleetx/state/<node>, and to the relay. */
+/** What each node publishes about itself: on t3-fleet/state/<node>, and to the relay. */
 import * as Schema from "effect/Schema";
 
 import { MachineObservation } from "./Observation.ts";
@@ -20,7 +20,7 @@ export const Alert = Schema.Struct({
 });
 export type Alert = typeof Alert.Type;
 
-/** What a node publishes on fleetx/state/<node>. */
+/** What a node publishes on t3-fleet/state/<node>. */
 export const NodeState = Schema.Struct({
   node: Schema.String,
   at: Schema.Number,

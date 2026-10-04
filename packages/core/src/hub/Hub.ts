@@ -651,7 +651,7 @@ export const makeHub = (
       login: (name) =>
         Effect.gen(function* () {
           const entry = yield* need(name);
-          if (redirectUri === "") return yield* Effect.fail("no [relay] url in fleetx.toml; signing in redirects to <relay url>/oauth/callback");
+          if (redirectUri === "") return yield* Effect.fail("no [relay] url in t3-fleet.toml; signing in redirects to <relay url>/oauth/callback");
           const r = entry.def.runner;
           const url = r.type === "remote" ? r.url : r.type === "port" ? `http://127.0.0.1:${r.port}/mcp` : r.type === "docker-http" && entry.port !== null ? `http://127.0.0.1:${entry.port}${r.path}` : null;
           if (url === null) return yield* Effect.fail(`${name} takes its credentials from its environment, not a sign-in`);

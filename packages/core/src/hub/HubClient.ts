@@ -9,6 +9,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { Config } from "../Config.ts";
+import { secretName } from "../Names.ts";
 import { RELAY_TOKEN, secretVar } from "../RelayClient.ts";
 
 export interface HubReply {
@@ -20,7 +21,7 @@ export interface HubReply {
 export const hubRequest = (config: Config, method: "GET" | "POST" | "DELETE", path: string, body?: string) =>
   Effect.gen(function* () {
     const url = config.settings.relay?.url?.replace(/\/+$/, "");
-    if (url === undefined) return yield* Effect.fail("no [relay] url in fleetx.toml: the MCP hub runs in the relay");
+    if (url === undefined) return yield* Effect.fail("no [relay] url in t3-fleet.toml: the MCP hub runs in the relay");
     const token = yield* secretVar(RELAY_TOKEN);
     if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets`);
     const client = yield* HttpClient.HttpClient;
@@ -39,5 +40,5 @@ export const hubRequest = (config: Config, method: "GET" | "POST" | "DELETE", pa
 export const expectOk = (reply: HubReply) =>
   reply.status >= 200 && reply.status < 300 ? Effect.succeed(reply.text) : Effect.fail(reply.text.trim() === "" ? `the relay answered HTTP ${reply.status}` : reply.text.trim());
 
-/** The secret a client token is kept under in the fleet's secrets. */
-export const clientTokenEnv = (client: string) => `FLEETX_MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+/** The secret a client token is kept under in this repo's secrets: T3_FLEET_MCP_TOKEN_<CLIENT>. */
+export const clientTokenEnv = (repo: string, client: string) => secretName(repo, `MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`);
