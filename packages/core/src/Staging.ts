@@ -62,12 +62,15 @@ export const listProposals = (repo: string, branch: string) =>
 const tipOf = (repo: string, proposal: Proposal) =>
   git(repo, ["ls-remote", "origin", `refs/heads/${proposal.branch}`]).pipe(Effect.map((r) => out(r).split(/\s+/)[0] ?? ""));
 
-/** The patch id of `commit`'s own change: equal for the same change made again on another base. */
-const patchId = (repo: string, commit: string) =>
+/**
+ * `commit`'s own change, exactly: each file's mode and blob before and after.
+ * Equal for the same change made again on another base, and for nothing else;
+ * a patch id would also match one that only re-indents.
+ */
+const changeOf = (repo: string, commit: string) =>
   Effect.gen(function* () {
-    const diff = yield* git(repo, ["diff-tree", "-p", "--no-renames", `${commit}^`, commit]);
-    if (!ok(diff) || diff.stdout === "") return "";
-    return out(yield* git(repo, ["patch-id", "--stable"], { stdin: diff.stdout })).split(/\s+/)[0] ?? "";
+    const raw = yield* git(repo, ["diff-tree", "-r", "-z", "--no-renames", "--full-index", `${commit}^`, commit]);
+    return ok(raw) ? raw.stdout : "";
   });
 
 /**
@@ -83,7 +86,8 @@ const reviewedTip = (repo: string, proposal: Proposal, expected: string | undefi
     if (!ok(fetch)) return yield* Effect.fail(`fetching the proposal: ${why(fetch)}`);
     if (reviewed.length >= 7 && tip.startsWith(reviewed)) return tip;
     const known = out(yield* git(repo, ["rev-parse", "-q", "--verify", `${reviewed}^{commit}`]));
-    const same = reviewed.length >= 7 && known !== "" && (yield* patchId(repo, known)) !== "" && (yield* patchId(repo, known)) === (yield* patchId(repo, tip));
+    const change = known === "" ? "" : yield* changeOf(repo, known);
+    const same = reviewed.length >= 7 && change !== "" && change === (yield* changeOf(repo, tip));
     if (!same) return yield* Effect.fail(`${proposal.node}'s proposal is ${tip.slice(0, 7)} now, not the ${reviewed.slice(0, 7)} reviewed; review it again`);
     return tip;
   });
@@ -118,8 +122,18 @@ export const approve = (repo: string, branch: string, proposal: Proposal, by: st
               `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made${conflicted.length > 0 ? ` (${conflicted.join(", ")})` : ""}; reject it, or have ${proposal.node} sync and propose again`,
             );
           }
+          // Only the files the proposal names, which is what was reviewed and
+          // what auto_approve trusts: a cherry-pick follows renames, so an
+          // edit to a file the branch has since moved would land elsewhere.
+          const changed = nulList((yield* git(scratch, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"])).stdout);
+          const elsewhere = changed.filter((f) => !files.includes(f));
+          if (elsewhere.length > 0) {
+            return yield* Effect.fail(
+              `${proposal.node}'s proposal would change ${elsewhere.join(", ")}, which it does not name (moved on ${branch} since?); reject it, or have ${proposal.node} sync and propose again`,
+            );
+          }
           // Already on the branch: nothing to commit.
-          if (ok(yield* git(scratch, ["diff", "--cached", "--quiet", "HEAD"]))) return null;
+          if (changed.length === 0) return null;
           const commit = yield* git(scratch, ["commit", "-q", "-m", `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}`]);
           if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
           return out(yield* git(scratch, ["rev-parse", "HEAD"]));
@@ -142,7 +156,9 @@ const inScratchWorktree = <A, E, R>(repo: string, use: (scratch: string) => Effe
     const fs = yield* FileSystem.FileSystem;
     const scratch = `${stateDir(process.env["HOME"] ?? "")}/approve`;
     const remove = Effect.gen(function* () {
-      yield* git(repo, ["worktree", "remove", "--force", scratch]);
+      // A run that died inside `worktree add` leaves it locked, which remove and prune skip.
+      yield* git(repo, ["worktree", "unlock", scratch]);
+      yield* git(repo, ["worktree", "remove", "--force", "--force", scratch]);
       yield* fs.remove(scratch, { recursive: true, force: true }).pipe(Effect.ignore);
       yield* git(repo, ["worktree", "prune"]);
     });
@@ -162,6 +178,8 @@ export const reject = (repo: string, proposal: Proposal, expected?: string) =>
       const push = yield* git(repo, [
         "push",
         "-q",
+        // Both or neither: a rejected branch without the deletion would make the node set aside a newer proposal.
+        "--atomic",
         `--force-with-lease=refs/heads/${proposal.branch}:${tip}`,
         "origin",
         `+${tip}:refs/heads/${branchPrefix(repo, "rejected")}${proposal.node}`,

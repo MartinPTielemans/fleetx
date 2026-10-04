@@ -294,6 +294,11 @@ approval applies only what the proposal itself changed, merged with what the
 branch has now, and never undoes newer work. When both changed the same lines
 it refuses: reject the proposal, or let that machine pull and propose again.
 
+**"…'s proposal would change …, which it does not name"** — the branch moved
+or renamed a file the proposal edits, and applying the edit would land in the
+new place, outside what was reviewed (or what `auto_approve` trusts). Reject
+it, or let that machine pull and propose again.
+
 **"a sync is running on this machine; try again in a moment"** — every command
 that writes to the config repo (approve, reject, skills, secrets, invite, `repo
 rename`) waits its turn with sync, so sync never commits or proposes half an

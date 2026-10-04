@@ -5,9 +5,10 @@
  * The lock is a directory, created atomically, holding its owner: pid, start
  * and a token. It goes stale only when that process has gone, never after a
  * while: a laptop can sleep for hours in the middle of a sync and carry on.
- * Gone means dead, or its pid now someone else's: the lock was taken before
- * the machine last booted (a power loss), or the process at that pid started
- * after the lock was taken.
+ * Gone means dead, or its pid now someone else's: the machine booted since
+ * (a power loss), or the process at that pid is not the one that took it.
+ * Both are told by what the kernel keeps, a boot id and a process's start,
+ * never by comparing clock times, which a clock step at boot would move.
  * A run only ever removes the lock holding its own token. A lock without an
  * owner (one an older build took, or whose process died between creating it
  * and writing the owner) goes stale after an hour, as before.
@@ -21,18 +22,25 @@
  */
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 
-import * as Duration from "effect/Duration";
-
 import { exec } from "./Exec.ts";
 import { stateDir } from "./Names.ts";
 
-const Owner = Schema.Struct({ pid: Schema.Number, start: Schema.Number, token: Schema.String });
+const Owner = Schema.Struct({
+  pid: Schema.Number,
+  start: Schema.Number,
+  token: Schema.String,
+  /** The machine's boot when the lock was taken. */
+  boot: Schema.optionalKey(Schema.String),
+  /** The owner process's start, as the kernel keeps it. */
+  process: Schema.optionalKey(Schema.String),
+});
 type Owner = typeof Owner.Type;
 const decodeOwner = Schema.decodeEffect(Schema.fromJsonString(Owner));
 const encodeOwner = Schema.encodeEffect(Schema.fromJsonString(Owner));
@@ -48,8 +56,6 @@ export const SYNC_LOCK_ENV = "T3_FLEET_SYNC_LOCK";
 const ownerPath = (lock: string) => `${lock}/owner.json`;
 
 const OWNERLESS_STALE_MS = 3_600_000;
-/** Clocks and ps disagree by a second or so; a pid's new owner shows up long after. */
-const CLOCK_SLACK_MS = 60_000;
 const TAKEOVER_STALE_MS = 60_000;
 
 const alive = (pid: number) =>
@@ -63,35 +69,45 @@ const alive = (pid: number) =>
     }
   });
 
-/** When this machine last booted, or none when it cannot tell. */
-const bootTime = Effect.gen(function* () {
+/** This boot of the machine, or none when it cannot tell. */
+const bootId = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   if (process.platform === "darwin") {
-    const sysctl = yield* exec({ command: "sysctl", args: ["-n", "kern.boottime"], timeout: Duration.seconds(5) });
-    const sec = /sec = (\d+)/.exec(sysctl.stdout)?.[1];
-    return sec === undefined ? Option.none<number>() : Option.some(Number(sec) * 1000);
+    const sysctl = yield* exec({ command: "sysctl", args: ["-n", "kern.bootsessionuuid"], timeout: Duration.seconds(5) });
+    return sysctl.code === 0 && sysctl.stdout.trim() !== "" ? Option.some(sysctl.stdout.trim()) : Option.none<string>();
   }
-  const stat = yield* fs.readFileString("/proc/stat").pipe(Effect.option);
-  const sec = Option.isSome(stat) ? /^btime (\d+)$/m.exec(stat.value)?.[1] : undefined;
-  return sec === undefined ? Option.none<number>() : Option.some(Number(sec) * 1000);
+  const id = yield* fs.readFileString("/proc/sys/kernel/random/boot_id").pipe(Effect.option);
+  return Option.filter(Option.map(id, (t) => t.trim()), (t) => t !== "");
 });
 
-/** When the process now at `pid` started, or none when ps cannot say. */
-const processStart = (pid: number) =>
+/**
+ * When the process now at `pid` started, in the kernel's own terms: on Linux
+ * clock ticks since boot (/proc/<pid>/stat), elsewhere ps's start time, which
+ * the kernel records once. Neither moves when the clock is set. None when the
+ * process is gone or nothing can say.
+ */
+export const processIdentity = (pid: number) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const stat = yield* fs.readFileString(`/proc/${pid}/stat`).pipe(Effect.option);
+    if (Option.isSome(stat)) {
+      // Field 22, counted after the command name, which may hold spaces and parentheses.
+      const ticks = stat.value.slice(stat.value.lastIndexOf(")") + 2).split(" ")[19];
+      return ticks === undefined ? Option.none<string>() : Option.some(`ticks ${ticks}`);
+    }
     const ps = yield* exec({ command: "ps", args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, extendEnv: true, timeout: Duration.seconds(5) });
-    const at = ps.code === 0 ? Date.parse(ps.stdout.trim().replace(/\s+/g, " ")) : Number.NaN;
-    return Number.isNaN(at) ? Option.none<number>() : Option.some(at);
+    const start = ps.stdout.trim().replace(/\s+/g, " ");
+    return ps.code === 0 && start !== "" ? Option.some(start) : Option.none<string>();
   });
 
-/** Whether the run that wrote `owner` is still running. */
+/** Whether the run that wrote `owner` is still running. A lock from an older build records neither boot nor process. */
 const ownerRuns = (owner: Owner) =>
   Effect.gen(function* () {
     if (!(yield* alive(owner.pid))) return false;
-    const boot = yield* bootTime;
-    if (Option.isSome(boot) && owner.start < boot.value - CLOCK_SLACK_MS) return false;
-    const started = yield* processStart(owner.pid);
-    return !(Option.isSome(started) && started.value > owner.start + CLOCK_SLACK_MS);
+    const boot = yield* bootId;
+    if (owner.boot !== undefined && Option.isSome(boot) && owner.boot !== boot.value) return false;
+    const started = yield* processIdentity(owner.pid);
+    return !(owner.process !== undefined && Option.isSome(started) && owner.process !== started.value);
   });
 
 const readOwner = (lock: string) =>
@@ -137,7 +153,15 @@ export const takeSyncLock = Effect.gen(function* () {
   const lock = syncLockPath(process.env["HOME"] ?? "");
   yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
   const now = yield* Clock.currentTimeMillis;
-  const owner: Owner = { pid: process.pid, start: now, token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}` };
+  const boot = yield* bootId;
+  const started = yield* processIdentity(process.pid);
+  const owner: Owner = {
+    pid: process.pid,
+    start: now,
+    token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}`,
+    ...(Option.isSome(boot) ? { boot: boot.value } : {}),
+    ...(Option.isSome(started) ? { process: started.value } : {}),
+  };
   // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
   const create = fs.makeDirectory(lock).pipe(
     Effect.as(true),

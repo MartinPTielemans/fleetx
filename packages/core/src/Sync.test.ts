@@ -22,7 +22,8 @@ import { lastSyncPath } from "./Probe.ts";
 import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
-import { releaseSyncLock, SYNC_LOCK_ENV, syncLockPath, takeSyncLock, underSyncLock } from "./SyncLock.ts";
+import { stateDir } from "./Names.ts";
+import { processIdentity, releaseSyncLock, SYNC_LOCK_ENV, syncLockPath, takeSyncLock, underSyncLock } from "./SyncLock.ts";
 
 const layer = Layer.merge(NodeServices.layer, FetchHttpClient.layer);
 const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices | import("effect/unstable/http").HttpClient.HttpClient>) =>
@@ -207,6 +208,62 @@ describe("approving a proposal", () => {
     expect(now?.commit).not.toBe(reviewed.commit);
     await run(approve(f.box, "main", reviewed, "box", reviewed.commit.slice(0, 7)));
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+  });
+
+  it("refuses a re-proposal that only changes indentation, though git's patch id would match", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "if x:\n    a()\nb()\n");
+    await f.sync(f.laptop, "laptop");
+    const [reviewed] = await run(listProposals(f.box, "main"));
+    if (reviewed === undefined) return expect.unreachable();
+    put(f.box, "README.md", "fleet, updated\n");
+    commitAll(f.box, "readme");
+    put(f.laptop, "skills/a/SKILL.md", "if x:\n    a()\n    b()\n");
+    await f.sync(f.laptop, "laptop");
+    expect(await fails(approve(f.box, "main", reviewed, "box", reviewed.commit))).toContain("review it again");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
+  });
+
+  it("auto-approve never writes outside the files a proposal names, though the branch moved one", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/Ref Guide.md", "line one, laptop\n");
+    await f.sync(f.laptop, "laptop");
+    git(f.box, "mv", "skills/a/Ref Guide.md", "secrets-ish.md");
+    git(f.box, "commit", "-qm", "move the guide");
+    git(f.box, "push", "-q", "origin", "HEAD:main");
+    const result = await f.sync(f.box, "box");
+    expect(result.lines.join("\n")).toContain("could not auto-approve laptop's proposal");
+    expect(onMain(f.origin, "secrets-ish.md")).toBe("line one\n");
+    expect(git(f.box, "status", "--porcelain")).toBe("");
+  });
+
+  it("a rejection is all or nothing: no rejected branch when the staging branch stays", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "a v2\n");
+    await f.sync(f.laptop, "laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    // The remote refuses the staging branch's deletion, as a lease would when the node re-proposed meanwhile.
+    put(f.origin, "hooks/update", '#!/bin/sh\ncase "$1" in refs/heads/t3-fleet/staging/*) [ "$3" = 0000000000000000000000000000000000000000 ] && exit 1;; esac\nexit 0\n');
+    execFileSync("chmod", ["+x", join(f.origin, "hooks/update")]);
+    expect(await fails(reject(f.box, proposal, proposal.commit))).toContain("reject failed");
+    expect(git(f.origin, "for-each-ref", "--format=%(refname)", "refs/heads/t3-fleet/").trim()).toBe("refs/heads/t3-fleet/staging/laptop");
+  });
+
+  it("clears a scratch worktree a dead approve left locked", async () => {
+    const f = makeFleet();
+    const scratch = join(stateDir(f.root), "approve");
+    mkdirSync(stateDir(f.root), { recursive: true });
+    git(f.box, "worktree", "add", "-q", "--detach", scratch, "HEAD");
+    git(f.box, "worktree", "lock", "--reason", "initializing", scratch);
+    execFileSync("rm", ["-rf", scratch]);
+    put(f.laptop, "skills/a/SKILL.md", "a v2\n");
+    await f.sync(f.laptop, "laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+    expect(git(f.box, "worktree", "list")).not.toContain("approve");
   });
 
   it("a rejection sets aside only the edits the proposal made", async () => {
@@ -403,9 +460,18 @@ describe("the sync lock's owner", () => {
     expect(await run(takeSyncLock)).toBeNull();
   });
 
-  it("is taken over when it was taken before the machine booted (a power loss), though its pid lives", async () => {
+  /** What this machine's boot and a process's start read as, from a lock this build took. */
+  const identity = async () => {
+    const token = await run(takeSyncLock);
+    const owner = JSON.parse(read(syncLockPath(process.env["HOME"] ?? ""), "owner.json")) as { boot?: string; process?: string };
+    if (token !== null) await run(releaseSyncLock(token));
+    return owner;
+  };
+
+  it("is taken over when the machine booted since (a power loss), though its pid lives", async () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
-    writeLock({ pid: 1, start: 1, token: "before-boot" });
+    expect((await identity()).boot).toBeTruthy();
+    writeLock({ pid: 1, start: 1, token: "before-boot", boot: "an-earlier-boot" });
     const token = await run(takeSyncLock);
     expect(token).not.toBeNull();
     if (token !== null) await run(releaseSyncLock(token));
@@ -415,10 +481,25 @@ describe("the sync lock's owner", () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
     const other = spawn("sleep", ["30"]);
     try {
-      writeLock({ pid: other.pid, start: (await run(Clock.currentTimeMillis)) - 600_000, token: "reused" });
+      const { boot } = await identity();
+      writeLock({ pid: other.pid, start: await run(Clock.currentTimeMillis), token: "reused", boot, process: "the process that took it" });
       const token = await run(takeSyncLock);
       expect(token).not.toBeNull();
       if (token !== null) await run(releaseSyncLock(token));
+    } finally {
+      other.kill();
+    }
+  });
+
+  it("stays held when the clock moved since it was taken (the first NTP sync after boot)", async () => {
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
+    const other = spawn("sleep", ["30"]);
+    try {
+      const { boot } = await identity();
+      const started = Option.getOrThrow(await run(processIdentity(other.pid ?? 0)));
+      // Its start says a day ago: no clock time is compared.
+      writeLock({ pid: other.pid, start: (await run(Clock.currentTimeMillis)) - 86_400_000, token: "stepped", boot, process: started });
+      expect(await run(takeSyncLock)).toBeNull();
     } finally {
       other.kill();
     }
