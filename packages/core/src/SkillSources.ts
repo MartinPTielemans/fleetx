@@ -21,6 +21,7 @@ import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
 import {
   allowedAt,
+  changedFiles,
   commitAndPush,
   git,
   literal,
@@ -59,6 +60,45 @@ const readSources = (repo: string) =>
     return yield* Schema.decodeEffect(Schema.fromJsonString(SourcesFile))(text.value).pipe(
       Effect.mapError(() => "skills/SOURCES.json is not valid"),
     );
+  });
+
+/**
+ * Each skill's entry in a SOURCES.json text: its source (or "local") and
+ * where it comes from in it; none when the text is not a SOURCES.json.
+ */
+const entriesOf = (text: string) =>
+  Schema.decodeEffect(Schema.fromJsonString(SourcesFile))(text).pipe(
+    Effect.map((file) => {
+      const entries = new Map<string, string>();
+      for (const [key, s] of Object.entries(file.sources ?? {}))
+        for (const skill of s.skills)
+          entries.set(
+            skill,
+            `${key}\0${s.url}\0${s.paths?.[skill] ?? ""}\0${s.renamed?.[skill] ?? ""}`,
+          );
+      for (const skill of file.local ?? []) entries.set(skill, "local");
+      return entries;
+    }),
+    Effect.option,
+  );
+
+/**
+ * The skills whose SOURCES.json entry the checkout's copy adds, removes or
+ * changes against `base`: what goes with that file wherever it goes. Null
+ * when the checkout's copy cannot be read, and so could name any skill.
+ */
+export const sourcesEntriesChanged = (repo: string, base = "HEAD") =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const before = yield* git(repo, ["show", `${base}:skills/SOURCES.json`]);
+    const now = yield* fs.readFileString(sourcesPath(repo)).pipe(Effect.orElseSucceed(() => ""));
+    const was = yield* entriesOf(ok(before) ? before.stdout : '{"sources": {}}');
+    const is = yield* entriesOf(now);
+    // Unreadable (conflict markers, say): it could name any skill.
+    if (Option.isNone(is)) return null;
+    const a = Option.getOrElse(was, () => new Map<string, string>());
+    const b = is.value;
+    return [...new Set([...a.keys(), ...b.keys()])].filter((k) => a.get(k) !== b.get(k)).sort();
   });
 
 const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
@@ -276,10 +316,23 @@ const readyForUpdate = (repo: string, paths: ReadonlyArray<string>) =>
         `updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`,
       );
     const dirty = lines.filter((l) => !l.startsWith("!! "));
+    const held = yield* heldSkills(repo, paths);
+    if (held.length > 0)
+      return yield* Effect.fail(
+        `sync holds back ${held.join(", ")}: an edit there looks like a secret, and no sync commits or proposes it. Take it out (\`t3-fleet secrets scan\` shows where), or have an authority allow the line, then update again.`,
+      );
     if (dirty.length > 0)
       return yield* Effect.fail(
         `these skills have changes not yet committed or proposed; the next sync takes care of them, then try again:\n${dirty.join("\n")}`,
       );
+  });
+
+/** The skill directories among `paths` whose uncommitted edits sync holds back: they look like a secret. */
+const heldSkills = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const edited = yield* changedFiles(repo, paths);
+    const hits = yield* scanEdits(repo, edited);
+    return [...new Set(hits.map((h) => h.file.split("/").slice(0, 2).join("/")))].sort();
   });
 
 /** Drop vendored skills and their provenance. Returns the repo paths changed. */
@@ -307,12 +360,18 @@ export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
 
 /**
  * An authority commits and pushes; any other node leaves the change for its
- * next sync to propose. `paths` are files the command just wrote: when they
- * add what looks like a secret, they are put back as the branch has them, on
- * any node, so no later sync commits or proposes part of them. What was
+ * next sync to propose. `paths` are what the command just wrote: when they
+ * add what looks like a secret, they are put back as `before` (a snapshot
+ * taken before the command wrote) has them, on any node, so no later sync
+ * commits or proposes part of them and edits waiting there stay. What was
  * fetched can be fetched again once the line is allowed.
  */
-export const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
+export const land = (
+  config: Config,
+  paths: ReadonlyArray<string>,
+  message: string,
+  before?: string,
+) =>
   underSyncLock(
     Effect.gen(function* () {
       const authority =
@@ -323,7 +382,7 @@ export const land = (config: Config, paths: ReadonlyArray<string>, message: stri
           : yield* allowedAt(config.repo, `origin/${config.branch}`),
       });
       if (hits.length > 0) {
-        yield* restorePaths(config.repo, paths);
+        yield* restorePaths(config.repo, paths, before);
         return yield* Effect.fail(`${refusal(hits)}\nNothing was changed.`);
       }
       if (authority) {
@@ -423,16 +482,35 @@ const sourced = (repo: string, only: ReadonlyArray<string>) =>
 export const previewUpdate = (repo: string, only: ReadonlyArray<string>) =>
   underSyncLock(
     Effect.gen(function* () {
-      const names = yield* sourced(repo, only);
-      if (names.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+      const { names, skipped } = yield* updatable(repo, only);
+      if (names.length === 0) return { files: [], stat: "", diff: "", digest: "", skipped };
       yield* readyForUpdate(
         repo,
         names.map((n) => `skills/${n}`),
       );
-      const { files, stat, diff, digest } = yield* stageUpdate(repo, only);
-      return { files, stat, diff, digest };
+      const { files, stat, diff, digest } = yield* stageUpdate(repo, names);
+      return { files, stat, diff, digest, skipped };
     }),
   );
+
+/**
+ * The skills an update covers: those `only` names, or every sourced one but
+ * those sync holds back, which a bare update skips (`skipped`) rather than
+ * let one held skill block the rest.
+ */
+const updatable = (repo: string, only: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const names = yield* sourced(repo, only);
+    if (only.length > 0) return { names, skipped: [] as Array<string> };
+    const held = yield* heldSkills(
+      repo,
+      names.map((n) => `skills/${n}`),
+    );
+    return {
+      names: names.filter((n) => !held.includes(`skills/${n}`)),
+      skipped: held,
+    };
+  });
 
 /**
  * Pull `only` again and, if it is still the change `digest` names, copy it
@@ -442,14 +520,14 @@ export const keepUpdate = (repo: string, only: ReadonlyArray<string>, digest: st
   underSyncLock(
     Effect.gen(function* () {
       const path = yield* Path.Path;
-      const names = yield* sourced(repo, only);
+      const { names } = yield* updatable(repo, only);
       if (names.length === 0)
         return yield* Effect.fail("these skills changed since the preview; preview again");
       yield* readyForUpdate(
         repo,
         names.map((n) => `skills/${n}`),
       ).pipe(Effect.mapError(() => "these skills changed since the preview; preview again"));
-      const now = yield* stageUpdate(repo, only);
+      const now = yield* stageUpdate(repo, names);
       if (now.digest === "" || now.digest !== digest) {
         return yield* Effect.fail(
           now.digest === ""

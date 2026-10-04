@@ -12,9 +12,12 @@
  * Two kinds of rule. One knows a credential by its shape (ghp_…, a JWT, a
  * private key block). The other knows it by its name (`api_key = …`,
  * `--token …`, `?sig=…`, `Bearer …`): the name must end in key, token,
- * secret, password or the like, and the value must look like a token, one
- * run of letters, digits and `_-+/=.`, varied, with a digit, and not a
- * variable name, a path, a reference ($NAME) or a placeholder (YOUR_…).
+ * secret, password or the like, and the value must be varied, with a digit,
+ * and not a variable name, a path, a reference ($NAME) or a placeholder
+ * (YOUR_…). A key or token is one run of letters, digits and `_-+/=.`, of 20
+ * or more; a password any run of 12 or more without brackets, as code has.
+ *
+ * Merge conflict markers are refused the same way: no commit carries one.
  *
  * A false positive is let through by an entry in t3-fleet.toml, keyed by the
  * file and the SHA-256 of the line, which `t3-fleet secrets allow FILE HASH`
@@ -41,7 +44,10 @@ export interface Suspect {
 
 export interface SecretHit {
   readonly file: string;
+  /** 0 when the whole file is the problem (unresolved conflict). */
   readonly line: number;
+  /** The commit adding it, when a commit not yet pushed does. */
+  readonly commit?: string;
   readonly kind: string;
   /** SHA-256 of the line, the key an allow_secret entry uses. Never published. */
   readonly hash: string;
@@ -94,13 +100,23 @@ const isVariableName = (value: string) => /^[A-Z][A-Z0-9_]*$/.test(value);
 const isPath = (value: string) =>
   /^(?:~\/|\/|\.\.?\/)/.test(value) || (value.includes("/") && /\.[A-Za-z0-9]{1,5}$/.test(value));
 
-/** Code reaching into an object (config.oauth.clientSecret), not a value. */
-const isMemberAccess = (value: string) => /^[A-Za-z_]+(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value);
+/**
+ * Code reaching into an object (config.oauth.clientSecret2), not a value. A
+ * segment that mixes digits into both cases (SG.k3Jd…) is random, not a name.
+ */
+const isMemberAccess = (value: string) =>
+  /^[A-Za-z_]+(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value) &&
+  value
+    .split(".")
+    .every(
+      (part) =>
+        !(/[0-9]/.test(part.replace(/[0-9]+$/, "")) && /[A-Z]/.test(part) && /[a-z]/.test(part)),
+    );
 
 /** A kebab-case name (t3-not-installed, docker-http): words, each perhaps ending in a number. */
 const isSlug = (value: string) => /^[a-z]+[0-9]*(?:-[a-z]+[0-9]*)+$/.test(value);
 
-/** A value a name-based rule calls a secret. */
+/** A key or token value a name-based rule calls a secret. */
 const looksLikeToken = (value: string, minLength: number) =>
   tokenShaped(value) &&
   !isVariableName(value) &&
@@ -109,15 +125,47 @@ const looksLikeToken = (value: string, minLength: number) =>
   !isSlug(value) &&
   looksReal(value, minLength);
 
+/** A password value: any run without brackets (a call or an index is code), not a name or path. */
+const looksLikePassword = (value: string, minLength: number) =>
+  !/[\s()[\]{}]/.test(value) &&
+  !isVariableName(value) &&
+  !isPath(value) &&
+  !isMemberAccess(value) &&
+  looksReal(value, minLength);
+
+/** `Basic <base64>`: real when it decodes to user:password. */
+const looksLikeBasic = (value: string) => {
+  if (!looksReal(value, 12)) return false;
+  let decoded = "";
+  try {
+    decoded = atob(value);
+  } catch {
+    return false;
+  }
+  const colon = decoded.indexOf(":");
+  return colon > 0 && colon < decoded.length - 1 && !PLACEHOLDER.test(decoded);
+};
+
+/** How a rule judges its value: by shape alone, as a key or token, as a password, as Basic auth. */
+type Check = "shape" | "token" | "password" | "basic";
+
+const PASSWORD_NAME = /(?:password|passwd|pwd)$/i;
+
 interface Rule {
   readonly kind: string | ((m: RegExpExecArray) => string);
   readonly pattern: RegExp;
-  /** The group holding the value; the whole match when absent. */
-  readonly value?: number;
-  readonly minLength: number;
-  /** Known by its name, not its shape: the value must look like a token. */
-  readonly byName?: boolean;
+  /** The group holding the value (the first it matched, of several); the whole match when absent. */
+  readonly value?: number | ReadonlyArray<number>;
+  /** Judged by shape alone unless it says otherwise; a password-named value as a password. */
+  readonly check?: Check | ((m: RegExpExecArray) => Check);
+  /** For shape rules: the least length a real one has. */
+  readonly minLength?: number;
 }
+
+const MIN_LENGTH: Record<Exclude<Check, "shape">, number> = { token: 20, password: 12, basic: 12 };
+/** A name-based rule's check: a password-named value is judged as a password. */
+const byName = (m: RegExpExecArray): Check =>
+  PASSWORD_NAME.test(m[1] ?? "") ? "password" : "token";
 
 /**
  * A name that ends in what a credential is called: api_key, apiKey,
@@ -182,6 +230,16 @@ const RULES: ReadonlyArray<Rule> = [
   { kind: "a Hugging Face token", pattern: /(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}/g, minLength: 30 },
   { kind: "a Groq API key", pattern: /(?<![A-Za-z0-9_])gsk_[A-Za-z0-9]{40,}/g, minLength: 40 },
   {
+    kind: "a SendGrid API key",
+    pattern: /(?<![A-Za-z0-9_])SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g,
+    minLength: 60,
+  },
+  {
+    kind: "a Telegram bot token",
+    pattern: /(?<![A-Za-z0-9_:])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g,
+    minLength: 40,
+  },
+  {
     kind: "an age secret key",
     pattern: /AGE-SECRET-KEY-1[0-9A-Z]{50,}/g,
     minLength: 50,
@@ -200,18 +258,23 @@ const RULES: ReadonlyArray<Rule> = [
     minLength: 8,
   },
   {
+    kind: "a Basic auth header",
+    pattern: /\bBasic\s+([A-Za-z0-9+/]{12,}={0,2})(?![A-Za-z0-9+/=])/g,
+    value: 1,
+    check: "basic",
+  },
+  {
     kind: "a bearer token",
     pattern: new RegExp(String.raw`\bBearer\s+(${VALUE})`, "gi"),
     value: 1,
-    minLength: 20,
-    byName: true,
+    check: "token",
   },
   {
     kind: (m) => `a token in a URL query (${m[1]})`,
     pattern: new RegExp(String.raw`[?&](${QUERY_NAME})=([^&\s"'#]+)`, "gi"),
     value: 2,
+    check: byName,
     minLength: 12,
-    byName: true,
   },
   {
     kind: (m) => `a secret in a command-line flag (--${m[1]})`,
@@ -220,30 +283,38 @@ const RULES: ReadonlyArray<Rule> = [
       "gi",
     ),
     value: 2,
-    minLength: 20,
-    byName: true,
+    check: byName,
   },
   {
     kind: "a password in a .netrc line",
     pattern: /(?:^\s*|\b(?:machine|login|default)\s+\S+\s+)password\s+(\S+)/gi,
     value: 1,
+    check: "password",
     minLength: 8,
-    byName: true,
   },
   {
+    // A quoted value is the whole quote, so a password may hold any punctuation.
     kind: (m) => `a secret assigned to ${m[1]}`,
     pattern: new RegExp(
-      String.raw`(?<![-A-Za-z0-9_])(${NAME})(?![A-Za-z0-9_])["']?\s*[:=]\s*["']?(${VALUE})`,
+      String.raw`(?<![-A-Za-z0-9_])(${NAME})(?![A-Za-z0-9_])["']?\s*[:=]\s*(?:"([^"\s]*)"|'([^'\s]*)'|(${VALUE}))`,
       "gi",
     ),
-    value: 2,
-    minLength: 20,
-    byName: true,
+    value: [2, 3, 4],
+    check: byName,
   },
 ];
 
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/;
 const AGE_ARMOR = "-----BEGIN AGE ENCRYPTED FILE-----";
+
+/** Whether a rule's value is real, by the rule's check. */
+const real = (rule: Rule, m: RegExpExecArray, value: string) => {
+  const check = typeof rule.check === "function" ? rule.check(m) : (rule.check ?? "shape");
+  if (check === "shape") return looksReal(value, rule.minLength ?? 0);
+  if (check === "basic") return looksLikeBasic(value);
+  const min = rule.minLength ?? MIN_LENGTH[check];
+  return check === "password" ? looksLikePassword(value, min) : looksLikeToken(value, min);
+};
 
 /** What one line looks like, if a secret: the first rule whose value is real. */
 export const scanLine = (text: string): string | null => {
@@ -251,16 +322,17 @@ export const scanLine = (text: string): string | null => {
   for (const rule of RULES) {
     rule.pattern.lastIndex = 0;
     for (let m = rule.pattern.exec(text); m !== null; m = rule.pattern.exec(text)) {
-      const value = (rule.value === undefined ? m[0] : m[rule.value]) ?? "";
-      const real =
-        rule.byName === true
-          ? looksLikeToken(value, rule.minLength)
-          : looksReal(value, rule.minLength);
-      if (real) return typeof rule.kind === "string" ? rule.kind : rule.kind(m);
+      const groups =
+        rule.value === undefined ? [0] : typeof rule.value === "number" ? [rule.value] : rule.value;
+      const value = groups.map((g) => m?.[g]).find((v) => v !== undefined) ?? "";
+      if (real(rule, m, value)) return typeof rule.kind === "string" ? rule.kind : rule.kind(m);
     }
   }
   return null;
 };
+
+/** A line git leaves where a merge conflicted. */
+const CONFLICT_MARKER = /^(?:<{7}|>{7})(?: |$)/;
 
 /** The fleet's own encrypted secrets, and any file that is an age file: never scanned. */
 export const isEncrypted = (file: string, firstLine: string | null) =>
@@ -279,7 +351,7 @@ export const suspectLines = (
   if (isEncrypted(file, first)) return [];
   const suspects: Array<Suspect> = [];
   for (const { line, text } of lines) {
-    const kind = scanLine(text);
+    const kind = CONFLICT_MARKER.test(text) ? "a merge conflict marker" : scanLine(text);
     if (kind !== null) suspects.push({ file, line, kind, text });
   }
   return suspects;
@@ -357,8 +429,8 @@ export const readAllowed = (repo: string) =>
   });
 
 /** One hit, for a person: where and what. Never the value, and never its hash. */
-export const describeHit = (hit: Pick<SecretHit, "file" | "line" | "kind">) =>
-  `${hit.file}:${hit.line} looks like ${hit.kind}`;
+export const describeHit = (hit: Pick<SecretHit, "file" | "line" | "kind" | "commit">) =>
+  `${hit.file}${hit.line > 0 ? `:${hit.line}` : ""}${hit.commit === undefined ? "" : ` (in commit ${hit.commit})`} ${hit.line > 0 ? "looks like" : "has"} ${hit.kind}`;
 
 export const allowCommand = (hit: SecretHit) => `t3-fleet secrets allow ${hit.file} ${hit.hash}`;
 

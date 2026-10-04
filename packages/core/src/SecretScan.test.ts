@@ -80,6 +80,29 @@ describe("what looks like a secret", () => {
       expect([line, scanLine(line ?? "")]).toEqual([line, kind]);
   });
 
+  it("finds passwords with punctuation, shorter keys' shapes and Basic auth", () => {
+    for (const [line, kind] of [
+      ["DB_PASSWORD=Sup3r!Secret#2024xyzw", "a secret assigned to DB_PASSWORD"],
+      ['password: "Xq7v@R2mK9pLs4TnB8w1"', "a secret assigned to password"],
+      ["admin_pwd = 'p@55w0rd!Kz9q'", "a secret assigned to admin_pwd"],
+      ["--db-password=Xq7v!R2mK9pL", "a secret in a command-line flag (--db-password)"],
+      ["machine db.example.com login app password Xq7v!R2mK9", "a password in a .netrc line"],
+      [`SENDGRID=${["SG", token("", 22), token("", 43)].join(".")}`, "a SendGrid API key"],
+      [
+        `SENDGRID=${["SG", "aBcDeFgHiJkLmNoPqRsTuV", token("", 43)].join(".")}`,
+        "a SendGrid API key",
+      ],
+      [`TELEGRAM=${"1234567890"}:${token("AA", 33)}`, "a Telegram bot token"],
+      [`"Authorization": "Basic ${btoa("deploy:Xq7v!R2mK9pL")}"`, "a Basic auth header"],
+    ])
+      expect([line, scanLine(line ?? "")]).toEqual([line, kind]);
+  });
+
+  it("refuses a merge conflict marker", async () => {
+    const [hit] = await scan("skills/SOURCES.json", "{\n<<<<<<< Updated upstream\n}\n");
+    expect(hit).toMatchObject({ line: 2, kind: "a merge conflict marker" });
+  });
+
   it("skips references, placeholders and examples", () => {
     for (const line of [
       'url = "https://mcp.exa.ai/mcp?exaApiKey=${EXA_API_KEY}"',
@@ -123,6 +146,12 @@ describe("what looks like a secret", () => {
       "const bulletKey = `${section.id}-${index}-${item.slug}`",
       'subject_token_type = "urn:ietf:params:oauth:token-type:access_token"',
       "client_secret = config.oauth.clientSecret2",
+      "DB_PASSWORD = process.env.DB_PASSWORD",
+      'password: "YOUR_PASSWORD_HERE_123"',
+      "const password = getPassword(user.id, 42)",
+      "password = os.environ['DB_PASSWORD']",
+      "Basic authentication is supported for 2 endpoints",
+      `"Authorization": "Basic ${btoa("ab")}"`,
       "--token-env T3_FLEET_MCP_TOKEN_LAPTOP",
       "Bearer tokens expire after 3600 seconds",
     ])

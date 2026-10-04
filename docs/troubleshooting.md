@@ -278,10 +278,11 @@ changes, say) proposes nothing until a sync there pulls again.
 
 **`sync-secret-<unit>`** — sync would not commit (an authority), propose
 (any other machine) or push something, because a line it adds looks like a
-secret: a token, a password in a URL, a bearer header, a private key. A unit
-is a whole skill (`skills/<name>`), with `skills/SOURCES.json` when it
-changed alongside, or a single file elsewhere: half a skill never reaches
-the other machines. The finding names the line and the kind, never the value
+secret: a token, a password in a URL, a bearer header, a private key; or a
+merge conflict marker, or a file git still has as conflicted. A unit is a
+whole skill (`skills/<name>`), or `skills/SOURCES.json` together with every
+skill whose entry it changes, or a single file elsewhere: half a skill, or a
+skill without its entry, never reaches the other machines. The finding names the line and the kind, never the value
 or its hash. Move the value into the fleet's secrets
 (`t3-fleet secrets set NAME=VALUE` on an authority) and refer to it as
 `${NAME}`.
@@ -305,15 +306,21 @@ already committed never blocks a later change to the same file.
 A held-back unit stays in the checkout as an edit. When a change from the
 branch (or a proposal the authority approves) touches it, sync sets it aside
 in `git stash` as `T3 Fleet: held back <unit>`, so pulling keeps working, and
-the finding says so until the stash entry is dropped:
-`git -C <repo> stash apply <entry>` brings the edits back. A commit made by
-hand that adds a secret is not pushed; `git -C <repo> reset --soft
-origin/main` turns it back into edits for sync to sort.
+the finding says so until the stash entry is dropped. To bring the edits
+back: `git -C <repo> stash apply <entry>` (it can conflict with what changed
+on the branch since; resolve by hand), take the secret out, then
+`git -C <repo> stash drop <entry>`. Every commit not yet pushed is checked
+one by one, so a commit made by hand that adds a secret is not pushed even
+when a later one takes it out again; the finding names the commit, and
+`git -C <repo> reset --soft origin/main` turns them back into edits for sync
+to sort. A bare `t3-fleet skills update` skips a skill sync holds back, and
+says so.
 
 Commands refuse the same way, naming file, line and kind with the allow
 command. A refused `skills add`, `skills update` or `mcp add` puts back the
-files it wrote, so no later sync commits part of them; run it again once the
-line is allowed.
+files it wrote as they were before it ran, edits waiting to be proposed
+included, so no later sync commits part of them; run it again once the line
+is allowed.
 
 **`sync-local-commits`** — a machine without the authority role has commits
 of its own in the config repo. Only an authority's commits reach the other

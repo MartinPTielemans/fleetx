@@ -31,7 +31,7 @@ import type { UiAlert, UiProposal } from "@t3-fleet/core/Api";
 import { checkNodes } from "@t3-fleet/core/Check";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
-import { git } from "@t3-fleet/core/Git";
+import { git, snapshot } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
 import {
@@ -345,6 +345,8 @@ export const uiCommand = Command.make("ui", {
               live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
+                    // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+                    const before = yield* snapshot(config.repo, ["skills"]);
                     const paths = yield* addSkills(config.repo, source, names, as);
                     const added = paths
                       .filter((p) => p !== "skills/SOURCES.json")
@@ -355,6 +357,7 @@ export const uiCommand = Command.make("ui", {
                         config,
                         paths,
                         `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`,
+                        before,
                       ),
                     };
                   }),
@@ -365,6 +368,8 @@ export const uiCommand = Command.make("ui", {
               live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
+                    // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+                    const before = yield* snapshot(config.repo, ["skills"]);
                     const paths = yield* keepUpdate(config.repo, names, digest);
                     return {
                       paths,
@@ -372,6 +377,7 @@ export const uiCommand = Command.make("ui", {
                         config,
                         paths,
                         `Update skill${paths.length === 1 ? "" : "s"} from upstream`,
+                        before,
                       ),
                     };
                   }),
@@ -381,6 +387,8 @@ export const uiCommand = Command.make("ui", {
               live((config) =>
                 underSyncLock(
                   Effect.gen(function* () {
+                    // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+                    const before = yield* snapshot(config.repo, ["skills"]);
                     const paths = yield* removeSkills(config.repo, names);
                     return {
                       paths,
@@ -388,6 +396,7 @@ export const uiCommand = Command.make("ui", {
                         config,
                         paths,
                         `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`,
+                        before,
                       ),
                     };
                   }),

@@ -304,13 +304,30 @@ export const scanStaged = (
 ) =>
   scanDiff(repo, ["--cached", ...(options.base === undefined ? [] : [options.base])], ":", options);
 
-/** What the commits in `from..to` add that looks like a secret: commits made by hand too. */
+/**
+ * What each commit in `from..to` adds that looks like a secret, commits made
+ * by hand too, each named. Commit by commit: one that adds a token and a
+ * later one that takes it out still put it in history.
+ */
 export const scanCommits = (
   repo: string,
   from: string,
   to: string,
   options: { readonly allowed?: ReadonlyArray<Allowed> } = {},
-) => scanDiff(repo, [from, to], `${to}:`, options);
+) =>
+  Effect.gen(function* () {
+    const list = yield* git(repo, ["rev-list", "--reverse", `${from}..${to}`]);
+    if (!ok(list)) return yield* Effect.fail(`scanning for secrets: ${why(list)}`);
+    const allowed = options.allowed ?? (yield* readAllowed(repo));
+    const hits: Array<SecretHit> = [];
+    for (const commit of out(list).split("\n").filter(Boolean)) {
+      // Against its first parent: what this commit itself brings.
+      const found = yield* scanDiff(repo, [`${commit}^`, commit], `${commit}:`, { allowed });
+      const short = commit.slice(0, 7);
+      hits.push(...found.map((h) => ({ ...h, commit: short })));
+    }
+    return hits;
+  });
 
 /**
  * What the checkout's edits to `paths` (new files too) would add against
@@ -339,22 +356,58 @@ export const allowedAt = (repo: string, ref: string) =>
   );
 
 /**
- * Put `paths` back as HEAD has them, new files removed: for undoing what a
- * refused command wrote. Only for files that command wrote itself.
+ * The checkout's files under `paths` as they are now, edits and new files
+ * included, as a git tree: what a command that is about to write there can
+ * put back with restorePaths. Nothing in the checkout or its index changes.
  */
-export const restorePaths = (repo: string, paths: ReadonlyArray<string>) =>
+export const snapshot = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-snapshot-index`, ...literal };
+    const read = yield* git(repo, ["read-tree", "HEAD"], { env });
+    if (!ok(read)) return yield* Effect.fail(`taking a snapshot: ${why(read)}`);
+    const add = yield* git(repo, ["add", "-A", "--", ...paths], { env });
+    if (!ok(add)) return yield* Effect.fail(`taking a snapshot: ${why(add)}`);
+    return out(yield* git(repo, ["write-tree"], { env }));
+  });
+
+/**
+ * Put `paths` back as `tree` (a snapshot) has them, HEAD by default, new
+ * files removed: for undoing what a refused command wrote. Edits made before
+ * the snapshot stay; without one, `paths` must be files the command wrote.
+ */
+export const restorePaths = (repo: string, paths: ReadonlyArray<string>, tree = "HEAD") =>
   Effect.gen(function* () {
     if (paths.length === 0) return;
+    const fs = yield* FileSystem.FileSystem;
     yield* git(repo, ["reset", "-q", "--", ...paths], { env: literal });
-    const tracked = nulList(
-      (yield* git(repo, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...paths], {
+    for (const p of paths) yield* fs.remove(`${repo}/${p}`, { recursive: true, force: true });
+    const kept = nulList(
+      (yield* git(repo, ["ls-tree", "-r", "-z", "--name-only", tree, "--", ...paths], {
         env: literal,
       })).stdout,
     );
-    if (tracked.length > 0)
-      yield* git(repo, ["checkout", "-q", "HEAD", "--", ...tracked], { env: literal });
-    yield* git(repo, ["clean", "-q", "-f", "-d", "--", ...paths], { env: literal });
+    if (kept.length > 0) {
+      const back = yield* git(repo, ["checkout", "-q", tree, "--", ...kept], { env: literal });
+      if (!ok(back)) return yield* Effect.fail(`putting ${paths.join(", ")} back: ${why(back)}`);
+      // checkout stages what it writes: the index goes back to HEAD's.
+      yield* git(repo, ["reset", "-q", "--", ...kept], { env: literal });
+    }
   });
+
+/** Files under `paths` (all when empty) git still has as conflicted, as hits naming each. */
+export const unmergedHits = (repo: string, paths: ReadonlyArray<string> = []) =>
+  unmergedFiles(repo).pipe(
+    Effect.map((files) =>
+      files
+        .filter((f) => paths.length === 0 || paths.some((p) => f === p || f.startsWith(`${p}/`)))
+        .map((file): SecretHit => ({
+          file,
+          line: 0,
+          kind: "an unresolved merge conflict",
+          hash: "",
+        })),
+    ),
+  );
 
 /**
  * Fail, naming them, when the staged `paths` add a secret; they are unstaged
@@ -396,6 +449,12 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
   underSyncLock(
     Effect.gen(function* () {
       yield* ensureGitConfig;
+      // Adding a conflicted file would mark it resolved, markers and all.
+      const conflicted = yield* unmergedHits(repo, paths);
+      if (conflicted.length > 0)
+        return yield* Effect.fail(
+          `refusing to commit: ${conflicted.map((h) => h.file).join(", ")} still conflicted; resolve by hand first`,
+        );
       yield* addPaths(repo, paths);
       const staged = nulList(
         (yield* git(

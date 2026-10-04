@@ -98,7 +98,6 @@ const hasSecret = (home: string, env: Readonly<Record<string, string | undefined
     return line.test(text) || (env[name] ?? "") !== "";
   });
 
-/** Whether `command` is on the node's PATH. */
 /**
  * The Tailscale CLI: on PATH, or inside the macOS app, which installs none on
  * PATH by default. T3_FLEET_TAILSCALE_APP names another app CLI to look for.
@@ -112,6 +111,7 @@ const findTailscale = (env: Readonly<Record<string, string | undefined>>) =>
     return (yield* fs.exists(app).pipe(Effect.orElseSucceed(() => false))) ? app : null;
   });
 
+/** Whether `command` is on the node's PATH. */
 const onPath = (command: string, env: Readonly<Record<string, string | undefined>>) =>
   exec({
     command: "sh",

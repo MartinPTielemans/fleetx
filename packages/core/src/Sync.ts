@@ -37,8 +37,10 @@ import {
   pullBranch,
   scanCommits,
   scanEdits,
+  unmergedHits,
   why,
 } from "./Git.ts";
+import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
@@ -172,20 +174,38 @@ export const unitOf = (file: string) => {
 const SOURCES = "skills/SOURCES.json";
 
 /**
- * The files of `changed` sync holds back for `hits`: every file in a unit
- * with a hit, and SOURCES.json when it changed alongside a held skill (it
- * would pin a version the branch does not have). By unit.
+ * The files of `changed` sync holds back for `hits`, by unit: every file in a
+ * unit with a hit. SOURCES.json is one unit with every skill whose entry it
+ * changes (`entries`, from sourcesEntriesChanged; null when it cannot be
+ * read): a skill without its entry, or an entry without its skill, is no use
+ * to the other machines.
  */
-export const heldBack = (changed: ReadonlyArray<string>, hits: ReadonlyArray<SecretHit>) => {
-  const units = new Set(hits.map((h) => unitOf(h.file)));
-  if ([...units].some((u) => u.startsWith("skills/")) && changed.includes(SOURCES))
-    units.add(SOURCES);
+export const heldBack = (
+  changed: ReadonlyArray<string>,
+  hits: ReadonlyArray<SecretHit>,
+  entries: ReadonlyArray<string> | null = [],
+) => {
+  // An unreadable SOURCES.json goes with every skill that changed.
+  const named =
+    entries === null
+      ? changed.map(unitOf).filter((u) => u.startsWith("skills/"))
+      : entries.map((name) => `skills/${name}`);
+  const grouped = changed.includes(SOURCES) ? new Set([SOURCES, ...named]) : new Set<string>();
+  const unit = (file: string) => (grouped.has(unitOf(file)) ? SOURCES : unitOf(file));
+  const units = new Set(hits.map((h) => unit(h.file)));
   const held = new Map<string, Array<string>>();
   for (const file of changed) {
-    const unit = unitOf(file);
-    if (units.has(unit)) held.set(unit, [...(held.get(unit) ?? []), file]);
+    const u = unit(file);
+    if (units.has(u)) held.set(u, [...(held.get(u) ?? []), file]);
   }
   return held;
+};
+
+/** A unit for a person: SOURCES.json names the skills that go with it. */
+const unitLabel = (unit: string, files: ReadonlyArray<string> = []) => {
+  if (unit !== SOURCES) return unit;
+  const skills = [...new Set(files.map(unitOf))].filter((u) => u !== SOURCES).sort();
+  return skills.length === 0 ? unit : `${unit} with ${skills.join(", ")}`;
 };
 
 const SET_ASIDE = "T3 Fleet: held back ";
@@ -204,6 +224,10 @@ const setAside = (repo: string) =>
     );
   });
 
+/** How to get set-aside edits back, in the order that works. */
+const bringBack = (repo: string, unit: string) =>
+  `Your edits are in git stash as "${SET_ASIDE}${unit}" (\`git -C ${repo} stash list\`). To bring them back: \`git -C ${repo} stash apply <that entry>\` (it can conflict with what changed on the branch since; resolve by hand), take the secret out (\`t3-fleet secrets scan\` shows where), then \`git -C ${repo} stash drop <that entry>\`.`;
+
 /**
  * What sync holds back: one finding per unit, naming lines and kinds, never
  * values or their hashes. `aside`: the unit was set aside in git stash.
@@ -217,7 +241,9 @@ const secretFindings = (
   aside: ReadonlySet<string> = new Set(),
 ): Array<Finding> =>
   [...held.keys()].map((unit) => {
-    const inUnit = hits.filter((h) => held.get(unit)?.includes(h.file) === true);
+    const files = held.get(unit) ?? [];
+    const inUnit = hits.filter((h) => files.includes(h.file));
+    const label = unitLabel(unit, files);
     const what =
       inUnit.length === 0
         ? "it changed with a skill held back"
@@ -228,17 +254,11 @@ const secretFindings = (
       severity: "error",
       area: "sync",
       title: aside.has(unit)
-        ? `sync set ${unit} aside in git stash, since a change from the branch touches it: ${what}`
-        : `sync will not ${verb} ${unit}: ${what}`,
-      detail: [
-        "Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as ${NAME}.",
-        "If it is not a secret, `t3-fleet secrets scan` on this machine prints the command that lets the line through, for an authority to run.",
-        ...(aside.has(unit)
-          ? [
-              `Your edits are kept: \`git -C ${repo} stash list\` shows them as "${SET_ASIDE}${unit}"; \`git -C ${repo} stash apply <that entry>\` brings them back.`,
-            ]
-          : []),
-      ].join(" "),
+        ? `sync set ${label} aside in git stash, since a change from the branch touches it: ${what}`
+        : `sync will not ${verb} ${label}: ${what}`,
+      detail: aside.has(unit)
+        ? bringBack(repo, unit)
+        : "Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as ${NAME}. If it is not a secret, `t3-fleet secrets scan` on this machine prints the command that lets the line through, for an authority to run.",
     };
   });
 
@@ -250,8 +270,15 @@ const asideFindings = (node: string, repo: string, units: ReadonlySet<string>): 
     severity: "warn",
     area: "sync",
     title: `${unit} is set aside in git stash: it held what looked like a secret`,
-    detail: `\`git -C ${repo} stash list\` shows it as "${SET_ASIDE}${unit}"; take the secret out, \`git -C ${repo} stash apply <that entry>\`, then drop the entry.`,
+    detail: bringBack(repo, unit),
   }));
+
+/** A refusal, for publishing: without the lines' hashes, which only the machine itself shows. */
+const withoutHashes = (message: string) =>
+  message
+    .split("\n")
+    .filter((l) => !/[0-9a-f]{64}/.test(l) && !l.startsWith("If it is not a secret"))
+    .join("\n");
 
 /**
  * A node's errors by finding key, with their titles. Keyed by the key alone:
@@ -309,12 +336,18 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       failed = true;
       message = scanned.failure;
     }
-    const hits = scanned._tag === "Success" ? scanned.success : [];
+    // A file still conflicted is never committed or proposed either.
+    const hits = [
+      ...(scanned._tag === "Success" ? scanned.success : []),
+      ...(yield* unmergedHits(repo, edited)),
+    ];
+    const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
     const held = heldBack(
       edited,
       scanned._tag === "Success"
         ? hits
         : edited.map((file) => ({ file, line: 0, kind: "", hash: "" })),
+      entries,
     );
 
     // A held-back unit that an incoming change (or a proposal this
@@ -332,11 +365,10 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           ])).stdout,
         ),
       );
-      if (authority) {
-        const prefixes = settingList(config, "auto_approve", []);
+      // On an authority, any proposal it may approve, by hand or not.
+      if (authority)
         for (const p of yield* listProposals(repo, config.branch))
-          if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
-      }
+          for (const f of p.files) incoming.add(f);
       const aside = new Set<string>();
       for (const [unit, files] of held) {
         if (!files.some((f) => incoming.has(f))) continue;
@@ -482,11 +514,17 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     if (!authority && !failed) {
       const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
       const outcome = yield* Effect.gen(function* () {
-        const hits = yield* scanEdits(repo, changed, {
-          base: `origin/${config.branch}`,
-          allowed: yield* allowedNow(),
-        });
-        const held = heldBack(changed, hits);
+        const hits = [
+          ...(yield* scanEdits(repo, changed, {
+            base: `origin/${config.branch}`,
+            allowed: yield* allowedNow(),
+          })),
+          ...(yield* unmergedHits(repo, changed)),
+        ];
+        const entries = changed.includes(SOURCES)
+          ? yield* sourcesEntriesChanged(repo, `origin/${config.branch}`)
+          : [];
+        const held = heldBack(changed, hits, entries);
         const heldFiles = new Set([...held.values()].flat());
         const kept = changed.filter((f) => !heldFiles.has(f));
         return { hits, held, kept, commit: yield* propose(repo, self.name, config.branch, kept) };
@@ -534,7 +572,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         ).pipe(
           Effect.catch((e: string) =>
             Effect.sync(() => {
-              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
+              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${withoutHashes(e)}`);
               return null;
             }),
           ),

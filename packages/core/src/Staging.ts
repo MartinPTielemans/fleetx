@@ -22,10 +22,11 @@ import {
   ok,
   out,
   pullBranch,
+  scanEdits,
   scanStaged,
   why,
 } from "./Git.ts";
-import { readAllowed, refusal } from "./SecretScan.ts";
+import { describeHit, readAllowed, refusal } from "./SecretScan.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -167,10 +168,15 @@ export const approve = (
       const tip = yield* reviewedTip(repo, proposal, expected);
       const files = yield* ownChange(repo, tip);
       const dirty = yield* changedFiles(repo, files);
-      if (dirty.length > 0)
+      if (dirty.length > 0) {
+        // Edits sync holds back never get committed: sync sets them aside for a proposal touching them.
+        const held = yield* scanEdits(repo, dirty);
         return yield* Effect.fail(
-          `local edits to ${dirty.join(", ")} would be overwritten; commit or stash them first`,
+          held.length > 0
+            ? `local edits to ${dirty.join(", ")} would be overwritten, and sync holds them back (${held.map((h) => describeHit(h)).join("; ")}); \`t3-fleet sync\` here sets them aside in git stash, then approve again`
+            : `local edits to ${dirty.join(", ")} would be overwritten; commit or stash them first`,
         );
+      }
       yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
       const allowed = yield* readAllowed(repo);
       const approved = yield* inScratchWorktree(

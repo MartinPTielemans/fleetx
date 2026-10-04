@@ -17,9 +17,9 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom, type Config } from "./Config.ts";
-import { commitAndPush, pullBranch, putBackConflicted, statusEntries } from "./Git.ts";
+import { commitAndPush, pullBranch, putBackConflicted, snapshot, statusEntries } from "./Git.ts";
 import { lastSyncPath } from "./Probe.ts";
-import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
+import { addSkills, keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
 import { allowSecret, lineHash } from "./SecretScan.ts";
@@ -583,10 +583,9 @@ describe("secrets never reach git", () => {
     expect(onMain(f.origin, "skills/new/scripts/go.sh")).toBeNull();
     // Its SOURCES.json entry changed with it, and waits with it.
     expect(onMain(f.origin, "skills/SOURCES.json")).toBeNull();
-    expect(result.findings.map((x) => x.key).sort()).toEqual([
-      "sync-secret-skills/SOURCES.json",
-      "sync-secret-skills/new",
-    ]);
+    // One unit: SOURCES.json with the skill its new entry names.
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/SOURCES.json"]);
+    expect(result.findings[0]?.title).toContain("skills/SOURCES.json with skills/new");
   });
 
   it("a held-back skill an incoming change touches is set aside, and the authority's sync still works", async () => {
@@ -664,8 +663,8 @@ describe("secrets never reach git", () => {
 
     // commitAndPush checks what rides along too.
     put(f.box, "README.md", "x\n");
-    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
-      "notes/setup.md:1 looks like a GitHub token",
+    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(
+      /notes\/setup\.md:1 \(in commit [0-9a-f]{7}\) looks like a GitHub token/,
     );
     expect(onMain(f.origin, "README.md")).toBe("fleet\n");
   });
@@ -716,6 +715,169 @@ describe("secrets never reach git", () => {
     const refused = await fails(approve(f.box, "main", proposal, "box", proposal.commit));
     expect(refused).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
+  });
+});
+
+describe("secrets never reach git: round two", () => {
+  /** A git repository of skills to vendor from, as a file:// URL. */
+  const upstreamOf = (root: string, files: Record<string, string>) => {
+    const dir = join(root, `upstream-${Object.keys(files).join("-").replace(/\W/g, "")}`);
+    for (const [rel, text] of Object.entries(files)) put(dir, rel, text);
+    git(root, "init", "-q", dir);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "upstream");
+    return `file://${dir}`;
+  };
+
+  it("scans every unpushed commit, not just where they end up, and names the commit", async () => {
+    const f = makeFleet();
+    put(f.box, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
+    git(f.box, "add", "-A");
+    git(f.box, "commit", "-qm", "token, by hand");
+    const added = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
+    put(f.box, "notes/setup.md", "export GITHUB_TOKEN=$GITHUB_TOKEN\n");
+    git(f.box, "commit", "-qam", "token out again");
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(true);
+    expect(onMain(f.origin, "notes/setup.md")).toBeNull();
+    expect(result.findings[0]?.title).toContain(
+      `notes/setup.md:1 (in commit ${added}) looks like a GitHub token`,
+    );
+    put(f.box, "README.md", "x\n");
+    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
+      `(in commit ${added})`,
+    );
+    expect(git(f.origin, "log", "--all", "-p")).not.toContain(fakeToken());
+  });
+
+  it("sets SOURCES.json aside with the skills its entries name, in one stash entry", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.box, "sources");
+    // A new skill with a secret, and its entry.
+    put(f.box, "skills/new/SKILL.md", `token: ${fakeToken()}\n`);
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "new"] })}\n`);
+    // Main changes SOURCES.json meanwhile.
+    git(f.laptop, "pull", "-q", "origin", "main");
+    put(f.laptop, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "b"] })}\n`);
+    commitAll(f.laptop, "b is local too");
+
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(false);
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/SOURCES.json"]);
+    expect(result.findings[0]?.title).toContain("skills/SOURCES.json with skills/new");
+    // One entry holding both; the checkout has main's SOURCES.json and no half skill.
+    const entries = git(f.box, "stash", "list").trim().split("\n");
+    expect(entries).toEqual([expect.stringContaining("T3 Fleet: held back skills/SOURCES.json")]);
+    const stashed = git(f.box, "stash", "show", "--include-untracked", "--name-only", "stash@{0}");
+    expect(stashed.split("\n").filter(Boolean).sort()).toEqual([
+      "skills/SOURCES.json",
+      "skills/new/SKILL.md",
+    ]);
+    expect(read(f.box, "skills/SOURCES.json")).toContain('"b"');
+    expect(existsSync(join(f.box, "skills/new"))).toBe(false);
+
+    // The edits come back, conflicting; nothing with conflict markers is ever committed.
+    spawnSync("git", ["stash", "apply", "stash@{0}"], { cwd: f.box });
+    expect(read(f.box, "skills/SOURCES.json")).toContain("<<<<<<<");
+    put(f.box, "skills/new/SKILL.md", "token: $GITHUB_TOKEN\n");
+    const after = await f.sync(f.box, "box");
+    expect(onMain(f.origin, "skills/SOURCES.json")).not.toContain("<<<<<<<");
+    expect(onMain(f.origin, "skills/new/SKILL.md")).toBeNull();
+    expect(after.findings.map((x) => x.title).join("\n")).toContain("skills/SOURCES.json");
+    expect(await fails(commitAndPush(f.box, ["skills/SOURCES.json"], "sources"))).toContain(
+      "still conflicted",
+    );
+  });
+
+  it("a refused skills add on a member keeps the entries already waiting in SOURCES.json", async () => {
+    const f = makeFleet();
+    const clean = upstreamOf(f.root, { "x/SKILL.md": "x v1\n" });
+    const leaky = upstreamOf(f.root, { "y/SKILL.md": `token: ${fakeToken()}\n` });
+    const config = await f.config(f.laptop, "laptop");
+    const add = (spec: string) =>
+      run(
+        Effect.gen(function* () {
+          const before = yield* snapshot(f.laptop, ["skills"]);
+          const paths = yield* addSkills(f.laptop, spec, []);
+          return yield* land(config, paths, "add", before);
+        }),
+      );
+    // x waits to be proposed; y is refused.
+    expect(await add(clean)).toContain("proposes it");
+    const waiting = read(f.laptop, "skills/SOURCES.json");
+    expect(waiting).toContain('"x"');
+    await add(leaky).then(
+      () => expect.unreachable(),
+      (e: unknown) => expect(String(e)).toContain("skills/y/SKILL.md:1 looks like a GitHub token"),
+    );
+    expect(read(f.laptop, "skills/SOURCES.json")).toBe(waiting);
+    expect(read(f.laptop, "skills/x/SKILL.md")).toBe("x v1\n");
+    expect(existsSync(join(f.laptop, "skills/y"))).toBe(false);
+  });
+
+  it("a bare skills update skips a held skill; a named one says why it cannot", async () => {
+    const f = makeFleet();
+    const url = upstreamOf(f.root, {
+      "a/SKILL.md": "a upstream v2\n",
+      "b/SKILL.md": "b upstream v2\n",
+    });
+    put(
+      f.box,
+      "skills/SOURCES.json",
+      `${JSON.stringify({ sources: { up: { type: "github", url, skills: ["a", "b"], paths: { a: "a", b: "b" } } } })}\n`,
+    );
+    commitAll(f.box, "sources");
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    const preview = await run(previewUpdate(f.box, []));
+    expect(preview.skipped).toEqual(["skills/a"]);
+    expect(preview.files).toEqual(["skills/b"]);
+    const named = await fails(previewUpdate(f.box, ["a"]));
+    expect(named).toContain("sync holds back skills/a");
+    expect(named).not.toContain("the next sync takes care of them");
+  });
+
+  it("approving over a held edit points at the set-aside, and sync makes the way", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
+      "`t3-fleet sync` here sets them aside in git stash",
+    );
+    await f.sync(f.box, "box");
+    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
+  });
+
+  it("publishes no line hash when an auto-approval is refused", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", `token: ${fakeToken()}\n`);
+    git(f.laptop, "add", "-A");
+    git(f.laptop, "commit", "-qm", "by hand");
+    git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const result = await f.sync(f.box, "box");
+    const text = result.lines.join("\n");
+    expect(text).toContain("could not auto-approve laptop's proposal");
+    expect(text).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
+    expect(text).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  it("tells how to bring set-aside edits back in the order that works", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
+    commitAll(f.laptop, "a v2");
+    const result = await f.sync(f.box, "box");
+    const detail = result.findings[0]?.detail ?? "";
+    const order = ["stash apply", "can conflict", "take the secret out", "stash drop"].map((s) =>
+      detail.indexOf(s),
+    );
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
   });
 });
 
