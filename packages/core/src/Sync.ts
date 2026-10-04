@@ -680,7 +680,8 @@ export interface SyncResult {
 
 export const syncRun = (
   startConfig: Config,
-  options: { readonly apply: boolean } = { apply: true },
+  /** `areas` narrows [fleet] apply further (setup's first sync). */
+  options: { readonly apply: boolean; readonly areas?: ReadonlyArray<string> } = { apply: true },
 ) =>
   Effect.gen(function* () {
     const repo = startConfig.repo;
@@ -744,7 +745,9 @@ export const syncRun = (
 
       let selfResult = yield* observeSelf;
       let findings = yield* findingsFor(fleetResults(selfResult));
-      const applyAreas = settingList(config, "apply", DEFAULT_APPLY);
+      const applyAreas = settingList(config, "apply", DEFAULT_APPLY).filter(
+        (a) => options.areas === undefined || options.areas.includes(a),
+      );
       const applicable = findings.filter(
         (f): f is Finding & { readonly fix: Fix } =>
           f.fix !== undefined &&
