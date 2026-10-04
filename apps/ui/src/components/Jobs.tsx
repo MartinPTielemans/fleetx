@@ -7,7 +7,8 @@ import { CheckCircle2Icon, CircleXIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 
 import type { UiJobT } from "../lib/api";
-import { finished, useStore } from "../lib/store";
+import { finished } from "../lib/jobs";
+import { useStore } from "../lib/store";
 import { ActionDialog } from "./dialogs";
 import { AppliedList, appliedTitle } from "./fixes";
 import { AlertDialogBody, AlertDialogClose, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";

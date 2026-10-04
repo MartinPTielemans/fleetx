@@ -14,6 +14,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ApiError, api, decodeCheckFailedEvent, decodeJobEvent, decodeStatusEvent, isUnauthorized, type UiJobT, type UiSession, type UiStatus } from "./api";
+import { finished, JobBook } from "./jobs";
 
 /** "paused": closed while the tab is hidden; "stale": this page's token is from an earlier run. */
 export type Connection = "connecting" | "live" | "lost" | "paused" | "stale";
@@ -22,8 +23,6 @@ const RELAY_EVENTS = ["state", "pull", "hub"];
 
 /** How long a hidden tab keeps its stream open. */
 const HIDDEN_GRACE_MS = 30_000;
-
-export const finished = (job: UiJobT) => job.state === "done" || job.state === "failed";
 
 interface Store {
   readonly session: UiSession | null;
@@ -57,20 +56,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [jobs, setJobs] = useState<ReadonlyMap<string, UiJobT>>(new Map());
   const [watched, setWatched] = useState<ReadonlySet<string>>(new Set());
   const listeners = useRef(new Map<string, Set<(data: string) => void>>());
-  const waiters = useRef(new Map<string, Array<(job: UiJobT) => void>>());
-
-  const updateJob = useCallback((job: UiJobT) => {
-    setJobs((all) => {
-      const known = all.get(job.id);
-      // Events can overtake the answer that started the job; never go back.
-      if (known !== undefined && finished(known) && !finished(job)) return all;
-      return new Map(all).set(job.id, job);
-    });
-    if (finished(job)) {
-      for (const resolve of waiters.current.get(job.id) ?? []) resolve(job);
-      waiters.current.delete(job.id);
-    }
-  }, []);
+  const [book] = useState(() => new JobBook(setJobs));
+  const updateJob = useCallback((job: UiJobT) => book.update(job), [book]);
 
   useEffect(() => {
     api.session().then(setSession, setSessionError);
@@ -215,16 +202,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const job = await start();
       setWatched((w) => new Set(w).add(job.id));
       started?.(job.id);
-      updateJob(job);
-      const done = finished(job)
-        ? job
-        : await new Promise<UiJobT>((resolve) => {
-            waiters.current.set(job.id, [...(waiters.current.get(job.id) ?? []), resolve]);
-          });
+      const done = await book.settled(job);
       if (done.state === "failed") throw new Error(done.error ?? "it failed");
       return done;
     },
-    [updateJob],
+    [book],
   );
 
   const jobList = useMemo(() => [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt), [jobs]);

@@ -145,10 +145,11 @@ hub's servers and tool-call log, model traffic, and every
 machine's merged config. Applying a fix works as `t3-fleet fix` does: the exact
 commands, what each interrupts, an explicit confirmation, then a fresh check.
 What runs is what you reviewed: a fix whose command changed since is left out
-and reported, and a proposal is approved only as the commit you saw. Fixes and
-repo changes keep running if you close or reload the tab; any tab shows how
-they went. It checks every minute while a tab is open and visible, and updates
-as the relay reports syncs.
+and reported, and a proposal is approved only if it still makes the change you
+saw. Fixes and repo changes keep running if you close or reload the tab; any
+tab shows how they went, and Ctrl-C waits for them (a second Ctrl-C stops
+them). It checks every minute while a tab is open and visible, and updates as
+the relay reports syncs.
 
 It listens on 127.0.0.1 only, on a new port each run, and answers only the tab
 that opened its link, from its own address, so no other website can read your

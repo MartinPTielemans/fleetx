@@ -14,9 +14,13 @@ import { api, type UiProposalT } from "../lib/api";
 import { useEvent, useResource, useStore } from "../lib/store";
 import { plural } from "../lib/utils";
 
+type Decision = { readonly verb: "approve" | "reject"; readonly proposal: UiProposalT };
+
 export function ProposalsView() {
   const { session } = useStore();
   const proposals = useResource(api.proposals);
+  // Which proposal is being decided, as it was when its dialog opened.
+  const [deciding, setDeciding] = useState<Decision | null>(null);
   // A sync elsewhere may have staged or settled a proposal.
   useEvent("pull", () => void proposals.reload());
   useEvent("state", () => void proposals.reload());
@@ -50,20 +54,20 @@ export function ProposalsView() {
         </Group>
       ) : (
         list.map((p) => (
-          <Proposal
-            key={p.node}
-            proposal={p}
-            canDecide={session?.authority === true}
-            onDecided={() => proposals.setData(list.filter((x) => x.node !== p.node))}
-          />
+          <Proposal key={p.node} proposal={p} canDecide={session?.authority === true} onDecide={(verb) => setDeciding({ verb, proposal: p })} />
         ))
       )}
+      <DecideDialog
+        decision={deciding}
+        current={proposals.data === null || deciding === null ? undefined : (list.find((p) => p.node === deciding.proposal.node) ?? null)}
+        onClose={() => setDeciding(null)}
+        onDecided={(node) => proposals.setData(list.filter((x) => x.node !== node))}
+      />
     </Page>
   );
 }
 
-function Proposal({ proposal: p, canDecide, onDecided }: { proposal: UiProposalT; canDecide: boolean; onDecided: () => void }) {
-  const [deciding, setDeciding] = useState<"approve" | "reject" | null>(null);
+function Proposal({ proposal: p, canDecide, onDecide }: { proposal: UiProposalT; canDecide: boolean; onDecide: (verb: "approve" | "reject") => void }) {
   return (
     <Group>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -75,11 +79,11 @@ function Proposal({ proposal: p, canDecide, onDecided }: { proposal: UiProposalT
         {p.autoApprovable ? <Badge variant="info">auto-approvable</Badge> : null}
         <span className="text-muted-foreground text-xs">{p.summary}</span>
         <span className="ml-auto flex gap-2">
-          <Button size="sm" variant="destructive-outline" disabled={!canDecide} onClick={() => setDeciding("reject")}>
+          <Button size="sm" variant="destructive-outline" disabled={!canDecide} onClick={() => onDecide("reject")}>
             <XIcon />
             Reject
           </Button>
-          <Button size="sm" disabled={!canDecide} onClick={() => setDeciding("approve")}>
+          <Button size="sm" disabled={!canDecide} onClick={() => onDecide("approve")}>
             <CheckIcon />
             Approve
           </Button>
@@ -94,38 +98,63 @@ function Proposal({ proposal: p, canDecide, onDecided }: { proposal: UiProposalT
         ))}
       </div>
       <Diff text={p.diff} />
-      <DecideDialog proposal={p} verb={deciding} onClose={() => setDeciding(null)} onDecided={onDecided} />
     </Group>
   );
 }
 
+/**
+ * Decides the proposal as it was when the dialog opened, with that diff in
+ * view. If a sync changes it meanwhile (or it is settled elsewhere), the
+ * dialog says so instead of deciding the new one unseen.
+ */
 function DecideDialog({
-  proposal,
-  verb,
+  decision,
+  current,
   onClose,
   onDecided,
 }: {
-  proposal: UiProposalT;
-  verb: "approve" | "reject" | null;
+  decision: Decision | null;
+  /** The proposal from the same machine as it is now: null when gone, undefined while unknown. */
+  current: UiProposalT | null | undefined;
   onClose: () => void;
-  onDecided: () => void;
+  onDecided: (node: string) => void;
 }) {
   const { runJob } = useStore();
+  // Kept while the dialog closes, so it does not go blank.
+  const [shown, setShown] = useState(decision);
+  if (decision !== null && decision !== shown) setShown(decision);
+  if (shown === null) return null;
+  const { verb, proposal } = shown;
+  const gone = decision !== null && current === null;
+  const changed = decision !== null && current != null && current.change !== proposal.change;
   return (
     <ConfirmDialog
-      open={verb !== null}
+      open={decision !== null}
+      className="max-w-3xl"
       title={`${verb === "approve" ? "Approve" : "Reject"} ${proposal.node}'s proposal?`}
       description={
         verb === "approve"
-          ? `${plural(proposal.files.length, "file")} land on the branch in one commit, pushed now; every machine picks them up on its next sync. Only the diff shown here lands: if ${proposal.node} has pushed since, nothing happens and you review it again.`
+          ? `${plural(proposal.files.length, "file")} ${proposal.files.length === 1 ? "lands" : "land"} on the branch in one commit, pushed now; every machine picks ${proposal.files.length === 1 ? "it" : "them"} up on its next sync. Only the change below lands: if it is different by then, nothing happens and you review it again.`
           : `The proposal moves aside. On its next sync, ${proposal.node} stashes its copies of these files (recoverable with git stash) and takes the branch's.`
       }
       confirm={verb === "approve" ? "Approve" : "Reject"}
       icon={verb === "approve" ? <CheckIcon /> : <XIcon />}
       variant={verb === "reject" ? "destructive" : "default"}
-      onConfirm={() => runJob(() => (verb === "approve" ? api.approve(proposal.node, proposal.commit) : api.reject(proposal.node, proposal.commit)))}
+      disabled={gone || changed}
+      onConfirm={() => runJob(() => (verb === "approve" ? api.approve(proposal.node, proposal.change) : api.reject(proposal.node, proposal.change)))}
       onClose={onClose}
-      onDone={onDecided}
-    />
+      onDone={() => onDecided(proposal.node)}
+    >
+      {gone || changed ? (
+        <div role="alert" className="rounded-lg border border-warning/32 bg-warning-surface px-3 py-2 text-warning-foreground text-xs">
+          {gone
+            ? `${proposal.node}'s proposal is no longer there: it was approved, rejected or withdrawn meanwhile.`
+            : `${proposal.node} proposed something different while this was open. Close this and review the new one.`}
+        </div>
+      ) : null}
+      <div className="overflow-hidden rounded-lg border">
+        <Diff text={proposal.diff} />
+      </div>
+    </ConfirmDialog>
   );
 }

@@ -36,9 +36,10 @@ import { git } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
 import { addSkills, keepUpdate, land, listSkills, lookupSource, previewUpdate, removeSkills } from "@t3-fleet/core/SkillSources";
-import { approve, autoApprovable, listProposals, reject } from "@t3-fleet/core/Staging";
+import { sha256 } from "@t3-fleet/core/Hash";
+import { approve, autoApprovable, listProposals, reject, type Proposal } from "@t3-fleet/core/Staging";
 import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
-import { uiLayer, type UiAsset } from "@t3-fleet/core/UiServer";
+import { uiLayer, type UiAsset, type UiServerOptions } from "@t3-fleet/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
 import { ownBundle, reportUserErrors } from "./shared.ts";
@@ -101,7 +102,22 @@ const statesOf = (config: Config) =>
     return yield* readStates(config.repo).pipe(Effect.orElseSucceed(() => []));
   });
 
-const proposalsOf = (config: Config) =>
+/**
+ * What approving `proposal` would do, as a digest: each proposed file's blob
+ * on the branch now and in the proposal. A sync re-creates the staging commit
+ * (a new SHA for the same change), so the commit cannot say whether what is
+ * there now is what was reviewed; this can, and it also changes when the
+ * branch moves under one of the files.
+ */
+export const proposalChange = (repo: string, branch: string, proposal: Pick<Proposal, "commit" | "files">) =>
+  Effect.gen(function* () {
+    const blobs = (ref: string) => git(repo, ["ls-tree", "-r", ref, "--", ...proposal.files]).pipe(Effect.map((r) => r.stdout.trim()));
+    const before = yield* blobs(`origin/${branch}`);
+    const after = yield* blobs(proposal.commit);
+    return yield* Effect.promise(() => sha256([proposal.files.join("\n"), before, after].join("\n\n")));
+  });
+
+export const proposalsOf = (config: Config) =>
   Effect.gen(function* () {
     const proposals = yield* listProposals(config.repo, config.branch);
     const prefixes = config.settings.fleet?.auto_approve ?? [];
@@ -112,6 +128,7 @@ const proposalsOf = (config: Config) =>
           node: p.node,
           branch: p.branch,
           commit: p.commit,
+          change: yield* proposalChange(config.repo, config.branch, p),
           summary: p.stat.split("\n").pop()?.trim() ?? "",
           files: p.files,
           diff: diff.stdout,
@@ -122,16 +139,18 @@ const proposalsOf = (config: Config) =>
   });
 
 /**
- * `node`'s proposal, if it is still the commit that was reviewed. Each sync
- * force-pushes a new commit to the staging branch, so what is there now may
- * be a diff nobody saw.
+ * `node`'s proposal, if it still makes the change that was reviewed (see
+ * proposalChange). Each sync force-pushes the staging branch, so what is
+ * there now may be a diff nobody saw.
  */
-const proposalFrom = (config: Config, node: string, reviewed: string) =>
+export const proposalFrom = (config: Config, node: string, reviewed: string) =>
   Effect.gen(function* () {
     if (!isAuthority(config)) return yield* Effect.fail(`${config.self} is not an authority; review proposals on a node with the authority role`);
     const proposal = (yield* listProposals(config.repo, config.branch)).find((p) => p.node === node);
     if (proposal === undefined) return yield* Effect.fail(`no proposal from ${node}`);
-    if (proposal.commit !== reviewed) return yield* Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`);
+    if ((yield* proposalChange(config.repo, config.branch, proposal)) !== reviewed) {
+      return yield* Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`);
+    }
     return proposal;
   });
 
@@ -189,78 +208,82 @@ export const uiCommand = Command.make("ui", {
           Effect.mapError((e) => (typeof e === "string" ? e : typeof e === "object" && e !== null && "message" in e ? String(e.message) : String(e))),
         );
 
+      const options = {
+        ticket,
+        assets,
+        session: {
+          version: packageJson.version,
+          self: config.self,
+          authority: isAuthority(config),
+          nodes: config.nodes.map((n) => n.name),
+          relay: relayUrl,
+        },
+        relay: relayUrl !== null && relayToken !== "" ? { url: relayUrl, token: relayToken } : null,
+        actions: {
+          check: closed(
+            Effect.gen(function* () {
+              const [report, states] = yield* Effect.all([checkNodes(config, bundle), statesOf(config)], { concurrency: "unbounded" });
+              return { report, states, accepted: config.settings.accept ?? [] };
+            }),
+          ),
+          apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
+          proposals: closed(proposalsOf(config)),
+          approve: (node, change) =>
+            closed(proposalFrom(config, node, change).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
+          reject: (node, change) => closed(proposalFrom(config, node, change).pipe(Effect.flatMap((p) => reject(config.repo, p)))),
+          alerts: closed(alertsOf(config)),
+          config: (node) => {
+            const found = config.nodes.find((n) => n.name === node);
+            return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
+          },
+          skills: {
+            list: closed(listSkills(config.repo)),
+            lookup: (source) => closed(lookupSource(config.repo, source)),
+            add: (source, names, as) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* addSkills(config.repo, source, names, as);
+                    const added = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
+                    return { paths, landed: yield* land(config, paths, `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`) };
+                  }),
+                ),
+              ),
+            preview: (names) => closed(underSyncLock(previewUpdate(config.repo, names))),
+            update: (names, digest) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* keepUpdate(config.repo, names, digest);
+                    return { paths, landed: yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`) };
+                  }),
+                ),
+              ),
+            remove: (names) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* removeSkills(config.repo, names);
+                    return { paths, landed: yield* land(config, paths, `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`) };
+                  }),
+                ),
+              ),
+          },
+        },
+      } satisfies Omit<UiServerOptions, "port">;
+
       const link = (port: number, ticket: string) => `http://127.0.0.1:${port}/#ticket=${ticket}`;
-      const routes = (port: number) =>
-        uiLayer({
-          ticket,
-          // The link works once; whoever opens it next needs the next one.
-          onTicketUsed: (next) => Console.log(`a browser opened the link; another tab can use ${link(port, next)}`),
-          port,
-          assets,
-          session: {
-            version: packageJson.version,
-            self: config.self,
-            authority: isAuthority(config),
-            nodes: config.nodes.map((n) => n.name),
-            relay: relayUrl,
-          },
-          relay: relayUrl !== null && relayToken !== "" ? { url: relayUrl, token: relayToken } : null,
-          actions: {
-            check: closed(
-              Effect.gen(function* () {
-                const [report, states] = yield* Effect.all([checkNodes(config, bundle), statesOf(config)], { concurrency: "unbounded" });
-                return { report, states, accepted: config.settings.accept ?? [] };
-              }),
-            ),
-            apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
-            proposals: closed(proposalsOf(config)),
-            approve: (node, commit) =>
-              closed(proposalFrom(config, node, commit).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
-            reject: (node, commit) => closed(proposalFrom(config, node, commit).pipe(Effect.flatMap((p) => reject(config.repo, p)))),
-            alerts: closed(alertsOf(config)),
-            config: (node) => {
-              const found = config.nodes.find((n) => n.name === node);
-              return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
-            },
-            skills: {
-              list: closed(listSkills(config.repo)),
-              lookup: (source) => closed(lookupSource(config.repo, source)),
-              add: (source, names, as) =>
-                closed(
-                  underSyncLock(
-                    Effect.gen(function* () {
-                      const paths = yield* addSkills(config.repo, source, names, as);
-                      const added = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
-                      return { paths, landed: yield* land(config, paths, `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`) };
-                    }),
-                  ),
-                ),
-              preview: (names) => closed(underSyncLock(previewUpdate(config.repo, names))),
-              update: (names, digest) =>
-                closed(
-                  underSyncLock(
-                    Effect.gen(function* () {
-                      const paths = yield* keepUpdate(config.repo, names, digest);
-                      return { paths, landed: yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`) };
-                    }),
-                  ),
-                ),
-              remove: (names) =>
-                closed(
-                  underSyncLock(
-                    Effect.gen(function* () {
-                      const paths = yield* removeSkills(config.repo, names);
-                      return { paths, landed: yield* land(config, paths, `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`) };
-                    }),
-                  ),
-                ),
-            },
-          },
-        });
+      // The link works once; whoever opens it next needs the next one.
+      const onTicketUsed = (port: number) => (next: string) => Console.log(`a browser opened the link; another tab can use ${link(port, next)}`);
+      // Ctrl-C waits for running jobs, so no machine is left half-fixed; a second one stops them anyway.
+      const onDrain = (running: ReadonlyArray<string>) =>
+        Effect.sync(() => process.once("SIGINT", () => process.exit(130))).pipe(
+          Effect.andThen(Console.log(`waiting for ${running.length === 1 ? "a job" : `${running.length} jobs`} to finish (${running.join("; ")}); Ctrl-C again stops ${running.length === 1 ? "it" : "them"} now`)),
+        );
 
       const listen = (port: number) =>
         Layer.build(
-          HttpRouter.serve(routes(port), { disableLogger: true, disableListenLog: true }).pipe(
+          HttpRouter.serve(uiLayer({ ...options, port, onTicketUsed: onTicketUsed(port), onDrain }), { disableLogger: true, disableListenLog: true }).pipe(
             Layer.provide(FetchHttpClient.layer),
             Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
           ),

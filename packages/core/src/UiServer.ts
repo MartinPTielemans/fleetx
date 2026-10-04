@@ -34,11 +34,13 @@
  * fix's exact command, with a digest), shows it, and sends the digests back;
  * the server checks again and runs only fixes whose digest still matches, and
  * those that interrupt something only if the user acknowledged it. Proposals
- * are approved or rejected by the commit that was shown.
+ * are approved or rejected by the change that was shown (see Api.ts
+ * UiProposal.change).
  *
  * Whatever changes a machine or the repo runs as a job in the server, not in
  * the request: closing the tab does not stop it, and its progress is an event
- * any tab can follow.
+ * any tab can follow. Stopping the server waits for running jobs (the caller
+ * hears which, through onDrain); finished ones are listed for half an hour.
  *
  * Skill changes edit the config repo the way `t3-fleet skills` does, one at a
  * time: an authority commits them, any other machine's next sync proposes
@@ -50,6 +52,7 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -125,9 +128,9 @@ export interface UiActions {
   readonly check: Effect.Effect<UiCheck, string>;
   readonly apply: (fixes: ReadonlyArray<Finding & { readonly fix: Fix }>) => Effect.Effect<ReadonlyArray<FixOutcome>>;
   readonly proposals: Effect.Effect<ReadonlyArray<UiProposal>, string>;
-  /** Approve `node`'s proposal, failing unless its staging branch is still at `commit`. */
-  readonly approve: (node: string, commit: string) => Effect.Effect<void, string>;
-  readonly reject: (node: string, commit: string) => Effect.Effect<void, string>;
+  /** Approve `node`'s proposal, failing unless it still makes the reviewed `change` (UiProposal.change). */
+  readonly approve: (node: string, change: string) => Effect.Effect<void, string>;
+  readonly reject: (node: string, change: string) => Effect.Effect<void, string>;
   readonly alerts: Effect.Effect<ReadonlyArray<typeof UiAlert.Type>, string>;
   readonly config: (node: string) => Effect.Effect<ReadonlyArray<UiConfigRow>, string>;
   readonly skills: {
@@ -161,6 +164,10 @@ export interface UiServerOptions {
   /** The relay and its token, when the fleet has one. */
   readonly relay: { readonly url: string; readonly token: string } | null;
   readonly checkEvery?: Duration.Input;
+  /** How long finished jobs stay listed; half an hour unless a test says otherwise. */
+  readonly keepJobsFor?: Duration.Input;
+  /** Called when the server stops while jobs run, with their titles, before it waits for them. */
+  readonly onDrain?: (running: ReadonlyArray<string>) => Effect.Effect<void>;
 }
 
 // ── turning a check into what the UI shows ──────────────────────────────
@@ -375,6 +382,17 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** How long finished jobs stay listed, for a tab that reloads or opens later. */
 const JOBS_KEPT = Duration.minutes(30);
 
+/** One per id: a request naming a fix twice runs it once. */
+export const uniqueFixes = <F extends { readonly id: string; readonly digest: string }>(fixes: ReadonlyArray<F>): ReadonlyArray<F> | string => {
+  const byId = new Map<string, F>();
+  for (const fix of fixes) {
+    const seen = byId.get(fix.id);
+    if (seen === undefined) byId.set(fix.id, fix);
+    else if (seen.digest !== fix.digest) return `${fix.id} is asked for twice, as two different fixes`;
+  }
+  return [...byId.values()];
+};
+
 interface ServerEvent {
   readonly id: number;
   readonly type: string;
@@ -394,7 +412,10 @@ export const uiLayer = (options: UiServerOptions) =>
     Effect.gen(function* () {
       const { actions } = options;
       const client = yield* HttpClient.HttpClient;
-      const scope = yield* Scope.Scope;
+      // Background work (checks, the relay, jobs) runs here rather than in the layer's own
+      // scope, so stopping the server can wait for jobs before anything is interrupted.
+      const scope = yield* Scope.make();
+      const keepJobsMs = Duration.toMillis(Duration.fromInputUnsafe(options.keepJobsFor ?? JOBS_KEPT));
       const everyMs = Duration.toMillis(Duration.fromInputUnsafe(options.checkEvery ?? Duration.seconds(60)));
       const latest = yield* Ref.make<Kept | null>(null);
       const lastError = yield* Ref.make<UiCheckFailed | null>(null);
@@ -403,6 +424,8 @@ export const uiLayer = (options: UiServerOptions) =>
       const events = yield* PubSub.unbounded<ServerEvent>();
       const eventId = yield* Ref.make(0);
       const jobs = yield* Ref.make<ReadonlyMap<string, UiJob>>(new Map());
+      /** Each running job's end, by id, for stopping the server. */
+      const running = yield* Ref.make<ReadonlyMap<string, Deferred.Deferred<void>>>(new Map());
       const tokens = yield* Ref.make<ReadonlySet<string>>(new Set());
       const ticket = yield* Ref.make(options.ticket);
       const usedTickets = yield* Ref.make<ReadonlySet<string>>(new Set());
@@ -525,13 +548,11 @@ export const uiLayer = (options: UiServerOptions) =>
             applied: null,
             landed: null,
           };
-          const keepAfter = now - Duration.toMillis(JOBS_KEPT);
-          yield* Ref.update(jobs, (all) => {
-            const kept = [...all.values()].filter((j) => j.finishedAt === null || j.finishedAt > keepAfter);
-            return new Map([...kept, job].map((j) => [j.id, j]));
-          });
+          yield* Ref.update(jobs, (all) => new Map(all).set(job.id, job));
           yield* announce(job);
           const step = (text: string) => updateJob(job.id, (j) => ({ ...j, state: "running", step: text }));
+          const ended = yield* Deferred.make<void>();
+          yield* Ref.update(running, (all) => new Map(all).set(job.id, ended));
           yield* lock
             .withPermits(1)(step("starting").pipe(Effect.andThen(work(step))))
             .pipe(
@@ -545,10 +566,37 @@ export const uiLayer = (options: UiServerOptions) =>
                     Effect.flatMap((at) => updateJob(job.id, (j) => ({ ...j, ...result, state: "done", step: null, finishedAt: at }))),
                   ),
               }),
+              Effect.ensuring(
+                Ref.update(running, (all) => {
+                  const rest = new Map(all);
+                  rest.delete(job.id);
+                  return rest;
+                }).pipe(Effect.andThen(Deferred.succeed(ended, undefined))),
+              ),
               Effect.forkIn(scope),
             );
           return job;
         });
+
+      /** Finished jobs older than keepJobsFor are dropped, checked every few seconds. */
+      const pruneJobs = Effect.gen(function* () {
+        const keepAfter = (yield* Clock.currentTimeMillis) - keepJobsMs;
+        yield* Ref.update(jobs, (all) => new Map([...all].filter(([, j]) => j.finishedAt === null || j.finishedAt > keepAfter)));
+      });
+      yield* pruneJobs.pipe(Effect.repeat(Schedule.spaced(Duration.millis(Math.min(5000, Math.max(10, keepJobsMs / 2))))), Effect.forkIn(scope));
+
+      // Stopping the server (Ctrl-C) waits for running jobs: one stopped mid-script leaves a machine half-fixed.
+      yield* Effect.addFinalizer(() =>
+        Effect.gen(function* () {
+          const left = [...(yield* Ref.get(jobs)).values()].filter((j) => j.finishedAt === null);
+          const ends = [...(yield* Ref.get(running)).values()];
+          if (ends.length > 0) {
+            if (options.onDrain !== undefined) yield* options.onDrain(left.map((j) => j.title));
+            yield* Effect.forEach(ends, Deferred.await, { discard: true });
+          }
+          yield* Scope.close(scope, Exit.void);
+        }),
+      );
 
       // Relay events pass through, so the app hears about syncs and the hub as they happen.
       if (options.relay !== null) {
@@ -741,8 +789,11 @@ export const uiLayer = (options: UiServerOptions) =>
         "/api/fixes",
         api((request) =>
           Effect.gen(function* () {
-            const asked = yield* body(UiApplyRequest, 'expected {"fixes": [{"id", "digest"}], "acknowledged": [...]}')(request);
-            if (asked.fixes.length === 0) return plain("no fixes asked for", 400);
+            const request_ = yield* body(UiApplyRequest, 'expected {"fixes": [{"id", "digest"}], "acknowledged": [...]}')(request);
+            const unique = uniqueFixes(request_.fixes);
+            if (typeof unique === "string") return plain(unique, 400);
+            if (unique.length === 0) return plain("no fixes asked for", 400);
+            const asked = { ...request_, fixes: unique };
             const machinesNamed = new Set(asked.fixes.map((f) => f.id.slice(0, f.id.indexOf(":")))).size;
             const job = yield* startJob(
               "fixes",
@@ -769,11 +820,11 @@ export const uiLayer = (options: UiServerOptions) =>
             Effect.gen(function* () {
               const node = (yield* HttpRouter.params)["node"] ?? "";
               if (!NAME.test(node)) return plain("not a machine name", 400);
-              const { commit } = yield* body(UiDecideRequest, 'expected {"commit": "<the commit you reviewed>"}')(request);
-              if (!/^[0-9a-f]{7,64}$/.test(commit)) return plain("not a commit", 400);
+              const { change } = yield* body(UiDecideRequest, 'expected {"change": "<the change you reviewed>"}')(request);
+              if (!/^[0-9a-f]{64}$/.test(change)) return plain("not a change digest", 400);
               const job = yield* startJob(verb, `${verb === "approve" ? "Approve" : "Reject"} ${node}'s proposal`, editingRepo, (step) =>
                 step(verb === "approve" ? "landing the proposal on the branch" : "moving the proposal aside").pipe(
-                  Effect.andThen(verb === "approve" ? actions.approve(node, commit) : actions.reject(node, commit)),
+                  Effect.andThen(verb === "approve" ? actions.approve(node, change) : actions.reject(node, change)),
                   Effect.as({}),
                 ),
               );

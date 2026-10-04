@@ -139,6 +139,7 @@ const proposals: ReadonlyArray<UiProposal> = [
     node: "server",
     branch: "fleetx/staging/server",
     commit: "5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e",
+    change: "c".repeat(64),
     summary: "1 file changed, 4 insertions(+), 1 deletion(-)",
     files: ["skills/review/SKILL.md"],
     diff: "diff --git a/skills/review/SKILL.md b/skills/review/SKILL.md\nindex 1a2b3c4..5d6e7f8 100644\n--- a/skills/review/SKILL.md\n+++ b/skills/review/SKILL.md\n@@ -1,6 +1,9 @@\n ---\n name: review\n-description: Review a diff.\n+description: Review a diff against the repo's standards.\n ---\n \n Read the change first.\n+\n+Then check it against AGENTS.md\n+and the originating issue.\n",

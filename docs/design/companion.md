@@ -231,7 +231,8 @@ still works.
   disruption marks and confirmation as `t3-fleet fix`; notes with a fix can be
   picked too; accepted notes shown with their reasons.
 - **Proposals**: review, approve and reject staged changes, with diffs; a
-  decision names the commit that was shown.
+  decision names the change that was shown, so a sync that re-creates the
+  same commit does not void it, and a different one is not decided unseen.
 - **Alerts**: the alert history.
 - **Skills**: the repo's skills against every machine, each link's state;
   add from a git repository (looked up first, then chosen), update (a diff
@@ -262,9 +263,10 @@ Fixes are planned (`POST /api/fixes/plan`: each fix's command, node, `on`,
 interruption and a digest), shown, and applied by digest: the server checks
 again and runs only fixes whose digest still matches, and fixes that
 interrupt something only if acknowledged. Applying fixes, approving or
-rejecting a proposal (by its commit), and adding, updating or removing skills
-are jobs: they run in the server, survive the tab, and are listed at
-`GET /api/jobs`.
+rejecting a proposal (by its change: each file's blob on the branch and in
+the proposal), and adding, updating or removing skills
+are jobs: they run in the server, survive the tab, are listed at `GET /api/jobs` for half an hour after they
+finish, and stopping `t3-fleet ui` waits for them (a second Ctrl-C does not).
 
 ## Who builds what
 

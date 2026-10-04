@@ -234,8 +234,14 @@ export type UiApplyResult = typeof UiApplyResult.Type;
 export const UiProposal = Schema.Struct({
   node: Schema.String,
   branch: Schema.String,
-  /** The staging branch's commit this diff was taken from; approving or rejecting names it, so a newer push is not decided unseen. */
+  /** The staging branch's commit this diff was taken from. */
   commit: Schema.String,
+  /**
+   * A digest of what approving lands: each file's blob on the branch and in
+   * the proposal. Approving or rejecting names it, so a newer change is not
+   * decided unseen; a sync that re-creates the same change keeps it.
+   */
+  change: Schema.String,
   summary: Schema.String,
   files: Schema.Array(Schema.String),
   diff: Schema.String,
@@ -243,7 +249,7 @@ export const UiProposal = Schema.Struct({
 });
 export type UiProposal = typeof UiProposal.Type;
 
-export const UiDecideRequest = Schema.Struct({ commit: Schema.String });
+export const UiDecideRequest = Schema.Struct({ change: Schema.String });
 
 export const UiAlert = Schema.Struct({
   at: Schema.Number,

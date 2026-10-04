@@ -35,7 +35,7 @@ export function ActionDialog({
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  className?: string;
+  className?: string | undefined;
   children: React.ReactNode;
 }) {
   return (
@@ -65,6 +65,8 @@ export function ConfirmDialog<T>({
   onClose,
   onDone,
   done,
+  disabled = false,
+  className,
   children,
 }: {
   open: boolean;
@@ -78,6 +80,9 @@ export function ConfirmDialog<T>({
   onDone?: (result: T) => void;
   /** What it did, shown in place of the question; without it the dialog closes on success. */
   done?: (result: T) => React.ReactNode;
+  /** Whether confirming is refused, for a reason the children say. */
+  disabled?: boolean;
+  className?: string;
   children?: React.ReactNode;
 }) {
   const action = useAction(onConfirm);
@@ -93,7 +98,7 @@ export function ConfirmDialog<T>({
   };
   const result = done === undefined ? null : action.result;
   return (
-    <ActionDialog open={open} busy={action.running} onClose={close}>
+    <ActionDialog open={open} busy={action.running} onClose={close} className={className}>
       <AlertDialogHeader>
         <AlertDialogTitle>{title}</AlertDialogTitle>
         <AlertDialogDescription>{description}</AlertDialogDescription>
@@ -110,7 +115,7 @@ export function ConfirmDialog<T>({
         ) : (
           <>
             <AlertDialogClose render={<Button variant="ghost" disabled={action.running} />}>Cancel</AlertDialogClose>
-            <Button variant={variant} disabled={action.running} onClick={() => void run()}>
+            <Button variant={variant} disabled={action.running || disabled} onClick={() => void run()}>
               {action.running ? <Spinner className="size-3.5" /> : icon}
               {confirm}
             </Button>

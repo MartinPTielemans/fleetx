@@ -12,11 +12,13 @@ import type { Node } from "./Config.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
 import type { MachineObservation } from "./Observation.ts";
 import { mergeLayers } from "./Settings.ts";
-import { refusal, uiLayer, type UiActions, type UiCheck } from "./UiServer.ts";
+import { fixDigest, refusal, uiLayer, uniqueFixes, type UiActions, type UiCheck } from "./UiServer.ts";
 
 const PORT = 8397;
 const TOKEN = "a".repeat(48);
 const TICKET = "c".repeat(48);
+/** The change digest of the one proposal the fake fleet has. */
+const REVIEWED = "e".repeat(64);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 const node = (name: string): Node => ({
@@ -111,7 +113,8 @@ const fakeFleet = () => {
         return fixes.map((finding) => ({ finding, ok: true, summary: "upgraded" }));
       }),
     proposals: Effect.succeed([]),
-    approve: (node, commit) => (commit === "abc1234" ? Effect.sync(() => void decided.push(`approve ${node} ${commit}`)) : Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`)),
+    approve: (node, change) =>
+      change === REVIEWED ? Effect.sync(() => void decided.push(`approve ${node}`)) : Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`),
     reject: (node) => Effect.fail(`no proposal from ${node}`),
     alerts: Effect.succeed([{ at: 5, node: "server", kind: "failing", message: "sync failed" }]),
     config: (name) => (name === "laptop" ? Effect.succeed([{ path: "a.b", value: "1", source: "defaults" }]) : Effect.fail(`unknown machine: ${name}`)),
@@ -155,7 +158,16 @@ const relayClient = (hub: boolean) =>
     }),
   );
 
-const serve = (options: { readonly hub?: boolean; readonly relay?: boolean; readonly actions?: UiActions; readonly checkEvery?: Duration.Input } = {}) => {
+const serve = (
+  options: {
+    readonly hub?: boolean;
+    readonly relay?: boolean;
+    readonly actions?: UiActions;
+    readonly checkEvery?: Duration.Input;
+    readonly keepJobsFor?: Duration.Input;
+  } = {},
+) => {
+  const drained: Array<ReadonlyArray<string>> = [];
   const fleet = fakeFleet();
   const tickets: Array<string> = [];
   const assets = new Map([
@@ -172,6 +184,8 @@ const serve = (options: { readonly hub?: boolean; readonly relay?: boolean; read
       actions: options.actions ?? fleet.actions,
       relay: options.relay === false ? null : { url: "https://relay.example", token: "relay-token" },
       ...(options.checkEvery === undefined ? {} : { checkEvery: options.checkEvery }),
+      ...(options.keepJobsFor === undefined ? {} : { keepJobsFor: options.keepJobsFor }),
+      onDrain: (running) => Effect.sync(() => void drained.push(running)),
     }).pipe(Layer.provide(relayClient(options.hub ?? true))),
     { disableLogger: true },
   );
@@ -204,7 +218,7 @@ const serve = (options: { readonly hub?: boolean; readonly relay?: boolean; read
     const started = decode(UiJob, await response.text());
     return (await settled()).find((j) => j.id === started.id)!;
   };
-  return { raw, call, post, job, settled, session, tickets, dispose, applied: fleet.applied, edits: fleet.edits, decided: fleet.decided };
+  return { raw, call, post, job, settled, session, tickets, drained, dispose, applied: fleet.applied, edits: fleet.edits, decided: fleet.decided };
 };
 
 /** The event stream's text until `until` appears in it. */
@@ -306,15 +320,15 @@ describe("the UI server", () => {
     expect((await server.call("/api/config/..%2F..")).status).toBe(400);
   });
 
-  it("approves or rejects only the commit that was shown, as a job", async () => {
+  it("approves or rejects only the change that was shown, as a job", async () => {
     expect((await server.post("/api/proposals/server/approve", {})).status).toBe(400);
-    expect((await server.post("/api/proposals/server/approve", { commit: "--force" })).status).toBe(400);
-    const stale = await server.job("/api/proposals/server/approve", { commit: "def5678" });
+    expect((await server.post("/api/proposals/server/approve", { change: "--force" })).status).toBe(400);
+    const stale = await server.job("/api/proposals/server/approve", { change: "f".repeat(64) });
     expect(stale).toMatchObject({ kind: "approve", state: "failed", error: "server's proposal changed since you reviewed it; review it again" });
-    const approved = await server.job("/api/proposals/server/approve", { commit: "abc1234" });
+    const approved = await server.job("/api/proposals/server/approve", { change: REVIEWED });
     expect(approved).toMatchObject({ state: "done", title: "Approve server's proposal" });
-    expect(server.decided).toEqual(["approve server abc1234"]);
-    expect(await server.job("/api/proposals/server/reject", { commit: "abc1234" })).toMatchObject({ state: "failed", error: "no proposal from server" });
+    expect(server.decided).toEqual(["approve server"]);
+    expect(await server.job("/api/proposals/server/reject", { change: REVIEWED })).toMatchObject({ state: "failed", error: "no proposal from server" });
   });
 
   it("plans fixes as they stand, then applies only those still the same, then checks again", async () => {
@@ -625,5 +639,68 @@ describe("checks", () => {
     expect(reconnected).toContain("event: check\n");
     expect(reconnected).toMatch(/event: check-failed\ndata: \{"at":\d+,"message":"ssh laptop failed: timed out"\}/);
     await server.dispose();
+  });
+});
+
+describe("a fix's digest", () => {
+  it("changes with anything that changes what running it does", async () => {
+    const digest = (fix: Partial<Fix>) => Effect.runPromise(fixDigest({ ...upgrade, fix: { ...upgrade.fix, ...fix } }));
+    const base = await digest({});
+    expect(await digest({})).toBe(base);
+    expect(await digest({ command: `${upgrade.fix.command} --force` })).not.toBe(base);
+    expect(await digest({ on: "server" })).not.toBe(base);
+    expect(await digest({ disrupts: "running threads" })).not.toBe(base);
+    expect(await digest({ disrupts: "running threads and the relay" })).not.toBe(await digest({ disrupts: "running threads" }));
+    expect(await digest({ safe: false })).not.toBe(base);
+    expect(await Effect.runPromise(fixDigest({ ...upgrade, node: "server" }))).not.toBe(base);
+  });
+});
+
+describe("jobs", () => {
+  it("run a fix named twice once", async () => {
+    expect(uniqueFixes([{ id: "a:x", digest: "1" }, { id: "a:x", digest: "1" }])).toEqual([{ id: "a:x", digest: "1" }]);
+    expect(uniqueFixes([{ id: "a:x", digest: "1" }, { id: "a:x", digest: "2" }])).toBe("a:x is asked for twice, as two different fixes");
+
+    const fleet = controlledFleet();
+    const server = serve({ actions: fleet.actions });
+    const planned = decode(UiFixPlan, await (await server.post("/api/fixes/plan", { ids: ["laptop:skills-dangling", "laptop:skills-dangling"] })).text());
+    expect(planned.fixes).toHaveLength(1);
+    const fix = { id: planned.fixes[0]!.id, digest: planned.fixes[0]!.digest };
+    const job = await server.job("/api/fixes", { fixes: [fix, fix], acknowledged: [] });
+    expect(job.title).toBe("Apply 1 fix on 1 machine");
+    expect(job.applied?.results).toHaveLength(1);
+    expect(fleet.state.applied).toEqual(["rm ~/.claude/skills/foo"]);
+    expect((await server.post("/api/fixes", { fixes: [fix, { ...fix, digest: "other" }], acknowledged: [] })).status).toBe(400);
+    await server.dispose();
+  });
+
+  it("are forgotten a while after they finish, whether or not another starts", async () => {
+    const server = serve({ keepJobsFor: "100 millis" });
+    expect(await server.job("/api/skills/remove", { skills: ["review"] })).toMatchObject({ state: "done" });
+    expect(decode(Schema.Array(UiJob), await (await server.call("/api/jobs")).text())).toHaveLength(1);
+    await tick(300);
+    expect(decode(Schema.Array(UiJob), await (await server.call("/api/jobs")).text())).toEqual([]);
+    await server.dispose();
+  });
+
+  it("are waited for when the server stops, not stopped halfway", async () => {
+    const fleet = controlledFleet();
+    const server = serve({ actions: fleet.actions });
+    const planned = decode(UiFixPlan, await (await server.post("/api/fixes/plan", { ids: ["laptop:skills-dangling"] })).text());
+    fleet.state.applyGate = gate();
+    expect((await server.post("/api/fixes", { fixes: planned.fixes.map((f) => ({ id: f.id, digest: f.digest })), acknowledged: [] })).status).toBe(202);
+    await tick(50);
+
+    let stopped = false;
+    const stopping = server.dispose().then(() => (stopped = true));
+    await tick(100);
+    expect(server.drained).toEqual([["Apply 1 fix on 1 machine"]]);
+    expect(stopped).toBe(false);
+    expect(fleet.state.interrupted).toBe(false);
+
+    fleet.state.applyGate.open();
+    await stopping;
+    expect(fleet.state.applied).toEqual(["rm ~/.claude/skills/foo"]);
+    expect(fleet.state.interrupted).toBe(false);
   });
 });
