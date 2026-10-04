@@ -66,4 +66,39 @@ describe("TomlEdit", () => {
     expect(addToList('[mcp]\nservers = "x"\n', ["mcp"], "servers", ["y"])).toHaveProperty("error");
     expect(setKey("not toml = = 1", [], "x", 1)).toHaveProperty("error");
   });
+  it("keeps comments, handles lists over several lines, headers with comments and implicit tables", () => {
+    const text = [
+      "[defaults.mcp] # what every machine gets",
+      "servers = [",
+      '  "fetch", # the first',
+      '  "ctx",',
+      "] # end",
+      "hub = true # the relay serves them",
+      "",
+    ].join("\n");
+    const out = edits(
+      text,
+      (t) => addToList(t, ["defaults", "mcp"], "servers", ["posthog"]),
+      (t) => setKey(t, ["defaults", "mcp"], "hub", false),
+      (t) => setKey(t, ["defaults"], "note", "x"),
+    );
+    const result = "text" in out ? out.text : out.error;
+    expect(parse(result)).toEqual({
+      defaults: { note: "x", mcp: { servers: ["fetch", "ctx", "posthog"], hub: false } },
+    });
+    expect(result).toContain("# what every machine gets");
+    expect(result).toContain("hub = false # the relay serves them");
+    expect(result).toContain('servers = ["fetch", "ctx", "posthog"] # end');
+  });
+
+  it("adds tables to a list, skipping ones it has", () => {
+    const one = { src: "a", dest: "~/a" };
+    const first = text(setKey("", [], "instructions.remove", [one]));
+    const again = text(
+      addToList(first, [], "instructions.remove", [one, { src: "b", dest: "~/b" }]),
+    );
+    expect(parse(again)).toEqual({
+      "instructions.remove": [one, { src: "b", dest: "~/b" }],
+    });
+  });
 });
