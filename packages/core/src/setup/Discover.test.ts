@@ -57,4 +57,37 @@ describe("discover", () => {
     expect(fs.existsSync(ran)).toBe(false);
     expect(fs.existsSync(join(home, ".codex"))).toBe(false);
   });
+
+  it("knows a mise shim and a Homebrew cask, and says unknown rather than guess", async () => {
+    // Codex through a mise shim (mise itself from Homebrew), Claude from a cask.
+    const mise = join(home, "brew/Cellar/mise/2025.1.0/bin/mise");
+    agent(mise);
+    const shims = join(home, ".local/share/mise/shims");
+    fs.mkdirSync(shims, { recursive: true });
+    fs.symlinkSync(mise, join(shims, "codex"));
+    fs.mkdirSync(join(home, ".local/share/mise/installs/npm-openai-codex/0.161.0"), {
+      recursive: true,
+    });
+    const cask = join(home, "brew/Caskroom/claude-code/2.1.290/claude");
+    agent(cask);
+    const bin = join(home, "cask-bin");
+    fs.mkdirSync(bin);
+    fs.symlinkSync(cask, join(bin, "claude"));
+    const path = process.env["PATH"];
+    process.env["PATH"] = `${shims}:${bin}:/usr/bin:/bin`;
+    try {
+      const found = await run(discover({ taken: [], managed: null }));
+      expect(found.agents.map((a) => [a.name, a.version, a.installedBy])).toEqual([
+        ["claude", "2.1.290", "brew"],
+        ["codex", "0.161.0", "mise"],
+      ]);
+      // Two installs: which one the shim runs depends on mise's config.
+      fs.mkdirSync(join(home, ".local/share/mise/installs/npm-openai-codex/0.162.0"));
+      const again = await run(discover({ taken: [], managed: null }));
+      expect(again.agents.find((a) => a.name === "codex")?.version).toBeNull();
+    } finally {
+      process.env["PATH"] = path;
+    }
+    expect(fs.existsSync(ran)).toBe(false);
+  });
 });

@@ -136,19 +136,23 @@ export const nodeName = (hostname: string) =>
 /** A clone URL without credentials in it. */
 export const cleanUrl = (url: string) => url.replace(/^([a-z+]+:\/\/)[^@/]+@/i, "$1");
 
-/** How an agent CLI was installed, from where its binary really lives. */
-export const installedBy = (real: string) =>
-  real.includes("/node_modules/")
-    ? "npm"
-    : /\/Cellar\/|^\/opt\/homebrew\/|\/linuxbrew\//.test(real)
-      ? "brew"
-      : real.includes("/mise/")
-        ? "mise"
+/**
+ * How an agent CLI was installed, from the PATH entry and where it really
+ * lives: a mise shim resolves to mise itself, so the entry says it. Null
+ * when neither says.
+ */
+export const installedBy = (real: string, entry: string = real) =>
+  entry.includes("/mise/shims/") || real.includes("/mise/")
+    ? "mise"
+    : real.includes("/node_modules/")
+      ? "npm"
+      : /\/Cellar\/|\/Caskroom\/|^\/opt\/homebrew\/|\/linuxbrew\//.test(real)
+        ? "brew"
         : /\/\.local\/share\/claude\/|\/\.claude\/local\//.test(real)
           ? "native installer"
           : real.includes("/.bun/")
             ? "bun"
-            : "other";
+            : null;
 
 /** The files of a skill (not .git, not node_modules), hashed, and the newest one's time. */
 export const hashSkill = (dir: string) =>
@@ -375,7 +379,9 @@ export const discoverInstructions = (home: string, managed: string | null) =>
 const versionAt = (real: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const inPath = /\/(?:versions|Cellar\/[^/]+)\/(\d[^/]*)\//.exec(`${real}/`)?.[1];
+    const inPath = /\/(?:versions|Cellar\/[^/]+|Caskroom\/[^/]+|installs\/[^/]+)\/(\d[^/]*)\//.exec(
+      `${real}/`,
+    )?.[1];
     if (inPath !== undefined) return inPath;
     for (let dir = real.slice(0, real.lastIndexOf("/")); dir.includes("/node_modules/");) {
       const text = yield* fs.readFileString(`${dir}/package.json`).pipe(Effect.option);
@@ -386,6 +392,26 @@ const versionAt = (real: string) =>
       dir = dir.slice(0, dir.lastIndexOf("/"));
     }
     return null;
+  });
+/**
+ * A mise shim's version: the one install of the tool under mise's installs
+ * (npm-openai-codex/<v>, say). Several, or none: which one runs depends on
+ * mise's config, so unknown.
+ */
+const miseVersion = (shim: string, name: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const installs = `${shim.slice(0, shim.indexOf("/shims/"))}/installs`;
+    const tools = (yield* fs
+      .readDirectory(installs)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>))).filter((t) => t.includes(name));
+    const versions: Array<string> = [];
+    for (const tool of tools)
+      for (const v of yield* fs
+        .readDirectory(`${installs}/${tool}`)
+        .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+        if (/^\d/.test(v)) versions.push(v);
+    return versions.length === 1 ? (versions[0] ?? null) : null;
   });
 const PackageJson = Schema.fromJsonString(Schema.Struct({ version: Schema.String }));
 
@@ -402,11 +428,17 @@ const discoverRuntime = Effect.gen(function* () {
     const first = (yield* resolveAll(name, process.env["PATH"]))[0] ?? null;
     const real =
       first === null ? null : yield* fs.realPath(first).pipe(Effect.orElseSucceed(() => first));
+    const shim = first !== null && first.includes("/mise/shims/");
     agents.push({
       name,
       path: first,
-      version: real === null ? null : yield* versionAt(real),
-      installedBy: real === null ? null : installedBy(real),
+      version:
+        first === null || real === null
+          ? null
+          : shim
+            ? yield* miseVersion(first, name)
+            : yield* versionAt(real),
+      installedBy: first === null || real === null ? null : installedBy(real, first),
     });
   }
   const runtimeText = yield* fs
