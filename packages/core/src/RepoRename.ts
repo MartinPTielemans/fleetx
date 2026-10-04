@@ -27,7 +27,7 @@ export const addRenamedSecrets = (text: string) => {
   const lines = text.split("\n");
   const has = new Set(lines.map((l) => /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=/.exec(l)?.[1]).filter((k) => k !== undefined));
   const added: Array<string> = [];
-  for (const line of [...lines]) {
+  for (const line of lines) {
     const m = new RegExp(`^\\s*(?:export\\s+)?${LEGACY_SECRET_PREFIX}([A-Z0-9_]+)=(.*)$`).exec(line);
     if (m === null) continue;
     const name = `${SECRET_PREFIX}${m[1]}`;

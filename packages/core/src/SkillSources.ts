@@ -106,8 +106,8 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
     if (as !== undefined && wanted.length !== 1) return yield* Effect.fail("--as renames exactly one skill");
     const sources = yield* readSources(repo);
     const entry = { ...(sources.sources?.[sourceName] ?? { type: "github", url, skills: [] }) };
-    const paths: Record<string, string> = { ...(entry.paths ?? {}) };
-    const renamed: Record<string, string> = { ...(entry.renamed ?? {}) };
+    const paths: Record<string, string> = { ...entry.paths };
+    const renamed: Record<string, string> = { ...entry.renamed };
     const changed: Array<string> = [];
     for (const upstream of wanted) {
       const rel = available.get(upstream);
@@ -126,7 +126,7 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
     const skills = [...new Set([...entry.skills, ...wanted.map((w) => as ?? w)])].sort();
     yield* writeSources(repo, {
       ...sources,
-      sources: { ...(sources.sources ?? {}), [sourceName]: { ...entry, url, skills, paths, ...(Object.keys(renamed).length > 0 ? { renamed } : {}) } },
+      sources: { ...sources.sources, [sourceName]: { ...entry, url, skills, paths, ...(Object.keys(renamed).length > 0 ? { renamed } : {}) } },
     });
     return [...changed, "skills/SOURCES.json"];
   });
