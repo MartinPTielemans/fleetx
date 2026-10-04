@@ -143,7 +143,8 @@ const localStreak = (home: string) =>
 /**
  * Steps 1 and 2, the repo's part of a run: propose or commit, pull, push,
  * and on an authority approve what `auto_approve` trusts. Appends what it did
- * to `lines`; the config is the one pulled. Run holding the sync lock.
+ * to `lines`; the config is the one pulled, and the findings are about the
+ * repo on this node. Run holding the sync lock.
  */
 export const exchange = (startConfig: Config, startSelf: Node, lines: Array<string>) =>
   Effect.gen(function* () {
@@ -152,6 +153,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     let self = startSelf;
     let message = "";
     let failed = false;
+    const findings: Array<Finding> = [];
 
     // 1. Propose or commit changes under the auto-commit paths. A node
     //    whose last proposal was rejected first sets those edits aside.
@@ -177,8 +179,26 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       }
     }
 
-    // 2. Pull, then push what an authority committed.
-    const pulled = yield* pullBranch(repo, config.branch, self.roles.includes("authority") ? "rebase" : "ff-only").pipe(
+    // 2. Pull, then push what an authority committed. Any other node only
+    //    fast-forwards: it never commits. Commits made there by hand are
+    //    rebased along, as before, and named, since they reach no one.
+    let how: "rebase" | "ff-only" = self.roles.includes("authority") ? "rebase" : "ff-only";
+    if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+      const local = out(yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`])).split("\n").filter(Boolean);
+      if (local.length > 0) {
+        how = "rebase";
+        const some = local.length === 1 ? "a commit" : `${local.length} commits`;
+        findings.push({
+          node: self.name,
+          key: "sync-local-commits",
+          severity: "warn",
+          area: "sync",
+          title: `${some} here that ${config.branch} lacks (${local.slice(0, 3).join("; ")}${local.length > 3 ? "; …" : ""}): only an authority's commits reach the other machines`,
+          detail: `git -C ${repo} reset --soft origin/${config.branch} turns them back into edits, which the next sync proposes for approval.`,
+        });
+      }
+    }
+    const pulled = yield* pullBranch(repo, config.branch, how).pipe(
       Effect.catch((e: string) => Effect.sync(() => {
         failed = true;
         message = message || e;
@@ -235,7 +255,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       }
     }
 
-    return { failed, message, config, self };
+    return { failed, message, config, self, findings };
   });
 
 /** What a run found and did, for its report. */
@@ -392,7 +412,7 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
         failed,
         message,
         lines,
-        findings: findings.filter((f) => f.node === self.name),
+        findings: [...findings.filter((f) => f.node === self.name), ...exchanged.findings],
         applied,
         observation: selfResult.ok ? selfResult.observation : null,
       });

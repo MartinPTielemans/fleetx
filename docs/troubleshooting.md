@@ -278,8 +278,15 @@ are proposed, and only by `t3-fleet sync`. `t3-fleet review` on an authority lis
 what is waiting. A machine whose pull failed (its own edits overlap incoming
 changes, say) proposes nothing until a sync there pulls again.
 
+**`sync-local-commits`** — a machine without the authority role has commits
+of its own in the config repo. Only an authority's commits reach the other
+machines, so these go nowhere; sync rebases them along and keeps working.
+`git -C <repo> reset --soft origin/main` there turns them back into edits,
+which its next sync proposes for approval.
+
 **"…'s proposal is … now, not the … reviewed"** — the proposal changed after
-`t3-fleet review` showed it. Review it again and approve the commit it shows:
+`t3-fleet review` showed it, and is not the same change made again on a newer
+branch. Review it again and approve the commit it shows:
 `t3-fleet approve <node> <commit>`.
 
 **"…'s proposal conflicts with what reached main since it was made"** — an
@@ -291,8 +298,9 @@ it refuses: reject the proposal, or let that machine pull and propose again.
 that writes to the config repo (approve, reject, skills, secrets, invite, `repo
 rename`) waits its turn with sync, so sync never commits or proposes half an
 edit. The lock is `~/.local/state/t3-fleet/sync.lock`, holding the pid of its
-run; it is taken over once that process has died, never just because it is
-old, so a laptop asleep mid-sync keeps it. `listen` retries a sync it could
+run; it is taken over once that process has gone (died, or its pid reused
+after a reboot), never just because it is old, so a laptop asleep mid-sync
+keeps it. `listen` retries a sync it could
 not start.
 
 **"local edits to … conflicted with incoming changes; they are kept in git

@@ -3,8 +3,11 @@
  * run, or a command changing the repo (approve, skills, secrets, invite…).
  *
  * The lock is a directory, created atomically, holding its owner: pid, start
- * and a token. It goes stale only when that process has died, never after a
+ * and a token. It goes stale only when that process has gone, never after a
  * while: a laptop can sleep for hours in the middle of a sync and carry on.
+ * Gone means dead, or its pid now someone else's: the lock was taken before
+ * the machine last booted (a power loss), or the process at that pid started
+ * after the lock was taken.
  * A run only ever removes the lock holding its own token. A lock without an
  * owner (one an older build took, or whose process died between creating it
  * and writing the owner) goes stale after an hour, as before.
@@ -24,6 +27,9 @@ import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 
+import * as Duration from "effect/Duration";
+
+import { exec } from "./Exec.ts";
 import { stateDir } from "./Names.ts";
 
 const Owner = Schema.Struct({ pid: Schema.Number, start: Schema.Number, token: Schema.String });
@@ -42,6 +48,8 @@ export const SYNC_LOCK_ENV = "T3_FLEET_SYNC_LOCK";
 const ownerPath = (lock: string) => `${lock}/owner.json`;
 
 const OWNERLESS_STALE_MS = 3_600_000;
+/** Clocks and ps disagree by a second or so; a pid's new owner shows up long after. */
+const CLOCK_SLACK_MS = 60_000;
 const TAKEOVER_STALE_MS = 60_000;
 
 const alive = (pid: number) =>
@@ -53,6 +61,37 @@ const alive = (pid: number) =>
       // EPERM: it exists, under another user.
       return (cause as { code?: string }).code === "EPERM";
     }
+  });
+
+/** When this machine last booted, or none when it cannot tell. */
+const bootTime = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  if (process.platform === "darwin") {
+    const sysctl = yield* exec({ command: "sysctl", args: ["-n", "kern.boottime"], timeout: Duration.seconds(5) });
+    const sec = /sec = (\d+)/.exec(sysctl.stdout)?.[1];
+    return sec === undefined ? Option.none<number>() : Option.some(Number(sec) * 1000);
+  }
+  const stat = yield* fs.readFileString("/proc/stat").pipe(Effect.option);
+  const sec = Option.isSome(stat) ? /^btime (\d+)$/m.exec(stat.value)?.[1] : undefined;
+  return sec === undefined ? Option.none<number>() : Option.some(Number(sec) * 1000);
+});
+
+/** When the process now at `pid` started, or none when ps cannot say. */
+const processStart = (pid: number) =>
+  Effect.gen(function* () {
+    const ps = yield* exec({ command: "ps", args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, extendEnv: true, timeout: Duration.seconds(5) });
+    const at = ps.code === 0 ? Date.parse(ps.stdout.trim().replace(/\s+/g, " ")) : Number.NaN;
+    return Number.isNaN(at) ? Option.none<number>() : Option.some(at);
+  });
+
+/** Whether the run that wrote `owner` is still running. */
+const ownerRuns = (owner: Owner) =>
+  Effect.gen(function* () {
+    if (!(yield* alive(owner.pid))) return false;
+    const boot = yield* bootTime;
+    if (Option.isSome(boot) && owner.start < boot.value - CLOCK_SLACK_MS) return false;
+    const started = yield* processStart(owner.pid);
+    return !(Option.isSome(started) && started.value > owner.start + CLOCK_SLACK_MS);
   });
 
 const readOwner = (lock: string) =>
@@ -85,7 +124,7 @@ const lockState = (lock: string, now: number) =>
     if (Option.isSome(owner)) {
       const { pid, token } = owner.value;
       if (pid === process.pid) return heldHere.has(token) ? "held" : "stale";
-      return (yield* alive(pid)) ? "held" : "stale";
+      return (yield* ownerRuns(owner.value)) ? "held" : "stale";
     }
     const age = yield* ageOf(lock, now);
     if (Option.isNone(age)) return "free";
@@ -99,10 +138,18 @@ export const takeSyncLock = Effect.gen(function* () {
   yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
   const now = yield* Clock.currentTimeMillis;
   const owner: Owner = { pid: process.pid, start: now, token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}` };
+  // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
   const create = fs.makeDirectory(lock).pipe(
-    Effect.andThen(writeOwner(lock, owner)),
     Effect.as(true),
     Effect.orElseSucceed(() => false),
+    Effect.flatMap((made) =>
+      made
+        ? writeOwner(lock, owner).pipe(
+            Effect.as(true),
+            Effect.catch(() => fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false))),
+          )
+        : Effect.succeed(false),
+    ),
   );
   const mine = Effect.sync(() => {
     heldHere.add(owner.token);

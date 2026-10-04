@@ -1,7 +1,7 @@
 // A fleet in a temp directory: a bare remote and three clones, box (authority),
 // laptop and omarchy. The repo's part of a sync runs against them for real.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -16,7 +17,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom, type Config } from "./Config.ts";
-import { commitAndPush, pullBranch, statusEntries } from "./Git.ts";
+import { commitAndPush, pullBranch, putBackConflicted, statusEntries } from "./Git.ts";
 import { lastSyncPath } from "./Probe.ts";
 import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
@@ -171,6 +172,43 @@ describe("approving a proposal", () => {
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
   });
 
+  it("a conflict that also adds a file leaves no conflict markers for the next sync to push", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "a from laptop\n");
+    put(f.laptop, "skills/a/new.md", "new from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/a/SKILL.md", "a from box\n");
+    commitAll(f.box, "box edits a");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain("conflicts with what reached main");
+    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
+    expect(existsSync(join(f.box, "skills/a/new.md"))).toBe(false);
+    // The authority's next sync, auto-approve included, pushes nothing of it.
+    const result = await f.sync(f.box, "box");
+    expect(result.lines.join("\n")).toContain("could not auto-approve laptop's proposal");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from box\n");
+    expect(onMain(f.origin, "skills/a/new.md")).toBeNull();
+    expect(git(f.box, "worktree", "list")).not.toContain("approve");
+  });
+
+  it("approves the same change remade on a newer branch, though its commit changed", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "a v2\n");
+    await f.sync(f.laptop, "laptop");
+    const [reviewed] = await run(listProposals(f.box, "main"));
+    if (reviewed === undefined) return expect.unreachable();
+    // Main moves; laptop pulls and proposes the same change on the new base.
+    put(f.box, "README.md", "fleet, updated\n");
+    commitAll(f.box, "readme");
+    await f.sync(f.laptop, "laptop");
+    const [now] = await run(listProposals(f.box, "main"));
+    expect(now?.commit).not.toBe(reviewed.commit);
+    await run(approve(f.box, "main", reviewed, "box", reviewed.commit.slice(0, 7)));
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+  });
+
   it("a rejection sets aside only the edits the proposal made", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
@@ -222,6 +260,23 @@ describe("pulling", () => {
     expect(proposal?.files).toEqual(["skills/x/Ref Guide.md", "skills/x/SKILL.md"]);
   });
 
+  it("puts every conflicted file back, even one the checkout's HEAD does not have", async () => {
+    const f = makeFleet();
+    // Local edits, set aside the way --autostash does, then main changes a and deletes b.
+    put(f.laptop, "skills/a/SKILL.md", "a, local\n");
+    put(f.laptop, "skills/b/SKILL.md", "b, local\n");
+    git(f.laptop, "stash", "push", "-q");
+    put(f.laptop, "skills/a/SKILL.md", "a, branch\n");
+    git(f.laptop, "rm", "-q", "skills/b/SKILL.md");
+    git(f.laptop, "commit", "-qam", "branch");
+    spawnSync("git", ["stash", "apply"], { cwd: f.laptop });
+    expect(git(f.laptop, "diff", "--name-only", "--diff-filter=U").trim().split("\n").sort()).toEqual(["skills/a/SKILL.md", "skills/b/SKILL.md"]);
+    expect((await run(putBackConflicted(f.laptop))).sort()).toEqual(["skills/a/SKILL.md", "skills/b/SKILL.md"]);
+    expect(git(f.laptop, "status", "--porcelain")).toBe("");
+    expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a, branch\n");
+    expect(git(f.laptop, "stash", "list")).not.toBe("");
+  });
+
   it("aborts a conflicted rebase and says so", async () => {
     const f = makeFleet();
     put(f.box, "skills/a/SKILL.md", "a from box\n");
@@ -231,6 +286,23 @@ describe("pulling", () => {
     expect(await fails(pullBranch(f.box, "main", "rebase"))).toContain("conflicted");
     expect(existsSync(join(f.box, ".git", "rebase-merge"))).toBe(false);
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
+  });
+
+  it("a member with a commit of its own rebases it along, still proposes, and names it", async () => {
+    const f = makeFleet();
+    put(f.laptop, "README.md", "committed here by hand\n");
+    git(f.laptop, "commit", "-qam", "notes");
+    const mine = git(f.laptop, "rev-parse", "--short", "HEAD").trim();
+    put(f.laptop, "skills/a/SKILL.md", "a v2\n");
+    put(f.box, "skills/b/SKILL.md", "b v2\n");
+    commitAll(f.box, "b");
+    const result = await f.sync(f.laptop, "laptop");
+    expect(result.failed).toBe(false);
+    expect(result.lines.join("\n")).toContain("proposed 1 file");
+    expect(read(f.laptop, "skills/b/SKILL.md")).toBe("b v2\n");
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-local-commits"]);
+    expect(result.findings[0]?.title).toContain(`${mine} notes`);
+    expect(result.findings[0]?.detail).toContain("reset --soft origin/main");
   });
 
   it("a member fast-forwards, keeping unrelated local edits", async () => {
@@ -325,9 +397,31 @@ describe("the sync lock's owner", () => {
 
   it("stays held while its process lives, however old (a laptop asleep mid-sync)", async () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
-    writeLock({ pid: process.ppid, start: 0, token: "asleep" });
+    // pid 1 has run since boot, so long before this lock was taken.
+    writeLock({ pid: 1, start: await run(Clock.currentTimeMillis), token: "asleep" });
     execFileSync("touch", ["-t", "200001010000", syncLockPath(process.env["HOME"] ?? "")]);
     expect(await run(takeSyncLock)).toBeNull();
+  });
+
+  it("is taken over when it was taken before the machine booted (a power loss), though its pid lives", async () => {
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
+    writeLock({ pid: 1, start: 1, token: "before-boot" });
+    const token = await run(takeSyncLock);
+    expect(token).not.toBeNull();
+    if (token !== null) await run(releaseSyncLock(token));
+  });
+
+  it("is taken over when its pid now belongs to a process started after it", async () => {
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
+    const other = spawn("sleep", ["30"]);
+    try {
+      writeLock({ pid: other.pid, start: (await run(Clock.currentTimeMillis)) - 600_000, token: "reused" });
+      const token = await run(takeSyncLock);
+      expect(token).not.toBeNull();
+      if (token !== null) await run(releaseSyncLock(token));
+    } finally {
+      other.kill();
+    }
   });
 
   it("is released only by the run whose token it holds", async () => {
@@ -342,7 +436,7 @@ describe("the sync lock's owner", () => {
 
   it("lets a process the holder started through, with its token", async () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
-    writeLock({ pid: process.ppid, start: 1, token: "the-sync" });
+    writeLock({ pid: 1, start: await run(Clock.currentTimeMillis), token: "the-sync" });
     expect(await fails(underSyncLock(Effect.succeed("ran")))).toContain("a sync is running");
     process.env[SYNC_LOCK_ENV] = "the-sync";
     try {

@@ -146,13 +146,28 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
     // Putting the local edits back can still conflict, and git calls that
     // success. Never leave conflict markers in a live file: take the branch's
     // version there; the edits stay in git stash.
-    const conflicted = yield* unmergedFiles(repo);
+    const conflicted = yield* putBackConflicted(repo);
     if (conflicted.length > 0) {
-      yield* git(repo, ["reset", "-q", "--", ...conflicted], { env: literal });
-      yield* git(repo, ["checkout", "-q", "HEAD", "--", ...conflicted], { env: literal });
       return yield* Effect.fail(`local edits to ${conflicted.join(", ")} conflicted with incoming changes; they are kept in git stash`);
     }
     return behind;
+  });
+
+/**
+ * Every conflicted file back to HEAD's version, one at a time: a file HEAD
+ * does not have (deleted there, or added only by the other side) is removed,
+ * and one failing never leaves the others with conflict markers. The files.
+ */
+export const putBackConflicted = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const conflicted = yield* unmergedFiles(repo);
+    for (const file of conflicted) {
+      yield* git(repo, ["reset", "-q", "--", file], { env: literal });
+      if (ok(yield* git(repo, ["cat-file", "-e", `HEAD:${file}`]))) yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
+      else yield* fs.remove(`${repo}/${file}`, { force: true }).pipe(Effect.ignore);
+    }
+    return conflicted;
   });
 
 /**
