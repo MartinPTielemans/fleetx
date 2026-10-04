@@ -21,65 +21,14 @@ const observed = (over: Record<string, unknown> = {}) => ({
   root: false,
   nodePath: "/usr/bin/node",
   timer: { installed: null, want: null, loaded: false },
-  legacy: [],
-  repoRenamed: false,
   ...over,
-});
-
-const repoNames = (
-  fleet: ReadonlyArray<{ node: string; observed: ReturnType<typeof observed> }>,
-  nodes: ReadonlyArray<string>,
-) =>
-  EngineArea.diagnose({
-    node: "mac",
-    desired: undefined,
-    observed: fleet.find((e) => e.node === "mac")?.observed,
-    fleet: fleet.map((e) => ({ ...e, desired: undefined })),
-    authority: "mac",
-    nodes,
-  }).find((f) => f.key === "engine-repo-names");
-
-describe("engine-repo-names", () => {
-  it("offers the rename on the authority once every configured machine runs this build", () => {
-    const ready = repoNames(
-      [
-        { node: "mac", observed: observed() },
-        { node: "box", observed: observed() },
-      ],
-      ["mac", "box"],
-    );
-    expect(ready).toMatchObject({
-      severity: "warn",
-      fix: { command: "t3-fleet repo rename", safe: false },
-    });
-  });
-
-  it("only notes it while a machine runs another build or cannot be reached", () => {
-    const behind = repoNames(
-      [
-        { node: "mac", observed: observed() },
-        { node: "box", observed: observed({ installed: "old" }) },
-      ],
-      ["mac", "box"],
-    );
-    expect(behind).toMatchObject({ severity: "info" });
-    expect(behind?.fix).toBeUndefined();
-    const unreachable = repoNames([{ node: "mac", observed: observed() }], ["mac", "box"]);
-    expect(unreachable?.fix).toBeUndefined();
-  });
-
-  it("says nothing once the repo is renamed", () => {
-    expect(
-      repoNames([{ node: "mac", observed: observed({ repoRenamed: true }) }], ["mac"]),
-    ).toBeUndefined();
-  });
 });
 
 const outdated = (over: Record<string, unknown>) =>
   EngineArea.diagnose({
     node: "box",
     desired: undefined,
-    observed: observed({ wanted: "new", installed: "old", repoRenamed: true, ...over }),
+    observed: observed({ wanted: "new", installed: "old", ...over }),
     fleet: [],
     authority: null,
   }).find((f) => f.key === "engine-outdated" || f.key === "engine-newer-here");
@@ -247,19 +196,13 @@ describe("engine-timer on macOS", () => {
     expect(pending()).toBe(false);
   });
 
-  it("inside the job, removes the timer and fleetx's with one helper", async () => {
-    const fix = timerFix(
-      true,
-      { installed: "<old/>", want: null, loaded: true, legacy: true },
-      { timer: false },
-    );
+  it("inside the job, removes the timer only after that sync has exited", async () => {
+    const fix = timerFix(true, { installed: "<old/>", want: null, loaded: true }, { timer: false });
     expect(fix.match(/spawn\(/g)).toHaveLength(1);
     const { early, calls, settled } = run(fix);
     expect(early).toBe("");
-    await settled(() => calls().includes("dev.fleetx.sync"));
-    expect(calls()).toMatch(
-      /bootout gui\/\d+\/dev\.t3-fleet\.sync\nbootout gui\/\d+\/dev\.fleetx\.sync/,
-    );
+    await settled(() => calls().includes("bootout"));
+    expect(calls()).toMatch(/^bootout gui\/\d+\/dev\.t3-fleet\.sync\n$/);
   });
 
   it("leaves the pending marker when the deferred reload fails", async () => {
@@ -328,7 +271,6 @@ describe("engine-local-config", () => {
       desired: undefined,
       observed: observed({
         local: { want: 'repo = "~/fleet"\nnode = "mac"\n', matches: false },
-        repoRenamed: true,
       }),
       fleet: [],
       authority: null,

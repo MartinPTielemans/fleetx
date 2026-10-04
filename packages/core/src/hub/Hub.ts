@@ -91,7 +91,7 @@ import {
   type Upstream,
   type UpstreamResponse,
 } from "./Upstream.ts";
-import { configDir, header, legacyHeader, stateDir as fleetStateDir } from "../Names.ts";
+import { configDir, header, stateDir as fleetStateDir } from "../Names.ts";
 
 export interface HubEvent {
   readonly server: string;
@@ -253,11 +253,7 @@ const counted = (inner: Upstream) => {
   return { upstream, inFlight: Effect.sync(() => inFlight) };
 };
 
-/** Sent under its fleetx name too, for a controller on a build from before the rename. Until 1.0. */
-const stateHeaders = (state: string) => ({
-  [header("hub-state")]: state,
-  [legacyHeader("hub-state")]: state,
-});
+const stateHeaders = (state: string) => ({ [header("hub-state")]: state });
 
 const jsonRpcFailure = (
   status: number,

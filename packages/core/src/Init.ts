@@ -21,7 +21,7 @@ import {
   writeRecipients,
   writeSecrets,
 } from "./Secrets.ts";
-import { configDir, FLEET_FILE, LEGACY_FLEET_FILE } from "./Names.ts";
+import { configDir, FLEET_FILE } from "./Names.ts";
 
 export interface Discovery {
   readonly node: string;
@@ -194,10 +194,8 @@ export const createRepo = (repo: string, found: Discovery) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = process.env["HOME"] ?? "";
-    for (const file of [FLEET_FILE, LEGACY_FLEET_FILE]) {
-      if (yield* fs.exists(path.join(repo, file)).pipe(Effect.orElseSucceed(() => false))) {
-        return yield* Effect.fail(`${repo} already has a ${file}`);
-      }
+    if (yield* fs.exists(path.join(repo, FLEET_FILE)).pipe(Effect.orElseSucceed(() => false))) {
+      return yield* Effect.fail(`${repo} already has a ${FLEET_FILE}`);
     }
     for (const dir of ["nodes", "skills", "mcp", "dotfiles"])
       yield* fs.makeDirectory(path.join(repo, dir), { recursive: true });

@@ -39,8 +39,8 @@ Ticked items are done and in `main`.
 
 ## Phase 2: git sync
 
-- [x] `fleetx/state/<node>` branches: each node publishes its own state
-- [x] `fleetx/staging/<node>` branches: proposals; rejections set aside on the node
+- [x] `t3-fleet/state/<node>` branches: each node publishes its own state
+- [x] `t3-fleet/staging/<node>` branches: proposals; rejections set aside on the node
 - [x] `sync`: propose, pull (refusing real overlaps), converge, report, alert; config reloaded after pulling
 - [x] Timers (launchd, systemd user and system units)
 - [x] `review`, `approve`, `reject`; `[fleet] auto_approve`
@@ -86,25 +86,20 @@ Ticked items are done and in `main`.
 - [x] The author's fleet on the hub and the model proxy (claude routed on every
       machine; codex stays on CLIProxyAPI with `route = false`)
 
-## Rename: fleetx → T3 Fleet
+## Rename to T3 Fleet
 
-- [x] Command `t3-fleet` (`fleetx` an alias until 1.0); packages, docs, UI
-- [x] Machine-local names (Names.ts): directories read under either name and
-      moved by `engine-legacy-dirs`; units, launchers, hub containers replaced
-      or adopted; headers between machines sent and read under both names
-- [x] Releases carry `t3-fleet.mjs` and `fleetx.mjs`; install script, Nix and
-      Homebrew keep working
+- [x] Command `t3-fleet`; packages, docs, UI
+- [x] Machine-local names (Names.ts): directories, units, launchers, hub
+      containers, headers between machines
+- [x] Releases carry `t3-fleet.mjs`; install script, Nix and Homebrew use it
 - [x] The author's fleet upgraded and migrated (2026-10-04)
-- [x] Config repo names: `t3-fleet repo rename` (`engine-repo-names`, offered on
-      the authority once every machine runs the controller's build) moves
-      `fleetx.toml` → `t3-fleet.toml` and `fleetx/state|staging|rejected` →
-      `t3-fleet/…`, and adds every `FLEETX_*` secret as `T3_FLEET_*`
+- [x] Config repo names: `t3-fleet.toml`, `t3-fleet/state|staging|rejected`
+      branches, `T3_FLEET_*` secrets
 - [x] The author's config repo renamed
-- [ ] 1.0: variables agents read from T3's environment (`FLEETX_RELAY_TOKEN`,
-      `token_env = "FLEETX_MCP_TOKEN_*"`) renamed and the `FLEETX_*` secrets
-      dropped, together with a T3 restart on every machine
+- [x] The fleetx names dropped in 0.8, before 1.0: the author's fleet was the
+      only one that had them; its old secret copies and leftover links are
+      removed by hand
 - [ ] GitHub repository, npm package and Homebrew formula renamed (owner)
-- [ ] 1.0: drop the old names (alias, both headers, legacy reads, `fleetx.mjs`)
 
 ## Migration (the author's own fleet)
 

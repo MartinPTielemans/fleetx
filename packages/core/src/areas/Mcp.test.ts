@@ -41,14 +41,10 @@ describe("mcp area: where clients connect", () => {
       });
     }
     expect(
-      resolveEndpoint("r", remote, { ...desired, token_env: "FLEETX_MCP_TOKEN_LAPTOP" }, home)
+      resolveEndpoint("r", remote, { ...desired, token_env: "T3_FLEET_MCP_TOKEN_LAPTOP" }, home)
         .endpoint,
-    ).toMatchObject({ tokenEnv: "FLEETX_MCP_TOKEN_LAPTOP" });
+    ).toMatchObject({ tokenEnv: "T3_FLEET_MCP_TOKEN_LAPTOP" });
     expect(resolveEndpoint("r", remote, { hub: true }, home).problem).toMatch(/no \[mcp\] gateway/);
-    // A fleet that has the relay token under its fleetx name keeps using it.
-    expect(
-      resolveEndpoint("r", remote, desired, home, "FLEETX_RELAY_TOKEN").endpoint,
-    ).toMatchObject({ tokenEnv: "FLEETX_RELAY_TOKEN" });
   });
 
   it("keeps the ports path for fleets without the hub", () => {

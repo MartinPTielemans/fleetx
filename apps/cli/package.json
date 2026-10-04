@@ -1,6 +1,6 @@
 {
   "name": "t3-fleet",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "private": false,
   "description": "Keep every machine you run T3 Code on equivalent.",
   "license": "MIT",
@@ -9,7 +9,6 @@
     "url": "git+https://github.com/MartinPTielemans/fleetx.git"
   },
   "bin": {
-    "fleetx": "./dist/bin.mjs",
     "t3-fleet": "./dist/bin.mjs"
   },
   "files": [

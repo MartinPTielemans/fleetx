@@ -17,8 +17,7 @@
           pname = "t3-fleet";
           inherit (release) version;
           src = pkgs.fetchurl {
-            # Every release until 1.0 carries the bundle as fleetx.mjs too; releases before the rename only that.
-            url = "https://github.com/MartinPTielemans/fleetx/releases/download/v${release.version}/fleetx.mjs";
+            url = "https://github.com/MartinPTielemans/fleetx/releases/download/v${release.version}/t3-fleet.mjs";
             inherit (release) hash;
           };
           dontUnpack = true;
@@ -26,7 +25,6 @@
           installPhase = ''
             install -Dm644 $src $out/libexec/t3-fleet.mjs
             makeWrapper ${pkgs.nodejs_24}/bin/node $out/bin/t3-fleet --add-flags $out/libexec/t3-fleet.mjs
-            ln -s t3-fleet $out/bin/fleetx
           '';
           meta = {
             description = "Keep every machine you run T3 Code on equivalent";
@@ -35,8 +33,6 @@
             mainProgram = "t3-fleet";
           };
         };
-        # The package's name before the rename. Until 1.0.
-        fleetx = t3-fleet;
         default = t3-fleet;
       });
     };

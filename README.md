@@ -162,29 +162,6 @@ when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
 does too), it stops installing its build on other machines until you restart
 it, since that would put the old build back.
 
-## Renamed from fleetx
-
-T3 Fleet was called fleetx until 0.5. Machines set up before then keep
-working: the new build reads the old names, `fleetx` stays as another name for
-`t3-fleet` until 1.0, and upgrading is the usual fix run from the machine you
-work on:
-
-```
-$ t3-fleet fix
-```
-
-It installs the new build on every machine, moves `~/.config/fleetx` and the
-other directories to their `t3-fleet` names (leaving links behind), replaces
-the timer, relay and model proxy services, and points T3 at the renamed model
-launchers.
-
-The config repo's own names move after that, in one step on the authority,
-once every machine runs a build that reads both: `fleetx.toml` becomes
-`t3-fleet.toml`, the `fleetx/state`, `fleetx/staging` and `fleetx/rejected`
-branches become `t3-fleet/…`, and the `FLEETX_*` secrets get `T3_FLEET_*`
-names (the old ones stay until 1.0). `t3-fleet status` offers it as
-`engine-repo-names` when the fleet is ready; it runs `t3-fleet repo rename`.
-
 ## Documentation
 
 - [Quickstart](docs/quickstart.md): one machine to two in five minutes

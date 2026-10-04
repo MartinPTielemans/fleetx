@@ -14,16 +14,12 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { Config } from "./Config.ts";
-import { legacySecretName } from "./Names.ts";
 import { localSecretsPath } from "./Secrets.ts";
 import { NodeState } from "./State.ts";
 
 export const RELAY_TOKEN = "T3_FLEET_RELAY_TOKEN";
 
-/**
- * A variable from this node's installed secrets, or the environment. A
- * T3_FLEET_ secret not set yet is read under its fleetx name. Until 1.0.
- */
+/** A variable from this node's installed secrets, or the environment. */
 export const secretVar = (name: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -36,13 +32,7 @@ export const secretVar = (name: string) =>
       if (m?.[1] !== undefined)
         values.set(m[1], (m[2] ?? "").replace(/^"(.*)"$/, "$1").replace(/\\(.)/g, "$1"));
     }
-    const legacy = legacySecretName(name);
-    return (
-      values.get(name) ??
-      process.env[name] ??
-      (legacy === null ? undefined : (values.get(legacy) ?? process.env[legacy])) ??
-      ""
-    );
+    return values.get(name) ?? process.env[name] ?? "";
   });
 
 const relayOf = (config: Config) => config.settings.relay?.url?.replace(/\/+$/, "") ?? null;

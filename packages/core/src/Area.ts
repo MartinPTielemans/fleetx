@@ -62,8 +62,6 @@ export interface DiagnoseContext<D, O> {
   }>;
   /** The node with the authority role, which fixes that change the repo run on; null if none. */
   readonly authority: string | null;
-  /** Every configured node, reachable or not; `fleet` has only those observed. */
-  readonly nodes?: ReadonlyArray<string>;
 }
 
 export interface Area<D, O> {

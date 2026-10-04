@@ -26,19 +26,14 @@ jobs:
           jq --arg v "$version" '.version = $v' apps/cli/package.json > /tmp/p && mv /tmp/p apps/cli/package.json
           pnpm --filter t3-fleet build
           cp apps/cli/dist/bin.mjs t3-fleet.mjs
-          # The same bundle under its name before the rename, for older install scripts,
-          # the Homebrew formula and the Nix flake. Until 1.0.
-          cp t3-fleet.mjs fleetx.mjs
-          sha256sum t3-fleet.mjs fleetx.mjs install.sh > SHA256SUMS
+          sha256sum t3-fleet.mjs install.sh > SHA256SUMS
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            t3-fleet.mjs
-            fleetx.mjs
+          subject-path: t3-fleet.mjs
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" t3-fleet.mjs fleetx.mjs install.sh SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" t3-fleet.mjs install.sh SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
       - name: npm (when an NPM_TOKEN secret is configured)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -63,7 +58,8 @@ jobs:
           sha=$(sha256sum t3-fleet.mjs | cut -d' ' -f1)
           git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/MartinPTielemans/homebrew-tap.git" tap
           cd tap
-          sed -i -e "s#releases/download/v[^/]*/fleetx.mjs#releases/download/v${version}/fleetx.mjs#" \
+          # The formula keeps its file name until the owner renames it; its URL names t3-fleet.mjs.
+          sed -i -e "s#releases/download/v[^/]*/[^/\"]*\.mjs#releases/download/v${version}/t3-fleet.mjs#" \
                  -e "s/^  version \".*\"/  version \"${version}\"/" \
                  -e "s/^  sha256 \".*\"/  sha256 \"${sha}\"/" Formula/fleetx.rb
           git config user.name "github-actions[bot]"

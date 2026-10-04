@@ -21,7 +21,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import { launchdLabel, SH_CONFIG_DIR, SH_STATE_DIR, STATE_DIR, systemdUnit } from "../Names.ts";
-import { launchdReload, retireLegacyUnit } from "../Runtime.ts";
+import { launchdReload } from "../Runtime.ts";
 import { MODELS_PORT, proxyUrl, type Recipe } from "./Recipes.ts";
 
 /** A double-quoted shell word, with {proxy} becoming the launcher's $proxy. */
@@ -169,7 +169,6 @@ export const serviceInstall = (platform: string, root: boolean, text: string) =>
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"`;
     return [
-      retireLegacyUnit(platform, root, "models"),
       `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       write(plist),
       // The proxy being replaced may drain for up to its ExitTimeOut before it is gone.
@@ -179,7 +178,6 @@ export const serviceInstall = (platform: string, root: boolean, text: string) =>
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
   return [
-    retireLegacyUnit(platform, root, "models"),
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     write(`${dir}/${SERVICE_UNIT}.service`),
     ...(root

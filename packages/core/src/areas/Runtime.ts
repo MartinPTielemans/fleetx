@@ -27,7 +27,7 @@ const Observed = Schema.Struct({
     Schema.Struct({ url: Schema.String, reachable: Schema.Boolean, detail: Schema.String }),
   ),
   localBinOnPath: Schema.Boolean,
-  fleetxGitConfig: Schema.Boolean,
+  fleetGitConfig: Schema.Boolean,
 });
 
 /** The same file Git.ensureGitConfig writes, for a node T3 Fleet is not installed on. */
@@ -57,7 +57,7 @@ export const RuntimeArea = defineArea({
             m !== null && /github\.com/.test(m[2] ?? "") && /^(git@|ssh:)/.test(m[1] ?? ""),
         )
         .map((m) => `${m[2]} -> ${m[1]}`);
-      const fleetxGitConfig =
+      const fleetGitConfig =
         (yield* exec({
           command: "test",
           args: ["-f", gitConfigPath(ctx.home)],
@@ -71,7 +71,7 @@ export const RuntimeArea = defineArea({
         timeout: Duration.seconds(5),
       });
       let remote: (typeof Observed.Type)["remote"] = null;
-      if (url.code === 0 && fleetxGitConfig) {
+      if (url.code === 0 && fleetGitConfig) {
         // As T3 Fleet's sync timer would: its own git config, no prompts, no SSH agent.
         const ls = yield* exec({
           command: "git",
@@ -97,7 +97,7 @@ export const RuntimeArea = defineArea({
           // Installers write entries like ~/.local/share/../bin; compare resolved paths.
           .map((d) => path.normalize(d.replace(/^~(?=\/)/, ctx.home)).replace(/\/+$/, ""))
           .includes(`${ctx.home}/.local/bin`),
-        fleetxGitConfig,
+        fleetGitConfig,
       };
     }),
   diagnose: ({ node, observed }) => {
@@ -112,7 +112,7 @@ export const RuntimeArea = defineArea({
         title: `Node ${observed.node} is older than ${MIN_NODE_MAJOR}; T3 Fleet and T3 need ${MIN_NODE_MAJOR}+`,
       });
     }
-    if (!observed.fleetxGitConfig) {
+    if (!observed.fleetGitConfig) {
       out.push({
         ...base,
         key: "t3-fleet-git-config-missing",

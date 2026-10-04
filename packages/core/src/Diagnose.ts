@@ -760,7 +760,6 @@ const areaFindings = (
             observed: entry.observed,
             fleet,
             authority,
-            nodes: nodes.map((n) => n.name),
           }),
         );
       } catch (error) {
