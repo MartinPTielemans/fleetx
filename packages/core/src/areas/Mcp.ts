@@ -76,7 +76,11 @@ export const Endpoint = Schema.Union([
 ]);
 export type Endpoint = typeof Endpoint.Type;
 
-/** What a client has registered under a name. */
+/**
+ * What a client has registered under a name. `kept` lists settings it has
+ * that a definition cannot express (an `env`, headers besides Authorization,
+ * Codex's per-server options): names only, since observations are published.
+ */
 const Registered = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("http"),
@@ -84,10 +88,36 @@ const Registered = Schema.Union([
     auth: Schema.Boolean,
     /** Whether the credential it sends is the declared one (only a yes or no: observations are published). */
     credential: Schema.optionalKey(Schema.Boolean),
+    kept: Schema.optionalKey(Schema.Array(Schema.String)),
   }),
-  Schema.Struct({ type: Schema.Literal("stdio"), command: Schema.String, args: Schema.Array(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal("other") }),
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    command: Schema.String,
+    args: Schema.Array(Schema.String),
+    kept: Schema.optionalKey(Schema.Array(Schema.String)),
+  }),
+  Schema.Struct({ type: Schema.Literal("other"), kept: Schema.optionalKey(Schema.Array(Schema.String)) }),
 ]);
+
+/**
+ * Settings of a client's entry that re-registering from a definition would
+ * drop: everything but the fields T3 Fleet writes, and empty or default values.
+ */
+export const keptSettings = (entry: Readonly<Record<string, unknown>>, writes: ReadonlyArray<string>): Array<string> => {
+  const kept: Array<string> = [];
+  for (const [key, value] of Object.entries(entry)) {
+    if (writes.includes(key) || value === undefined || value === null || (key === "enabled" && value === true)) continue;
+    if (key === "headers" && typeof value === "object") {
+      for (const header of Object.keys(value)) if (header.toLowerCase() !== "authorization") kept.push(`header ${header}`);
+      continue;
+    }
+    if (typeof value === "object" && Object.keys(value).length === 0) continue;
+    kept.push(key);
+  }
+  return kept;
+};
+const CLAUDE_WRITES = ["type", "url", "command", "args"];
+const CODEX_WRITES = ["url", "bearer_token_env_var", "command", "args"];
 type Registered = typeof Registered.Type;
 
 const Observed = Schema.Struct({
@@ -123,6 +153,10 @@ const ClaudeJson = Schema.Struct({
       }),
     ),
   ),
+});
+
+const ClaudeJsonRaw = Schema.Struct({
+  mcpServers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))),
 });
 
 const INITIALIZE = JSON.stringify({
@@ -288,6 +322,10 @@ export const McpArea = defineArea({
       const claude = Option.isSome(claudeText)
         ? Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(ClaudeJson))(claudeText.value))?.mcpServers ?? {}
         : {};
+      // The same entries with every field, for what re-registering would drop.
+      const claudeRaw = Option.isSome(claudeText)
+        ? Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(ClaudeJsonRaw))(claudeText.value))?.mcpServers ?? {}
+        : {};
       const codexText = yield* fs.readFileString(path.join(ctx.home, ".codex/config.toml")).pipe(Effect.option);
       const codexAll = Option.isSome(codexText)
         ? ((yield* Effect.try(() => parseToml(codexText.value)).pipe(Effect.orElseSucceed(() => ({})))) as { mcp_servers?: Record<string, Record<string, unknown>> }).mcp_servers ?? {}
@@ -297,6 +335,8 @@ export const McpArea = defineArea({
       const fromClaude = (name: string, tokenEnv: string | null, token: string | undefined): Registered | null => {
         const e = claude[name];
         if (e === undefined) return null;
+        const kept = keptSettings(claudeRaw[name] ?? {}, CLAUDE_WRITES);
+        const keeps = kept.length === 0 ? {} : { kept };
         if (e.url !== undefined) {
           const header = e.headers?.["Authorization"];
           return {
@@ -304,20 +344,23 @@ export const McpArea = defineArea({
             url: e.url,
             auth: header !== undefined,
             ...(tokenEnv === null || token === undefined || header === undefined ? {} : { credential: header === `Bearer ${token}` }),
+            ...keeps,
           };
         }
-        if (e.command !== undefined) return { type: "stdio", command: e.command, args: e.args ?? [] };
-        return { type: "other" };
+        if (e.command !== undefined) return { type: "stdio", command: e.command, args: e.args ?? [], ...keeps };
+        return { type: "other", ...keeps };
       };
       const fromCodex = (name: string, tokenEnv: string | null): Registered | null => {
         const e = codexAll[name];
         if (e === undefined) return null;
+        const kept = keptSettings(e, CODEX_WRITES);
+        const keeps = kept.length === 0 ? {} : { kept };
         if (typeof e["url"] === "string") {
           const env = e["bearer_token_env_var"];
-          return { type: "http", url: e["url"], auth: typeof env === "string", ...(tokenEnv === null || typeof env !== "string" ? {} : { credential: env === tokenEnv }) };
+          return { type: "http", url: e["url"], auth: typeof env === "string", ...(tokenEnv === null || typeof env !== "string" ? {} : { credential: env === tokenEnv }), ...keeps };
         }
-        if (typeof e["command"] === "string") return { type: "stdio", command: e["command"], args: (e["args"] as Array<string> | undefined) ?? [] };
-        return { type: "other" };
+        if (typeof e["command"] === "string") return { type: "stdio", command: e["command"], args: (e["args"] as Array<string> | undefined) ?? [], ...keeps };
+        return { type: "other", ...keeps };
       };
 
       // Secrets for live checks: the node's t3-fleet secrets file, then the environment.
@@ -422,14 +465,21 @@ export const McpArea = defineArea({
         );
       }
       if (fixes.length > 0) {
-        const which = [observed.clients.claude && !sameEndpoint(e, s.claude) ? "Claude" : "", observed.clients.codex && !sameEndpoint(e, s.codex) ? "Codex" : ""].filter(Boolean).join(" and ");
+        const redo = { claude: observed.clients.claude && !sameEndpoint(e, s.claude), codex: observed.clients.codex && !sameEndpoint(e, s.codex) };
+        const which = [redo.claude ? "Claude" : "", redo.codex ? "Codex" : ""].filter(Boolean).join(" and ");
+        // Re-registering replaces the entry, so what only the old one had would be lost: a person decides.
+        const dropped = [
+          ...(redo.claude ? (s.claude?.kept ?? []).map((k) => `Claude's ${k}`) : []),
+          ...(redo.codex ? (s.codex?.kept ?? []).map((k) => `Codex's ${k}`) : []),
+        ];
+        const target = e.type === "http" ? e.url : `${e.command} ${e.args.join(" ")}`.trim();
         out.push({
           ...base,
           key: `mcp-${s.name}-unregistered`,
           severity: "warn",
           title: `MCP server ${s.name} is not registered as declared in ${which}`,
-          detail: e.type === "http" ? e.url : `${e.command} ${e.args.join(" ")}`.trim(),
-          fix: { command: fixes.join("\n"), safe: true },
+          detail: dropped.length === 0 ? target : `${target}; re-registering drops ${dropped.join(", ")}, which the definition does not have`,
+          fix: { command: fixes.join("\n"), safe: dropped.length === 0 },
         });
       }
       if (s.live !== null && s.live !== "ok" && s.live !== NEEDS_LOGIN) {

@@ -238,6 +238,7 @@ export const probeSettings = (config: Config, node?: Node, engine?: string): Pro
     : { proxy: { credentials: config.settings.proxy.credentials, launchers: config.settings.proxy.launchers } }),
   ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name, roles: node.roles }),
   ...(config.settings.relay === undefined ? {} : { relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 } }),
-  checkout: config.checkout,
+  // This machine uses the repo it loaded, wherever it is (join --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
+  checkout: node?.ssh === null ? config.repo : config.checkout,
   ...(config.settings.plugins?.areas === undefined ? {} : { plugins: config.settings.plugins.areas }),
 });

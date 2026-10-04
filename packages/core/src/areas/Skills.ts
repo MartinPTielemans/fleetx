@@ -12,6 +12,10 @@
  * A skill installed outside T3 Fleet (a real directory with a SKILL.md) is a
  * stray. It is not deleted: the fix proposes it for the repo, where an
  * authority approves it (t3-fleet skills adopt).
+ *
+ * A real directory where a link belongs is kept as a backup under
+ * ~/.local/state/t3-fleet/skill-backups, outside every directory scanned for
+ * strays, so it never comes back as a skill of its own.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -21,6 +25,7 @@ import * as Schema from "effect/Schema";
 
 import { defineArea, sh, shPath } from "../Area.ts";
 import { expandHome } from "../Config.ts";
+import { SH_STATE_DIR } from "../Names.ts";
 import type { Finding } from "../Diagnose.ts";
 
 export const Desired = Schema.UndefinedOr(
@@ -31,6 +36,9 @@ export const Desired = Schema.UndefinedOr(
     ignore: Schema.optionalKey(Schema.Array(Schema.String)),
   }),
 );
+
+/** A backup an older T3 Fleet left beside the skill it replaced (<name>.t3-fleet-backup.<time>): never a skill. */
+export const isSkillBackup = (name: string) => /\.t3-fleet-backup(\.|$)/.test(name);
 
 export const LinkState = Schema.Literals(["ok", "missing", "wrong", "real-dir"]);
 
@@ -67,7 +75,7 @@ export const SkillsArea = defineArea({
 
       const vendored: Array<string> = [];
       for (const name of (yield* list(repoSkills)).sort()) {
-        if (name.startsWith(".")) continue;
+        if (name.startsWith(".") || isSkillBackup(name)) continue;
         if (yield* exists(path.join(repoSkills, name, "SKILL.md"))) vendored.push(name);
       }
 
@@ -93,7 +101,7 @@ export const SkillsArea = defineArea({
       const dangling: Array<{ skill: string; dir: string }> = [];
       for (const dir of [store, ...clients, ...watch]) {
         for (const name of yield* list(dir)) {
-          if (name.startsWith(".") || ignore.has(name)) continue;
+          if (name.startsWith(".") || ignore.has(name) || isSkillBackup(name)) continue;
           const at = path.join(dir, name);
           const link = yield* fs.readLink(at).pipe(Effect.option);
           if (Option.isSome(link)) {
@@ -112,11 +120,16 @@ export const SkillsArea = defineArea({
     const broken = observed.links.filter((l) => l.state !== "ok");
     if (broken.length > 0) {
       const commands: Array<string> = [];
+      if (broken.some((l) => l.state === "real-dir")) {
+        commands.push(`backups="${SH_STATE_DIR}/skill-backups/$(date +%Y%m%d%H%M%S)"`);
+      }
       for (const l of broken) {
         const isStore = l.dir === observed.store;
         const at = `${shPath(tilde(l.dir))}/${sh(l.skill)}`;
         const target = isStore ? `"$T3_FLEET_CHECKOUT/skills/${l.skill}"` : `${shPath(storeConfigured)}/${sh(l.skill)}`;
-        const aside = l.state === "real-dir" ? `mv ${at} ${at}.t3-fleet-backup.$(date +%Y%m%d%H%M%S) && ` : "";
+        // One backup directory per client directory, named after it: ~/.claude/skills → .claude-skills.
+        const backup = `"$backups"/${sh(tilde(l.dir).replace(/^~\/?/, "").replaceAll("/", "-") || "home")}`;
+        const aside = l.state === "real-dir" ? `mkdir -p ${backup} && mv ${at} ${backup}/ && ` : "";
         commands.push(`mkdir -p ${shPath(tilde(l.dir))} && ${aside}ln -sfn ${target} ${at}`);
       }
       const skills = [...new Set(broken.map((l) => l.skill))];
@@ -126,7 +139,7 @@ export const SkillsArea = defineArea({
         severity: "warn",
         area: "skills",
         title: `${skills.length} skill${skills.length === 1 ? " is" : "s are"} not linked into place: ${skills.slice(0, 5).join(", ")}${skills.length > 5 ? ", …" : ""}`,
-        ...(broken.some((l) => l.state === "real-dir") ? { detail: "real directories in the way are kept as backups" } : {}),
+        ...(broken.some((l) => l.state === "real-dir") ? { detail: "real directories in the way are kept in ~/.local/state/t3-fleet/skill-backups" } : {}),
         fix: { command: commands.join("\n"), safe: true },
       });
     }

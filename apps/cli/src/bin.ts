@@ -123,7 +123,7 @@ const fixCommand = Command.make("fix", {
         const go = yield* Prompt.run(Prompt.Confirm({ message: `Apply ${fixes.length} fix${fixes.length === 1 ? "" : "es"}?` }));
         if (!go) return;
       }
-      const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle);
+      const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle, config.repo);
       const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name));
       const after = narrow(yield* checkNodes(config, bundle), (name) => touched.some((n) => n.name === name));
       yield* Console.log(renderFixResults(outcomes));
@@ -188,7 +188,7 @@ const mcpServeCommand = Command.make("mcp").pipe(
             const report = yield* checkNodes(config, bundle);
             return narrow(report, (name) => only.length === 0 || only.includes(name));
           }).pipe(Effect.provide(services)),
-        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
+        apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle, config.repo).pipe(Effect.provide(services)),
         compare: (report) => compareWithLast(report.findings).pipe(Effect.provide(services)),
         alerts: (peek) => takeAlerts(config, peek).pipe(
           Effect.provide(services),

@@ -33,6 +33,16 @@ describe("mergeLayers", () => {
     ]);
     expect(replaced.table).toEqual({ mcp: { servers: ["z"] } });
   });
+
+  it("adds to an empty list when no lower layer has the table", () => {
+    const added = mergeLayers([
+      { source: "defaults", table: {} },
+      { source: "node laptop", table: { skills: { "ignore.add": ["synced"], "watch.remove": ["x"] } } },
+    ]);
+    expect(added.table).toEqual({ skills: { ignore: ["synced"], watch: [] } });
+    const rows = Object.fromEntries(describeMerged(added).map((r) => [r.path, r.source]));
+    expect(rows["skills.ignore"]).toBe("node laptop (add)");
+  });
 });
 
 describe("dotfiles", () => {

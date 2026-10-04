@@ -18,6 +18,7 @@ import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
 import { addSkills, land, removeSkills, updateSkills } from "@t3-fleet/core/SkillSources";
+import { isSkillBackup } from "@t3-fleet/core/areas/Skills";
 import { renameRepo } from "@t3-fleet/core/RepoRename";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import { readStates, syncRun, type Alert, type NodeState } from "@t3-fleet/core/Sync";
@@ -196,7 +197,7 @@ const adopt = Command.make("adopt", {
       const path = yield* Path.Path;
       const config = yield* loadConfig;
       const home = process.env["HOME"] ?? "";
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return yield* Effect.fail(`not a skill name: ${name}`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || isSkillBackup(name)) return yield* Effect.fail(`not a skill name: ${name}`);
       const src = path.join(expandHome(from, home), name);
       const dest = path.join(config.repo, "skills", name);
       if (!(yield* fs.exists(path.join(src, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)))) return yield* Effect.fail(`${src} has no SKILL.md`);
