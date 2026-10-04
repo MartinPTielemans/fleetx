@@ -47,10 +47,12 @@ export const renameRepo = (repo: string, branch: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     yield* ensureGitConfig;
-    if (out(yield* git(repo, ["status", "--porcelain", "--untracked-files=no"])) !== "") {
-      return yield* Effect.fail(`${repo} has uncommitted changes; commit or stash them first`);
+    // Other local edits are fine: they are set aside for the pull and never committed.
+    const touched = [LEGACY_FLEET_FILE, FLEET_FILE, encryptedPath(repo).slice(repo.length + 1)];
+    if (out(yield* git(repo, ["status", "--porcelain", "--", ...touched])) !== "") {
+      return yield* Effect.fail(`${repo} has uncommitted changes to ${touched.join(" or ")}; commit or stash them first`);
     }
-    const pull = yield* git(repo, ["pull", "-q", "--rebase", "origin", branch]);
+    const pull = yield* git(repo, ["pull", "-q", "--rebase", "--autostash", "origin", branch]);
     if (!ok(pull)) return yield* Effect.fail(`pull failed: ${why(pull)}`);
     const done: Array<string> = [];
 
