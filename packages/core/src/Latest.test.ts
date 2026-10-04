@@ -22,13 +22,14 @@ interface Seen {
 }
 
 /** A registry and GitHub that answer `github` for the releases index and count what is asked. */
-const fake = (github: { status: number; etag?: string }) => {
+const fake = (github: { status: number; etag?: string }, down = false) => {
   const seen: Array<Seen> = [];
   const layer = Layer.succeed(HttpClient.HttpClient)(
     HttpClient.make((request, url) => {
       seen.push({ url: url.toString(), ifNoneMatch: request.headers["if-none-match"] });
       const reply = (status: number, body: string, headers: Record<string, string> = {}) =>
         Effect.succeed(HttpClientResponse.fromWeb(request, new Response(status === 304 ? null : body, { status, headers })));
+      if (down) return reply(503, "");
       if (url.hostname === "registry.npmjs.org") return reply(200, JSON.stringify({ version: "9.9.9" }), { etag: '"npm"' });
       if (request.headers["if-none-match"] === github.etag && github.etag !== undefined) return reply(304, "");
       return reply(github.status, JSON.stringify([{ tag_name: `v${NIGHTLY}` }]), github.etag === undefined ? {} : { etag: github.etag });
@@ -68,6 +69,25 @@ describe("lookupLatest", () => {
     const third = await lookup(cache, github.layer);
     expect(third.t3.nightly?.versions[0]).toBe(NIGHTLY);
     expect(github.seen.slice(3).find((s) => s.url.includes("api.github.com"))?.ifNoneMatch).toBe('"r1"');
+  });
+
+  it("keeps answering from an hours-old lookup while offline, but not from one days old", async () => {
+    const cache = join(mkdtempSync(join(tmpdir(), "t3-fleet-latest-")), "latest.json");
+    await lookup(cache, fake({ status: 200 }).layer);
+    const age = (ms: number) => {
+      const entries = JSON.parse(readFileSync(cache, "utf8")) as Record<string, { at: number }>;
+      for (const entry of Object.values(entries)) entry.at -= ms;
+      writeFileSync(cache, JSON.stringify(entries));
+    };
+    age(2 * 60 * 60 * 1000);
+    const hours = await lookup(cache, fake({ status: 200 }, true).layer);
+    expect(hours.t3.nightly?.versions[0]).toBe(NIGHTLY);
+    expect(hours.failed).toBeUndefined();
+    age(2 * 24 * 60 * 60 * 1000);
+    const days = await lookup(cache, fake({ status: 200 }, true).layer);
+    expect(days.t3.nightly).toBeUndefined();
+    expect(days.agents.claude).toBeNull();
+    expect(days.failed?.t3).toBe("api.github.com answered 503; the last answer is 2 days old");
   });
 
   it("says why the releases are unknown, rather than nothing", async () => {

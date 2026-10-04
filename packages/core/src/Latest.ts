@@ -48,9 +48,11 @@ const Releases = Schema.Array(Schema.Struct({ tag_name: Schema.String, draft: Sc
  * Lookups are kept for 15 minutes in the state directory, then revalidated
  * with their ETag: an unchanged answer is a 304, which GitHub does not count
  * against its 60 anonymous requests an hour. A failed lookup falls back to
- * the last answer, however old.
+ * the last answer for a day; after that it is a failed lookup, so a machine
+ * long offline does not look current.
  */
 const FRESH_MS = 15 * 60 * 1000;
+const STALE_MS = 24 * 60 * 60 * 1000;
 
 const Cache = Schema.Record(Schema.String, Schema.Struct({ at: Schema.Number, etag: Schema.NullOr(Schema.String), body: Schema.String }));
 /** The cache as read, changed in place by each lookup. */
@@ -83,15 +85,16 @@ const getText = (cache: Cache, url: string, headers: Effect.Effect<Record<string
       cache.changed = true;
       return { body: kept.body } satisfies Got;
     }
-    if (kept !== undefined) return { body: kept.body } satisfies Got;
+    if (kept !== undefined && now - kept.at < STALE_MS) return { body: kept.body } satisfies Got;
     const status = response._tag === "Success" ? response.success.status : null;
-    const error =
+    const reason =
       status === null
         ? `no answer from ${new URL(url).host}`
         : (status === 403 || status === 429) && url.startsWith("https://api.github.com/")
           ? "GitHub's limit of 60 anonymous requests an hour is used up; `gh auth login` or GITHUB_TOKEN raises it"
           : `${new URL(url).host} answered ${status}`;
-    return { error } satisfies Got;
+    const days = kept === undefined ? 0 : Math.floor((now - kept.at) / STALE_MS);
+    return { error: kept === undefined ? reason : `${reason}; the last answer is ${days} day${days === 1 ? "" : "s"} old` } satisfies Got;
   });
 
 const npmLatest = (cache: Cache, pkg: string) =>

@@ -218,10 +218,11 @@ const SERVICE_NAMES: Readonly<Record<"serve" | "listen" | "models", string>> = {
 const engineFinding = (node: string, observed: typeof Observed.Type): Finding => {
   const wanted = observed.wantedBuild ?? null;
   const installed = observed.installedBuild ?? null;
-  const order = observed.installed === null ? 1 : wanted === null ? (installed === null ? 0 : -1) : installed === null ? 1 : compareBuilds(wanted, installed);
+  // null: neither is known to be newer.
+  const order = observed.installed === null ? 1 : wanted === null ? (installed === null ? null : -1) : installed === null ? 1 : compareBuilds(wanted, installed);
   const here = installed === null ? "" : ` (${describeBuild(installed)})`;
   const controller = wanted === null ? "" : ` (${describeBuild(wanted)})`;
-  if (order < 0) {
+  if (order !== null && order < 0) {
     return {
       node,
       key: "engine-newer-here",
@@ -234,9 +235,11 @@ const engineFinding = (node: string, observed: typeof Observed.Type): Finding =>
   const services = observed.services ?? [];
   const install = {
     command: ENGINE_INSTALL,
-    safe: order > 0,
+    // Asked first unless the controller's build is known to be the newer one.
+    safe: order !== null && order > 0,
     ...(services.length === 0 ? {} : { disrupts: `restarts ${services.map((s) => SERVICE_NAMES[s]).join(", ").replace(/, ([^,]*)$/, " and $1")} on ${node}` }),
   };
+  const sameVersion = wanted !== null && installed !== null && wanted.version === installed.version;
   return {
     node,
     key: "engine-outdated",
@@ -245,10 +248,15 @@ const engineFinding = (node: string, observed: typeof Observed.Type): Finding =>
     title:
       observed.installed === null
         ? "T3 Fleet is not installed here"
-        : order > 0
+        : order !== null && order > 0
           ? `T3 Fleet here is an older build${here} than the controller's${controller}`
-          : "T3 Fleet here is a different build than the controller's, and neither is known to be newer",
-    detail: "timers and fixes on this machine run its own copy",
+          : `T3 Fleet here is a different build${here} than the controller's${controller}, and neither is known to be newer`,
+    detail:
+      order === null
+        ? sameVersion
+          ? "both are the same version built from different commits, so installing the controller's could take this machine back; install it only if the controller has the build you want"
+          : "one of the builds does not say what it is; install the controller's only if it has the build you want"
+        : "timers and fixes on this machine run its own copy",
     fix: install,
   };
 };

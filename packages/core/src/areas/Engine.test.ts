@@ -53,7 +53,7 @@ const outdated = (over: Record<string, unknown>) =>
     authority: null,
   }).find((f) => f.key === "engine-outdated" || f.key === "engine-newer-here");
 
-const build = (version: string, builtAt: number) => ({ version, builtAt, commit: "abc1234" });
+const build = (version: string, builtAt: number, commit = "abc1234") => ({ version, builtAt, commit });
 
 describe("engine-outdated", () => {
   it("installs the controller's build, as a safe fix, when it is the newer one", () => {
@@ -79,6 +79,13 @@ describe("engine-outdated", () => {
 
   it("asks before installing when neither build is known to be newer", () => {
     expect(outdated({ wantedBuild: build("0.6.2", 1), installedBuild: build("0.6.2", 1) })).toMatchObject({ fix: { safe: false } });
+  });
+
+  it("asks before installing a build of the same version from another commit, however recent", () => {
+    const f = outdated({ wantedBuild: build("0.6.1", 9, "old0001"), installedBuild: build("0.6.1", 1, "new0002") });
+    expect(f).toMatchObject({ key: "engine-outdated", fix: { command: ENGINE_INSTALL, safe: false } });
+    expect(f?.title).toContain("neither is known to be newer");
+    expect(f?.detail).toContain("same version built from different commits");
   });
 
   it("says which services the install restarts", () => {

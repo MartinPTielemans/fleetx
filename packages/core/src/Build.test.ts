@@ -24,6 +24,13 @@ describe("compareBuilds", () => {
     expect(compareBuilds(build("0.6.1", 1), build("0.6.1", 2))).toBeLessThan(0);
     expect(compareBuilds(build("1.0.0", 1), build("1.0.0-rc.1", 2))).toBeGreaterThan(0);
     expect(compareBuilds(build("0.6.1", 2), build("0.6.1", 2))).toBe(0);
+    expect(compareBuilds(build("0.6.1", 2, "abc1234-dirty"), build("0.6.1", 1, "abc1234"))).toBeGreaterThan(0);
+  });
+
+  it("does not know which of one version's builds is newer when they come from different commits", () => {
+    // An older branch, still 0.6.1, rebuilt today.
+    expect(compareBuilds(build("0.6.1", 9, "old0001"), build("0.6.1", 1, "new0002"))).toBeNull();
+    expect(compareBuilds(build("0.6.1", 9, null), build("0.6.1", 1, null))).toBeNull();
   });
 });
 

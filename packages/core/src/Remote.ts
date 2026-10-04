@@ -37,14 +37,21 @@ export const NOT_INSTALLED = 97;
 
 /**
  * Runs the node's installed copy when its SHA-256 is `engine`, else exits
- * NOT_INSTALLED. Only POSIX tools: sha256sum on Linux, shasum on macOS.
+ * NOT_INSTALLED. The copy is taken first, then hashed and run, so an install
+ * landing in between cannot swap the build that was checked. Only POSIX
+ * tools: sha256sum on Linux, shasum on macOS.
  */
 export const installedProbe = (engine: string, settings: ProbeSettings) =>
   [
-    `f="$HOME/${SHARE_DIR}/${BUNDLE_FILE}"`,
-    `h=$( (sha256sum "$f" || shasum -a 256 "$f") 2>/dev/null | cut -d" " -f1)`,
-    `[ "$h" = ${engine} ] || exit ${NOT_INSTALLED}`,
-    `exec node "$f" probe ${encodeSettings(settings)}`,
+    `d=$(mktemp -d 2>/dev/null) || exit ${NOT_INSTALLED}`,
+    `t="$d/${BUNDLE_FILE}"`,
+    `cp "$HOME/${SHARE_DIR}/${BUNDLE_FILE}" "$t" 2>/dev/null || { rm -rf "$d"; exit ${NOT_INSTALLED}; }`,
+    `h=$( (sha256sum "$t" || shasum -a 256 "$t") 2>/dev/null | cut -d" " -f1)`,
+    `[ "$h" = ${engine} ] || { rm -rf "$d"; exit ${NOT_INSTALLED}; }`,
+    `node "$t" probe ${encodeSettings(settings)}`,
+    `s=$?`,
+    `rm -rf "$d"`,
+    `exit $s`,
   ].join("; ");
 
 /** Nodes (ssh target and build) whose installed copy was not the wanted build. */
@@ -52,12 +59,17 @@ const notInstalled = new Set<string>();
 
 const SSH = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
 
-const probeRemote = (ssh: string, bundle: string, settings: ProbeSettings, engine: string | undefined) =>
+/**
+ * Observes a node over ssh: its own copy first, unless it is known not to
+ * have this build, then the bundle when the copy is missing or failed. An
+ * unreachable node or one that times out is not asked twice.
+ */
+export const probeRemote = (ssh: string, bundle: string, settings: ProbeSettings, engine: string | undefined, timeoutSeconds = 90) =>
   Effect.gen(function* () {
     const key = `${ssh}\n${engine ?? ""}`;
     let run = engine === undefined || notInstalled.has(key)
       ? null
-      : yield* exec({ command: "ssh", args: [...SSH, "-n", ssh, `bash -lc '${installedProbe(engine, settings)}'`], env: process.env, timeout: Duration.seconds(90) });
+      : yield* exec({ command: "ssh", args: [...SSH, "-n", ssh, `bash -lc '${installedProbe(engine, settings)}'`], env: process.env, timeout: Duration.seconds(timeoutSeconds) });
     if (run !== null && run.code === NOT_INSTALLED) notInstalled.add(key);
     // Anything but an answer or an unreachable node tries the bundle; it may run where the copy did not.
     if (run === null || (!run.timedOut && run.code !== 0 && run.code !== 255)) {
@@ -67,10 +79,10 @@ const probeRemote = (ssh: string, bundle: string, settings: ProbeSettings, engin
         args: [...SSH, "-o", "Compression=yes", ssh, `bash -lc 'node --input-type=module - probe ${encodeSettings(settings)}'`],
         env: process.env,
         stdin: bundle,
-        timeout: Duration.seconds(90),
+        timeout: Duration.seconds(timeoutSeconds),
       });
     }
-    if (run.timedOut) return yield* Effect.fail(`no answer from ${ssh} within 90s`);
+    if (run.timedOut) return yield* Effect.fail(`no answer from ${ssh} within ${timeoutSeconds}s`);
     if (run.code === 255) return yield* Effect.fail(`ssh ${ssh} failed: ${lastLine(run.stderr) || "unreachable"}`);
     if (run.code !== 0) return yield* Effect.fail(`probe exited ${run.code}: ${lastLine(run.stderr) || lastLine(run.stdout)}`);
     const observation = yield* decode(lastLine(run.stdout)).pipe(

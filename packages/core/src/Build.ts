@@ -43,8 +43,13 @@ const parts = (version: string) => {
   return { numbers: core.split(".").map(Number), pre: pre ?? null };
 };
 
-/** Positive when `a` is newer than `b`: by version, then by build time. */
-export const compareBuilds = (a: BuildId, b: BuildId): number => {
+/**
+ * Positive when `a` is newer than `b`, by version. Two builds of one version
+ * are ordered by build time only when they come from the same commit; from
+ * different commits (an older branch rebuilt today) neither is known to be
+ * newer, and the answer is null.
+ */
+export const compareBuilds = (a: BuildId, b: BuildId): number | null => {
   const x = parts(a.version);
   const y = parts(b.version);
   for (let i = 0; i < 3; i += 1) {
@@ -57,6 +62,8 @@ export const compareBuilds = (a: BuildId, b: BuildId): number => {
     if (y.pre === null) return -1;
     return x.pre < y.pre ? -1 : 1;
   }
+  const commit = (c: string | null) => c?.replace(/-dirty$/, "") ?? null;
+  if (commit(a.commit) === null || commit(a.commit) !== commit(b.commit)) return null;
   return a.builtAt - b.builtAt;
 };
 
