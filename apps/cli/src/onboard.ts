@@ -16,7 +16,7 @@ import { exec } from "@t3-fleet/core/Exec";
 import { ensureGitConfig, git, ok, out, why } from "@t3-fleet/core/Git";
 import { addNode, createRepo, discover, writeLocalConfig } from "@t3-fleet/core/Init";
 import { ensureIdentity, installSecrets } from "@t3-fleet/core/Secrets";
-import { syncRun } from "@t3-fleet/core/Sync";
+import { syncRun, underSyncLock } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
 import { stateDir } from "@t3-fleet/core/Names";
@@ -78,7 +78,7 @@ export const inviteCommand = Command.make("invite", {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) return yield* Effect.fail("names are lowercase letters, digits and dashes");
       const url = out(yield* git(config.repo, ["remote", "get-url", "origin"]));
       if (url === "") return yield* Effect.fail("the config repo has no origin remote yet; push it to a private repository first");
-      const rev = yield* addNode(config.repo, name, ssh._tag === "Some" ? ssh.value : null, profile);
+      const rev = yield* underSyncLock(addNode(config.repo, name, ssh._tag === "Some" ? ssh.value : null, profile));
       yield* Console.log(`Added nodes/${name}.toml (${rev}). On ${name}, run:\n\n  curl -fsSL ${INSTALL_URL} | sh -s -- join ${url} ${name}\n`);
       yield* Console.log("It joins, publishes its state, and this machine's next sync lets it read the secrets.");
     }).pipe(reportUserErrors),

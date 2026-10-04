@@ -2,10 +2,11 @@
  * Proposals: changes a non-authority node made under the auto-commit paths,
  * waiting on t3-fleet/staging/<node> for an authority.
  *
- *   approve  the proposal's files land on the branch (one commit), and the
- *            staging branch is deleted
+ *   approve  the proposal's change lands on the branch (one commit), merged
+ *            with whatever reached it since, and the staging branch is
+ *            deleted
  *   reject   the proposal moves to t3-fleet/rejected/<node>; on its next sync
- *            the proposing node stashes its local copies and deletes it
+ *            the proposing node stashes its edits to those files and deletes it
  *
  * `[fleet] auto_approve = ["skills/"]` approves proposals whose files are all
  * under those prefixes during the authority's own sync.
@@ -15,18 +16,25 @@
  * not pulled the rename.
  */
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 
-import { git, ok, out, why } from "./Git.ts";
-import { branchPrefix, branchPrefixes } from "./Names.ts";
+import { changedFiles, git, literal, nulList, ok, out, pullBranch, why } from "./Git.ts";
+import { branchPrefix, branchPrefixes, stateDir } from "./Names.ts";
+import { underSyncLock } from "./SyncLock.ts";
 
 export interface Proposal {
   readonly node: string;
   /** The branch it waits on: t3-fleet/staging/<node>, or fleetx/staging/<node>. */
   readonly branch: string;
   readonly commit: string;
+  /** What the proposal's own commit changes. */
   readonly files: ReadonlyArray<string>;
   readonly stat: string;
 }
+
+/** The files `commit` itself changes, against its parent: the proposal, whatever the branch did since. */
+const ownChange = (repo: string, commit: string) =>
+  git(repo, ["diff", "--name-only", "-z", "--no-renames", `${commit}^`, commit]).pipe(Effect.map((r) => nulList(r.stdout)));
 
 /** Every pending proposal, fetched from the remote. */
 export const listProposals = (repo: string, branch: string) =>
@@ -40,72 +48,174 @@ export const listProposals = (repo: string, branch: string) =>
     for (const ref of refs) {
       const node = ref.slice((prefixes.find((p) => ref.startsWith(p)) ?? "").length);
       const commit = out(yield* git(repo, ["rev-parse", `origin/${ref}`]));
-      const files = out(yield* git(repo, ["diff", "--name-only", `origin/${branch}`, commit])).split("\n").filter(Boolean);
+      const files = yield* ownChange(repo, commit);
       if (files.length === 0) continue;
-      const stat = out(yield* git(repo, ["diff", "--stat", `origin/${branch}`, commit]));
+      // Already on the branch (approved, its staging branch not yet gone): nothing to review.
+      if (ok(yield* git(repo, ["diff", "--quiet", `origin/${branch}`, commit, "--", ...files], { env: literal }))) continue;
+      const stat = out(yield* git(repo, ["diff", "--stat", `${commit}^`, commit]));
       proposals.push({ node, branch: ref, commit, files, stat });
     }
     return proposals;
   });
 
+/** Where the proposal's staging branch points now on the remote, or "" when it is gone. */
+const tipOf = (repo: string, proposal: Proposal) =>
+  git(repo, ["ls-remote", "origin", `refs/heads/${proposal.branch}`]).pipe(Effect.map((r) => out(r).split(/\s+/)[0] ?? ""));
+
 /**
- * Apply a proposal on the branch: check out its files from the proposal
- * commit (additions and edits) and drop the ones it deleted, commit, push.
+ * `commit`'s own change, exactly: each file's mode and blob before and after.
+ * Equal for the same change made again on another base, and for nothing else;
+ * a patch id would also match one that only re-indents.
  */
-export const approve = (repo: string, branch: string, proposal: Proposal, by: string) =>
+const changeOf = (repo: string, commit: string) =>
   Effect.gen(function* () {
-    const status = out(yield* git(repo, ["status", "--porcelain", "--", ...proposal.files]));
-    if (status !== "") return yield* Effect.fail(`local edits to ${proposal.files.join(", ")} would be overwritten; commit or stash them first`);
-    const pull = yield* git(repo, ["pull", "-q", "--rebase", "--autostash", "origin", branch]);
-    if (!ok(pull)) return yield* Effect.fail(`pull failed: ${why(pull)}`);
-    const present = out(yield* git(repo, ["ls-tree", "-r", "--name-only", proposal.commit, "--", ...proposal.files])).split("\n").filter(Boolean);
-    const removed = proposal.files.filter((f) => !present.includes(f));
-    if (present.length > 0) {
-      const checkout = yield* git(repo, ["checkout", proposal.commit, "--", ...present]);
-      if (!ok(checkout)) return yield* Effect.fail(`applying: ${why(checkout)}`);
-    }
-    if (removed.length > 0) yield* git(repo, ["rm", "-q", "--ignore-unmatch", "--", ...removed]);
-    const commit = yield* git(repo, ["commit", "-q", "-m", `Approve ${proposal.node}'s proposal (by ${by})\n\n${proposal.files.join("\n")}`, "--", ...proposal.files]);
-    if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
-    const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
-    if (!ok(push)) return yield* Effect.fail(`push failed: ${why(push)}`);
-    yield* git(repo, ["push", "-q", "origin", `:refs/heads/${proposal.branch}`]);
-    return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+    const raw = yield* git(repo, ["diff-tree", "-r", "-z", "--no-renames", "--full-index", `${commit}^`, commit]);
+    return ok(raw) ? raw.stdout : "";
   });
 
-export const reject = (repo: string, proposal: Proposal) =>
+/**
+ * The proposal's tip, fetched, when it is still the change that was reviewed:
+ * the same commit, or the same change remade on a newer branch.
+ */
+const reviewedTip = (repo: string, proposal: Proposal, expected: string | undefined) =>
   Effect.gen(function* () {
-    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${proposal.commit}:refs/heads/${branchPrefix(repo, "rejected")}${proposal.node}`, `:refs/heads/${proposal.branch}`]);
-    if (!ok(push)) return yield* Effect.fail(`reject failed: ${why(push)}`);
+    const reviewed = expected ?? proposal.commit;
+    const tip = yield* tipOf(repo, proposal);
+    if (tip === "") return yield* Effect.fail(`${proposal.node}'s proposal is gone: approved, rejected or withdrawn since`);
+    const fetch = yield* git(repo, ["fetch", "-q", "origin", `refs/heads/${proposal.branch}`]);
+    if (!ok(fetch)) return yield* Effect.fail(`fetching the proposal: ${why(fetch)}`);
+    if (reviewed.length >= 7 && tip.startsWith(reviewed)) return tip;
+    const known = out(yield* git(repo, ["rev-parse", "-q", "--verify", `${reviewed}^{commit}`]));
+    const change = known === "" ? "" : yield* changeOf(repo, known);
+    const same = reviewed.length >= 7 && change !== "" && change === (yield* changeOf(repo, tip));
+    if (!same) return yield* Effect.fail(`${proposal.node}'s proposal is ${tip.slice(0, 7)} now, not the ${reviewed.slice(0, 7)} reviewed; review it again`);
+    return tip;
   });
+
+/** Delete the staging branch, unless its node proposed something else meanwhile. */
+const dropStaging = (repo: string, proposal: Proposal, tip: string) =>
+  git(repo, ["push", "-q", `--force-with-lease=refs/heads/${proposal.branch}:${tip}`, "origin", `:refs/heads/${proposal.branch}`]);
+
+/**
+ * Apply a proposal on the branch: its own commit's change, merged three ways
+ * onto what the branch has now (cherry-pick), so whatever reached the branch
+ * after the proposal was made stays. The merge happens in a scratch worktree,
+ * so a conflict never leaves a mark in the checkout; the checkout only
+ * fast-forwards to the result. Refuses on a conflict, and when the proposal
+ * is no longer `expected`, the change the caller reviewed.
+ */
+export const approve = (repo: string, branch: string, proposal: Proposal, by: string, expected?: string) =>
+  underSyncLock(
+    Effect.gen(function* () {
+      const tip = yield* reviewedTip(repo, proposal, expected);
+      const files = yield* ownChange(repo, tip);
+      const dirty = yield* changedFiles(repo, files);
+      if (dirty.length > 0) return yield* Effect.fail(`local edits to ${dirty.join(", ")} would be overwritten; commit or stash them first`);
+      yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
+      const approved = yield* inScratchWorktree(
+        repo,
+        Effect.fnUntraced(function* (scratch: string) {
+          const pick = yield* git(scratch, ["cherry-pick", "--no-commit", tip]);
+          if (!ok(pick)) {
+            const conflicted = nulList((yield* git(scratch, ["diff", "--name-only", "-z", "--diff-filter=U"])).stdout);
+            return yield* Effect.fail(
+              `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made${conflicted.length > 0 ? ` (${conflicted.join(", ")})` : ""}; reject it, or have ${proposal.node} sync and propose again`,
+            );
+          }
+          // Only the files the proposal names, which is what was reviewed and
+          // what auto_approve trusts: a cherry-pick follows renames, so an
+          // edit to a file the branch has since moved would land elsewhere.
+          const changed = nulList((yield* git(scratch, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"])).stdout);
+          const elsewhere = changed.filter((f) => !files.includes(f));
+          if (elsewhere.length > 0) {
+            return yield* Effect.fail(
+              `${proposal.node}'s proposal would change ${elsewhere.join(", ")}, which it does not name (moved on ${branch} since?); reject it, or have ${proposal.node} sync and propose again`,
+            );
+          }
+          // Already on the branch: nothing to commit.
+          if (changed.length === 0) return null;
+          const commit = yield* git(scratch, ["commit", "-q", "-m", `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}`]);
+          if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
+          return out(yield* git(scratch, ["rev-parse", "HEAD"]));
+        }),
+      );
+      if (approved !== null) {
+        const forward = yield* git(repo, ["merge", "-q", "--ff-only", approved]);
+        if (!ok(forward)) return yield* Effect.fail(`could not move the checkout to the approved commit: ${why(forward)}`);
+        const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
+        if (!ok(push)) return yield* Effect.fail(`push failed: ${why(push)}`);
+      }
+      yield* dropStaging(repo, proposal, tip);
+      return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+    }),
+  );
+
+/** Run `use` in a throwaway worktree of `repo` at its HEAD, removed afterwards whatever happens. */
+const inScratchWorktree = <A, E, R>(repo: string, use: (scratch: string) => Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const scratch = `${stateDir(process.env["HOME"] ?? "")}/approve`;
+    const remove = Effect.gen(function* () {
+      // A run that died inside `worktree add` leaves it locked, which remove and prune skip.
+      yield* git(repo, ["worktree", "unlock", scratch]);
+      yield* git(repo, ["worktree", "remove", "--force", "--force", scratch]);
+      yield* fs.remove(scratch, { recursive: true, force: true }).pipe(Effect.ignore);
+      yield* git(repo, ["worktree", "prune"]);
+    });
+    // One left behind by a run that died.
+    yield* remove;
+    yield* fs.makeDirectory(stateDir(process.env["HOME"] ?? ""), { recursive: true }).pipe(Effect.ignore);
+    const add = yield* git(repo, ["worktree", "add", "-q", "--detach", scratch, "HEAD"]);
+    if (!ok(add)) return yield* Effect.fail(`making a scratch worktree: ${why(add)}`);
+    return yield* use(scratch).pipe(Effect.ensuring(remove));
+  });
+
+/** Move the proposal to t3-fleet/rejected/<node>, if it is still `expected` (the commit reviewed). */
+export const reject = (repo: string, proposal: Proposal, expected?: string) =>
+  underSyncLock(
+    Effect.gen(function* () {
+      const tip = yield* reviewedTip(repo, proposal, expected);
+      const push = yield* git(repo, [
+        "push",
+        "-q",
+        // Both or neither: a rejected branch without the deletion would make the node set aside a newer proposal.
+        "--atomic",
+        `--force-with-lease=refs/heads/${proposal.branch}:${tip}`,
+        "origin",
+        `+${tip}:refs/heads/${branchPrefix(repo, "rejected")}${proposal.node}`,
+        `:refs/heads/${proposal.branch}`,
+      ]);
+      if (!ok(push)) return yield* Effect.fail(`reject failed: ${why(push)}`);
+    }),
+  );
 
 /** Under one of the auto-approve prefixes, every file. */
 export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<string>) =>
   prefixes.length > 0 && proposal.files.every((f) => prefixes.some((p) => f.startsWith(p)));
 
 /**
- * On the proposing node: if its proposal was rejected, set its local copies
- * of those files aside (in `git stash`, recoverable) and restore the
- * branch's versions.
+ * On the proposing node: if its proposal was rejected, set aside its local
+ * edits to the files that proposal changed (in `git stash`, recoverable),
+ * which leaves the checkout's versions; the next pull brings the branch's.
+ * Edits to any other file are not touched. The files set aside.
  */
 export const settleRejection = (repo: string, node: string, branch: string) =>
-  Effect.gen(function* () {
-    let ref = "";
-    let commit = "";
-    for (const prefix of branchPrefixes("rejected")) {
-      ref = `refs/heads/${prefix}${node}`;
-      commit = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
-      if (commit !== "") break;
-    }
-    if (commit === "") return [] as Array<string>;
-    yield* git(repo, ["fetch", "-q", "origin", ref]);
-    const files = out(yield* git(repo, ["diff", "--name-only", `origin/${branch}`, commit])).split("\n").filter(Boolean);
-    for (const file of files) {
-      const tracked = ok(yield* git(repo, ["cat-file", "-e", `origin/${branch}:${file}`]));
-      yield* git(repo, ["stash", "push", "-q", "--include-untracked", "-m", `T3 Fleet: rejected ${file}`, "--", file]);
-      if (!tracked) continue;
-      yield* git(repo, ["checkout", `origin/${branch}`, "--", file]);
-    }
-    yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
-    return files;
-  });
+  underSyncLock(
+    Effect.gen(function* () {
+      let ref = "";
+      let commit = "";
+      for (const prefix of branchPrefixes("rejected")) {
+        ref = `refs/heads/${prefix}${node}`;
+        commit = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
+        if (commit !== "") break;
+      }
+      if (commit === "") return [] as Array<string>;
+      yield* git(repo, ["fetch", "-q", "origin", ref, branch]);
+      const edited = yield* changedFiles(repo, yield* ownChange(repo, commit));
+      for (const file of edited) {
+        yield* git(repo, ["stash", "push", "-q", "--include-untracked", "-m", `T3 Fleet: rejected ${file}`, "--", file], { env: literal });
+      }
+      yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
+      return edited;
+    }),
+  );

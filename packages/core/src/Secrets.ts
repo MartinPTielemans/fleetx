@@ -8,7 +8,9 @@
  *   ~/.config/t3-fleet/secrets.env decrypted, mode 600, what fixes and
  *                                templates read
  *
- * Encryption uses age-encryption, so nodes need no age binary.
+ * Encryption uses age-encryption, so nodes need no age binary. Writing into
+ * the repo holds the sync lock; a caller that commits afterwards should hold
+ * it around both.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -18,6 +20,7 @@ import * as Schema from "effect/Schema";
 import { armor, Decrypter, Encrypter, generateX25519Identity, identityToRecipient } from "age-encryption";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { configDir } from "./Names.ts";
+import { underSyncLock } from "./SyncLock.ts";
 
 export class SecretsError extends Schema.TaggedError<SecretsError>()("SecretsError", {
   message: Schema.String,
@@ -70,12 +73,14 @@ export const readRecipients = (repo: string) =>
   });
 
 export const writeRecipients = (repo: string, recipients: Record<string, string>) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
-    const sorted = Object.fromEntries(Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)));
-    yield* fs.writeFileString(recipientsPath(repo), `# Public age keys of the nodes that can read secrets.env.age.\n${stringifyToml(sorted)}\n`);
-  });
+  underSyncLock(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
+      const sorted = Object.fromEntries(Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)));
+      yield* fs.writeFileString(recipientsPath(repo), `# Public age keys of the nodes that can read secrets.env.age.\n${stringifyToml(sorted)}\n`);
+    }),
+  );
 
 export const decryptWith = (identity: string, armored: string) =>
   Effect.gen(function* () {
@@ -104,13 +109,15 @@ export const readSecrets = (repo: string) =>
 
 /** Re-encrypt `plaintext` to every recipient and write it into the repo. */
 export const writeSecrets = (repo: string, plaintext: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const recipients = Object.values(yield* readRecipients(repo));
-    const armored = yield* encryptFor(recipients, plaintext);
-    yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
-    yield* fs.writeFileString(encryptedPath(repo), armored);
-  });
+  underSyncLock(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const recipients = Object.values(yield* readRecipients(repo));
+      const armored = yield* encryptFor(recipients, plaintext);
+      yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
+      yield* fs.writeFileString(encryptedPath(repo), armored);
+    }),
+  );
 
 /** Decrypt the repo's secrets onto this node, where fixes and templates read them. */
 export const installSecrets = (repo: string) =>

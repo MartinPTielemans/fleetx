@@ -16,6 +16,7 @@ import { Argument, Command } from "effect/unstable/cli";
 
 import { loadConfig } from "@t3-fleet/core/Config";
 import { commitAndPush } from "@t3-fleet/core/Git";
+import { underSyncLock } from "@t3-fleet/core/Sync";
 import {
   encryptedPath,
   ensureIdentity,
@@ -83,17 +84,22 @@ const set = Command.make("set", {
   Command.withHandler(({ pairs }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      let text = yield* readSecrets(config.repo);
-      const keys: Array<string> = [];
+      const vars: Array<readonly [string, string]> = [];
       for (const pair of pairs) {
         const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/s.exec(pair);
         if (m?.[1] === undefined) return yield* Effect.fail(`not KEY=VALUE with an upper-case key: ${pair.split("=")[0]}`);
-        text = setVar(text, m[1], m[2] ?? "");
-        keys.push(m[1]);
+        vars.push([m[1], m[2] ?? ""]);
       }
-      yield* writeSecrets(config.repo, text);
-      yield* installSecrets(config.repo);
-      const rev = yield* commitSecrets(config.repo, `Set secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+      const keys = vars.map(([key]) => key);
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          let text = yield* readSecrets(config.repo);
+          for (const [key, value] of vars) text = setVar(text, key, value);
+          yield* writeSecrets(config.repo, text);
+          yield* installSecrets(config.repo);
+          return yield* commitSecrets(config.repo, `Set secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+        }),
+      );
       yield* Console.log(`set ${keys.join(", ")} (${rev})`);
     }).pipe(reportUserErrors),
   ),
@@ -106,11 +112,15 @@ const unset = Command.make("unset", {
   Command.withHandler(({ keys }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      let text = yield* readSecrets(config.repo);
-      for (const key of keys) text = setVar(text, key, null);
-      yield* writeSecrets(config.repo, text);
-      yield* installSecrets(config.repo);
-      const rev = yield* commitSecrets(config.repo, `Remove secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          let text = yield* readSecrets(config.repo);
+          for (const key of keys) text = setVar(text, key, null);
+          yield* writeSecrets(config.repo, text);
+          yield* installSecrets(config.repo);
+          return yield* commitSecrets(config.repo, `Remove secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+        }),
+      );
       yield* Console.log(`removed ${keys.join(", ")} (${rev})`);
     }).pipe(reportUserErrors),
   ),
@@ -125,15 +135,19 @@ const importFile = Command.make("import", {
       const config = yield* asAuthority;
       const fs = yield* FileSystem.FileSystem;
       const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => `cannot read ${file}`));
-      const recipients = yield* readRecipients(config.repo);
-      if (!Object.keys(recipients).includes(config.self)) {
-        const { recipient } = yield* ensureIdentity;
-        yield* writeRecipients(config.repo, { ...recipients, [config.self]: recipient });
-      }
-      yield* writeSecrets(config.repo, text);
-      yield* installSecrets(config.repo);
       const names = varNames(text);
-      const rev = yield* commitSecrets(config.repo, `Import ${names.length} secrets`);
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          const recipients = yield* readRecipients(config.repo);
+          if (!Object.keys(recipients).includes(config.self)) {
+            const { recipient } = yield* ensureIdentity;
+            yield* writeRecipients(config.repo, { ...recipients, [config.self]: recipient });
+          }
+          yield* writeSecrets(config.repo, text);
+          yield* installSecrets(config.repo);
+          return yield* commitSecrets(config.repo, `Import ${names.length} secrets`);
+        }),
+      );
       yield* Console.log(`imported ${names.length} secrets (${rev})`);
     }).pipe(reportUserErrors),
   ),
@@ -149,11 +163,15 @@ const addNode = Command.make("add-node", {
       const config = yield* asAuthority;
       if (!config.nodes.some((n) => n.name === node)) return yield* Effect.fail(`unknown machine: ${node}`);
       if (!/^age1[0-9a-z]+$/.test(recipient)) return yield* Effect.fail("not an age public key (age1…)");
-      const text = yield* readSecrets(config.repo);
-      const recipients = yield* readRecipients(config.repo);
-      yield* writeRecipients(config.repo, { ...recipients, [node]: recipient });
-      yield* writeSecrets(config.repo, text);
-      const rev = yield* commitSecrets(config.repo, `Let ${node} read the fleet's secrets`);
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          const text = yield* readSecrets(config.repo);
+          const recipients = yield* readRecipients(config.repo);
+          yield* writeRecipients(config.repo, { ...recipients, [node]: recipient });
+          yield* writeSecrets(config.repo, text);
+          return yield* commitSecrets(config.repo, `Let ${node} read the fleet's secrets`);
+        }),
+      );
       yield* Console.log(`${node} can read the secrets after its next pull (${rev})`);
     }).pipe(reportUserErrors),
   ),

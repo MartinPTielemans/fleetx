@@ -17,11 +17,11 @@ import { exec } from "@t3-fleet/core/Exec";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
-import { addSkills, land, removeSkills, updateSkills } from "@t3-fleet/core/SkillSources";
+import { addSkills, keepUpdate, land, previewUpdate, removeSkills } from "@t3-fleet/core/SkillSources";
 import { isSkillBackup } from "@t3-fleet/core/areas/Skills";
 import { renameRepo } from "@t3-fleet/core/RepoRename";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
-import { readStates, syncRun, type Alert, type NodeState } from "@t3-fleet/core/Sync";
+import { readStates, syncRun, underSyncLock, type Alert, type NodeState } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
 import { stateDir } from "@t3-fleet/core/Names";
@@ -104,7 +104,7 @@ export const reviewCommand = Command.make("review").pipe(
       for (const p of proposals) {
         yield* Console.log(`${p.node}  (${p.commit.slice(0, 7)})\n${p.stat.split("\n").map((l) => `  ${l}`).join("\n")}\n`);
       }
-      yield* Console.log("t3-fleet approve <node>   or   t3-fleet reject <node>");
+      yield* Console.log("t3-fleet approve <node> <commit>   or   t3-fleet reject <node> <commit>");
     }).pipe(reportUserErrors),
   ),
 );
@@ -121,7 +121,7 @@ const repoRenameCommand = Command.make("rename").pipe(
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      const done = yield* renameRepo(config.repo, config.branch);
+      const done = yield* underSyncLock(renameRepo(config.repo, config.branch));
       yield* Console.log(done.length === 0 ? "the config repo already has T3 Fleet's names" : done.join("\n"));
     }).pipe(reportUserErrors),
   ),
@@ -132,23 +132,26 @@ export const repoCommand = Command.make("repo").pipe(
   Command.withSubcommands([repoRenameCommand]),
 );
 
-export const approveCommand = Command.make("approve", { node: Argument.String("node") }).pipe(
+/** The commit `t3-fleet review` showed; the command refuses when the proposal moved on since. */
+const reviewedArg = Argument.String("commit").pipe(Argument.withDescription("The commit review showed."), Argument.optional);
+
+export const approveCommand = Command.make("approve", { node: Argument.String("node"), commit: reviewedArg }).pipe(
   Command.withDescription("Apply a node's proposal to the branch (authority)."),
-  Command.withHandler(({ node }) =>
+  Command.withHandler(({ node, commit }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      const rev = yield* approve(config.repo, config.branch, yield* proposalOf(config, node), config.self);
+      const rev = yield* approve(config.repo, config.branch, yield* proposalOf(config, node), config.self, Option.getOrUndefined(commit));
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
     }).pipe(reportUserErrors),
   ),
 );
 
-export const rejectCommand = Command.make("reject", { node: Argument.String("node") }).pipe(
+export const rejectCommand = Command.make("reject", { node: Argument.String("node"), commit: reviewedArg }).pipe(
   Command.withDescription("Decline a node's proposal; that node sets its edits aside on its next sync (authority)."),
-  Command.withHandler(({ node }) =>
+  Command.withHandler(({ node, commit }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      yield* reject(config.repo, yield* proposalOf(config, node));
+      yield* reject(config.repo, yield* proposalOf(config, node), Option.getOrUndefined(commit));
       yield* Console.log(`rejected ${node}'s proposal`);
     }).pipe(reportUserErrors),
   ),
@@ -202,7 +205,7 @@ const adopt = Command.make("adopt", {
       const dest = path.join(config.repo, "skills", name);
       if (!(yield* fs.exists(path.join(src, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)))) return yield* Effect.fail(`${src} has no SKILL.md`);
       if (yield* fs.exists(dest).pipe(Effect.orElseSucceed(() => false))) return yield* Effect.fail(`skills/${name} already exists in the repo`);
-      const copy = yield* exec({ command: "cp", args: ["-R", src, dest], timeout: Duration.seconds(30) });
+      const copy = yield* underSyncLock(exec({ command: "cp", args: ["-R", src, dest], timeout: Duration.seconds(30) }));
       if (copy.code !== 0) return yield* Effect.fail(`copying: ${copy.stderr.trim()}`);
       const aside = path.join(stateDir(home), "adopted", String(yield* Clock.currentTimeMillis));
       yield* fs.makeDirectory(aside, { recursive: true });
@@ -221,9 +224,14 @@ const add = Command.make("add", {
   Command.withHandler(({ source, skills, as }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const paths = yield* addSkills(config.repo, source, skills, as._tag === "Some" ? as.value : undefined);
-      const names = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
-      yield* Console.log(`added ${names.join(", ")}: ${yield* land(config, paths, `Add skill${names.length === 1 ? "" : "s"} ${names.join(", ")} from ${source}`)}`);
+      const { names, landed } = yield* underSyncLock(
+        Effect.gen(function* () {
+          const paths = yield* addSkills(config.repo, source, skills, as._tag === "Some" ? as.value : undefined);
+          const names = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
+          return { names, landed: yield* land(config, paths, `Add skill${names.length === 1 ? "" : "s"} ${names.join(", ")} from ${source}`) };
+        }),
+      );
+      yield* Console.log(`added ${names.join(", ")}: ${landed}`);
     }).pipe(reportUserErrors),
   ),
 );
@@ -236,23 +244,26 @@ const update = Command.make("update", {
   Command.withHandler(({ skills, yes }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const touched = yield* updateSkills(config.repo, skills);
-      const stat = yield* exec({ command: "git", args: ["-C", config.repo, "diff", "--stat", "--", ...touched], timeout: Duration.seconds(10) });
-      const changed = yield* exec({ command: "git", args: ["-C", config.repo, "status", "--porcelain", "--", ...touched], timeout: Duration.seconds(10) });
-      if (changed.stdout.trim() === "") {
+      // The update waits in a scratch directory while you decide; the checkout only changes once you keep it.
+      const preview = yield* previewUpdate(config.repo, skills);
+      if (preview.files.length === 0) {
         yield* Console.log("every skill is current");
         return;
       }
-      yield* Console.log(stat.stdout.trim() || changed.stdout.trim());
+      yield* Console.log(preview.stat);
       const keep =
         yes || (process.stdin.isTTY === true && (yield* Prompt.run(Prompt.Confirm({ message: "Keep these changes?" })).pipe(Effect.orElseSucceed(() => false))));
       if (!keep) {
-        yield* exec({ command: "git", args: ["-C", config.repo, "checkout", "--", ...touched], timeout: Duration.seconds(10) });
-        yield* exec({ command: "git", args: ["-C", config.repo, "clean", "-qfd", "--", ...touched], timeout: Duration.seconds(10) });
         yield* Console.log(process.stdin.isTTY === true ? "discarded" : "discarded; re-run with --yes to keep them");
         return;
       }
-      yield* Console.log(yield* land(config, touched, `Update skill${touched.length === 1 ? "" : "s"} from upstream`));
+      const landed = yield* underSyncLock(
+        Effect.gen(function* () {
+          const paths = yield* keepUpdate(config.repo, skills, preview.digest);
+          return yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`);
+        }),
+      );
+      yield* Console.log(landed);
     }).pipe(reportUserErrors),
   ),
 );
@@ -262,8 +273,10 @@ const remove = Command.make("remove", { skills: Argument.String("skill").pipe(Ar
   Command.withHandler(({ skills }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const paths = yield* removeSkills(config.repo, skills);
-      yield* Console.log(`removed ${skills.join(", ")}: ${yield* land(config, paths, `Remove skill${skills.length === 1 ? "" : "s"} ${skills.join(", ")}`)}`);
+      const landed = yield* underSyncLock(
+        removeSkills(config.repo, skills).pipe(Effect.flatMap((paths) => land(config, paths, `Remove skill${skills.length === 1 ? "" : "s"} ${skills.join(", ")}`))),
+      );
+      yield* Console.log(`removed ${skills.join(", ")}: ${landed}`);
     }).pipe(reportUserErrors),
   ),
 );
@@ -315,17 +328,22 @@ export const mcpAddCommand = Command.make("add", {
         url._tag === "Some"
           ? { kind: "direct", url: url.value, ...(token._tag === "Some" ? { auth: { type: "bearer", token_env: token.value } } : {}) }
           : { kind: "stdio", command: command._tag === "Some" ? command.value : "", args: arg };
-      yield* fs.writeFileString(`${config.repo}/mcp/${name}.json`, prettyJson(definition));
       const targets = node.length > 0 ? node : config.nodes.map((n) => n.name);
-      const changed = [`mcp/${name}.json`];
-      for (const target of targets) {
-        const file = `${config.repo}/nodes/${target}.toml`;
-        const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => `unknown machine: ${target}`));
-        if (text.includes(`"${name}"`)) continue;
-        yield* fs.writeFileString(file, withMcpServer(text, name));
-        changed.push(`nodes/${target}.toml`);
-      }
-      yield* Console.log(`declared ${name} for ${targets.join(", ")}: ${yield* land(config, changed, `Add MCP server ${name}`)}`);
+      const landed = yield* underSyncLock(
+        Effect.gen(function* () {
+          yield* fs.writeFileString(`${config.repo}/mcp/${name}.json`, prettyJson(definition));
+          const changed = [`mcp/${name}.json`];
+          for (const target of targets) {
+            const file = `${config.repo}/nodes/${target}.toml`;
+            const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => `unknown machine: ${target}`));
+            if (text.includes(`"${name}"`)) continue;
+            yield* fs.writeFileString(file, withMcpServer(text, name));
+            changed.push(`nodes/${target}.toml`);
+          }
+          return yield* land(config, changed, `Add MCP server ${name}`);
+        }),
+      );
+      yield* Console.log(`declared ${name} for ${targets.join(", ")}: ${landed}`);
     }).pipe(reportUserErrors),
   ),
 );

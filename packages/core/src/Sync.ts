@@ -5,12 +5,15 @@
  *               authority commits them to the branch; any other node
  *               proposes them on t3-fleet/staging/<node> for approval
  *   2. pull     the branch, refusing when local edits overlap incoming files
+ *               (a node whose pull failed proposes nothing that run)
  *   3. converge observe this node, diagnose it against the whole fleet's
  *               last reported state, and run its safe fixes in [fleet] apply
  *   4. report   this node's observation and findings to t3-fleet/state/<node>
  *   5. alert    record health transitions there too, for whoever relays them
  *
  * Every branch T3 Fleet writes belongs to one node, so pushes never race.
+ * On the machine, a run holds the sync lock (SyncLock.ts), as does every
+ * command that writes to the checkout.
  */
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -21,7 +24,7 @@ import * as Schema from "effect/Schema";
 import { loadConfigFrom, probeSettings, type Config, type Node } from "./Config.ts";
 import { diagnose, type Finding, type Fix } from "./Diagnose.ts";
 import { runFixes } from "./Fix.ts";
-import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
+import { addPaths, changedFiles, ensureGitConfig, git, literal, ok, out, pullBranch, why } from "./Git.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
@@ -31,6 +34,7 @@ import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
 import { approve, autoApprovable, listProposals, settleRejection } from "./Staging.ts";
 import { branchPrefix, branchPrefixes, repoRenamed, stateDir } from "./Names.ts";
+import { withSyncLock } from "./SyncLock.ts";
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
@@ -85,17 +89,6 @@ const publishState = (repo: string, state: NodeState) =>
     yield* dropLegacyBranch(repo, "state", state.node);
   });
 
-/** Changed or new files under `paths`, as git sees them (ignored files excluded). */
-const changedUnder = (repo: string, paths: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    if (paths.length === 0) return [] as Array<string>;
-    const status = yield* git(repo, ["status", "--porcelain", "-uall", "--", ...paths]);
-    return out(status)
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => l.slice(3).replace(/^.* -> /, ""));
-  });
-
 /**
  * Propose `files` on t3-fleet/staging/<node>: one commit on top of the branch
  * tip with exactly these files, built in a scratch index so the working tree
@@ -111,50 +104,233 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
       return null;
     }
     // A scratch index: the working tree and the real index stay untouched.
-    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-propose-index` };
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-propose-index`, ...literal };
     const read = yield* git(repo, ["read-tree", `origin/${branch}`], { env });
     if (!ok(read)) return yield* Effect.fail(`proposing: ${why(read)}`);
-    yield* git(repo, ["add", "-A", "--", ...files], { env });
-    const tree = yield* git(repo, ["write-tree"], { env });
-    const commit = yield* git(repo, ["commit-tree", out(tree), "-p", `origin/${branch}`, "-m", `Proposed by ${node}: ${files.length} file${files.length === 1 ? "" : "s"}\n\n${files.join("\n")}`]);
+    const add = yield* git(repo, ["add", "-A", "--", ...files], { env });
+    if (!ok(add)) return yield* Effect.fail(`proposing: ${why(add)}`);
+    const tree = out(yield* git(repo, ["write-tree"], { env }));
+    // The same change on the same base is already proposed: keep its commit, the one an authority may be reviewing.
+    const existing = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
+    if (existing !== "" && ok(yield* git(repo, ["fetch", "-q", "origin", ref]))) {
+      const [sameTree, sameBase] = [
+        out(yield* git(repo, ["rev-parse", `${existing}^{tree}`])) === tree,
+        out(yield* git(repo, ["rev-parse", `${existing}^`])) === out(yield* git(repo, ["rev-parse", `origin/${branch}`])),
+      ];
+      if (sameTree && sameBase) return existing.slice(0, 7);
+    }
+    const commit = yield* git(repo, ["commit-tree", tree, "-p", `origin/${branch}`, "-m", `Proposed by ${node}: ${files.length} file${files.length === 1 ? "" : "s"}\n\n${files.join("\n")}`]);
     const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:${ref}`]);
     if (!ok(push)) return yield* Effect.fail(`proposing: ${why(push)}`);
     return out(commit).slice(0, 7);
   });
 
-/** Rebase onto origin, refusing when an uncommitted edit touches an incoming file. */
-const pull = (repo: string, branch: string) =>
+/**
+ * A node's errors by finding key, with their titles. Keyed by the key alone:
+ * a title that counts something ("failed 4 times") changes every run, and is
+ * still the same problem.
+ */
+const healthOf = (findings: ReadonlyArray<Finding>) => new Map(findings.filter((f) => f.severity === "error").map((f) => [f.key, f.title] as const));
+
+/** The streak in this node's own record of its last run, which a failed publish cannot lose. */
+const localStreak = (home: string) =>
   Effect.gen(function* () {
-    const fetch = yield* git(repo, ["fetch", "-q", "origin", branch]);
-    if (!ok(fetch)) return yield* Effect.fail(`fetch failed: ${why(fetch)}`);
-    const behind = Number(out(yield* git(repo, ["rev-list", "--count", `HEAD..origin/${branch}`])));
-    if (behind === 0) return 0;
-    const status = out(yield* git(repo, ["status", "--porcelain", "-uall"])).split("\n").filter(Boolean);
-    const dirty = new Map(status.map((l) => [l.slice(3).replace(/^.* -> /, ""), l.slice(0, 2)] as const));
-    const incoming = out(yield* git(repo, ["diff", "--name-only", `HEAD...origin/${branch}`])).split("\n").filter(Boolean);
-    const overlap: Array<string> = [];
-    for (const file of incoming.filter((f) => dirty.has(f))) {
-      // A local edit identical to what arrives (an approved proposal coming
-      // back) is not a conflict: drop the local copy and take the branch's.
-      const local = out(yield* git(repo, ["hash-object", "--", file]));
-      const remote = out(yield* git(repo, ["rev-parse", `origin/${branch}:${file}`]));
-      if (local !== "" && local === remote) {
-        if (dirty.get(file) === "??") yield* git(repo, ["clean", "-q", "-f", "--", file]);
-        else yield* git(repo, ["checkout", "-q", "HEAD", "--", file]);
-        continue;
-      }
-      overlap.push(file);
-    }
-    if (overlap.length > 0) return yield* Effect.fail(`local edits overlap incoming changes: ${overlap.join(", ")}`);
-    const rebase = yield* git(repo, ["rebase", "-q", "--autostash", `origin/${branch}`]);
-    if (!ok(rebase)) {
-      yield* git(repo, ["rebase", "--abort"]);
-      return yield* Effect.fail(`rebase onto origin/${branch} conflicted; resolve by hand`);
-    }
-    return behind;
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(lastSyncPath(home)).pipe(Effect.option);
+    return Option.map(text, (t) => Number(t.split("\t")[2]) || 0);
   });
 
-const healthOf = (findings: ReadonlyArray<Finding>) => new Set(findings.filter((f) => f.severity === "error").map((f) => `${f.key}\t${f.title}`));
+/**
+ * Steps 1 and 2, the repo's part of a run: propose or commit, pull, push,
+ * and on an authority approve what `auto_approve` trusts. Appends what it did
+ * to `lines`; the config is the one pulled, and the findings are about the
+ * repo on this node. Run holding the sync lock.
+ */
+export const exchange = (startConfig: Config, startSelf: Node, lines: Array<string>) =>
+  Effect.gen(function* () {
+    const repo = startConfig.repo;
+    let config = startConfig;
+    let self = startSelf;
+    let message = "";
+    let failed = false;
+    const findings: Array<Finding> = [];
+
+    // 1. Propose or commit changes under the auto-commit paths. A node
+    //    whose last proposal was rejected first sets those edits aside.
+    const autoCommit = settingList(config, "auto_commit", DEFAULT_AUTO_COMMIT);
+    if (!self.roles.includes("authority")) {
+      const settled = yield* settleRejection(repo, self.name, config.branch);
+      if (settled.length > 0) lines.push(`set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`);
+    }
+    if (self.roles.includes("authority") && autoCommit.length > 0) {
+      // Exactly the changed files: an auto_commit path that does not exist would fail the whole add.
+      const changed = yield* changedFiles(repo, autoCommit);
+      if (changed.length > 0) {
+        const committed = yield* addPaths(repo, changed).pipe(
+          Effect.andThen(git(repo, ["commit", "-q", "-m", `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`, "--", ...changed], { env: literal })),
+          Effect.flatMap((commit) => (ok(commit) ? Effect.void : Effect.fail(why(commit)))),
+          Effect.result,
+        );
+        if (committed._tag === "Success") lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
+        else {
+          failed = true;
+          message = `committing ${changed.length} changed file${changed.length === 1 ? "" : "s"}: ${committed.failure}`;
+        }
+      }
+    }
+
+    // 2. Pull, then push what an authority committed. Any other node only
+    //    fast-forwards: it never commits. Commits made there by hand are
+    //    rebased along, as before, and named, since they reach no one.
+    let how: "rebase" | "ff-only" = self.roles.includes("authority") ? "rebase" : "ff-only";
+    if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+      const local = out(yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`])).split("\n").filter(Boolean);
+      if (local.length > 0) {
+        how = "rebase";
+        const some = local.length === 1 ? "a commit" : `${local.length} commits`;
+        findings.push({
+          node: self.name,
+          key: "sync-local-commits",
+          severity: "warn",
+          area: "sync",
+          title: `${some} here that ${config.branch} lacks (${local.slice(0, 3).join("; ")}${local.length > 3 ? "; …" : ""}): only an authority's commits reach the other machines`,
+          detail: `git -C ${repo} reset --soft origin/${config.branch} turns them back into edits, which the next sync proposes for approval.`,
+        });
+      }
+    }
+    const pulled = yield* pullBranch(repo, config.branch, how).pipe(
+      Effect.catch((e: string) => Effect.sync(() => {
+        failed = true;
+        message = message || e;
+        return 0;
+      })),
+    );
+    if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
+    if (self.roles.includes("authority") && !failed) {
+      const ahead = Number(out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])));
+      if (ahead > 0) {
+        const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${config.branch}`]);
+        if (ok(push)) lines.push(`pushed ${ahead} commit${ahead === 1 ? "" : "s"}`);
+        else {
+          failed = true;
+          message = `push failed: ${why(push)}`;
+        }
+      }
+    }
+
+    // A non-authority proposes what still differs once it has pulled. Not
+    // after a failed pull: its files would be based on an old branch, and
+    // approving them would undo what it failed to pull.
+    if (!self.roles.includes("authority") && !failed) {
+      const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
+      const proposal = yield* propose(repo, self.name, config.branch, changed).pipe(
+        Effect.catch((e: string) => Effect.sync(() => {
+          failed = true;
+          message = message || e;
+          return null;
+        })),
+      );
+      if (proposal !== null) lines.push(`proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`);
+    }
+
+    // The pull may have changed the config; reload it.
+    const reloaded = yield* loadConfigFrom(repo, config.self).pipe(Effect.option);
+    if (Option.isSome(reloaded)) {
+      config = reloaded.value;
+      self = config.nodes.find((n) => n.name === config.self) ?? self;
+    }
+
+    // An authority approves proposals the config trusts without review.
+    if (self.roles.includes("authority") && !failed) {
+      const prefixes = settingList(config, "auto_approve", []);
+      for (const proposal of yield* listProposals(repo, config.branch)) {
+        if (!autoApprovable(proposal, prefixes)) continue;
+        const rev = yield* approve(repo, config.branch, proposal, `${self.name}, automatically`, proposal.commit).pipe(
+          Effect.catch((e: string) => Effect.sync(() => {
+            lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
+            return null;
+          })),
+        );
+        if (rev !== null) lines.push(`approved ${proposal.node}'s proposal (${rev})`);
+      }
+    }
+
+    return { failed, message, config, self, findings };
+  });
+
+/** What a run found and did, for its report. */
+export interface Outcome {
+  readonly config: Config;
+  readonly node: string;
+  readonly now: number;
+  /** The node's last published state. */
+  readonly previous: Option.Option<NodeState>;
+  readonly failed: boolean;
+  readonly message: string;
+  readonly lines: Array<string>;
+  /** This node's own findings. */
+  readonly findings: ReadonlyArray<Finding>;
+  readonly applied: NodeState["applied"];
+  readonly observation: NodeState["observation"];
+}
+
+/**
+ * Steps 4 and 5: publish the node's state, with alerts for health
+ * transitions, and record the run locally once it is published. The streak
+ * counts on from that local record, so a node that cannot publish still knows
+ * it is failing, and says so in the record the probe reads.
+ */
+export const report = ({ config, node, now, previous, failed, message, lines, findings, applied, observation }: Outcome) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = process.env["HOME"] ?? "";
+    const repo = config.repo;
+    const previousStreak = Option.getOrElse(yield* localStreak(home), () => Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }));
+    const stateOf = (fail: boolean, reason: string): NodeState => {
+      const streak = fail ? previousStreak + 1 : 0;
+      const alerts: Array<Alert> = [...Option.match(previous, { onNone: () => [], onSome: (p) => p.alerts })];
+      const before = healthOf(Option.match(previous, { onNone: () => [] as Array<Finding>, onSome: (p) => p.findings as ReadonlyArray<Finding> }));
+      const after = healthOf(findings);
+      for (const [key, title] of after) if (!before.has(key)) alerts.push({ at: now, node, kind: "problem", message: title });
+      for (const [key, title] of before) if (!after.has(key)) alerts.push({ at: now, node, kind: "resolved", message: title });
+      const wasFailing = previousStreak >= config.alertAfter;
+      if (streak >= config.alertAfter && !wasFailing) alerts.push({ at: now, node, kind: "failing", message: `sync failed ${streak} times in a row: ${reason}` });
+      if (streak === 0 && wasFailing) alerts.push({ at: now, node, kind: "recovered", message: "sync works again" });
+      return {
+        node,
+        at: now,
+        result: fail ? "fail" : "ok",
+        streak,
+        message: reason || (lines.length === 0 ? "nothing to do" : lines.join("; ")),
+        rev,
+        observation,
+        findings: findings.map((f) => ({ node: f.node, key: f.key, severity: f.severity, area: f.area, title: f.title, ...(f.detail === undefined ? {} : { detail: f.detail }) })),
+        applied,
+        alerts: alerts.slice(-MAX_ALERTS),
+      };
+    };
+    const record = (state: NodeState) =>
+      fs.makeDirectory(stateDir(home), { recursive: true }).pipe(
+        Effect.andThen(fs.writeFileString(lastSyncPath(home), `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`)),
+        Effect.ignore,
+      );
+    const rev = out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+    const state = stateOf(failed, message);
+    // Recorded only after publishing, so a run nobody else could see is never "ok" here.
+    const published = yield* publishState(repo, state).pipe(
+      Effect.mapError((e) => (typeof e === "string" ? e : `publishing state: ${e.message}`)),
+      Effect.result,
+    );
+    if (published._tag === "Failure") {
+      const unpublished = stateOf(true, message === "" ? published.failure : `${message}; ${published.failure}`);
+      yield* record(unpublished);
+      yield* reportToRelay(config, unpublished).pipe(Effect.ignore);
+      return yield* Effect.fail(published.failure);
+    }
+    yield* record(state);
+    if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
+    return state;
+  });
 
 export interface SyncResult {
   readonly state: NodeState;
@@ -163,8 +339,6 @@ export interface SyncResult {
 
 export const syncRun = (startConfig: Config, options: { readonly apply: boolean } = { apply: true }) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const home = process.env["HOME"] ?? "";
     const repo = startConfig.repo;
     // Reassigned after the pull: everything from observing on must judge this
     // node by the config it just pulled, not the one it started with.
@@ -175,85 +349,13 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
     const lines: Array<string> = [];
     const now = yield* Clock.currentTimeMillis;
 
-    if (!(yield* takeSyncLock)) return { state: null, lines: ["another sync is running"] } as const;
-
     const run = Effect.gen(function* () {
       yield* ensureGitConfig;
       const previous = Option.fromNullishOr((yield* readStates(repo)).find((s) => s.node === self.name));
-      let message = "";
-      let failed = false;
-
-      // 1. Propose or commit changes under the auto-commit paths. A node
-      //    whose last proposal was rejected first sets those edits aside.
-      const autoCommit = settingList(config, "auto_commit", DEFAULT_AUTO_COMMIT);
-      if (!self.roles.includes("authority")) {
-        const settled = yield* settleRejection(repo, self.name, config.branch);
-        if (settled.length > 0) lines.push(`set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`);
-      }
-      if (self.roles.includes("authority")) {
-        const changed = yield* changedUnder(repo, autoCommit);
-        if (changed.length > 0) {
-          yield* git(repo, ["add", "-A", "--", ...autoCommit]);
-          const commit = yield* git(repo, ["commit", "-q", "-m", `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`, "--", ...autoCommit]);
-          if (ok(commit)) lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
-        }
-      }
-
-      // 2. Pull, then push what an authority committed.
-      const pulled = yield* pull(repo, config.branch).pipe(
-        Effect.catch((e: string) => Effect.sync(() => {
-          failed = true;
-          message = message || e;
-          return 0;
-        })),
-      );
-      if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
-      if (self.roles.includes("authority") && !failed) {
-        const ahead = Number(out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])));
-        if (ahead > 0) {
-          const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${config.branch}`]);
-          if (ok(push)) lines.push(`pushed ${ahead} commit${ahead === 1 ? "" : "s"}`);
-          else {
-            failed = true;
-            message = `push failed: ${why(push)}`;
-          }
-        }
-      }
-
-      // A non-authority proposes what still differs once it has pulled.
-      if (!self.roles.includes("authority")) {
-        const changed = yield* changedUnder(repo, autoCommit);
-        const proposal = yield* propose(repo, self.name, config.branch, changed).pipe(
-          Effect.catch((e: string) => Effect.sync(() => {
-            failed = true;
-            message = message || e;
-            return null;
-          })),
-        );
-        if (proposal !== null) lines.push(`proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`);
-      }
-
-      // The pull may have changed the config; reload it.
-      const reloaded = yield* loadConfigFrom(repo, config.self).pipe(Effect.option);
-      if (Option.isSome(reloaded)) {
-        config = reloaded.value;
-        self = config.nodes.find((n) => n.name === config.self) ?? self;
-      }
-
-      // An authority approves proposals the config trusts without review.
-      if (self.roles.includes("authority") && !failed) {
-        const prefixes = settingList(config, "auto_approve", []);
-        for (const proposal of yield* listProposals(repo, config.branch)) {
-          if (!autoApprovable(proposal, prefixes)) continue;
-          const rev = yield* approve(repo, config.branch, proposal, `${self.name}, automatically`).pipe(
-            Effect.catch((e: string) => Effect.sync(() => {
-              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
-              return null;
-            })),
-          );
-          if (rev !== null) lines.push(`approved ${proposal.node}'s proposal (${rev})`);
-        }
-      }
+      const exchanged = yield* exchange(config, self, lines);
+      let { failed, message } = exchanged;
+      config = exchanged.config;
+      self = exchanged.self;
 
       // 3. Observe, diagnose against everyone's last state, apply safe fixes.
       const others = yield* readStates(repo);
@@ -302,77 +404,26 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
       }
 
       // 4 and 5. Report, with alerts for health transitions.
-      const streak = failed ? Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }) + 1 : 0;
-      const alerts: Array<Alert> = [...Option.match(previous, { onNone: () => [], onSome: (p) => p.alerts })];
-      const before = healthOf(Option.match(previous, { onNone: () => [] as Array<Finding>, onSome: (p) => p.findings as ReadonlyArray<Finding> }));
-      const after = healthOf(findings.filter((f) => f.node === self.name));
-      for (const problem of after) if (!before.has(problem)) alerts.push({ at: now, node: self.name, kind: "problem", message: problem.split("\t")[1] ?? problem });
-      for (const problem of before) if (!after.has(problem)) alerts.push({ at: now, node: self.name, kind: "resolved", message: problem.split("\t")[1] ?? problem });
-      const wasFailing = Option.match(previous, { onNone: () => false, onSome: (p) => p.streak >= config.alertAfter });
-      if (streak >= config.alertAfter && !wasFailing) alerts.push({ at: now, node: self.name, kind: "failing", message: `sync failed ${streak} times in a row: ${message}` });
-      if (streak === 0 && wasFailing) alerts.push({ at: now, node: self.name, kind: "recovered", message: "sync works again" });
-
-      const state: NodeState = {
+      const state = yield* report({
+        config,
         node: self.name,
-        at: now,
-        result: failed ? "fail" : "ok",
-        streak,
-        message: message || (lines.length === 0 ? "nothing to do" : lines.join("; ")),
-        rev: out(yield* git(repo, ["rev-parse", "--short", "HEAD"])),
-        observation: selfResult.ok ? selfResult.observation : null,
-        findings: findings.filter((f) => f.node === self.name).map((f) => ({ node: f.node, key: f.key, severity: f.severity, area: f.area, title: f.title, ...(f.detail === undefined ? {} : { detail: f.detail }) })),
+        now,
+        previous,
+        failed,
+        message,
+        lines,
+        findings: [...findings.filter((f) => f.node === self.name), ...exchanged.findings],
         applied,
-        alerts: alerts.slice(-MAX_ALERTS),
-      };
-      // Recorded locally before publishing, so the probe sees the run even when the push fails.
-      yield* fs.writeFileString(lastSyncPath(home), `${Math.round(now / 1000)}\t${state.result}\t${streak}\t${state.message.replaceAll("\n", " ")}\n`).pipe(Effect.ignore);
-      yield* publishState(repo, state);
-      if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
+        observation: selfResult.ok ? selfResult.observation : null,
+      });
       return { state, lines };
     });
 
-    return yield* run.pipe(Effect.ensuring(releaseSyncLock));
+    // The fixes it runs are part of the run: an authority's `t3-fleet secrets add-node` must not wait for it.
+    return yield* withSyncLock(run, Effect.succeed({ state: null, lines: ["another sync is running"] } as const), { children: true });
   });
-
-const syncLock = () => `${stateDir(process.env["HOME"] ?? "")}/sync.lock`;
-
-/**
- * One run at a time. Creating the lock directory is the acquisition: it fails
- * when another run holds it, so two runs can never both take it. A lock older
- * than an hour belongs to a dead run; it is renamed away (only one run can)
- * and the directory created again. False when another run holds it.
- */
-const takeSyncLock = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const lock = syncLock();
-  yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
-  const take = fs.makeDirectory(lock).pipe(
-    Effect.as(true),
-    Effect.orElseSucceed(() => false),
-  );
-  if (yield* take) return true;
-  const now = yield* Clock.currentTimeMillis;
-  const lockStat = yield* fs.stat(lock).pipe(Effect.option);
-  if (Option.isNone(lockStat)) return yield* take;
-  const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
-  if (age < 3_600_000) return false;
-  const aside = `${lock}.stale.${now}.${process.pid}`;
-  if (!(yield* fs.rename(lock, aside).pipe(Effect.as(true), Effect.orElseSucceed(() => false)))) return false;
-  yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
-  return yield* take;
-});
-
-const releaseSyncLock = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  yield* fs.remove(syncLock(), { recursive: true }).pipe(Effect.ignore);
-});
 
 /** Run `effect` holding sync's lock, so no sync proposes or pulls the repo halfway through an edit. */
-export const underSyncLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.gen(function* () {
-    if (!(yield* takeSyncLock)) return yield* Effect.fail("a sync is running on this machine; try again in a moment");
-    return yield* effect.pipe(Effect.ensuring(releaseSyncLock));
-  });
-
+export { underSyncLock } from "./SyncLock.ts";
 
 export { NodeState, type Alert } from "./State.ts";
