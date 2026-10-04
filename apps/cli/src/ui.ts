@@ -226,7 +226,7 @@ export const uiCommand = Command.make("ui", {
               return { report, states, accepted: config.settings.accept ?? [] };
             }),
           ),
-          apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
+          apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle, config.repo).pipe(Effect.provide(services)),
           proposals: closed(proposalsOf(config)),
           approve: (node, change) =>
             closed(proposalFrom(config, node, change).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),

@@ -316,9 +316,11 @@ describe("sync-stale", () => {
 });
 
 describe("t3-access", () => {
-  const access = (state: "expiring" | "rejected" | "none", expiresAt: number | null, detail = "") =>
-    diagnose([ok("a", machine({}, { access: { state, expiresAt, detail, cli: true } }))], latest).find((f) => f.key === "t3-access");
   const now = 1_791_000_000_000;
+  const access = (state: "expiring" | "rejected" | "none", expiresAt: number | null, detail = "", lastAttempt?: number) =>
+    diagnose([ok("a", machine({}, { access: { state, expiresAt, detail, cli: true, ...(lastAttempt === undefined ? {} : { lastAttempt }) } }))], latest).find(
+      (f) => f.key === "t3-access",
+    );
 
   it("lets sync renew a token that is running out or has run out", () => {
     expect(access("expiring", now + 86_400_000)?.fix).toEqual({ command: "t3-fleet t3 connect", safe: true });
@@ -328,5 +330,14 @@ describe("t3-access", () => {
   it("leaves a first connection, or a token T3 refused before it ran out, to a person", () => {
     expect(access("none", null)?.fix?.safe).toBe(false);
     expect(access("rejected", now + 20 * 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(false);
+    // Revoked in its last three days: still a person's call.
+    expect(access("rejected", now + 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(false);
+  });
+
+  it("tries at most once a day", () => {
+    const tried = access("expiring", now + 86_400_000, "", now - 2 * 3_600_000);
+    expect(tried?.fix?.safe).toBe(false);
+    expect(tried?.detail).toContain("tried to renew it 2 hours ago");
+    expect(access("expiring", now + 86_400_000, "", now - 25 * 3_600_000)?.fix?.safe).toBe(true);
   });
 });

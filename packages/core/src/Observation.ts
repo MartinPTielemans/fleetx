@@ -77,6 +77,8 @@ export const T3Observation = Schema.Struct({
       detail: Schema.String,
       /** Whether T3's CLI can be reached here to mint one. */
       cli: Schema.Boolean,
+      /** When T3 Fleet last tried to mint one here (ms since the epoch). */
+      lastAttempt: Schema.optionalKey(Schema.Number),
     }),
   ),
   /**

@@ -49,7 +49,10 @@ systemd timer (a user unit, or a system unit for root) that runs the absolute
 node binary with a fixed PATH. Logs: `~/.local/state/t3-fleet/sync.log`. On
 macOS, when a sync the timer started applies this fix, reloading the agent
 would stop that sync and the fix with it, so a helper does the reload once the
-sync has finished (`~/.local/state/t3-fleet/sync-timer-reload.sh`).
+sync has finished. Until it has, `~/.local/state/t3-fleet/sync-timer-reload.pending`
+says so; if it is still there once that sync is over (the helper failed, the Mac
+slept), `engine-timer` (or `engine-timer-unwanted`, for a removal) reports that
+launchd never reloaded the timer, and the fix tries again.
 
 **`engine-timer-unwanted`** — a sync timer is installed but this machine's
 settings do not ask for one. The fix removes it.
@@ -102,8 +105,12 @@ read-only token, and writes it to `~/.config/t3-fleet/t3-access.json` (mode
 600). T3 lists it among its clients as "T3 Fleet", where it can be revoked.
 Until then only Claude and Codex are checked, through `claude auth status`
 and `codex login status`. Sync renews a token that expires within three days,
-or has expired, by itself (the `t3` area is in the default `[fleet] apply`); a
-first connection, or a token T3 refused before it ran out, waits for a person.
+or has expired, by itself (the `t3` area is in the default `[fleet] apply`), at
+most once a day: every attempt, failed or not, is noted in
+`~/.local/state/t3-fleet/t3-access-attempt`, since each one adds a "T3 Fleet"
+client in T3. A new token that is itself due within three days is kept but the
+fix fails, so it is not mistaken for a renewal. A first connection, or a token
+T3 refused (a person revoked it) before it expired, waits for a person.
 
 ## models
 
@@ -191,7 +198,12 @@ disrupting them until the hub serves them; sign in to OAuth servers first).
 ## T3
 
 Each problem observing T3 has a key of its own, so an `[[accept]]` for one
-never covers another:
+never covers another. Up to T3 Fleet 0.6.1 they were numbered (`t3-problem-1`, and
+`plugin-problem-1` for plugins), and the number moved when the list changed.
+An `[[accept]]` written for a numbered id no longer matches anything: replace it
+with the new id, which `t3-fleet status` shows. The first sync after upgrading
+also sends one round of alerts in which each such finding appears under its new
+id and is resolved under its old one; nothing changed on the machine.
 
 - **`t3-not-running`** — T3 has run here, but no server is up (stopped, or
   mid-restart), or the one `server-runtime.json` names has exited.

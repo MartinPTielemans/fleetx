@@ -16,6 +16,7 @@ import { why } from "./Plugins.ts";
 import type { FleetSettings, Node, ProxySettings } from "./Config.ts";
 import type { Latest } from "./Latest.ts";
 import { releasesBehind } from "./Latest.ts";
+import { RENEW_WITHIN_MS } from "./T3Access.ts";
 import type { AgentObservation, MachineObservation, ProviderObservation } from "./Observation.ts";
 import type { NodeResult } from "./Remote.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
@@ -502,10 +503,19 @@ const providerAuthFindings = (node: string, obs: MachineObservation): Array<Find
 const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding> => {
   const access = obs.t3.access;
   if (access === null || access.state === "ok") return [];
-  // Renewing a token that is running out is what the person did to get it, with the same CLI and scope; sync may do it.
-  const renewal = access.expiresAt !== null && access.expiresAt - obs.observedAt < 3 * 86_400_000 && (access.state === "expiring" || access.state === "rejected");
-  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: renewal } : undefined;
-  const how = fix === undefined ? "; T3's CLI was not found on this machine to issue one" : "";
+  // Renewing a token that is running out, or ran out, is what the person did to get it, with the same CLI and scope;
+  // sync may do it, at most once a day (each attempt adds a client in T3). A token T3 refused before then waits for a person.
+  const renewal =
+    access.expiresAt !== null &&
+    (access.state === "expiring" ? access.expiresAt - obs.observedAt < RENEW_WITHIN_MS : access.state === "rejected" && access.expiresAt <= obs.observedAt);
+  const recent = access.lastAttempt !== undefined && obs.observedAt - access.lastAttempt < 86_400_000;
+  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: renewal && !recent } : undefined;
+  const how =
+    fix === undefined
+      ? "; T3's CLI was not found on this machine to issue one"
+      : renewal && recent
+        ? `; T3 Fleet tried to renew it ${Math.max(1, Math.round((obs.observedAt - (access.lastAttempt ?? 0)) / 3_600_000))} hours ago, and sync tries again a day after that`
+        : "";
   const title =
     access.state === "none"
       ? "T3 Fleet cannot read T3's provider status here; only Claude and Codex logins are checked, through their CLIs"

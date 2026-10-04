@@ -36,7 +36,7 @@ import {
   type ProxyObservation,
   type T3Observation,
 } from "./Observation.ts";
-import { readAccess, readProviderSnapshot, t3CliFromCommandLine } from "./T3Access.ts";
+import { readAccess, readProviderSnapshot, RENEW_WITHIN_MS, t3AccessAttemptPath, t3CliFromCommandLine } from "./T3Access.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
 import { stateDir } from "./Names.ts";
@@ -262,22 +262,25 @@ const observeT3 = (home: string, loginEnv: Env) =>
     if (runtime?.alive === true) {
       const now = yield* Clock.currentTimeMillis;
       const token = yield* readAccess(home);
+      const attempted = Number(Option.getOrElse(yield* readText(t3AccessAttemptPath(home)), () => "").trim());
+      const attempt = attempted > 0 ? { lastAttempt: attempted } : {};
       if (Option.isNone(token) || token.value.origin !== runtime.origin) {
-        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "T3 Fleet has no T3 token here" : `T3 Fleet's token is for ${token.value.origin}`, cli };
+        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "T3 Fleet has no T3 token here" : `T3 Fleet's token is for ${token.value.origin}`, cli, ...attempt };
       } else if (token.value.expiresAt <= now) {
-        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "T3 Fleet's T3 token has expired", cli };
+        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "T3 Fleet's T3 token has expired", cli, ...attempt };
       } else {
         const snapshot = yield* readProviderSnapshot(runtime.origin, token.value.token);
-        const expiring = token.value.expiresAt - now < 3 * 86_400_000;
+        const expiring = token.value.expiresAt - now < RENEW_WITHIN_MS;
         if (snapshot._tag === "ok") {
           providerAuth = [...snapshot.providers];
-          access = { state: expiring ? "expiring" : "ok", expiresAt: token.value.expiresAt, detail: "read from T3", cli };
+          access = { state: expiring ? "expiring" : "ok", expiresAt: token.value.expiresAt, detail: "read from T3", cli, ...attempt };
         } else {
           access = {
             state: snapshot._tag === "rejected" ? "rejected" : "failed",
             expiresAt: token.value.expiresAt,
             detail: snapshot._tag === "rejected" ? "T3 refused T3 Fleet's token" : snapshot.detail,
             cli,
+            ...attempt,
           };
         }
       }

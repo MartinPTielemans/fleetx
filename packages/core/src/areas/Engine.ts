@@ -70,6 +70,8 @@ const Observed = Schema.Struct({
      * XPC_SERVICE_NAME; the fix's shell sees "0", so it is noted here.
      */
     inJob: Schema.optionalKey(Schema.Boolean),
+    /** A reload deferred by an earlier sync (see outsideSyncJob) has not run. */
+    reloadPending: Schema.optionalKey(Schema.Boolean),
   }),
   /** fleetx's directories still to move: config, state, share (Names.ts). Absent from older probes. */
   legacy: Schema.optionalKey(Schema.Array(Schema.Literals(["config", "state", "share"]))),
@@ -140,20 +142,30 @@ export const ENGINE_INSTALL = "t3-fleet:install-self";
 
 const heredoc = (file: string, text: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
 
+/** Left by a deferred reload until it runs; holds the pid of the sync that deferred it. */
+export const RELOAD_PENDING = "sync-timer-reload.pending";
+
 /**
  * launchctl steps that stop the sync timer's job, for a fix that runs inside
  * it: a sync the timer started runs its fixes in that job, and bootout stops
  * the job's processes, the fix's shell with them, before the next step runs,
  * leaving the Mac with no timer. Those steps go to a helper in its own
- * session, which waits for the sync (the shell's parent) to exit first.
+ * session (a file of its own, so two never share one), which waits for the
+ * sync (the shell's parent) to exit first. Until the steps have run, a marker
+ * says a reload is pending; a failed reload puts it back.
  */
-export const outsideSyncJob = (nodePath: string, steps: string) =>
-  [
-    `mkdir -p "$HOME/${STATE_DIR}" && helper="$HOME/${STATE_DIR}/sync-timer-reload.sh"`,
-    heredoc('"$helper"', `i=0; while kill -0 "$1" 2>/dev/null && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done\n${steps}`),
+export const outsideSyncJob = (nodePath: string, steps: string) => {
+  const marker = `"$HOME/${STATE_DIR}/${RELOAD_PENDING}"`;
+  return [
+    `mkdir -p "$HOME/${STATE_DIR}" && helper=$(mktemp "$HOME/${STATE_DIR}/sync-timer-reload.XXXXXX") && echo "$PPID" > ${marker}`,
+    heredoc(
+      '"$helper"',
+      `i=0; while kill -0 "$1" 2>/dev/null && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done\nrm -f ${marker}\n{\n${steps}\n} || echo "$1" > ${marker}\nrm -f "$0"`,
+    ),
     `${sh(nodePath)} -e 'require("node:child_process").spawn("/bin/sh", process.argv.slice(1), { detached: true, stdio: "ignore" }).unref()' "$helper" "$PPID"`,
     `echo "the sync timer reloads once this sync finishes"`,
   ].join("\n");
+};
 
 /** The launchctl steps as they run: now, or, inside the timer's own job, once its sync has exited. */
 const launchctlSteps = (inJob: boolean, nodePath: string, steps: string) => (inJob ? outsideSyncJob(nodePath, steps) : steps);
@@ -184,16 +196,23 @@ const installTimer = (platform: string, root: boolean, want: string, inJob: bool
   ].join("\n");
 };
 
-const removeTimer = (platform: string, root: boolean, inJob: boolean, nodePath: string) =>
-  platform === "darwin"
-    ? `rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"\n${launchctlSteps(inJob, nodePath, `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; true`)}`
-    : root
-      ? `systemctl disable --now ${UNIT}.timer; rm -f /etc/systemd/system/${UNIT}.service /etc/systemd/system/${UNIT}.timer; systemctl daemon-reload`
-      : `systemctl --user disable --now ${UNIT}.timer; rm -f "$HOME/.config/systemd/user/${UNIT}.service" "$HOME/.config/systemd/user/${UNIT}.timer"; systemctl --user daemon-reload`;
-
-/** Retiring fleetx's timer on macOS stops its job too, so it waits the same way. */
-const retireLegacyTimer = (platform: string, root: boolean, inJob: boolean, nodePath: string) =>
-  platform === "darwin" ? launchctlSteps(inJob, nodePath, retireLegacyUnit(platform, root, "sync")) : retireLegacyUnit(platform, root, "sync");
+/**
+ * Remove the timer, and fleetx's with it; with `ours` false, only fleetx's.
+ * On macOS every launchctl step is in one batch, so a fix inside the job
+ * starts a single helper.
+ */
+const removeTimer = (platform: string, root: boolean, ours: boolean, inJob: boolean, nodePath: string) => {
+  const legacy = retireLegacyUnit(platform, root, "sync");
+  if (platform === "darwin") {
+    if (!ours) return launchctlSteps(inJob, nodePath, legacy);
+    return `rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"\n${launchctlSteps(inJob, nodePath, `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null\n${legacy}`)}`;
+  }
+  if (!ours) return legacy;
+  const remove = root
+    ? `systemctl disable --now ${UNIT}.timer; rm -f /etc/systemd/system/${UNIT}.service /etc/systemd/system/${UNIT}.timer; systemctl daemon-reload`
+    : `systemctl --user disable --now ${UNIT}.timer; rm -f "$HOME/.config/systemd/user/${UNIT}.service" "$HOME/.config/systemd/user/${UNIT}.timer"; systemctl --user daemon-reload`;
+  return `${remove}\n${legacy}`;
+};
 
 /**
  * Move fleetx's directories to T3 Fleet's, leaving links at the old names so
@@ -285,6 +304,15 @@ export const EngineArea = defineArea({
           Effect.map(() => false),
           Effect.catch(() => fs.stat(`${ctx.home}/${rel}`).pipe(Effect.map((s) => s.type === "Directory"), Effect.orElseSucceed(() => false))),
         );
+      // A pending reload's marker names the sync that deferred it: this one (its fix just ran) or one still running is not stuck.
+      const pendingPid = yield* fs.readFileString(`${ctx.home}/${STATE_DIR}/${RELOAD_PENDING}`).pipe(
+        Effect.map((text) => Number(text.trim())),
+        Effect.option,
+      );
+      const reloadPending =
+        Option.isSome(pendingPid) &&
+        pendingPid.value !== process.pid &&
+        !(pendingPid.value > 0 && (yield* exec({ command: "ps", args: ["-p", String(pendingPid.value), "-o", "pid="], timeout: Duration.seconds(5) })).stdout.trim() !== "");
       const legacy: Array<"config" | "state" | "share"> = [];
       if (yield* realDir(LEGACY_CONFIG_DIR)) legacy.push("config");
       if (yield* realDir(LEGACY_STATE_DIR)) legacy.push("state");
@@ -303,6 +331,7 @@ export const EngineArea = defineArea({
           want,
           loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)),
           legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
+          reloadPending,
           inJob: platform === "darwin" && (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL || ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
         },
       };
@@ -321,35 +350,47 @@ export const EngineArea = defineArea({
       });
     }
     const t = observed.timer;
-    if (t.want !== null && (t.installed !== t.want || !t.loaded)) {
+    // A reload deferred to after an earlier sync that never ran (the helper failed, or the Mac slept): launchd still has the old job.
+    const stuck = t.reloadPending === true;
+    if (t.want !== null && (t.installed !== t.want || !t.loaded || stuck)) {
       out.push({
         node,
         key: "engine-timer",
         severity: "warn",
         area: "engine",
-        title: t.installed === null ? notInstalledTitle("sync timer", t.legacy) : t.installed !== t.want ? "the sync timer is out of date" : "the sync timer is not running",
+        title:
+          t.installed === null
+            ? notInstalledTitle("sync timer", t.legacy)
+            : t.installed !== t.want
+              ? "the sync timer is out of date"
+              : !t.loaded
+                ? "the sync timer is not running"
+                : "the sync timer was changed, but launchd never reloaded it",
         detail: `runs ${observed.nodePath} with a fixed PATH`,
         fix: { command: installTimer(observed.platform, observed.root, t.want, t.inJob === true, observed.nodePath), safe: true },
       });
     }
-    if (t.want === null && t.installed === null && t.legacy === true) {
+    if (t.want === null && t.installed === null && t.legacy === true && !stuck) {
       out.push({
         node,
         key: "engine-timer-unwanted",
         severity: "warn",
         area: "engine",
         title: "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
-        fix: { command: retireLegacyTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath), safe: true },
+        fix: { command: removeTimer(observed.platform, observed.root, false, t.inJob === true, observed.nodePath), safe: true },
       });
     }
-    if (t.want === null && t.installed !== null) {
+    if (t.want === null && (t.installed !== null || stuck)) {
       out.push({
         node,
         key: "engine-timer-unwanted",
         severity: "warn",
         area: "engine",
-        title: "a sync timer is installed, but [engine] timer is not set for this machine",
-        fix: { command: `${removeTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath)}\n${retireLegacyTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath)}`, safe: true },
+        title:
+          t.installed !== null
+            ? "a sync timer is installed, but [engine] timer is not set for this machine"
+            : "the sync timer was removed, but launchd still has it loaded",
+        fix: { command: removeTimer(observed.platform, observed.root, true, t.inJob === true, observed.nodePath), safe: true },
       });
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {

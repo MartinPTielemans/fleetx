@@ -45,9 +45,15 @@ import { exec } from "./Exec.ts";
 import { ForwardCompatibleArray } from "./vendor/t3/baseSchemas.ts";
 import { ORCHESTRATION_PROTOCOL_QUERY_PARAM, ORCHESTRATION_PROTOCOL_VERSION_TEXT } from "./vendor/t3/environment.ts";
 import { ServerProvider } from "./vendor/t3/server.ts";
-import { configDir } from "./Names.ts";
+import { configDir, stateDir } from "./Names.ts";
 
 export const t3AccessPath = (home: string) => `${configDir(home)}/t3-access.json`;
+
+/** When `t3-fleet t3 connect` last tried to mint a token (ms since the epoch), so sync renews at most once a day. */
+export const t3AccessAttemptPath = (home: string) => `${stateDir(home)}/t3-access-attempt`;
+
+/** A token closer than this to expiring is renewed; a new one must outlive it to count as renewed. */
+export const RENEW_WITHIN_MS = 3 * 86_400_000;
 
 export const T3AccessFile = Schema.Struct({
   origin: Schema.String,
@@ -180,6 +186,10 @@ export const mintAccess = (input: {
   readonly now: number;
 }) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    // Every attempt counts, failed ones too: each pairing adds a client in T3.
+    yield* fs.makeDirectory(stateDir(input.home), { recursive: true }).pipe(Effect.ignore);
+    yield* fs.writeFileString(t3AccessAttemptPath(input.home), `${input.now}\n`).pipe(Effect.ignore);
     const pairing = yield* exec({
       command: input.cli.command,
       args: [...input.cli.args, "auth", "pairing", "create", "--ttl", "2m", "--label", "T3 Fleet", "--json"],
@@ -210,12 +220,15 @@ export const mintAccess = (input: {
     );
     if (token.scope !== "orchestration:read") return yield* new T3AccessError({ message: `T3 granted "${token.scope}", not orchestration:read alone; not keeping it` });
     const access: T3AccessFile = { origin: input.origin, token: token.access_token, expiresAt: input.now + token.expires_in * 1000 };
-    const fs = yield* FileSystem.FileSystem;
     const file = t3AccessPath(input.home);
     yield* fs.makeDirectory(configDir(input.home), { recursive: true }).pipe(Effect.ignore);
     const text = yield* Schema.encodeEffect(Schema.fromJsonString(T3AccessFile))(access);
     yield* fs.writeFileString(`${file}.tmp`, `${text}\n`, { mode: 0o600 });
     yield* fs.chmod(`${file}.tmp`, 0o600);
     yield* fs.rename(`${file}.tmp`, file);
+    // Kept, since it works, but not a renewal: it would be due again at once.
+    if (token.expires_in * 1000 <= RENEW_WITHIN_MS) {
+      return yield* new T3AccessError({ message: `T3 issued a token valid for only ${Math.round(token.expires_in / 3600)} hours; T3 Fleet renews tokens three days before they expire, at most once a day` });
+    }
     return access;
   });
