@@ -156,7 +156,7 @@ export const makeBridge = (options: {
             const { id: _, ...rest } = message;
             yield* p.deliver({ ...rest, id: p.clientId });
           } else if (isRequest(message)) {
-            yield* process.write(toJson(errorMessage(message.id ?? null, -32601, `the fleetx hub does not offer ${message.method ?? "this method"} to servers`)));
+            yield* process.write(toJson(errorMessage(message.id ?? null, -32601, `the T3 Fleet hub does not offer ${message.method ?? "this method"} to servers`)));
           } else if (isNotification(message)) {
             const params = message.params as { progressToken?: unknown } | undefined;
             if (message.method === "notifications/progress" && params?.progressToken !== undefined) {
@@ -227,7 +227,7 @@ export const makeBridge = (options: {
           ownRequest("initialize", {
             protocolVersion: PROTOCOL_VERSION,
             capabilities: {},
-            clientInfo: { name: "fleetx-hub", version: options.version ?? "1" },
+            clientInfo: { name: "t3-fleet-hub", version: options.version ?? "1" },
           }),
           early,
         );

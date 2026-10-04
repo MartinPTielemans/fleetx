@@ -169,7 +169,7 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
         const query = Object.fromEntries(new URL(request.url, "http://relay").searchParams);
         const result = yield* hub.finishLogin(query).pipe(Effect.result);
         return result._tag === "Success"
-          ? page(`Signed in to ${result.success}`, "The fleetx hub holds the login now. You can close this tab.", 200)
+          ? page(`Signed in to ${result.success}`, "The T3 Fleet hub holds the login now. You can close this tab.", 200)
           : page("Sign-in failed", result.failure, 400);
       }).pipe(Effect.catchCause(() => Effect.succeed(page("Sign-in failed", "Something went wrong on the relay.", 500)))),
     ),

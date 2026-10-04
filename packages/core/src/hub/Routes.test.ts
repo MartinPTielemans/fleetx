@@ -21,7 +21,7 @@ let handler: (request: Request) => Promise<Response>;
 let dispose: () => Promise<void>;
 
 beforeAll(async () => {
-  const dir = mkdtempSync(join(tmpdir(), "fleetx-relay-"));
+  const dir = mkdtempSync(join(tmpdir(), "t3-fleet-relay-"));
   const repo = join(dir, "repo");
   mkdirSync(join(repo, "mcp"), { recursive: true });
   execFileSync("git", ["init", "-q", repo]);

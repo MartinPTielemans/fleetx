@@ -10,7 +10,7 @@
  *   4. report   this node's observation and findings to fleetx/state/<node>
  *   5. alert    record health transitions there too, for whoever relays them
  *
- * Every branch fleetx writes belongs to one node, so pushes never race.
+ * Every branch T3 Fleet writes belongs to one node, so pushes never race.
  */
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -30,6 +30,7 @@ import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
 import { approve, autoApprovable, listProposals, settleRejection, STAGING } from "./Staging.ts";
+import { stateDir } from "./Names.ts";
 
 export const STATE_PREFIX = "fleetx/state/";
 
@@ -95,7 +96,7 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
       return null;
     }
     // A scratch index: the working tree and the real index stay untouched.
-    const env = { GIT_INDEX_FILE: `${repo}/.git/fleetx-propose-index` };
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-propose-index` };
     const read = yield* git(repo, ["read-tree", `origin/${branch}`], { env });
     if (!ok(read)) return yield* Effect.fail(`proposing: ${why(read)}`);
     yield* git(repo, ["add", "-A", "--", ...files], { env });
@@ -318,22 +319,32 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
     return yield* run.pipe(Effect.ensuring(releaseSyncLock));
   });
 
-const syncLock = () => `${process.env["HOME"] ?? ""}/.local/state/fleetx/sync.lock`;
+const syncLock = () => `${stateDir(process.env["HOME"] ?? "")}/sync.lock`;
 
-/** One run at a time; a lock older than an hour belongs to a dead run. False when another run holds it. */
+/**
+ * One run at a time. Creating the lock directory is the acquisition: it fails
+ * when another run holds it, so two runs can never both take it. A lock older
+ * than an hour belongs to a dead run; it is renamed away (only one run can)
+ * and the directory created again. False when another run holds it.
+ */
 const takeSyncLock = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const lock = syncLock();
-  const now = yield* Clock.currentTimeMillis;
   yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
+  const take = fs.makeDirectory(lock).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+  if (yield* take) return true;
+  const now = yield* Clock.currentTimeMillis;
   const lockStat = yield* fs.stat(lock).pipe(Effect.option);
-  if (Option.isSome(lockStat)) {
-    const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
-    if (age < 3_600_000) return false;
-    yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
-  }
-  yield* fs.makeDirectory(lock).pipe(Effect.ignore);
-  return true;
+  if (Option.isNone(lockStat)) return yield* take;
+  const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
+  if (age < 3_600_000) return false;
+  const aside = `${lock}.stale.${now}.${process.pid}`;
+  if (!(yield* fs.rename(lock, aside).pipe(Effect.as(true), Effect.orElseSucceed(() => false)))) return false;
+  yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
+  return yield* take;
 });
 
 const releaseSyncLock = Effect.gen(function* () {

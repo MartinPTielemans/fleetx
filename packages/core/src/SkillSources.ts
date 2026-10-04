@@ -20,6 +20,7 @@ import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
 import { commitAndPush, git, ok, why } from "./Git.ts";
 import { sha256 } from "./Hash.ts";
+import { stateDir } from "./Names.ts";
 
 const Source = Schema.Struct({
   type: Schema.String,
@@ -97,7 +98,7 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url, name: sourceName } = parseSource(spec);
-    const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
     const available = yield* fetchSource(url, scratch);
     if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
     const wanted = names.length > 0 ? names : available.size === 1 ? [...available.keys()] : [];
@@ -135,11 +136,21 @@ export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
     const sources = yield* readSources(repo);
+    // Updating replaces a skill's whole directory, and git can only put back what it tracks.
+    const paths = Object.values(sources.sources ?? {})
+      .flatMap((s) => s.skills)
+      .filter((s) => only.length === 0 || only.includes(s))
+      .map((s) => `skills/${s}`);
+    if (paths.length > 0) {
+      const ignored = yield* git(repo, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...paths]);
+      const lost = ignored.stdout.split("\n").filter((l) => l.startsWith("!! ")).map((l) => l.slice(3));
+      if (lost.length > 0) return yield* Effect.fail(`updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`);
+    }
     const touched: Array<string> = [];
     for (const [, source] of Object.entries(sources.sources ?? {})) {
       const mine = source.skills.filter((s) => only.length === 0 || only.includes(s));
       if (mine.length === 0) continue;
-      const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+      const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
       const available = yield* fetchSource(source.url, scratch);
       for (const local of mine) {
         const upstream = source.renamed?.[local] ?? local;
@@ -211,7 +222,7 @@ export const lookupSource = (repo: string, spec: string) =>
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url } = parseSource(spec);
-    const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
     const available = yield* fetchSource(url, scratch);
     if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
     const skills: Array<{ name: string; exists: boolean }> = [];

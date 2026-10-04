@@ -129,7 +129,7 @@ describe("hub policy", () => {
 
 describe("hub call log", () => {
   it("keeps a ring of recent calls and a bounded private file that survives a restart", async () => {
-    const file = join(mkdtempSync(join(tmpdir(), "fleetx-calls-")), "hub/calls.jsonl");
+    const file = join(mkdtempSync(join(tmpdir(), "t3-fleet-calls-")), "hub/calls.jsonl");
     const call = (i: number) => ({ at: i, server: i % 2 === 0 ? "a" : "b", client: "relay", method: "tools/call", tool: "t", durationMs: 1, outcome: "ok" as const, error: null });
     const recent = await Effect.runPromise(
       Effect.gen(function* () {

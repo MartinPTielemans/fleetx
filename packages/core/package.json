@@ -1,5 +1,5 @@
 {
-  "name": "@fleetx/core",
+  "name": "@t3-fleet/core",
   "private": true,
   "type": "module",
   "exports": {

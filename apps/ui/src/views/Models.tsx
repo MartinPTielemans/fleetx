@@ -1,5 +1,5 @@
 /** Per machine: each provider's login under T3, and the model proxy's traffic per upstream over three windows. */
-import type { ModelUpstreamStats, ModelWindow } from "@fleetx/core/Api";
+import type { ModelUpstreamStats, ModelWindow } from "@t3-fleet/core/Api";
 import { ActivityIcon, RefreshCwIcon } from "lucide-react";
 
 import { ErrorState, LoadingRows, Page, SeverityIcon, UnavailableState, type Severity } from "../components/common";
@@ -28,7 +28,7 @@ export function ModelsView() {
     <Page
       wide
       title="Models"
-      description="Each provider's login under T3, and traffic through the fleetx model proxy, per machine"
+      description="Each provider's login under T3, and traffic through the T3 Fleet model proxy, per machine"
       actions={
         <Button size="sm" variant="outline" disabled={models.loading} onClick={() => void models.reload()}>
           {models.loading ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
@@ -41,7 +41,7 @@ export function ModelsView() {
       ) : reporting.length === 0 ? (
         <Group>
           <UnavailableState error={null} title="No machine reports model traffic yet">
-            The model proxy and the provider login checks come with the models area. Once a machine runs <code>fleetx models serve</code>, its traffic shows up here after the next check.
+            The model proxy and the provider login checks come with the models area. Once a machine runs <code>t3-fleet models serve</code>, its traffic shows up here after the next check.
           </UnavailableState>
         </Group>
       ) : (

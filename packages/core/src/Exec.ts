@@ -1,6 +1,6 @@
 /**
  * Running a command and collecting its output, with a timeout that leaves a
- * result instead of an error: fleetx probes machines it does not control, and
+ * result instead of an error: T3 Fleet probes machines it does not control, and
  * "this binary hangs" is a finding, not a crash.
  */
 import * as Duration from "effect/Duration";

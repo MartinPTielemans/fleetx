@@ -1,5 +1,5 @@
 /**
- * The part of T3's settings fleetx reads: which provider instances T3 runs,
+ * The part of T3's settings T3 Fleet reads: which provider instances T3 runs,
  * and with which binary. The probe uses it to launch each provider the way T3
  * would; the models area uses it to see whether T3 starts a provider through
  * its launcher. Everything else in settings.json is ignored.

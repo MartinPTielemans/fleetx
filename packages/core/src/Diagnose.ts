@@ -1,5 +1,5 @@
 /**
- * Turning observations into findings. This is where fleetx decides what
+ * Turning observations into findings. This is where T3 Fleet decides what
  * matters, so every rule here answers one question: would the user act on
  * this? A finding names the machine, says what is wrong in plain words, and,
  * when there is one, gives the exact command that fixes it.
@@ -18,6 +18,7 @@ import { releasesBehind } from "./Latest.ts";
 import type { AgentObservation, MachineObservation, ProviderObservation } from "./Observation.ts";
 import type { NodeResult } from "./Remote.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
+import { isLauncher } from "./Names.ts";
 
 export type Severity = "error" | "warn" | "info";
 /** "reach", "t3", "providers", "agents", "sync", "parity", or a registered area's id. */
@@ -193,8 +194,8 @@ const providerFindings = (node: string, obs: MachineObservation, proxy: ProxySet
     // T3 starts something; is it the copy fleet keeps current?
     const agentName = DRIVER_AGENT[p.driver];
     const agent = obs.agents.find((a) => a.name === agentName);
-    // A fleetx models launcher (fleetx-claude, fleetx-codex, …) runs the managed CLI itself.
-    const viaModels = p.resolved !== null && basename(p.resolved).startsWith("fleetx-");
+    // A t3-fleet models launcher (t3-fleet-claude, t3-fleet-codex, …) runs the managed CLI itself.
+    const viaModels = p.resolved !== null && isLauncher(basename(p.resolved));
     if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && !viaModels && p.resolved !== agent.managedPath) {
       out.push({
         node,
@@ -467,22 +468,22 @@ const providerAuthFindings = (node: string, obs: MachineObservation): Array<Find
 };
 
 /**
- * fleetx's read-only token for T3's API, which provider health comes from.
+ * T3 Fleet's read-only token for T3's API, which provider health comes from.
  * Without it only Claude and Codex are checked, through their CLIs.
  */
 const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding> => {
   const access = obs.t3.access;
   if (access === null || access.state === "ok") return [];
-  const fix: Fix | undefined = access.cli ? { command: "fleetx t3 connect", safe: false } : undefined;
+  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: false } : undefined;
   const how = fix === undefined ? "; T3's CLI was not found on this machine to issue one" : "";
   const title =
     access.state === "none"
-      ? "fleetx cannot read T3's provider status here; only Claude and Codex logins are checked, through their CLIs"
+      ? "T3 Fleet cannot read T3's provider status here; only Claude and Codex logins are checked, through their CLIs"
       : access.state === "expiring"
-        ? "fleetx's read-only T3 token expires within three days"
+        ? "T3 Fleet's read-only T3 token expires within three days"
         : access.state === "rejected"
-          ? "T3 no longer accepts fleetx's read-only token; provider logins fall back to the CLIs"
-          : "fleetx could not read T3's provider status this time";
+          ? "T3 no longer accepts T3 Fleet's read-only token; provider logins fall back to the CLIs"
+          : "T3 Fleet could not read T3's provider status this time";
   return [
     {
       node,

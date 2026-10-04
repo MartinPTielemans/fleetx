@@ -1,4 +1,4 @@
-/** A machine's merged settings, and the layer each value comes from (`fleetx config show`). */
+/** A machine's merged settings, and the layer each value comes from (`t3-fleet config show`). */
 import { SearchIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -63,7 +63,7 @@ export function ConfigView({ node }: { node: string }) {
           )
         ) : shown.length === 0 ? (
           <Empty icon={<SlidersHorizontalIcon />} title={rows.data.length === 0 ? "No settings" : "Nothing matches"}>
-            {rows.data.length === 0 ? `${selected} uses fleetx's defaults for everything.` : "Try a shorter filter."}
+            {rows.data.length === 0 ? `${selected} uses T3 Fleet's defaults for everything.` : "Try a shorter filter."}
           </Empty>
         ) : (
           <div className="overflow-x-auto">

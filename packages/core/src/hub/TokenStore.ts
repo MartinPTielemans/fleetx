@@ -3,8 +3,8 @@
  * registrations and tokens per server, and the digests of client tokens.
  *
  * One JSON document, encrypted with age to the relay node's own key
- * (~/.config/fleetx/age-key.txt) and written atomically with mode 600 to
- * ~/.local/state/fleetx/hub/tokens.age. It never enters the config repo and
+ * (~/.config/t3-fleet/age-key.txt) and written atomically with mode 600 to
+ * ~/.local/state/t3-fleet/hub/tokens.age. It never enters the config repo and
  * no other node can read it. Writes are serialized; reads come from memory.
  */
 import * as Effect from "effect/Effect";
@@ -16,6 +16,7 @@ import * as Semaphore from "effect/Semaphore";
 import { identityToRecipient } from "age-encryption";
 
 import { decryptWith, encryptFor } from "../Secrets.ts";
+import { stateDir } from "../Names.ts";
 
 export const OAuthClient = Schema.Struct({
   clientId: Schema.String,
@@ -82,7 +83,7 @@ export interface TokenStore {
   readonly update: <A>(f: (store: Store) => readonly [A, Store]) => Effect.Effect<A>;
 }
 
-export const tokenStorePath = (home: string) => `${home}/.local/state/fleetx/hub/tokens.age`;
+export const tokenStorePath = (home: string) => `${stateDir(home)}/hub/tokens.age`;
 
 export const makeTokenStore = (options: { readonly file: string; readonly identity: string }) =>
   Effect.gen(function* () {

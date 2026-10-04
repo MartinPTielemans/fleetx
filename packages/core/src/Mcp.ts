@@ -1,12 +1,12 @@
 /**
- * fleetx as MCP tools, so an agent in any T3 thread can answer "what is wrong
+ * T3 Fleet as MCP tools, so an agent in any T3 thread can answer "what is wrong
  * with my environments?" and fix it. Built the way T3 Code builds its own
  * toolkits (effect/unstable/ai Tool and Toolkit), so these tools could join
  * T3's MCP server unchanged.
  *
  * Applying is deliberately two steps: `fleet_status` hands out fix ids, and
  * `fleet_apply_fixes` runs only ids it is given, after checking again that
- * each is still needed. An agent cannot run a command fleetx did not propose.
+ * each is still needed. An agent cannot run a command T3 Fleet did not propose.
  */
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -109,7 +109,7 @@ const ApplyTool = Tool.make("fleet_apply_fixes", {
 const AlertsTool = Tool.make("fleet_alerts", {
   ...shared,
   description:
-    "Health changes every machine reported through fleetx sync since the last call (a problem appeared or was resolved, sync started failing or recovered, a machine stopped reporting). Each alert is returned once. For scheduled checks: when the list is empty, say nothing beyond one short line.",
+    "Health changes every machine reported through t3-fleet sync since the last call (a problem appeared or was resolved, sync started failing or recovered, a machine stopped reporting). Each alert is returned once. For scheduled checks: when the list is empty, say nothing beyond one short line.",
   // MCP requires an object input schema with properties; an empty struct does not produce one.
   parameters: Schema.Struct({
     peek: Schema.optionalKey(Schema.Boolean).annotate({ description: "Return the alerts without marking them seen." }),

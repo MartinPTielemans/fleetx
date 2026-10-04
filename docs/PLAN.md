@@ -1,6 +1,6 @@
 # Plan
 
-What fleetx becomes, in phases. Each phase ends at a check a person can run.
+What T3 Fleet becomes, in phases. Each phase ends at a check a person can run.
 Ticked items are done and in `main`.
 
 ## Principles
@@ -18,7 +18,7 @@ Ticked items are done and in `main`.
 - [x] Topology as configuration: roles (authority, relay, member) on nodes
 - [x] Stack matches T3 Code (TypeScript, Effect 4, Node 24, pnpm, vite-plus)
 - [x] T3 contracts vendored at a pinned commit
-- [x] Config format: TOML; `~/.config/fleetx/config.toml` points at the user's repo
+- [x] Config format: TOML; `~/.config/t3-fleet/config.toml` points at the user's repo
 - [x] Area interface: observe on the node, diagnose with the whole fleet, fixes as plans
 
 ## Phase 1: core
@@ -73,22 +73,38 @@ Ticked items are done and in `main`.
 
 ## Phase 6: companion (docs/design/companion.md)
 
-- [x] `fleetx ui`: a local web app in T3's look, embedded in the bundle; token,
+- [x] `t3-fleet ui`: a local web app in T3's look, embedded in the bundle; token,
       Host and Origin checks; live through server-sent events
 - [x] models: a pass-through model proxy on every node with configurable
       upstreams, launchers per T3 provider instance, long-lived credentials
       per provider; login and health of every T3 provider from T3 itself
-- [x] hub: fleetx's own MCP hub on the relay, replacing ToolHive: containers,
+- [x] hub: T3 Fleet's own MCP hub on the relay, replacing ToolHive: containers,
       stdio bridge, OAuth with sign-in through the relay, client tokens,
       tool policy, call log
 - [x] Security review before deploy; its must-fix items fixed
 - [x] ui: Skills view: links per machine; add, update (previewed), remove; adopt as a fix
 - [ ] The author's fleet on the hub and the model proxy
 
+## Rename: fleetx → T3 Fleet
+
+- [x] Command `t3-fleet` (`fleetx` an alias until 1.0); packages, docs, UI
+- [x] Machine-local names (Names.ts): directories read under either name and
+      moved by `engine-legacy-dirs`; units, launchers, hub containers replaced
+      or adopted; headers between machines sent and read under both names
+- [x] Releases carry `t3-fleet.mjs` and `fleetx.mjs`; install script, Nix and
+      Homebrew keep working
+- [ ] The author's fleet upgraded and migrated
+- [ ] Config repo names, once every machine runs T3 Fleet: `fleetx.toml` →
+      `t3-fleet.toml`, `fleetx/state|staging|rejected` → `t3-fleet/…`,
+      `FLEETX_RELAY_TOKEN` and `FLEETX_MCP_TOKEN_*` → `T3_FLEET_…`; an
+      authority fix, offered when every machine's published state is new enough
+- [ ] GitHub repository, npm package and Homebrew formula renamed (owner)
+- [ ] 1.0: drop the old names (alias, both headers, legacy reads, `fleetx.mjs`)
+
 ## Migration (the author's own fleet)
 
-- [x] fleetx checks all machines alongside the bash fleet
-- [ ] omarchy on fleetx alone for a week (switched on 2026-10-03 together with
+- [x] T3 Fleet checks all machines alongside the bash fleet
+- [ ] omarchy on T3 Fleet alone for a week (switched on 2026-10-03 together with
       the others; the week has not passed yet)
 - [x] box (also the relay) and mac switched: bash timers and workstation
       ToolHive proxies off, MCP through the relay's gateway

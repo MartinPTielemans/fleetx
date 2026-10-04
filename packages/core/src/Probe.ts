@@ -3,7 +3,7 @@
  * them for `--version` (and, as a fallback, for login status), and never
  * writes a file. Provider logins come from T3 itself (T3Access.ts).
  *
- * The provider check is the point of fleetx. T3 launches providers with its
+ * The provider check is the point of T3 Fleet. T3 launches providers with its
  * server's environment, not your shell's, and the two differ: a server
  * ran without ~/.local/bin on PATH, so a Codex that worked in every terminal
  * failed in T3. The probe therefore reads the running server's environment and
@@ -37,6 +37,7 @@ import {
 import { readAccess, readProviderSnapshot, t3CliFromCommandLine } from "./T3Access.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
+import { stateDir } from "./Names.ts";
 
 /** Moved to T3Settings.ts; re-exported for existing importers. */
 export { providerPlans, T3_DRIVERS } from "./T3Settings.ts";
@@ -246,22 +247,22 @@ const observeT3 = (home: string, loginEnv: Env) =>
     if (Option.isSome(settingsText)) {
       const settings = yield* decodeJson(T3SettingsFile, settingsText.value);
       if (Option.isNone(settings)) {
-        problems.push("settings.json did not match the provider settings fleetx understands");
+        problems.push("settings.json did not match the provider settings T3 Fleet understands");
       } else {
         providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, serverEnv ?? loginEnv), { concurrency: 4 });
       }
     }
 
-    // Logins: T3's own snapshot when fleetx can read it, else each CLI's status command.
+    // Logins: T3's own snapshot when T3 Fleet can read it, else each CLI's status command.
     let access: T3Observation["access"] = null;
     let providerAuth: Array<ProviderAuth> = [];
     if (runtime?.alive === true) {
       const now = yield* Clock.currentTimeMillis;
       const token = yield* readAccess(home);
       if (Option.isNone(token) || token.value.origin !== runtime.origin) {
-        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "fleetx has no T3 token here" : `fleetx's token is for ${token.value.origin}`, cli };
+        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "T3 Fleet has no T3 token here" : `T3 Fleet's token is for ${token.value.origin}`, cli };
       } else if (token.value.expiresAt <= now) {
-        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "fleetx's T3 token has expired", cli };
+        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "T3 Fleet's T3 token has expired", cli };
       } else {
         const snapshot = yield* readProviderSnapshot(runtime.origin, token.value.token);
         const expiring = token.value.expiresAt - now < 3 * 86_400_000;
@@ -272,7 +273,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
           access = {
             state: snapshot._tag === "rejected" ? "rejected" : "failed",
             expiresAt: token.value.expiresAt,
-            detail: snapshot._tag === "rejected" ? "T3 refused fleetx's token" : snapshot.detail,
+            detail: snapshot._tag === "rejected" ? "T3 refused T3 Fleet's token" : snapshot.detail,
             cli,
           };
         }
@@ -350,10 +351,10 @@ const observeProxy = (home: string, settings: ProbeSettings["proxy"]) =>
 
 // ---- the last sync ---------------------------------------------------------
 
-/** Where `fleetx sync` records each run on the node: `<seconds>\t<ok|fail>\t<streak>\t<message>`. */
-export const lastSyncPath = (home: string) => `${home}/.local/state/fleetx/last-sync`;
+/** Where `t3-fleet sync` records each run on the node: `<seconds>\t<ok|fail>\t<streak>\t<message>`. */
+export const lastSyncPath = (home: string) => `${stateDir(home)}/last-sync`;
 
-/** fleetx's own record first; a bash `fleet sync` timer's only where fleetx has never synced. */
+/** T3 Fleet's own record first; a bash `fleet sync` timer's only where T3 Fleet has never synced. */
 const observeLastSync = (home: string) =>
   Effect.gen(function* () {
     const own = yield* readText(lastSyncPath(home));

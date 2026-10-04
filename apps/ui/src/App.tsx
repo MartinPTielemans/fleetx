@@ -90,7 +90,7 @@ function Sidebar({ active }: { active: View }) {
     <aside className="hidden w-(--sidebar-width) shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:flex">
       <div className="flex h-13 items-center gap-2 px-4">
         <BoxesIcon className="size-4.5 text-primary" />
-        <span className="font-semibold text-sm tracking-tight">fleetx</span>
+        <span className="font-semibold text-sm tracking-tight">T3 Fleet</span>
         {session === null ? null : <span className="ml-auto text-2xs text-sidebar-muted-foreground">{session.version}</span>}
       </div>
       <nav className="flex flex-col gap-0.5 px-2 py-1">

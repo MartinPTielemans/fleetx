@@ -1,6 +1,6 @@
 /**
  * Services: Docker Compose stacks a node runs, reported only. Services deploy
- * from their own repositories; fleetx never starts, stops or recreates one.
+ * from their own repositories; T3 Fleet never starts, stops or recreates one.
  * It reports whether each declared stack is running, and whether the compose
  * file it runs from still matches the repo's copy (services/<name>/), and can
  * capture the running file into the repo.
@@ -93,7 +93,7 @@ export const ServicesArea = defineArea({
           severity: "info",
           title: `service ${s.name} runs from a compose file ${s.inRepo ? "that differs from" : "missing in"} the repo's services/${s.name}/`,
           detail: `running from ${s.composeFile}; services deploy from their own repos, so the repo copy is captured, not applied`,
-          fix: { command: `mkdir -p "$FLEETX_CHECKOUT/services/${s.name}" && cp ${sh(s.composeFile)} "$FLEETX_CHECKOUT/services/${s.name}/docker-compose.yml"`, safe: true },
+          fix: { command: `mkdir -p "$T3_FLEET_CHECKOUT/services/${s.name}" && cp ${sh(s.composeFile)} "$T3_FLEET_CHECKOUT/services/${s.name}/docker-compose.yml"`, safe: true },
         });
       }
     }

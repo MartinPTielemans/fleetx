@@ -1,11 +1,11 @@
 /**
  * The config repo's skills, and how each machine has them linked. Adding,
- * updating and removing change the repo the way `fleetx skills` does: an
+ * updating and removing change the repo the way `t3-fleet skills` does: an
  * authority commits, any other machine's next sync proposes. Linking them on
- * a machine, and adopting skills installed outside fleetx, are fixes, applied
+ * a machine, and adopting skills installed outside T3 Fleet, are fixes, applied
  * through the same dialog as on the Findings view.
  */
-import type { UiSkill, UiSkillsNode } from "@fleetx/core/Api";
+import type { UiSkill, UiSkillsNode } from "@t3-fleet/core/Api";
 import { CheckCircle2Icon, DownloadIcon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, Trash2Icon, WrenchIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -102,7 +102,7 @@ export function SkillsView() {
                 {fixable(f) ? (
                   <Button size="xs" variant="outline" onClick={() => setDialog({ kind: "fix", fixes: [f] })}>
                     <WrenchIcon />
-                    {f.fix.command.startsWith("fleetx skills adopt") ? "Adopt" : "Fix"}
+                    {f.fix.command.startsWith("t3-fleet skills adopt") ? "Adopt" : "Fix"}
                   </Button>
                 ) : null}
               </div>
@@ -116,7 +116,7 @@ export function SkillsView() {
       ) : skills.data.skills.length === 0 ? (
         <Group>
           <Empty icon={<SparklesIcon />} title="No skills in the config repo yet">
-            Add skills from a git repository, or adopt ones a machine installed outside fleetx; every machine links them on its next sync.
+            Add skills from a git repository, or adopt ones a machine installed outside T3 Fleet; every machine links them on its next sync.
           </Empty>
         </Group>
       ) : (
@@ -466,7 +466,7 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
       <AlertDialogHeader>
         <AlertDialogTitle>Update {which}</AlertDialogTitle>
         <AlertDialogDescription>
-          fleetx pulls from upstream and shows the change; nothing is kept until you say so.
+          T3 Fleet pulls from upstream and shows the change; nothing is kept until you say so.
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogBody className="flex flex-col gap-3">

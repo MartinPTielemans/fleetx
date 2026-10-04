@@ -1,5 +1,5 @@
 /**
- * Pointing a T3 provider instance at its launcher: `fleetx models route
+ * Pointing a T3 provider instance at its launcher: `t3-fleet models route
  * <instance>`, the fix for `models-not-routed`.
  *
  * T3 offers no CLI command for provider settings; its settings RPC needs an
@@ -15,7 +15,7 @@
  *
  * Creating an explicit instance would drop what T3 reads from the legacy
  * block (custom models and the like), so the legacy field is edited instead.
- * The first edit keeps a copy (settings.json.fleetx-models-backup, mode 600);
+ * The first edit keeps a copy (settings.json.t3-fleet-models-backup, mode 600);
  * `--undo` puts back the binaryPath that copy has.
  */
 import * as Effect from "effect/Effect";
@@ -83,7 +83,7 @@ export const routeProvider = (home: string, instanceId: string, launcher: string
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const file = t3SettingsPath(home);
-    const backup = `${file}.fleetx-models-backup`;
+    const backup = `${file}.t3-fleet-models-backup`;
     const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => new RouteError({ message: `${file} does not exist; has T3 run here?` })));
     let want = launcher;
     if (options.undo === true) {
@@ -96,7 +96,7 @@ export const routeProvider = (home: string, instanceId: string, launcher: string
     if (!(yield* fs.exists(backup))) {
       yield* fs.writeFileString(backup, text, { mode: 0o600 });
     }
-    const tmp = `${file}.fleetx-tmp`;
+    const tmp = `${file}.t3-fleet-tmp`;
     yield* fs.writeFileString(tmp, edited.text, { mode: 0o600 });
     yield* fs.rename(tmp, file);
     return { previous: edited.previous, now: want };

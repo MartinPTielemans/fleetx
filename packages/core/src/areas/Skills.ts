@@ -7,11 +7,11 @@
  *   store = "~/.agents/skills"          # links to <repo>/skills/<name>
  *   clients = ["~/.claude/skills"]      # links to <store>/<name>
  *   watch = ["~/.codex/skills"]         # only checked for stray installs
- *   ignore = ["synced"]                 # names fleetx leaves alone
+ *   ignore = ["synced"]                 # names T3 Fleet leaves alone
  *
- * A skill installed outside fleetx (a real directory with a SKILL.md) is a
+ * A skill installed outside T3 Fleet (a real directory with a SKILL.md) is a
  * stray. It is not deleted: the fix proposes it for the repo, where an
- * authority approves it (fleetx skills adopt).
+ * authority approves it (t3-fleet skills adopt).
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -115,8 +115,8 @@ export const SkillsArea = defineArea({
       for (const l of broken) {
         const isStore = l.dir === observed.store;
         const at = `${shPath(tilde(l.dir))}/${sh(l.skill)}`;
-        const target = isStore ? `"$FLEETX_CHECKOUT/skills/${l.skill}"` : `${shPath(storeConfigured)}/${sh(l.skill)}`;
-        const aside = l.state === "real-dir" ? `mv ${at} ${at}.fleetx-backup.$(date +%Y%m%d%H%M%S) && ` : "";
+        const target = isStore ? `"$T3_FLEET_CHECKOUT/skills/${l.skill}"` : `${shPath(storeConfigured)}/${sh(l.skill)}`;
+        const aside = l.state === "real-dir" ? `mv ${at} ${at}.t3-fleet-backup.$(date +%Y%m%d%H%M%S) && ` : "";
         commands.push(`mkdir -p ${shPath(tilde(l.dir))} && ${aside}ln -sfn ${target} ${at}`);
       }
       const skills = [...new Set(broken.map((l) => l.skill))];
@@ -146,9 +146,9 @@ export const SkillsArea = defineArea({
         key: `skill-stray-${stray.skill}`,
         severity: "warn",
         area: "skills",
-        title: `skill ${stray.skill} was installed in ${tilde(stray.dir)} outside fleetx`,
+        title: `skill ${stray.skill} was installed in ${tilde(stray.dir)} outside T3 Fleet`,
         detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
-        fix: { command: `fleetx skills adopt ${sh(stray.skill)} --from ${shPath(tilde(stray.dir))}`, safe: true },
+        fix: { command: `t3-fleet skills adopt ${sh(stray.skill)} --from ${shPath(tilde(stray.dir))}`, safe: true },
       });
     }
     return out;

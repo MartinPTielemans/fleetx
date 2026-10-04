@@ -36,6 +36,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { T3_DRIVERS } from "../T3Settings.ts";
+import { LAUNCHER_PREFIX, LEGACY_LAUNCHER_PREFIX } from "../Names.ts";
 
 export const MODELS_PORT = 8398;
 
@@ -161,7 +162,7 @@ export const resolveRecipe = (instanceId: string, driver: string, settings: Mode
       reason:
         bin === null
           ? `${driver} runs inside T3 (an SDK provider), with no CLI to point at the proxy`
-          : `fleetx has no recipe for ${driver}; declare [models.providers.${instanceId}] env or args if its CLI takes a base URL`,
+          : `T3 Fleet has no recipe for ${driver}; declare [models.providers.${instanceId}] env or args if its CLI takes a base URL`,
     };
   }
   const command = declared?.command ?? builtin?.command ?? bin ?? null;
@@ -194,4 +195,7 @@ export const resolveRecipe = (instanceId: string, driver: string, settings: Mode
 /** "claudeAgent" → "claude", what people call it and what its launcher is named after. */
 export const providerName = (instanceId: string) => (instanceId === "claudeAgent" ? "claude" : instanceId);
 
-export const launcherPath = (home: string, instanceId: string) => `${home}/.local/bin/fleetx-${providerName(instanceId).replace(/[^A-Za-z0-9._-]/g, "-")}`;
+const launcherName = (instanceId: string) => providerName(instanceId).replace(/[^A-Za-z0-9._-]/g, "-");
+export const launcherPath = (home: string, instanceId: string) => `${home}/.local/bin/${LAUNCHER_PREFIX}${launcherName(instanceId)}`;
+/** Where the launcher was before the rename. Until 1.0. */
+export const legacyLauncherPath = (home: string, instanceId: string) => `${home}/.local/bin/${LEGACY_LAUNCHER_PREFIX}${launcherName(instanceId)}`;

@@ -71,7 +71,7 @@ describe("mcp area: hub findings", () => {
     });
     expect(findings.map((f) => f.key)).toEqual(["mcp-posthog-needs-login"]);
     expect(findings[0]?.fix).toBeUndefined();
-    expect(findings[0]?.detail).toContain("fleetx mcp login posthog");
+    expect(findings[0]?.detail).toContain("t3-fleet mcp login posthog");
   });
 
   it("re-registers a client that sends a different credential than the declared one", () => {
@@ -90,7 +90,7 @@ describe("mcp area: hub findings", () => {
   it("points an expired credential at the hub's sign-in", () => {
     const [down] = diagnose({ servers: [server("HTTP 401: Unauthorized")], clients: { claude: true, codex: true } });
     expect(down?.key).toBe("mcp-posthog-down");
-    expect(down?.detail).toContain("fleetx mcp login posthog");
+    expect(down?.detail).toContain("t3-fleet mcp login posthog");
   });
 
   it("reads running workloads from thv list", () => {

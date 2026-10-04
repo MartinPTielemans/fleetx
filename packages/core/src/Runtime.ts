@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 
 import { exec } from "./Exec.ts";
 import { sha256 } from "./Hash.ts";
+import { BUNDLE_FILE, CLI, LEGACY_CLI, legacyLaunchdLabel, legacySystemdUnit, SHARE_DIR } from "./Names.ts";
 
 export const MIN_NODE_MAJOR = 24;
 
@@ -27,16 +28,50 @@ export const stableNode = (home: string) =>
     return process.execPath;
   });
 
-/** The bundle ~/.local/bin/fleetx resolves to (a development build, or the installed copy). */
+/** The bundle ~/.local/bin/t3-fleet resolves to (a development build, or the installed copy); before the rename, ~/.local/bin/fleetx. */
 export const installedBundle = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    return yield* fs.realPath(`${home}/.local/bin/fleetx`).pipe(Effect.orElseSucceed(() => `${home}/.local/share/fleetx/fleetx.mjs`));
+    return yield* fs.realPath(`${home}/.local/bin/${CLI}`).pipe(
+      Effect.catch(() => fs.realPath(`${home}/.local/bin/${LEGACY_CLI}`)),
+      Effect.orElseSucceed(() => `${home}/${SHARE_DIR}/${BUNDLE_FILE}`),
+    );
   });
+
+/** Whether a service or timer is still installed under its fleetx name. Until 1.0. */
+export const legacyUnitInstalled = (platform: string, root: boolean, home: string, role: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const file =
+      platform === "darwin"
+        ? `${home}/Library/LaunchAgents/${legacyLaunchdLabel(role)}.plist`
+        : `${root ? "/etc/systemd/system" : `${home}/.config/systemd/user`}/${legacySystemdUnit(role)}.service`;
+    return yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false));
+  });
+
+/** "the relay is not installed", or, when it runs under its fleetx name, that it is waiting to be replaced. */
+export const notInstalledTitle = (what: string, legacy: boolean | undefined) =>
+  legacy === true ? `the ${what} still runs under its fleetx name` : `the ${what} is not installed`;
+
+/**
+ * Shell that stops and removes a service or timer installed under its fleetx
+ * name, if there is one. Installing its T3 Fleet unit runs this first, so the
+ * two never run side by side. Until 1.0.
+ */
+export const retireLegacyUnit = (platform: string, root: boolean, role: string) => {
+  if (platform === "darwin") {
+    const label = legacyLaunchdLabel(role);
+    return `launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/${label}.plist"`;
+  }
+  const unit = legacySystemdUnit(role);
+  const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
+  const ctl = root ? "systemctl" : "systemctl --user";
+  return `${ctl} disable --now ${unit}.service ${unit}.timer 2>/dev/null; rm -f ${dir}/${unit}.service ${dir}/${unit}.timer`;
+};
 
 /**
  * Completes once the bundle this process runs from holds a different build.
- * fleetx's long-running services (the relay, the listener, the model proxy)
+ * T3 Fleet's long-running services (the relay, the listener, the model proxy)
  * race their work against it and exit, and their unit (KeepAlive, or
  * Restart=always) starts the new build. Without it an update reaches the
  * timer's runs but a service keeps the code it started with, indefinitely.

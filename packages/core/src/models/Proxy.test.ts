@@ -240,8 +240,8 @@ describe("model proxy against a fake upstream", () => {
     expect(await response.text()).toBe("via relay");
     expect(up.seen[0]?.headers["authorization"]).toBe("Bearer client");
     expect(up.seen[0]?.url).toBe("/v1/messages");
-    expect(up.seen[0]?.headers["x-fleetx-relay-token"]).toBeUndefined();
-    expect(up.seen[0]?.headers["x-fleetx-egress-base"]).toBeUndefined();
+    expect(up.seen[0]?.headers["x-t3-fleet-relay-token"]).toBeUndefined();
+    expect(up.seen[0]?.headers["x-t3-fleet-egress-base"]).toBeUndefined();
     const refused = await fetch(`${relay}/egress/anthropic/v1/messages`, { method: "POST", body: "{}" });
     expect(refused.status).toBe(401);
   });

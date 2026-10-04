@@ -1,5 +1,5 @@
-/** The status table, live; each machine opens to everything fleetx saw there. */
-import type { UiEnvironment, UiFinding } from "@fleetx/core/Api";
+/** The status table, live; each machine opens to everything T3 Fleet saw there. */
+import type { UiEnvironment, UiFinding } from "@t3-fleet/core/Api";
 import { ChevronRightIcon, RefreshCwIcon, ServerIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -329,7 +329,7 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
                         {login.method === null ? "" : ` · ${login.method}`}
                       </Badge>
                     )}
-                    {p.viaModels ? <Badge variant="info">via fleetx models</Badge> : null}
+                    {p.viaModels ? <Badge variant="info">via t3-fleet models</Badge> : null}
                     <span className="ml-auto font-mono text-muted-foreground">{p.version ?? ""}</span>
                   </div>
                   {p.runs === null ? null : <div className="truncate pl-5.5 font-mono text-muted-foreground" title={p.runs}>{p.runs}</div>}

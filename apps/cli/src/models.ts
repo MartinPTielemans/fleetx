@@ -1,7 +1,7 @@
 /**
- * fleetx models serve            run the model proxy on 127.0.0.1:8398 (the models area installs it as a service)
- * fleetx models stats            this node's proxy traffic
- * fleetx models route <instance> point T3's provider instance at its launcher (the fix for models-not-routed)
+ * t3-fleet models serve            run the model proxy on 127.0.0.1:8398 (the models area installs it as a service)
+ * t3-fleet models stats            this node's proxy traffic
+ * t3-fleet models route <instance> point T3's provider instance at its launcher (the fix for models-not-routed)
  */
 // The HTTP server itself has no Effect equivalent; T3 Code builds its server the same way.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -20,18 +20,19 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-import type { ModelProxyStats, ModelWindow } from "@fleetx/core/Api";
-import { loadConfig } from "@fleetx/core/Config";
-import { fetchStats, MODELS_PORT, modelProxyLayer } from "@fleetx/core/models/Proxy";
-import { decodeModelsSettings, launcherPath, upstreamsOf, type ModelsSettings } from "@fleetx/core/models/Recipes";
-import { routeProvider } from "@fleetx/core/models/Route";
-import { RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
-import { providerPlans, readT3Settings } from "@fleetx/core/T3Settings";
+import type { ModelProxyStats, ModelWindow } from "@t3-fleet/core/Api";
+import { loadConfig } from "@t3-fleet/core/Config";
+import { fetchStats, MODELS_PORT, modelProxyLayer } from "@t3-fleet/core/models/Proxy";
+import { decodeModelsSettings, launcherPath, upstreamsOf, type ModelsSettings } from "@t3-fleet/core/models/Recipes";
+import { routeProvider } from "@t3-fleet/core/models/Route";
+import { RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
+import { providerPlans, readT3Settings } from "@t3-fleet/core/T3Settings";
 
 import packageJson from "../package.json" with { type: "json" };
 import { encodeJson, reportUserErrors, untilNewBuild } from "./shared.ts";
+import { stateDir } from "@t3-fleet/core/Names";
 
-/** This node's [models] settings; empty when fleetx is not set up here (the proxy still serves). */
+/** This node's [models] settings; empty when T3 Fleet is not set up here (the proxy still serves). */
 const ownSettings = loadConfig.pipe(
   Effect.map((config) => {
     const self = config.nodes.find((n) => n.name === config.self);
@@ -59,7 +60,7 @@ const serve = Command.make("serve", {
         relay = { url: relayUrl, token };
       }
       const home = process.env["HOME"] ?? "";
-      yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true })), Effect.ignore);
+      yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(stateDir(home), { recursive: true })), Effect.ignore);
       // Upstreams follow the config repo as sync updates it, without a restart.
       let upstreams = upstreamsOf(models);
       yield* ownSettings.pipe(
@@ -109,7 +110,7 @@ const stats = Command.make("stats", {
   Command.withHandler(({ json }) =>
     Effect.gen(function* () {
       const result = yield* fetchStats().pipe(Effect.provide(FetchHttpClient.layer));
-      if (result === null) return yield* Effect.fail(`no model proxy answers on 127.0.0.1:${MODELS_PORT} (fleetx models serve)`);
+      if (result === null) return yield* Effect.fail(`no model proxy answers on 127.0.0.1:${MODELS_PORT} (t3-fleet models serve)`);
       yield* Console.log(json ? yield* encodeJson(result) : renderModelStats(result));
     }).pipe(reportUserErrors),
   ),
@@ -117,9 +118,9 @@ const stats = Command.make("stats", {
 
 const route = Command.make("route", {
   instance: Argument.String("instance").pipe(Argument.withDescription("T3 provider instance, e.g. claudeAgent or codex.")),
-  undo: Flag.Boolean("undo").pipe(Flag.withDescription("Put back the binary path T3 had before fleetx first routed it."), Flag.withDefault(false)),
+  undo: Flag.Boolean("undo").pipe(Flag.withDescription("Put back the binary path T3 had before T3 Fleet first routed it."), Flag.withDefault(false)),
 }).pipe(
-  Command.withDescription("Point a T3 provider instance at its fleetx launcher. Running sessions keep their binary."),
+  Command.withDescription("Point a T3 provider instance at its T3 Fleet launcher. Running sessions keep their binary."),
   Command.withHandler(({ instance, undo }) =>
     Effect.gen(function* () {
       const home = process.env["HOME"] ?? "";
@@ -129,7 +130,7 @@ const route = Command.make("route", {
       if (plan === undefined) return yield* Effect.fail(`T3 has no provider instance named ${instance}`);
       const launcher = launcherPath(home, instance);
       const fs = yield* FileSystem.FileSystem;
-      if (!undo && !(yield* fs.exists(launcher))) return yield* Effect.fail(`${launcher} is not installed (fleetx fix --area models)`);
+      if (!undo && !(yield* fs.exists(launcher))) return yield* Effect.fail(`${launcher} is not installed (t3-fleet fix --area models)`);
       const result = yield* routeProvider(home, instance, launcher, { undo }).pipe(Effect.mapError((e) => e.message));
       yield* Console.log(`T3 ${instance} binaryPath: ${result.previous ?? "(default)"} → ${result.now ?? "(default)"}`);
       yield* Console.log("T3 reloads its settings; new sessions use this, running ones keep theirs.");

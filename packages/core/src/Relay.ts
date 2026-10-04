@@ -15,7 +15,7 @@
  *        /hub/*, /oauth/callback
  *                       managing the hub and signing in (see hub/Routes.ts)
  *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
- *                       (models/Egress.ts; token in x-fleetx-relay-token)
+ *                       (models/Egress.ts; token in x-t3-fleet-relay-token)
  *   GET  /health
  *
  * Everything but /health and /oauth/callback needs `Authorization: Bearer

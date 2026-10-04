@@ -1,6 +1,6 @@
 /**
- * fleetx relay serve   run the relay (on the node with the relay role)
- * fleetx listen        follow the relay and sync as soon as the branch moves
+ * t3-fleet relay serve   run the relay (on the node with the relay role)
+ * t3-fleet listen        follow the relay and sync as soon as the branch moves
  */
 // The HTTP server itself has no Effect equivalent; T3 Code builds its server the same way.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -15,12 +15,12 @@ import { Command } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-import { loadConfig } from "@fleetx/core/Config";
-import { git, out } from "@fleetx/core/Git";
-import { relayLayer } from "@fleetx/core/Relay";
-import { listen, RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
-import { ensureIdentity } from "@fleetx/core/Secrets";
-import { syncRun } from "@fleetx/core/Sync";
+import { loadConfig } from "@t3-fleet/core/Config";
+import { git, out } from "@t3-fleet/core/Git";
+import { relayLayer } from "@t3-fleet/core/Relay";
+import { listen, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
+import { ensureIdentity } from "@t3-fleet/core/Secrets";
+import { syncRun } from "@t3-fleet/core/Sync";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -34,7 +34,7 @@ const serve = Command.make("serve").pipe(
       const self = config.nodes.find((n) => n.name === config.self);
       if (!self?.roles.includes("relay")) return yield* Effect.fail(`${config.self} does not have the relay role`);
       const token = yield* secretVar(RELAY_TOKEN);
-      if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets (fleetx secrets set ${RELAY_TOKEN}=… on an authority)`);
+      if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets (t3-fleet secrets set ${RELAY_TOKEN}=… on an authority)`);
       const port = config.settings.relay?.port ?? 8399;
       const mcp = (self.settings.table["mcp"] ?? {}) as { ports?: Record<string, number>; hub?: boolean };
       const { identity } = yield* ensureIdentity;

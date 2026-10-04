@@ -46,8 +46,8 @@ const observation: MachineObservation = {
         instanceId: "claudeAgent",
         driver: "claudeAgent",
         enabled: true,
-        binaryPath: "~/.local/bin/fleetx-claude",
-        resolved: "~/.local/bin/fleetx-claude",
+        binaryPath: "~/.local/bin/t3-fleet-claude",
+        resolved: "~/.local/bin/t3-fleet-claude",
         launch: { ok: true, version: "2.1.0", detail: "" },
       },
     ],
@@ -155,7 +155,7 @@ const relayClient = (hub: boolean) =>
 const serve = (options: { readonly hub?: boolean; readonly relay?: boolean } = {}) => {
   const fleet = fakeFleet();
   const assets = new Map([
-    ["/index.html", { type: "text/html; charset=utf-8", body: new TextEncoder().encode("<!doctype html><title>fleetx</title>") }],
+    ["/index.html", { type: "text/html; charset=utf-8", body: new TextEncoder().encode("<!doctype html><title>T3 Fleet</title>") }],
     ["/assets/app-1.js", { type: "text/javascript; charset=utf-8", body: new TextEncoder().encode("console.log(1)") }],
   ]);
   const { handler, dispose } = HttpRouter.toWebHandler(
@@ -172,7 +172,7 @@ const serve = (options: { readonly hub?: boolean; readonly relay?: boolean } = {
   const call = (path: string, init: RequestInit & { readonly token?: string | null } = {}) => {
     const headers = new Headers(init.headers);
     if (!headers.has("host")) headers.set("host", `127.0.0.1:${PORT}`);
-    if (init.token !== null) headers.set("x-fleetx-token", init.token ?? TOKEN);
+    if (init.token !== null) headers.set("x-t3-fleet-token", init.token ?? TOKEN);
     return handler(new Request(`${ORIGIN}${path}`, { ...init, headers }));
   };
   return { call, dispose, applied: fleet.applied, edits: fleet.edits };
@@ -183,7 +183,7 @@ const decode = <S extends Schema.Top & { readonly DecodingServices: never }>(sch
 describe("refusal", () => {
   const options = { port: PORT, token: TOKEN };
   const none = new URLSearchParams();
-  const ok = { "host": `127.0.0.1:${PORT}`, "x-fleetx-token": TOKEN };
+  const ok = { "host": `127.0.0.1:${PORT}`, "x-t3-fleet-token": TOKEN };
 
   it("lets this run's own page through", () => {
     expect(refusal({ method: "POST", headers: { ...ok, origin: ORIGIN } }, options, none)).toBeNull();
@@ -198,12 +198,12 @@ describe("refusal", () => {
 
   it("refuses a rebound host name, even with the token", () => {
     expect(refusal({ method: "GET", headers: { ...ok, host: `evil.example:${PORT}` } }, options, none)?.status).toBe(421);
-    expect(refusal({ method: "GET", headers: { "x-fleetx-token": TOKEN } }, options, none)?.status).toBe(421);
+    expect(refusal({ method: "GET", headers: { "x-t3-fleet-token": TOKEN } }, options, none)?.status).toBe(421);
   });
 
   it("needs the token, as a header or in the query", () => {
     expect(refusal({ method: "GET", headers: { host: ok.host } }, options, none)?.status).toBe(401);
-    expect(refusal({ method: "GET", headers: { host: ok.host, "x-fleetx-token": "b".repeat(48) } }, options, none)?.status).toBe(401);
+    expect(refusal({ method: "GET", headers: { host: ok.host, "x-t3-fleet-token": "b".repeat(48) } }, options, none)?.status).toBe(401);
     expect(refusal({ method: "GET", headers: { host: ok.host } }, options, new URLSearchParams({ token: TOKEN }))).toBeNull();
   });
 
@@ -350,8 +350,8 @@ describe("the UI server", () => {
     expect(index.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(index.headers.get("x-frame-options")).toBe("DENY");
     expect(index.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
-    expect(await index.text()).toContain("<title>fleetx</title>");
-    expect(await (await server.call("/findings", { token: null })).text()).toContain("<title>fleetx</title>");
+    expect(await index.text()).toContain("<title>T3 Fleet</title>");
+    expect(await (await server.call("/findings", { token: null })).text()).toContain("<title>T3 Fleet</title>");
     const asset = await server.call("/assets/app-1.js", { token: null });
     expect(asset.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     expect(asset.headers.get("cache-control")).toContain("immutable");

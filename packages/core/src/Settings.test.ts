@@ -46,9 +46,9 @@ describe("dotfiles", () => {
 
   it("links a missing file, backing up one that differs first", () => {
     expect(diagnose("missing")[0]?.fix?.command).toBe(
-      'mkdir -p "$(dirname "$HOME"/.zshrc)" && ln -sfn "$FLEETX_CHECKOUT/dotfiles/zshrc" "$HOME"/.zshrc',
+      'mkdir -p "$(dirname "$HOME"/.zshrc)" && ln -sfn "$T3_FLEET_CHECKOUT/dotfiles/zshrc" "$HOME"/.zshrc',
     );
-    expect(diagnose("file-differs")[0]?.fix?.command).toMatch(/^mv "\$HOME"\/\.zshrc "\$HOME"\/\.zshrc\.fleetx-backup\.\$\(date/);
+    expect(diagnose("file-differs")[0]?.fix?.command).toMatch(/^mv "\$HOME"\/\.zshrc "\$HOME"\/\.zshrc\.t3-fleet-backup\.\$\(date/);
   });
 
   it("cannot fix a source missing from the repo", () => {

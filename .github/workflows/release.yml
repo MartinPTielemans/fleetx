@@ -24,16 +24,21 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           jq --arg v "$version" '.version = $v' apps/cli/package.json > /tmp/p && mv /tmp/p apps/cli/package.json
-          pnpm --filter fleetx build
-          cp apps/cli/dist/bin.mjs fleetx.mjs
-          sha256sum fleetx.mjs install.sh > SHA256SUMS
+          pnpm --filter t3-fleet build
+          cp apps/cli/dist/bin.mjs t3-fleet.mjs
+          # The same bundle under its name before the rename, for older install scripts,
+          # the Homebrew formula and the Nix flake. Until 1.0.
+          cp t3-fleet.mjs fleetx.mjs
+          sha256sum t3-fleet.mjs fleetx.mjs install.sh > SHA256SUMS
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: fleetx.mjs
+          subject-path: |
+            t3-fleet.mjs
+            fleetx.mjs
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" fleetx.mjs install.sh SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" t3-fleet.mjs fleetx.mjs install.sh SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
       - name: npm (when an NPM_TOKEN secret is configured)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -43,19 +48,19 @@ jobs:
       - name: Point the Nix flake at this release
         run: |
           version="${GITHUB_REF_NAME#v}"
-          hash="sha256-$(openssl dgst -sha256 -binary fleetx.mjs | base64)"
+          hash="sha256-$(openssl dgst -sha256 -binary t3-fleet.mjs | base64)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch -q origin main && git checkout -q main
           printf '{\n  "version": "%s",\n  "hash": "%s"\n}\n' "$version" "$hash" > nix/release.json
-          git add nix/release.json && git commit -q -m "Nix: fleetx $version" && git push -q origin main || echo "flake already current"
+          git add nix/release.json && git commit -q -m "Nix: T3 Fleet $version" && git push -q origin main || echo "flake already current"
       - name: Update the Homebrew formula (when a HOMEBREW_TAP_TOKEN secret is configured)
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         if: ${{ env.TAP_TOKEN != '' }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          sha=$(sha256sum fleetx.mjs | cut -d' ' -f1)
+          sha=$(sha256sum t3-fleet.mjs | cut -d' ' -f1)
           git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/MartinPTielemans/homebrew-tap.git" tap
           cd tap
           sed -i -e "s#releases/download/v[^/]*/fleetx.mjs#releases/download/v${version}/fleetx.mjs#" \
@@ -63,4 +68,4 @@ jobs:
                  -e "s/^  sha256 \".*\"/  sha256 \"${sha}\"/" Formula/fleetx.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -qam "fleetx ${version}" && git push -q
+          git commit -qam "T3 Fleet ${version}" && git push -q

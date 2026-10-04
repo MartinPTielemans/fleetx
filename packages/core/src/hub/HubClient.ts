@@ -1,5 +1,5 @@
 /**
- * Talking to the hub on the relay, for `fleetx mcp …` and the UI server:
+ * Talking to the hub on the relay, for `t3-fleet mcp …` and the UI server:
  * the relay's URL from `[relay] url`, the relay token from this node's
  * secrets. Failures are sentences meant for the user.
  */

@@ -9,6 +9,7 @@
  */
 import type { ModelFailureClass } from "../Api.ts";
 import type { UpstreamDef, Upstreams } from "./Recipes.ts";
+import { header, legacyHeader } from "../Names.ts";
 
 /** Headers that describe one connection, not the request (RFC 9110 §7.6.1), plus what the client re-derives. */
 const HOP_BY_HOP = new Set([
@@ -27,15 +28,17 @@ const HOP_BY_HOP = new Set([
 ]);
 
 /** The relay token travels in its own header, so the client's Authorization passes untouched. */
-export const RELAY_TOKEN_HEADER = "x-fleetx-relay-token";
+export const RELAY_TOKEN_HEADER = header("relay-token");
 /** With egress through the relay, the upstream base the node resolved, for the relay to forward to. */
-export const EGRESS_BASE_HEADER = "x-fleetx-egress-base";
+export const EGRESS_BASE_HEADER = header("egress-base");
+/** Both, under their names and their fleetx names, which a node sends and the relay reads until 1.0. */
+const OWN_HEADERS = new Set([RELAY_TOKEN_HEADER, EGRESS_BASE_HEADER, legacyHeader("relay-token"), legacyHeader("egress-base")]);
 
 export const requestHeaders = (headers: Readonly<Record<string, string | undefined>>): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
-    if (value === undefined || HOP_BY_HOP.has(lower) || lower === RELAY_TOKEN_HEADER || lower === EGRESS_BASE_HEADER) continue;
+    if (value === undefined || HOP_BY_HOP.has(lower) || OWN_HEADERS.has(lower)) continue;
     out[lower] = value;
   }
   return out;

@@ -8,10 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { addSkills, keepUpdate, listSkills, previewUpdate, skillDescription } from "./SkillSources.ts";
+import { underSyncLock } from "./Sync.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
 const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
@@ -27,7 +29,7 @@ describe("skillDescription", () => {
 });
 
 describe("updating vendored skills", () => {
-  const root = mkdtempSync(join(tmpdir(), "fleetx-skills-"));
+  const root = mkdtempSync(join(tmpdir(), "t3-fleet-skills-"));
   const source = join(root, "upstream");
   const repo = join(root, "fleet");
   const skill = (text: string) => writeFileSync(join(source, "review", "SKILL.md"), `---\ndescription: Reviews\n---\n${text}\n`);
@@ -78,3 +80,41 @@ describe("updating vendored skills", () => {
     expect(readFileSync(join(repo, "skills", "review", "SKILL.md"), "utf8")).toContain("v2");
   });
 });
+
+describe("an update and files git ignores", () => {
+  it("refuses instead of deleting them, and leaves them in place", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-fleet-ignored-"));
+    process.env["HOME"] = root;
+    const source = join(root, "upstream");
+    const repo = join(root, "fleet");
+    mkdirSync(join(source, "notes"), { recursive: true });
+    writeFileSync(join(source, "notes", "SKILL.md"), "---\ndescription: Notes\n---\nv1\n");
+    git(root, "init", "-q", "upstream");
+    git(source, "add", "-A");
+    git(source, "commit", "-qm", "v1");
+    mkdirSync(join(repo, "skills"), { recursive: true });
+    git(root, "init", "-q", "fleet");
+    await run(addSkills(repo, source, ["notes"]));
+    writeFileSync(join(repo, ".gitignore"), ".env\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "add notes");
+    writeFileSync(join(repo, "skills", "notes", ".env"), "SECRET=1\n");
+
+    expect(await fails(previewUpdate(repo, ["notes"]))).toContain("skills/notes/.env");
+    expect(readFileSync(join(repo, "skills", "notes", ".env"), "utf8")).toBe("SECRET=1\n");
+  });
+});
+
+describe("the sync lock", () => {
+  it("is held by one run at a time, even when two start together", async () => {
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
+    const hold = underSyncLock(Effect.sleep(Duration.millis(200)).pipe(Effect.as("ran")));
+    const results = await Effect.runPromise(
+      Effect.all([hold, hold, hold].map((e) => Effect.result(e)), { concurrency: "unbounded" }).pipe(Effect.provide(NodeServices.layer)),
+    );
+    expect(results.filter((r) => r._tag === "Success")).toHaveLength(1);
+    // Released afterwards.
+    expect(await run(hold)).toBe("ran");
+  });
+});
+

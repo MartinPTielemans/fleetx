@@ -1,5 +1,5 @@
 {
-  description = "fleetx: keep every machine you run T3 Code on equivalent";
+  description = "T3 Fleet: keep every machine you run T3 Code on equivalent";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -13,27 +13,31 @@
     in
     {
       packages = forAll (pkgs: rec {
-        fleetx = pkgs.stdenvNoCC.mkDerivation {
-          pname = "fleetx";
+        t3-fleet = pkgs.stdenvNoCC.mkDerivation {
+          pname = "t3-fleet";
           inherit (release) version;
           src = pkgs.fetchurl {
+            # Every release until 1.0 carries the bundle as fleetx.mjs too; releases before the rename only that.
             url = "https://github.com/MartinPTielemans/fleetx/releases/download/v${release.version}/fleetx.mjs";
             inherit (release) hash;
           };
           dontUnpack = true;
           nativeBuildInputs = [ pkgs.makeWrapper ];
           installPhase = ''
-            install -Dm644 $src $out/libexec/fleetx.mjs
-            makeWrapper ${pkgs.nodejs_24}/bin/node $out/bin/fleetx --add-flags $out/libexec/fleetx.mjs
+            install -Dm644 $src $out/libexec/t3-fleet.mjs
+            makeWrapper ${pkgs.nodejs_24}/bin/node $out/bin/t3-fleet --add-flags $out/libexec/t3-fleet.mjs
+            ln -s t3-fleet $out/bin/fleetx
           '';
           meta = {
             description = "Keep every machine you run T3 Code on equivalent";
             homepage = "https://github.com/MartinPTielemans/fleetx";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "fleetx";
+            mainProgram = "t3-fleet";
           };
         };
-        default = fleetx;
+        # The package's name before the rename. Until 1.0.
+        fleetx = t3-fleet;
+        default = t3-fleet;
       });
     };
 }

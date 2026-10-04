@@ -7,7 +7,7 @@
  *   dest = "~/.zshrc"
  *
  * A destination that is a real file with other content is moved aside to
- * <dest>.fleetx-backup.<time> before linking, never overwritten.
+ * <dest>.t3-fleet-backup.<time> before linking, never overwritten.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -58,14 +58,14 @@ const linkArea = (id: string, base: string, description: string) => defineArea({
       }),
     ),
   diagnose: ({ node, observed }) => {
-    const checkout = "$FLEETX_CHECKOUT";
+    const checkout = "$T3_FLEET_CHECKOUT";
     const out: Array<Finding> = [];
     for (const o of observed) {
       if (o.state === "linked") continue;
       const rel = base === "" ? o.src : `${base}/${o.src}`;
       const src = `${checkout}/${rel}`;
       const link = `mkdir -p "$(dirname ${shPath(o.dest)})" && ln -sfn "${src}" ${shPath(o.dest)}`;
-      const backup = `mv ${shPath(o.dest)} ${shPath(o.dest)}.fleetx-backup.$(date +%Y%m%d%H%M%S) && `;
+      const backup = `mv ${shPath(o.dest)} ${shPath(o.dest)}.t3-fleet-backup.$(date +%Y%m%d%H%M%S) && `;
       const key = `${id}-${o.dest.replace(/^~\//, "").replace(/[^A-Za-z0-9]+/g, "-")}`;
       const common = { node, key, area: id };
       switch (o.state) {

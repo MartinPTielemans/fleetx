@@ -1,5 +1,5 @@
 /**
- * fleetx secrets: the fleet's encrypted dotenv file.
+ * t3-fleet secrets: the fleet's encrypted dotenv file.
  *
  *   init                     create this node's key (once), print its public half
  *   install                  decrypt the repo's secrets onto this node
@@ -14,8 +14,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { Argument, Command } from "effect/unstable/cli";
 
-import { loadConfig } from "@fleetx/core/Config";
-import { commitAndPush } from "@fleetx/core/Git";
+import { loadConfig } from "@t3-fleet/core/Config";
+import { commitAndPush } from "@t3-fleet/core/Git";
 import {
   encryptedPath,
   ensureIdentity,
@@ -27,7 +27,7 @@ import {
   varNames,
   writeRecipients,
   writeSecrets,
-} from "@fleetx/core/Secrets";
+} from "@t3-fleet/core/Secrets";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -55,7 +55,7 @@ const init = Command.make("init").pipe(
 );
 
 const install = Command.make("install").pipe(
-  Command.withDescription("Decrypt the repo's secrets into ~/.config/fleetx/secrets.env (mode 600)."),
+  Command.withDescription("Decrypt the repo's secrets into ~/.config/t3-fleet/secrets.env (mode 600)."),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
@@ -141,7 +141,7 @@ const importFile = Command.make("import", {
 
 const addNode = Command.make("add-node", {
   node: Argument.String("NODE"),
-  recipient: Argument.String("RECIPIENT").pipe(Argument.withDescription("The node's public key (age1…), from `fleetx secrets init` there.")),
+  recipient: Argument.String("RECIPIENT").pipe(Argument.withDescription("The node's public key (age1…), from `t3-fleet secrets init` there.")),
 }).pipe(
   Command.withDescription("Let a node read the secrets (authority): adds its key and re-encrypts."),
   Command.withHandler(({ node, recipient }) =>

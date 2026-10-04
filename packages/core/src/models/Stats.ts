@@ -2,12 +2,12 @@
  * What the model proxy remembers about traffic: one small record per request,
  * metadata only, never a body or a header. Records live in memory for the
  * rolling windows (5 minutes, 1 hour, 24 hours) and are appended to
- * ~/.local/state/fleetx/models.jsonl, so a restarted proxy keeps its last day
+ * ~/.local/state/t3-fleet/models.jsonl, so a restarted proxy keeps its last day
  * and a person can read what happened. The log is bounded: past a size it is
  * rotated to models.jsonl.1, and only those two files exist.
  *
  * Fallbacks are counted from the launchers' log
- * (~/.local/state/fleetx/models-fallback.log): a launcher only falls back when
+ * (~/.local/state/t3-fleet/models-fallback.log): a launcher only falls back when
  * the proxy is not listening, so the proxy cannot count them itself.
  */
 import * as Effect from "effect/Effect";
@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { ModelFailureClass, ModelUpstream, type ModelProxyStats, type ModelUpstreamStats, type ModelWindow } from "../Api.ts";
+import { stateDir } from "../Names.ts";
 
 export const RequestRecord = Schema.Struct({
   /** When the request finished, ms since the epoch. */
@@ -49,8 +50,8 @@ export const MAX_RECORDS = 200_000;
 /** Rotate models.jsonl past this size. */
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
-export const statsLogPath = (home: string) => `${home}/.local/state/fleetx/models.jsonl`;
-export const fallbackLogPath = (home: string) => `${home}/.local/state/fleetx/models-fallback.log`;
+export const statsLogPath = (home: string) => `${stateDir(home)}/models.jsonl`;
+export const fallbackLogPath = (home: string) => `${stateDir(home)}/models-fallback.log`;
 
 /** Nearest-rank percentile; null for no samples. */
 export const percentile = (values: ReadonlyArray<number>, p: number): number | null => {

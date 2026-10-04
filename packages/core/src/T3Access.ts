@@ -2,21 +2,21 @@
  * Reading T3's own view of its providers: whether each one is logged in,
  * ready, or failing, the way T3's settings screen shows it. T3 tracks this
  * for every driver it has (Claude, Codex, Cursor, OpenCode, Grok, Pi, …), so
- * fleetx asks T3 instead of guessing per CLI.
+ * T3 Fleet asks T3 instead of guessing per CLI.
  *
  * T3 serves the snapshot as `server.getConfig` over its authenticated
- * WebSocket RPC (`/ws`, scope orchestration:read). fleetx holds its own
+ * WebSocket RPC (`/ws`, scope orchestration:read). T3 Fleet holds its own
  * token for that, with that one scope and nothing else:
  *
- *   1. `t3 auth pairing create --ttl 2m --label fleetx --json`, T3's own
+ *   1. `t3 auth pairing create --ttl 2m --label t3-fleet --json`, T3's own
  *      command for headless clients, issues a one-time pairing credential
  *   2. POST /oauth/token exchanges it for a bearer token, asking for
  *      scope=orchestration:read only (T3 grants a subset of the pairing's
- *      scopes on request); T3 lists it as a client labelled "fleetx"
- *   3. the token goes to ~/.config/fleetx/t3-access.json, mode 600; it lasts
+ *      scopes on request); T3 lists it as a client labelled "T3 Fleet"
+ *   3. the token goes to ~/.config/t3-fleet/t3-access.json, mode 600; it lasts
  *      T3's default 30 days
  *
- * That is `fleetx t3 connect`, run as a fix (`t3-access`), never by the
+ * That is `t3-fleet t3 connect`, run as a fix (`t3-access`), never by the
  * probe. The probe only reads: it trades the token for a five-minute
  * WebSocket ticket (POST /api/auth/websocket-ticket), calls server.getConfig
  * once, and closes. getConfig returns T3's cached provider checks; it starts
@@ -45,8 +45,9 @@ import { exec } from "./Exec.ts";
 import { ForwardCompatibleArray } from "./vendor/t3/baseSchemas.ts";
 import { ORCHESTRATION_PROTOCOL_QUERY_PARAM, ORCHESTRATION_PROTOCOL_VERSION_TEXT } from "./vendor/t3/environment.ts";
 import { ServerProvider } from "./vendor/t3/server.ts";
+import { configDir } from "./Names.ts";
 
-export const t3AccessPath = (home: string) => `${home}/.config/fleetx/t3-access.json`;
+export const t3AccessPath = (home: string) => `${configDir(home)}/t3-access.json`;
 
 export const T3AccessFile = Schema.Struct({
   origin: Schema.String,
@@ -56,7 +57,7 @@ export const T3AccessFile = Schema.Struct({
 });
 export type T3AccessFile = typeof T3AccessFile.Type;
 
-/** The fields of T3's provider snapshot fleetx reads; T3 adds others freely. */
+/** The fields of T3's provider snapshot T3 Fleet reads; T3 adds others freely. */
 export const ProviderSnapshot = Schema.Struct(
   Struct.pick(ServerProvider.fields, ["instanceId", "driver", "enabled", "installed", "version", "status", "auth", "checkedAt", "message"]),
 );
@@ -73,7 +74,7 @@ export class T3ConfigRpcs extends RpcGroup.make(
   }),
 ) {}
 
-/** A provider snapshot as fleetx reports it. The account's email is left out: observations are published. */
+/** A provider snapshot as T3 Fleet reports it. The account's email is left out: observations are published. */
 export const fromSnapshot = (p: ProviderSnapshot): ProviderAuth => ({
   instanceId: String(p.instanceId),
   driver: String(p.driver),
@@ -102,7 +103,7 @@ const wsUrl = (origin: string, ticket: string) => {
 
 const Ticket = Schema.Struct({ ticket: Schema.String });
 
-/** T3's provider snapshot, read with fleetx's token. Never fails. */
+/** T3's provider snapshot, read with T3 Fleet's token. Never fails. */
 export const readProviderSnapshot = (origin: string, token: string) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
@@ -142,7 +143,7 @@ const describe = (error: unknown) => {
   return [typeof tag === "string" ? tag : "error", typeof message === "string" ? message : ""].filter((s) => s !== "").join(": ").slice(0, 200);
 };
 
-/** fleetx's T3 token on this machine, if any. */
+/** T3 Fleet's T3 token on this machine, if any. */
 export const readAccess = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -171,7 +172,7 @@ const TokenResult = Schema.Struct({ access_token: Schema.String, expires_in: Sch
 
 export class T3AccessError extends Schema.TaggedError<T3AccessError>()("T3AccessError", { message: Schema.String }) {}
 
-/** Mints fleetx's read-only token for the T3 server at `origin` and writes it. */
+/** Mints T3 Fleet's read-only token for the T3 server at `origin` and writes it. */
 export const mintAccess = (input: {
   readonly home: string;
   readonly origin: string;
@@ -181,7 +182,7 @@ export const mintAccess = (input: {
   Effect.gen(function* () {
     const pairing = yield* exec({
       command: input.cli.command,
-      args: [...input.cli.args, "auth", "pairing", "create", "--ttl", "2m", "--label", "fleetx", "--json"],
+      args: [...input.cli.args, "auth", "pairing", "create", "--ttl", "2m", "--label", "T3 Fleet", "--json"],
       env: { ...process.env, ...input.cli.env },
       timeout: Duration.seconds(60),
     });
@@ -198,7 +199,7 @@ export const mintAccess = (input: {
             subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
             requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
             scope: "orchestration:read",
-            client_label: "fleetx",
+            client_label: "T3 Fleet",
           }),
         ),
       )
@@ -211,7 +212,7 @@ export const mintAccess = (input: {
     const access: T3AccessFile = { origin: input.origin, token: token.access_token, expiresAt: input.now + token.expires_in * 1000 };
     const fs = yield* FileSystem.FileSystem;
     const file = t3AccessPath(input.home);
-    yield* fs.makeDirectory(`${input.home}/.config/fleetx`, { recursive: true }).pipe(Effect.ignore);
+    yield* fs.makeDirectory(configDir(input.home), { recursive: true }).pipe(Effect.ignore);
     const text = yield* Schema.encodeEffect(Schema.fromJsonString(T3AccessFile))(access);
     yield* fs.writeFileString(`${file}.tmp`, `${text}\n`, { mode: 0o600 });
     yield* fs.chmod(`${file}.tmp`, 0o600);

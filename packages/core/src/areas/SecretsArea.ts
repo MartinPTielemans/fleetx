@@ -1,10 +1,10 @@
 /**
  * Whether each node can read the fleet's secrets, and has the current ones.
  *
- * The node's key is created on the node (`fleetx secrets init`) and only its
+ * The node's key is created on the node (`t3-fleet secrets init`) and only its
  * public half leaves it. An authority then adds that public key to the repo
- * and re-encrypts (`fleetx secrets add-node`), and the node decrypts its copy
- * (`fleetx secrets install`). Each step is a fix on the node that can take it.
+ * and re-encrypts (`t3-fleet secrets add-node`), and the node decrypts its copy
+ * (`t3-fleet secrets install`). Each step is a fix on the node that can take it.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -71,7 +71,7 @@ export const SecretsArea = defineArea({
     const base = { node, area: "secrets" as const };
     if (!observed.encrypted) return out;
     if (observed.recipient === null) {
-      out.push({ ...base, key: "secrets-no-key", severity: "warn", title: "this machine has no key for the fleet's secrets", fix: { command: "fleetx secrets init", safe: true } });
+      out.push({ ...base, key: "secrets-no-key", severity: "warn", title: "this machine has no key for the fleet's secrets", fix: { command: "t3-fleet secrets init", safe: true } });
       return out;
     }
     if (!observed.isRecipient) {
@@ -82,14 +82,14 @@ export const SecretsArea = defineArea({
         severity: "warn",
         title: "this machine's key is not among the secrets' recipients, so it cannot read them",
         ...(authority === null
-          ? { detail: `no node has the authority role to add it: fleetx secrets add-node ${node} ${observed.recipient}` }
-          : { fix: { command: `fleetx secrets add-node ${sh(node)} ${sh(observed.recipient)}`, safe: true, on: authority } }),
+          ? { detail: `no node has the authority role to add it: t3-fleet secrets add-node ${node} ${observed.recipient}` }
+          : { fix: { command: `t3-fleet secrets add-node ${sh(node)} ${sh(observed.recipient)}`, safe: true, on: authority } }),
       });
       return out;
     }
     if (observed.error !== null) out.push({ ...base, key: "secrets-unreadable", severity: "error", title: observed.error });
     else if (observed.current === false) {
-      out.push({ ...base, key: "secrets-stale", severity: "warn", title: "this machine's installed secrets are out of date", fix: { command: "fleetx secrets install", safe: true } });
+      out.push({ ...base, key: "secrets-stale", severity: "warn", title: "this machine's installed secrets are out of date", fix: { command: "t3-fleet secrets install", safe: true } });
     }
     return out;
   },
