@@ -69,7 +69,8 @@ describe("engine-timer on macOS", () => {
   const run = (fix: string, failBootstrap = false) => {
     const home = mkdtempSync(join(tmpdir(), "t3f-timer-"));
     mkdirSync(join(home, "bin"));
-    writeFileSync(join(home, "bin/launchctl"), `#!/bin/sh\necho "$@" >> "${home}/calls"\n${failBootstrap ? '[ "$1" = bootstrap ] && exit 5\n' : ""}exit 0\n`, { mode: 0o755 });
+    // launchd knows no job once it is booted out: print fails.
+    writeFileSync(join(home, "bin/launchctl"), `#!/bin/sh\necho "$@" >> "${home}/calls"\n[ "$1" = print ] && exit 113\n${failBootstrap ? '[ "$1" = bootstrap ] && exit 5\n' : ""}exit 0\n`, { mode: 0o755 });
     writeFileSync(join(home, "fix.sh"), fix);
     const env = { ...process.env, HOME: home, PATH: `${home}/bin:${process.env["PATH"] ?? ""}` };
     // The parent stands in for the sync: it notes whether launchctl ran before it exits.
@@ -86,7 +87,7 @@ describe("engine-timer on macOS", () => {
 
   it("reloads the job at once when a person runs it", () => {
     const { home, early } = run(timerFix(false));
-    expect(early).toMatch(/bootout gui\/\d+\/dev\.t3-fleet\.sync\nbootstrap gui\/\d+ /);
+    expect(early).toMatch(/bootout gui\/\d+\/dev\.t3-fleet\.sync\nprint gui\/\d+\/dev\.t3-fleet\.sync\nbootstrap gui\/\d+ /);
     expect(readFileSync(join(home, "Library/LaunchAgents/dev.t3-fleet.sync.plist"), "utf8")).toBe("<plist/>\n");
   });
 
@@ -94,7 +95,7 @@ describe("engine-timer on macOS", () => {
     const { early, calls, pending, settled } = run(timerFix(true));
     expect(early).toBe("");
     await settled(() => calls().includes("bootstrap"));
-    expect(calls()).toMatch(/bootout gui\/\d+\/dev\.t3-fleet\.sync\nbootstrap gui\/\d+ /);
+    expect(calls()).toMatch(/bootout gui\/\d+\/dev\.t3-fleet\.sync\nprint gui\/\d+\/dev\.t3-fleet\.sync\nbootstrap gui\/\d+ /);
     expect(pending()).toBe(false);
   });
 

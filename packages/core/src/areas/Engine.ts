@@ -41,7 +41,7 @@ import {
   STATE_DIR,
   systemdUnit,
 } from "../Names.ts";
-import { installedBundle, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
+import { installedBundle, launchdReload, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({ timer: Schema.optionalKey(Schema.Boolean), interval: Schema.optionalKey(Schema.Number) }),
@@ -179,7 +179,8 @@ const installTimer = (platform: string, root: boolean, want: string, inJob: bool
       launchctlSteps(
         inJob,
         nodePath,
-        `${retireLegacyUnit(platform, root, "sync")}\nlaunchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
+        // The plist sets no ExitTimeOut, so launchd's default applies.
+        `${retireLegacyUnit(platform, root, "sync")}\n${launchdReload(LAUNCHD_LABEL, plist)}`,
       ),
     ].join("\n");
   }
