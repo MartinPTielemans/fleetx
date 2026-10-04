@@ -148,9 +148,9 @@ const decodeAs = <S extends Schema.Top>(schema: S, value: unknown, file: string)
     ),
   );
 
-const NOT_SET_UP = new ConfigError({
+export const NOT_SET_UP = new ConfigError({
   message:
-    'this machine is not set up: run `t3-fleet join`, or write ~/.config/t3-fleet/config.toml with repo = "<your config repo>" and node = "<this machine>"',
+    "this machine is not set up yet: run `t3-fleet setup` to start a fleet here, or `t3-fleet setup <repo-url>` to join one (it shows its plan before changing anything); `t3-fleet doctor` checks this machine first",
 });
 
 const StringList = Schema.Array(Schema.String);

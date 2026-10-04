@@ -44,6 +44,7 @@ import {
   setVar,
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
+import { mergeProposedSecrets } from "@t3-fleet/core/setup/Apply";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -218,6 +219,8 @@ export const approveCommand = Command.make("approve", {
         Option.getOrUndefined(commit),
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
+      // Secrets it proposed (setup on a joining machine) are encrypted to this machine: merge them.
+      for (const line of yield* mergeProposedSecrets(config.repo)) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );
