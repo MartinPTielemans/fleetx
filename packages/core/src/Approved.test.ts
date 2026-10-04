@@ -11,32 +11,14 @@ import * as Effect from "effect/Effect";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import {
-  approvedDir,
-  approvedFiles,
   lastProposalPath,
-  reapplyHeld,
-  restoreHeld,
+  PROPOSAL_REF,
+  proposalTrailer,
+  restoreDropped,
   settleApproval,
   unmergedStep,
 } from "./Approved.ts";
 import { pullBranch } from "./Git.ts";
-
-describe("approvedFiles", () => {
-  it("lists the files approvals of this node's proposals name, and no one else's", () => {
-    const log = [
-      "Approve desktop's proposal (by laptop)\n\nt3-fleet.toml\nmcp/notes.json\n\u001e",
-      "Approve server's proposal (by laptop)\n\nnodes/server.toml\n\u001e",
-      "Approve desktop's proposal (by laptop, automatically)\n\nskills/desk/SKILL.md\n\u001e",
-      "Set up laptop\n\n\u001e",
-    ].join("\n");
-    expect(approvedFiles(log, "desktop")).toEqual([
-      "t3-fleet.toml",
-      "mcp/notes.json",
-      "skills/desk/SKILL.md",
-    ]);
-    expect(approvedFiles(log, "laptop")).toEqual([]);
-  });
-});
 
 // Real repositories in a temporary home: an origin, the authority's checkout and a member's.
 const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
@@ -48,7 +30,6 @@ const git = (cwd: string, ...args: Array<string>) =>
     stdio: "pipe",
   }).trim();
 
-const FLEET = '[defaults.mcp]\nservers = ["fetch"]\n';
 const home = fs.mkdtempSync(join(tmpdir(), "t3-fleet-approved-"));
 const realHome = process.env["HOME"];
 beforeAll(() => {
@@ -58,128 +39,188 @@ afterAll(() => {
   process.env["HOME"] = realHome;
 });
 
+const FLEET = '[defaults.mcp]\nservers = ["fetch"]\n';
+const servers = (...names: Array<string>) =>
+  FLEET.replace('["fetch"]', JSON.stringify(["fetch", ...names]).replaceAll(",", ", "));
+type Files = Record<string, string | { readonly text: string; readonly mode: number }>;
+const write = (repo: string, files: Files) => {
+  for (const [file, value] of Object.entries(files)) {
+    const { text, mode } = typeof value === "string" ? { text: value, mode: 0o644 } : value;
+    fs.mkdirSync(join(repo, file, ".."), { recursive: true });
+    fs.writeFileSync(join(repo, file), text);
+    fs.chmodSync(join(repo, file), mode);
+  }
+};
+const commitOn = (repo: string, files: Files, message: string) => {
+  write(repo, files);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", message);
+  git(repo, "push", "-q", "origin", "HEAD:main");
+};
+
 /** origin with one commit, the authority's clone and the member's. */
-const fleet = (name: string) => {
+const fleet = (name: string, files: Files = { "t3-fleet.toml": FLEET }) => {
   const root = join(home, name);
   const origin = join(root, "origin.git");
   git(home, "init", "-q", "--bare", "-b", "main", origin);
   const authority = join(root, "authority");
   git(home, "clone", "-q", origin, authority);
-  fs.writeFileSync(join(authority, "t3-fleet.toml"), FLEET);
-  git(authority, "add", "-A");
-  git(authority, "commit", "-qm", "start");
-  git(authority, "push", "-q", "origin", "HEAD:main");
+  commitOn(authority, files, "start");
   const member = join(root, "member");
   git(home, "clone", "-q", origin, member);
   return { authority, member };
 };
-/** The member proposes its copy of t3-fleet.toml (recorded as Sync does); the authority approves it with `merged`. */
-const proposeAndApprove = (f: ReturnType<typeof fleet>, mine: string, merged: string) => {
-  fs.writeFileSync(join(f.member, "t3-fleet.toml"), mine);
-  git(f.member, "add", "t3-fleet.toml");
-  const tree = git(f.member, "write-tree");
-  const proposal = git(f.member, "commit-tree", tree, "-p", "HEAD", "-m", "p");
-  git(f.member, "reset", "-q");
-  fs.mkdirSync(join(home, ".local/state/t3-fleet"), { recursive: true });
+/** The member proposes `files` as Sync does: a commit on its HEAD, recorded and kept by a ref; its copies stay. */
+const propose = (member: string, files: Files) => {
+  write(member, files);
+  git(member, "add", "-A");
+  const tree = git(member, "write-tree");
+  const proposal = git(member, "commit-tree", tree, "-p", "HEAD", "-m", "Proposed by member");
+  git(member, "reset", "-q");
+  git(member, "update-ref", PROPOSAL_REF, proposal);
+  fs.mkdirSync(join(lastProposalPath(home), ".."), { recursive: true });
   fs.writeFileSync(lastProposalPath(home), `${proposal}\n`);
+  return proposal;
+};
+/** The authority approves `proposal`, landing `files` (merged, perhaps) with the trailer naming it. */
+const approveWith = (authority: string, proposal: string, files: Files) =>
   commitOn(
-    f.authority,
-    "t3-fleet.toml",
-    merged,
-    "Approve member's proposal (by authority)\n\nt3-fleet.toml",
+    authority,
+    files,
+    `Approve member's proposal (by authority)\n\n${Object.keys(files).join("\n")}\n\n${proposalTrailer(proposal)}`,
   );
-};
-const commitOn = (repo: string, file: string, text: string, message: string) => {
-  fs.mkdirSync(join(repo, file, ".."), { recursive: true });
-  fs.writeFileSync(join(repo, file), text);
-  git(repo, "add", "-A");
-  git(repo, "commit", "-qm", message);
-  git(repo, "push", "-q", "origin", "HEAD:main");
-};
-/** Settle, pull as Sync does with one fetch, then write back or restore. */
-const settle = async (member: string) => {
+/** Settle, pull as Sync does with one fetch, and put dropped files back when the pull fails. */
+const settle = async (member: string, exclude: ReadonlySet<string> = new Set()) => {
   git(member, "fetch", "-q", "origin", "main");
-  const { held, refused } = await run(settleApproval(member, "member", "main"));
-  const pulled = await run(Effect.result(pullBranch(member, "main", "ff-only", { fetched: true })));
-  const lines =
-    pulled._tag === "Success"
-      ? await run(reapplyHeld(member, held))
-      : (await run(restoreHeld(member, held)), []);
-  return { held, refused, pulled, lines };
+  const how =
+    git(member, "rev-list", "--count", "origin/main..HEAD") === "0" ? "ff-only" : "rebase";
+  const settled = await run(settleApproval(member, "member", "main", { exclude, how }));
+  const pulled = await run(Effect.result(pullBranch(member, "main", how, { fetched: true })));
+  if (pulled._tag === "Failure") await run(restoreDropped(member, settled));
+  return { settled, pulled };
 };
 const read = (repo: string, file: string) => fs.readFileSync(join(repo, file), "utf8");
-const savedRuns = () => fs.readdirSync(approvedDir(home)).filter((n) => /^\d+$/.test(n));
+const modeOf = (repo: string, file: string) => fs.statSync(join(repo, file)).mode & 0o777;
+/** Everything a member's checkout holds, for "exactly as it was". */
+const snapshot = (repo: string) =>
+  JSON.stringify({
+    head: git(repo, "rev-parse", "HEAD"),
+    status: git(repo, "status", "--porcelain", "-uall"),
+    files: git(repo, "ls-files", "-co", "--exclude-standard")
+      .split("\n")
+      .filter((f) => f !== "" && fs.existsSync(join(repo, f)))
+      .map((f) => [f, read(repo, f), modeOf(repo, f)]),
+  });
 
 describe("settleApproval", () => {
-  it("drops a copy that is what was proposed, keeping no copy and stashing nothing", async () => {
-    const f = fleet("same");
-    const before = fs.existsSync(approvedDir(home)) ? savedRuns() : [];
-    commitOn(
-      f.authority,
-      "t3-fleet.toml",
-      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
-      "other",
-    );
-    proposeAndApprove(
-      f,
-      '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
-      '[defaults.mcp]\nservers = ["fetch", "posthog", "notes"]\n',
-    );
-    const { held } = await settle(f.member);
-    expect(held.map((h) => h.outcome)).toEqual(["proposed"]);
-    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
+  it("drops a copy exactly as its approved proposal had it; the pull brings the merged version", async () => {
+    const f = fleet("approved");
+    commitOn(f.authority, { "t3-fleet.toml": servers("posthog") }, "x");
+    const p = propose(f.member, { "t3-fleet.toml": servers("notes") });
+    approveWith(f.authority, p, { "t3-fleet.toml": servers("posthog", "notes") });
+    const { settled, pulled } = await settle(f.member);
+    expect(settled.dropped).toEqual(["t3-fleet.toml"]);
+    expect(pulled._tag).toBe("Success");
+    expect(read(f.member, "t3-fleet.toml")).toBe(servers("posthog", "notes"));
     expect(git(f.member, "status", "--porcelain")).toBe("");
     expect(git(f.member, "stash", "list")).toBe("");
-    expect(savedRuns()).toEqual(before);
+    expect(fs.existsSync(join(home, ".local/state/t3-fleet/approved"))).toBe(false);
   });
 
-  it("puts a later edit on top of the approved version", async () => {
-    const f = fleet("later");
-    commitOn(
-      f.authority,
-      "t3-fleet.toml",
-      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
-      "other",
-    );
-    git(f.member, "fetch", "-q");
-    proposeAndApprove(
-      f,
-      '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
-      '[defaults.mcp]\nservers = ["fetch", "posthog", "notes"]\n',
-    );
-    // Edited again after proposing.
-    fs.writeFileSync(
-      join(f.member, "t3-fleet.toml"),
-      '[defaults.mcp]\nservers = ["fetch", "notes", "x"]\n',
-    );
-    const { lines } = await settle(f.member);
-    expect(lines[0]).toContain("kept this machine's edit to t3-fleet.toml");
-    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes", "x"]');
+  it("drops a proposed file the branch approved and then removed again (merged secrets)", async () => {
+    const f = fleet("removed");
+    const p = propose(f.member, { "secrets-proposed/member.env.age": "-----BEGIN AGE-----\n" });
+    approveWith(f.authority, p, { "secrets-proposed/member.env.age": "-----BEGIN AGE-----\n" });
+    fs.rmSync(join(f.authority, "secrets-proposed"), { recursive: true });
+    git(f.authority, "commit", "-qam", "Drop the merged proposed secrets");
+    git(f.authority, "push", "-q", "origin", "HEAD:main");
+    const { settled, pulled } = await settle(f.member);
+    expect(settled.dropped).toEqual(["secrets-proposed/member.env.age"]);
+    expect(pulled._tag).toBe("Success");
+    expect(git(f.member, "status", "--porcelain", "-uall")).toBe("");
   });
 
-  it("puts every copy back exactly when the pull fails, and leaves the unmergeable one alone", async () => {
-    const f = fleet("fails");
-    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree\n", "x");
-    commitOn(f.authority, "skills/y/SKILL.md", "y v1\n", "y");
-    git(f.member, "pull", "-q");
-    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree, branch\n", "x again");
-    commitOn(f.authority, "skills/y/SKILL.md", "y, branch\n", "y again");
-    // x merges cleanly with the branch; y does not.
-    fs.writeFileSync(join(f.member, "skills/x/SKILL.md"), "x, mine\none\ntwo\nthree\n");
-    fs.writeFileSync(join(f.member, "skills/y/SKILL.md"), "y, mine\n");
-    const { held, refused, pulled } = await settle(f.member);
-    expect(held.map((h) => [h.file, h.outcome])).toEqual([["skills/x/SKILL.md", "merged"]]);
-    expect(refused).toEqual(["skills/y/SKILL.md"]);
+  it("puts a dropped file back from the proposal commit, mode included, when the pull fails", async () => {
+    const f = fleet("mode", { "t3-fleet.toml": FLEET, "bin/run.sh": "v1\n", "notes.md": "one\n" });
+    const p = propose(f.member, { "bin/run.sh": { text: "#!/bin/sh\necho v2\n", mode: 0o755 } });
+    approveWith(f.authority, p, {
+      "bin/run.sh": { text: "#!/bin/sh\necho v2, merged\n", mode: 0o755 },
+    });
+    // Meanwhile an edit here that the branch's change to notes.md overlaps: the pull refuses.
+    commitOn(f.authority, { "notes.md": "one, branch\n" }, "notes");
+    write(f.member, { "notes.md": "one, mine\n" });
+    const before = snapshot(f.member);
+    const { settled, pulled } = await settle(f.member);
+    expect(settled.dropped).toEqual(["bin/run.sh"]);
+    expect(settled.overlapping).toEqual(["notes.md"]);
     expect(pulled._tag).toBe("Failure");
-    expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree\n");
-    expect(read(f.member, "skills/y/SKILL.md")).toBe("y, mine\n");
-    expect(fs.existsSync(held[0]?.saved ?? "")).toBe(false);
+    expect(snapshot(f.member)).toBe(before);
+    expect(modeOf(f.member, "bin/run.sh")).toBe(0o755);
+  });
 
-    // The step the refusal names gets past it, and keeps the edit.
-    const step = unmergedStep(f.member, refused);
+  it("never drops a copy whose mode differs from the proposal's", async () => {
+    const f = fleet("chmod", { "t3-fleet.toml": FLEET, "bin/run.sh": "v1\n" });
+    const p = propose(f.member, { "bin/run.sh": { text: "v2\n", mode: 0o755 } });
+    approveWith(f.authority, p, { "bin/run.sh": { text: "v2, merged\n", mode: 0o755 } });
+    fs.chmodSync(join(f.member, "bin/run.sh"), 0o644);
+    const before = snapshot(f.member);
+    const { settled, pulled } = await settle(f.member);
+    expect(settled).toMatchObject({ dropped: [], overlapping: ["bin/run.sh"] });
+    expect(pulled._tag).toBe("Failure");
+    expect(snapshot(f.member)).toBe(before);
+  });
+
+  it("touches nothing on a member with commits of its own", async () => {
+    const f = fleet("local-commit", { "t3-fleet.toml": FLEET, "README.md": "fleet\n" });
+    const p = propose(f.member, { "t3-fleet.toml": servers("notes") });
+    approveWith(f.authority, p, { "t3-fleet.toml": servers("posthog", "notes") });
+    write(f.member, { "README.md": "fleet, mine\n" });
+    git(f.member, "commit", "-qm", "mine", "--", "README.md");
+    const before = snapshot(f.member);
+    const { settled, pulled } = await settle(f.member);
+    expect(settled).toMatchObject({ dropped: [], overlapping: ["t3-fleet.toml"] });
+    expect(pulled._tag).toBe("Failure");
+    expect(snapshot(f.member)).toBe(before);
+    expect(git(f.member, "log", "-1", "--format=%s")).toBe("mine");
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "settling that fails part-way puts back what it had dropped, and fails",
+    async () => {
+      const f = fleet("midway", { "a.toml": "a = 1\n", "z/b.toml": "b = 1\n" });
+      const p = propose(f.member, { "a.toml": "a = 2\n", "z/b.toml": "b = 2\n" });
+      approveWith(f.authority, p, { "a.toml": "a = 2\nm = 1\n", "z/b.toml": "b = 2\nm = 1\n" });
+      git(f.member, "fetch", "-q", "origin", "main");
+      const before = snapshot(f.member);
+      // z/ cannot be written: putting z/b.toml back to HEAD fails after a.toml was dropped.
+      fs.chmodSync(join(f.member, "z"), 0o555);
+      try {
+        const failed = await run(
+          Effect.flip(settleApproval(f.member, "member", "main", { how: "ff-only" })),
+        );
+        expect(failed).toContain("z/b.toml");
+      } finally {
+        fs.chmodSync(join(f.member, "z"), 0o755);
+      }
+      expect(snapshot(f.member)).toBe(before);
+    },
+  );
+
+  it("leaves an edit made after the proposal, and the step it names gets past it", async () => {
+    const f = fleet("later");
+    const p = propose(f.member, { "t3-fleet.toml": servers("notes") });
+    approveWith(f.authority, p, { "t3-fleet.toml": servers("posthog", "notes") });
+    write(f.member, { "t3-fleet.toml": servers("notes", "x") });
+    const before = snapshot(f.member);
+    const { settled, pulled } = await settle(f.member);
+    expect(settled).toMatchObject({ dropped: [], overlapping: ["t3-fleet.toml"], pending: [] });
+    expect(pulled._tag).toBe("Failure");
+    expect(snapshot(f.member)).toBe(before);
+
+    // As written, on a machine where git has no identity of its own.
+    const step = unmergedStep(f.member, settled.overlapping);
     const stash = /`(git -C \S+ .*?stash push -m t3-fleet -- [^`]+)`/.exec(step)?.[1] ?? "";
     expect(stash).not.toBe("");
-    // As written, on a machine where git has no identity of its own.
     execFileSync("sh", ["-c", stash], {
       env: {
         ...process.env,
@@ -188,84 +229,47 @@ describe("settleApproval", () => {
         GIT_CONFIG_VALUE_0: "true",
       },
     });
-    const again = await settle(f.member);
-    expect(again.pulled._tag).toBe("Success");
-    expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree, branch\n");
-    expect(git(f.member, "stash", "show", "-p")).toContain("y, mine");
+    expect((await settle(f.member)).pulled._tag).toBe("Success");
+    expect(read(f.member, "t3-fleet.toml")).toBe(servers("posthog", "notes"));
+    expect(git(f.member, "stash", "show", "-p")).toContain('"x"');
   });
 
-  it("merges wherever it runs: a broken repository around its directory is not in play", async () => {
-    const f = fleet("broken");
-    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree\n", "x");
-    git(f.member, "pull", "-q");
-    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree, branch\n", "x again");
-    fs.writeFileSync(join(f.member, "skills/x/SKILL.md"), "x, mine\none\ntwo\nthree\n");
-    // Run from inside a worktree whose .git points nowhere.
-    const broken = join(home, "broken-worktree");
-    fs.mkdirSync(broken, { recursive: true });
-    fs.writeFileSync(join(broken, ".git"), "gitdir: /nonexistent/.git/worktrees/gone\n");
-    const cwd = process.cwd();
-    process.chdir(broken);
-    try {
-      const { held, pulled } = await settle(f.member);
-      expect(held.map((h) => [h.file, h.outcome])).toEqual([["skills/x/SKILL.md", "merged"]]);
-      expect(pulled._tag).toBe("Success");
-      expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree, branch\n");
-    } finally {
-      process.chdir(cwd);
-    }
+  it("leaves a proposal that waits for approval, and says so", async () => {
+    const f = fleet("pending");
+    propose(f.member, { "t3-fleet.toml": servers("notes") });
+    commitOn(f.authority, { "t3-fleet.toml": servers("posthog") }, "x");
+    const before = snapshot(f.member);
+    const { settled, pulled } = await settle(f.member);
+    expect(settled).toMatchObject({ dropped: [], pending: ["t3-fleet.toml"] });
+    expect(pulled._tag).toBe("Failure");
+    expect(snapshot(f.member)).toBe(before);
+  });
+
+  it("never drops what sync holds back, or anything once the proposal commit is gone", async () => {
+    const f = fleet("held");
+    const p = propose(f.member, { "t3-fleet.toml": servers("notes") });
+    approveWith(f.authority, p, { "t3-fleet.toml": servers("posthog", "notes") });
+    const held = await settle(f.member, new Set(["t3-fleet.toml"]));
+    expect(held.settled.dropped).toEqual([]);
+    git(f.member, "update-ref", "-d", PROPOSAL_REF);
+    fs.writeFileSync(lastProposalPath(home), `${"0".repeat(40)}\n`);
+    const gone = await settle(f.member);
+    expect(gone.settled).toMatchObject({ proposal: null, dropped: [] });
+    expect(gone.pulled._tag).toBe("Failure");
   });
 
   it("leaves everything as it was when the pull is refused, identical untracked copies included", async () => {
     const f = fleet("refused");
-    commitOn(f.authority, "instructions/claude/CLAUDE.md", "rules\n", "instructions");
-    commitOn(f.authority, "skills/y/SKILL.md", "y, branch\n", "y");
-    // Not pulled yet: an identical copy of the incoming file, and an edit that does not merge.
-    fs.mkdirSync(join(f.member, "instructions/claude"), { recursive: true });
-    fs.writeFileSync(join(f.member, "instructions/claude/CLAUDE.md"), "rules\n");
-    fs.mkdirSync(join(f.member, "skills/y"), { recursive: true });
-    fs.writeFileSync(join(f.member, "skills/y/SKILL.md"), "y, mine\n");
-    const status = git(f.member, "status", "--porcelain", "-uall");
+    commitOn(f.authority, { "instructions/claude/CLAUDE.md": "rules\n" }, "instructions");
+    commitOn(f.authority, { "skills/y/SKILL.md": "y, branch\n" }, "y");
+    // Not pulled yet: an identical copy of the incoming file, and an edit that overlaps.
+    write(f.member, {
+      "instructions/claude/CLAUDE.md": "rules\n",
+      "skills/y/SKILL.md": "y, mine\n",
+    });
+    const before = snapshot(f.member);
     const { pulled } = await settle(f.member);
     expect(pulled._tag).toBe("Failure");
-    expect(read(f.member, "instructions/claude/CLAUDE.md")).toBe("rules\n");
-    expect(read(f.member, "skills/y/SKILL.md")).toBe("y, mine\n");
-    expect(git(f.member, "status", "--porcelain", "-uall")).toBe(status);
-  });
-
-  it("never touches what sync holds back, and keeps copies only when it must, mode 600", async () => {
-    const f = fleet("held");
-    commitOn(
-      f.authority,
-      "t3-fleet.toml",
-      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
-      "other",
-    );
-    fs.writeFileSync(
-      join(f.member, "t3-fleet.toml"),
-      '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
-    );
-    git(f.member, "fetch", "-q", "origin", "main");
-    const { held } = await run(
-      settleApproval(f.member, "member", "main", new Set(["t3-fleet.toml"])),
-    );
-    expect(held).toEqual([]);
-    expect(read(f.member, "t3-fleet.toml")).toContain("notes");
-    // Not held back: saved at 600 until the pull, then gone.
-    const settled = await run(settleApproval(f.member, "member", "main"));
-    expect(fs.statSync(settled.held[0]?.saved ?? "").mode & 0o777).toBe(0o600);
-    await run(pullBranch(f.member, "main", "ff-only", { fetched: true }));
-    await run(reapplyHeld(f.member, settled.held));
-    expect(fs.existsSync(settled.held[0]?.saved ?? "")).toBe(false);
-    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
-  });
-
-  it("prunes old copies", async () => {
-    const f = fleet("prune");
-    fs.mkdirSync(join(approvedDir(home), "1000", "skills"), { recursive: true });
-    fs.writeFileSync(join(approvedDir(home), "1000", "skills", "old"), "old");
-    git(f.member, "fetch", "-q", "origin", "main");
-    await run(settleApproval(f.member, "member", "main"));
-    expect(fs.existsSync(join(approvedDir(home), "1000"))).toBe(false);
+    expect(snapshot(f.member)).toBe(before);
   });
 });

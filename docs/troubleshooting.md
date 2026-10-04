@@ -383,6 +383,19 @@ machines, so these go nowhere; sync rebases them along and keeps working.
 `git -C <repo> reset --soft origin/main` there turns them back into edits,
 which its next sync proposes for approval.
 
+**`sync-edit-unmerged`** — a member has an edit to a file the fleet's branch
+has changed since, so its sync does not pull (and proposes nothing that would
+undo the branch's change). Sync never merges or moves the edit. The finding
+gives the step: `git -C <repo> stash push -m t3-fleet -- <files>`, then
+`t3-fleet sync`, then make the edit again on top (`git -C <repo> stash show -p`
+shows it). The one copy sync does replace is a file exactly as the machine's
+own proposal had it, once that proposal is approved: the branch then has it,
+merged with what was approved alongside it.
+
+**`sync-edit-proposed`** — the overlapping file is this machine's proposal,
+still waiting. Sync pulls once an authority approves it (`t3-fleet review`,
+`t3-fleet approve <node>`) or rejects it.
+
 **"…'s proposal is … now, not the … reviewed"** — the proposal changed after
 `t3-fleet review` showed it, and is not the same change made again on a newer
 branch. Review it again and approve the commit it shows:

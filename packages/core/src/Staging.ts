@@ -27,6 +27,7 @@ import {
   unmergedHits,
   why,
 } from "./Git.ts";
+import { proposalTrailer } from "./Approved.ts";
 import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
 import { readAllowed, refusal } from "./SecretScan.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
@@ -254,7 +255,8 @@ export const approve = (
             "commit",
             "-q",
             "-m",
-            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}`,
+            // The trailer names the commit approved: that member drops its copies of it (Approved.ts).
+            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
           ]);
           if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
           return out(yield* git(scratch, ["rev-parse", "HEAD"]));

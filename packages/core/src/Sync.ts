@@ -54,11 +54,11 @@ import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretSca
 import { lookupLatest } from "./Latest.ts";
 import {
   lastProposalPath,
-  reapplyHeld,
-  restoreHeld,
+  PROPOSAL_REF,
+  restoreDropped,
   settleApproval,
   unmergedStep,
-  type Held,
+  type Settled,
 } from "./Approved.ts";
 import { clearSetupProposed, setupProposed } from "./setup/State.ts";
 import { applyAccepted } from "./Memory.ts";
@@ -294,7 +294,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     let self = startSelf;
     let message = "";
     let failed = false;
-    let carried: ReadonlyArray<Held> = [];
+    let settled: Settled | null = null;
     const findings: Array<Finding> = [];
 
     // 1. Propose or commit changes under the auto-commit paths. A node
@@ -442,32 +442,24 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         });
       }
     }
-    // A member's own copies of files the branch changed (Approved.ts); never what is held back for a secret.
+    // A member's copies exactly as its approved proposal had them (Approved.ts); nothing else is touched.
     if (fetched && !failed) {
-      const settled = yield* settleApproval(repo, self.name, config.branch, heldFiles).pipe(
+      settled = yield* settleApproval(repo, self.name, config.branch, {
+        exclude: heldFiles,
+        how,
+      }).pipe(
         Effect.catch((e: string) =>
           Effect.sync(() => {
             failed = true;
             message = e;
-            return { held: [] as Array<Held>, refused: [] as Array<string> };
+            return null;
           }),
         ),
       );
-      carried = settled.held;
-      const proposed = carried.filter((h) => h.outcome === "proposed").length;
-      if (proposed > 0)
+      if (settled !== null && settled.dropped.length > 0)
         lines.push(
-          `took the branch's version of ${proposed} approved file${proposed === 1 ? "" : "s"}`,
+          `took the branch's version of ${settled.dropped.length} approved file${settled.dropped.length === 1 ? "" : "s"}`,
         );
-      if (settled.refused.length > 0)
-        findings.push({
-          node: self.name,
-          key: "sync-edit-unmerged",
-          severity: "warn",
-          area: "sync",
-          title: `this machine's edit to ${settled.refused.join(", ")} and the branch's change to it do not merge`,
-          detail: unmergedStep(repo, settled.refused),
-        });
     }
     const pulled = yield* pullBranch(repo, config.branch, how, { fetched }).pipe(
       Effect.catch((e: string) =>
@@ -479,22 +471,35 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
-    // Pulled: merges go on top. Not pulled: every copy goes back exactly as it was.
-    if (carried.length > 0) {
-      const after = failed
-        ? restoreHeld(repo, carried).pipe(Effect.as([]))
-        : reapplyHeld(repo, carried);
-      lines.push(
-        ...(yield* after.pipe(
-          Effect.catch((e: string) =>
-            Effect.sync(() => {
-              failed = true;
-              message = message || e;
-              return [`${e}; the copies are in ${carried.map((h) => h.saved).join(", ")}`];
-            }),
-          ),
-        )),
+    if (failed && settled !== null) {
+      // Not pulled: what was dropped comes back from the proposal commit, exactly.
+      yield* restoreDropped(repo, settled).pipe(
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            message = `${message}; ${e}`;
+          }),
+        ),
       );
+      const waiting = settled.pending;
+      const edits = settled.overlapping.filter((f) => !waiting.includes(f));
+      if (waiting.length > 0)
+        findings.push({
+          node: self.name,
+          key: "sync-edit-proposed",
+          severity: "info",
+          area: "sync",
+          title: `${waiting.join(", ")}: this machine's proposal, waiting for approval; sync pulls once an authority approves or rejects it`,
+          detail: `t3-fleet review on an authority shows it. Until then this machine does not take the branch's change to ${waiting.length === 1 ? "it" : "them"}.`,
+        });
+      if (edits.length > 0)
+        findings.push({
+          node: self.name,
+          key: "sync-edit-unmerged",
+          severity: "warn",
+          area: "sync",
+          title: `this machine's edit to ${edits.join(", ")} overlaps the branch's change, so sync does not pull`,
+          detail: unmergedStep(repo, edits),
+        });
     }
     if (authority && !failed) {
       const ahead = Number(
@@ -585,11 +590,14 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           const full = out(
             yield* git(repo, ["rev-parse", "--verify", `${outcome.commit}^{commit}`]),
           );
-          if (full !== "")
+          if (full !== "") {
+            // A ref keeps the commit here (git gc), for putting dropped files back (Approved.ts).
+            yield* git(repo, ["update-ref", PROPOSAL_REF, full]);
             yield* FileSystem.FileSystem.pipe(
               Effect.flatMap((fs) => fs.writeFileString(lastProposalPath(home), `${full}\n`)),
               Effect.ignore,
             );
+          }
         }
       }
     }

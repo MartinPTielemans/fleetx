@@ -1207,3 +1207,50 @@ describe("reporting a run", () => {
     );
   });
 });
+
+describe("a member's approved proposal", () => {
+  const TOML =
+    '[fleet]\nauto_approve = []\nauto_commit = ["skills/", "t3-fleet.toml"]\n\n[defaults.mcp]\nservers = ["fetch"]\n';
+
+  it("comes back merged; an edit the branch's change overlaps stays, named, and nothing is proposed", async () => {
+    const f = makeFleet(TOML);
+    put(f.laptop, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "notes"]'));
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
+    commitAll(f.box, "posthog");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(onMain(f.origin, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
+
+    const synced = await f.sync(f.laptop, "laptop");
+    expect(synced.failed).toBe(false);
+    expect(synced.lines.join("\n")).toContain("took the branch's version of 1 approved file");
+    expect(read(f.laptop, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
+    expect(git(f.laptop, "status", "--porcelain")).toBe("");
+
+    // An edit of its own the branch also changed: left in place, named, and never re-proposed.
+    put(f.laptop, "skills/b/SKILL.md", "b, mine\n");
+    put(f.box, "skills/b/SKILL.md", "b, box\n");
+    commitAll(f.box, "b");
+    const refused = await f.sync(f.laptop, "laptop");
+    expect(refused.failed).toBe(true);
+    expect(read(f.laptop, "skills/b/SKILL.md")).toBe("b, mine\n");
+    const finding = refused.findings.find((x) => x.key === "sync-edit-unmerged");
+    expect(finding?.title).toContain("skills/b/SKILL.md");
+    expect(finding?.detail).toContain("stash push -m t3-fleet -- skills/b/SKILL.md");
+    expect(git(f.origin, "for-each-ref", "refs/heads/t3-fleet/staging/")).toBe("");
+  });
+
+  it("waiting for approval, it is left as it is, and said so", async () => {
+    const f = makeFleet(TOML);
+    put(f.laptop, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "notes"]'));
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
+    commitAll(f.box, "posthog");
+    const synced = await f.sync(f.laptop, "laptop");
+    expect(synced.failed).toBe(true);
+    expect(read(f.laptop, "t3-fleet.toml")).toContain('["fetch", "notes"]');
+    expect(synced.findings.map((x) => x.key)).toContain("sync-edit-proposed");
+  });
+});
