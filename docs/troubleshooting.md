@@ -192,8 +192,9 @@ yet, on an authority run
 the fleet's secrets yet: see the secrets findings for it.
 
 **`relay-tailscale-missing`** — the relay is reached at a tailnet name (a
-`*.ts.net` or MagicDNS name, or a 100.x address) and its port is published
-with `tailscale serve`, but the `tailscale` command is not on this machine.
+MagicDNS name such as `server.tailnet.ts.net`, or a 100.x address) and its
+port is published with `tailscale serve`, but the `tailscale` command is not
+on this machine.
 Install Tailscale and run `tailscale up`.
 
 **`relay-docker-missing`** — the hub runs `container` or `registry` servers

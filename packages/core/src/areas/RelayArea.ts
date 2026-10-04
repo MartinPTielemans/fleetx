@@ -48,15 +48,18 @@ const Observed = Schema.Struct({
   docker: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
 });
 
+/** The domain Tailscale's MagicDNS names end in. */
+const TAILNET_DOMAIN = "ts.net";
+
 /**
  * Whether `url` names a host on a tailnet: a MagicDNS name (`box`,
- * `box.tail1234.ts.net`) or a Tailscale address (100.64.0.0/10). No URL: the
+ * `server.tailnet.ts.net`) or a Tailscale address (100.64.0.0/10). No URL: the
  * relay is published on the tailnet, as the service does by default.
  */
 export const onTailnet = (url: string | null) => {
   if (url === null) return true;
   const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^:/?#]+)/i.exec(url)?.[1]?.toLowerCase() ?? "";
-  if (host.endsWith(".ts.net")) return true;
+  if (host === TAILNET_DOMAIN || host.endsWith(`.${TAILNET_DOMAIN}`)) return true;
   const ip = /^100\.(\d+)\.\d+\.\d+$/.exec(host);
   if (ip !== null) return Number(ip[1]) >= 64 && Number(ip[1]) < 128;
   return host !== "" && host !== "localhost" && !host.includes(".") && !host.includes("[");

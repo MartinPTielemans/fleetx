@@ -8,9 +8,7 @@ import { bundleFor, fixPlan } from "./shared.ts";
 describe("the bundle this runs from", () => {
   it("is this file under any name, and the last build when this is source", () => {
     expect(bundleFor("/repo/apps/cli/dist/bin.mjs", join)).toBe("/repo/apps/cli/dist/bin.mjs");
-    expect(bundleFor("/home/me/.local/share/t3-fleet/t3-fleet", join)).toBe(
-      "/home/me/.local/share/t3-fleet/t3-fleet",
-    );
+    expect(bundleFor("/opt/t3-fleet/t3-fleet", join)).toBe("/opt/t3-fleet/t3-fleet");
     expect(bundleFor("/opt/t3-fleet/bin.js", join)).toBe("/opt/t3-fleet/bin.js");
     expect(bundleFor("/repo/apps/cli/src/shared.ts", join)).toBe("/repo/apps/cli/dist/bin.mjs");
   });

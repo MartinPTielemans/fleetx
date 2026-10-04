@@ -54,7 +54,7 @@ const relayNode = (url: string) => {
 
 describe("the relay before its service", () => {
   it("says what it lacks, and offers no service that would only crash", async () => {
-    const node = relayNode("https://box.tail1234.ts.net:8399");
+    const node = relayNode("https://server.tailnet.ts.net:8399");
     const findings = await node.findings();
     expect(findings.map((f) => f.key)).toEqual([
       "relay-token-missing",
@@ -69,7 +69,7 @@ describe("the relay before its service", () => {
   });
 
   it("offers the service once the token is there, and publishing once Tailscale is", async () => {
-    const node = relayNode("https://box.tail1234.ts.net:8399");
+    const node = relayNode("https://server.tailnet.ts.net:8399");
     mkdirSync(configDir(node.home), { recursive: true });
     writeFileSync(join(configDir(node.home), "secrets.env"), "T3_FLEET_RELAY_TOKEN=abc123\n");
     node.tool("tailscale", "exit 0");
@@ -90,7 +90,7 @@ describe("the relay before its service", () => {
 
 describe("a tailnet name", () => {
   it("is a MagicDNS name or a Tailscale address", () => {
-    expect(onTailnet("https://box.tail1234.ts.net")).toBe(true);
+    expect(onTailnet("https://server.tailnet.ts.net")).toBe(true);
     expect(onTailnet("http://box:8399")).toBe(true);
     expect(onTailnet("http://100.101.2.3:8399")).toBe(true);
     expect(onTailnet(null)).toBe(true);
