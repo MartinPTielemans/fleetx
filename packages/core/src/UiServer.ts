@@ -1,28 +1,44 @@
 /**
  * The server behind `t3-fleet ui`: the built app and its /api, on 127.0.0.1.
  *
- *   GET  /api/session, /api/status, /api/proposals, /api/alerts,
+ *   POST /api/session    the link's one-use ticket, traded for this tab's token
+ *   GET  /api/session, /api/status, /api/proposals, /api/alerts, /api/jobs,
  *        /api/models, /api/config/<node>, /api/hub/servers, /api/hub/calls,
  *        /api/skills
- *   POST /api/fixes, /api/proposals/<node>/approve | /reject,
+ *   POST /api/fixes/plan, /api/fixes, /api/proposals/<node>/approve | /reject,
  *        /api/hub/servers/<name>/login | /logout | /restart,
  *        /api/skills/lookup | /add | /preview | /update | /remove
- *   GET  /api/events     server-sent events: the relay's, plus "check"
+ *   GET  /api/events     server-sent events: the latest status first, then the
+ *                        relay's, plus "check", "check-failed" and "job"
  *   GET  *               the app
  *
  * Shapes are the ones in Api.ts, encoded here and decoded by the app.
  *
  * Other websites in the same browser must not be able to read the fleet or
- * drive fixes. Every /api request needs this run's token (the browser gets it
- * in the URL fragment `t3-fleet ui` opens, and sends it as a header; a page on
- * another origin cannot read it or set that header without a CORS preflight,
- * which is never granted). The Host header must name this loopback port, so a
- * DNS-rebinding page cannot pose as the same origin, and an Origin, when sent,
- * must be this one. The app may not be framed, so it cannot be clickjacked.
+ * drive fixes. `t3-fleet ui` opens the app with a ticket in the URL fragment;
+ * the app trades it, once, for a token it sends as a header on every /api
+ * request (a page on another origin cannot read it or set that header without
+ * a CORS preflight, which is never granted). A ticket that comes back a second
+ * time is refused loudly: someone else opened the link. Only the event stream
+ * takes the token in its query, since EventSource cannot set headers. The Host
+ * header must name this loopback port, so a DNS-rebinding page cannot pose as
+ * the same origin, and an Origin, when sent, must be this one. The app may not
+ * be framed, so it cannot be clickjacked.
  *
- * A check runs at start, then every minute while a browser is connected.
- * Applying fixes follows fleet_apply_fixes: it checks again first and runs
- * only fixes that check still proposes.
+ * Checks run one at a time and are shared: whoever asks while one runs gets
+ * its result. One runs at start, then every minute while a browser tab is
+ * open and visible (a hidden tab closes its event stream). A check never
+ * probes while fixes run, so it never reports a half-applied machine.
+ *
+ * Fixes are applied the way they were reviewed: the app asks for a plan (each
+ * fix's exact command, with a digest), shows it, and sends the digests back;
+ * the server checks again and runs only fixes whose digest still matches, and
+ * those that interrupt something only if the user acknowledged it. Proposals
+ * are approved or rejected by the commit that was shown.
+ *
+ * Whatever changes a machine or the repo runs as a job in the server, not in
+ * the request: closing the tab does not stop it, and its progress is an event
+ * any tab can follow.
  *
  * Skill changes edit the config repo the way `t3-fleet skills` does, one at a
  * time: an authority commits them, any other machine's next sync proposes
@@ -31,6 +47,7 @@
  * change.
  */
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -39,6 +56,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -54,11 +72,16 @@ import {
   ModelProxyStats,
   UiAlert,
   UiApplyRequest,
-  UiApplyResult,
+  UiCheckFailed,
   UiConfigRow,
+  UiDecideRequest,
+  UiFixPlan,
+  UiFixPlanRequest,
+  UiJob,
   UiModels,
   UiProposal,
   UiSession,
+  UiSessionGrant,
   UiSkills,
   UiSkillsAddRequest,
   UiSkillsKeepRequest,
@@ -68,16 +91,20 @@ import {
   UiSkillsNames,
   UiSkillsPreview,
   UiStatus,
+  type UiApplyResult,
   type UiEnvironment,
   type UiFinding,
+  type UiJobKind,
+  type UiPlannedFix,
   type UiSkill,
   type UiSkillsNode,
 } from "./Api.ts";
 import { Desired as SkillsDesired, Observed as SkillsObserved } from "./areas/Skills.ts";
 import type { CheckReport } from "./Check.ts";
 import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
-import { constantTimeEqual } from "./hub/Policy.ts";
 import type { FixOutcome } from "./Fix.ts";
+import { sha256 } from "./Hash.ts";
+import { constantTimeEqual } from "./hub/Policy.ts";
 import { releasesBehind } from "./Latest.ts";
 import { findingId } from "./Memory.ts";
 import type { MachineObservation } from "./Observation.ts";
@@ -98,8 +125,9 @@ export interface UiActions {
   readonly check: Effect.Effect<UiCheck, string>;
   readonly apply: (fixes: ReadonlyArray<Finding & { readonly fix: Fix }>) => Effect.Effect<ReadonlyArray<FixOutcome>>;
   readonly proposals: Effect.Effect<ReadonlyArray<UiProposal>, string>;
-  readonly approve: (node: string) => Effect.Effect<void, string>;
-  readonly reject: (node: string) => Effect.Effect<void, string>;
+  /** Approve `node`'s proposal, failing unless its staging branch is still at `commit`. */
+  readonly approve: (node: string, commit: string) => Effect.Effect<void, string>;
+  readonly reject: (node: string, commit: string) => Effect.Effect<void, string>;
   readonly alerts: Effect.Effect<ReadonlyArray<typeof UiAlert.Type>, string>;
   readonly config: (node: string) => Effect.Effect<ReadonlyArray<UiConfigRow>, string>;
   readonly skills: {
@@ -120,8 +148,10 @@ export interface UiAsset {
 }
 
 export interface UiServerOptions {
-  /** This run's token; every /api request must carry it. */
-  readonly token: string;
+  /** The one-use ticket in the link `t3-fleet ui` opens; the app trades it for a token. */
+  readonly ticket: string;
+  /** Called with a new ticket each time one is used, so the user can open another tab. */
+  readonly onTicketUsed?: (next: string) => Effect.Effect<void>;
   /** The port the server listens on, for the Host check. */
   readonly port: number;
   /** The built app, by URL path ("/index.html", "/assets/…"). */
@@ -280,7 +310,13 @@ const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
 /** Why a request is refused, or null when it may proceed. */
 export const refusal = (
   request: { readonly method: string; readonly headers: Readonly<Record<string, string | undefined>> },
-  options: { readonly port: number; readonly token: string | null },
+  options: {
+    readonly port: number;
+    /** The tokens this run handed out; null for what needs none (the app itself, trading a ticket). */
+    readonly tokens: ReadonlySet<string> | null;
+    /** Whether the token may come in the query instead of a header: the event stream only. */
+    readonly queryToken?: boolean;
+  },
   query: URLSearchParams,
 ): { readonly status: number; readonly message: string } | null => {
   const allowed = LOOPBACK.map((h) => `${h}:${options.port}`);
@@ -288,9 +324,11 @@ export const refusal = (
   if (host === undefined || !allowed.includes(host)) return { status: 421, message: "t3-fleet ui answers only on its loopback address" };
   const origin = request.headers["origin"];
   if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
-  if (options.token === null) return null;
-  const token = request.headers["x-t3-fleet-token"] ?? query.get("token") ?? "";
-  if (!constantTimeEqual(token, options.token)) return { status: 401, message: "missing or stale token: open the link `t3-fleet ui` printed" };
+  if (options.tokens === null) return null;
+  const given = request.headers["x-t3-fleet-token"] ?? (options.queryToken === true ? query.get("token") : null) ?? "";
+  let ok = false;
+  for (const token of options.tokens) if (constantTimeEqual(given, token)) ok = true;
+  if (!ok) return { status: 401, message: "missing or stale token: open the link `t3-fleet ui` printed" };
   return null;
 };
 
@@ -299,18 +337,18 @@ const SECURITY_HEADERS = {
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
 };
 
 const plain = (message: string, status: number) =>
   HttpServerResponse.text(message, { status, headers: SECURITY_HEADERS });
 
-const jsonResponse = <S extends Schema.Top & { readonly EncodingServices: never }>(schema: S) => {
+const jsonResponse = <S extends Schema.Top & { readonly EncodingServices: never }>(schema: S, status = 200) => {
   const encode = Schema.encodeEffect(Schema.fromJsonString(schema));
   return (value: S["Type"]) =>
     encode(value).pipe(
       Effect.map((body) =>
-        HttpServerResponse.text(body, { contentType: "application/json", headers: { ...SECURITY_HEADERS, "cache-control": "no-store" } }),
+        HttpServerResponse.text(body, { status, contentType: "application/json", headers: { ...SECURITY_HEADERS, "cache-control": "no-store" } }),
       ),
       Effect.orElseSucceed(() => plain("could not encode the response", 500)),
     );
@@ -321,10 +359,34 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** What `t3-fleet skills add` takes: owner/repo, or an https or ssh git URL. */
 const SKILL_SOURCE = /^(?:[\w.-]+\/[\w.-]+|https:\/\/[^\s]+|git@[\w.-]+:[^\s]+|ssh:\/\/[^\s]+)$/;
 
+/** A random hex string, from Web Crypto as Hash.ts uses it. */
+const randomHex = (bytes: number) =>
+  Effect.sync(() => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join(""));
+
+/** Names exactly what a fix would do: where, which command, and what it interrupts. */
+export const fixDigest = (finding: Finding & { readonly fix: Fix }) => {
+  const { command, on, disrupts, safe } = finding.fix;
+  const parts = [finding.node, on ?? finding.node, command, disrupts ?? "-", safe ? "safe" : "unsafe"];
+  return Effect.promise(() => sha256(parts.map((p) => `${p.length}:${p}`).join("")));
+};
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** How long finished jobs stay listed, for a tab that reloads or opens later. */
+const JOBS_KEPT = Duration.minutes(30);
+
 interface ServerEvent {
+  readonly id: number;
   readonly type: string;
   readonly data: string;
 }
+
+interface Kept {
+  readonly check: UiCheck;
+  readonly status: UiStatus;
+}
+
+type JobResult = Pick<UiJob, "applied" | "landed">;
 
 /** The UI server's routes and background work, as one layer. */
 export const uiLayer = (options: UiServerOptions) =>
@@ -332,48 +394,161 @@ export const uiLayer = (options: UiServerOptions) =>
     Effect.gen(function* () {
       const { actions } = options;
       const client = yield* HttpClient.HttpClient;
-      const every = options.checkEvery ?? Duration.seconds(60);
-      const latest = yield* Ref.make<{ readonly check: UiCheck; readonly status: UiStatus } | null>(null);
-      const lastError = yield* Ref.make<string | null>(null);
+      const scope = yield* Scope.Scope;
+      const everyMs = Duration.toMillis(Duration.fromInputUnsafe(options.checkEvery ?? Duration.seconds(60)));
+      const latest = yield* Ref.make<Kept | null>(null);
+      const lastError = yield* Ref.make<UiCheckFailed | null>(null);
+      const inflight = yield* Ref.make<Deferred.Deferred<Kept, string> | null>(null);
       const clients = yield* Ref.make(0);
       const events = yield* PubSub.unbounded<ServerEvent>();
-      const checking = yield* Semaphore.make(1);
+      const eventId = yield* Ref.make(0);
+      const jobs = yield* Ref.make<ReadonlyMap<string, UiJob>>(new Map());
+      const tokens = yield* Ref.make<ReadonlySet<string>>(new Set());
+      const ticket = yield* Ref.make(options.ticket);
+      const usedTickets = yield* Ref.make<ReadonlySet<string>>(new Set());
+      /** Guards starting a check, so two callers never start two. */
+      const starting = yield* Semaphore.make(1);
+      /** Held while a check probes and while fixes run: a check never sees a half-applied machine. */
+      const machines = yield* Semaphore.make(1);
+      /** One fix job at a time, from its first check to its last. */
       const applying = yield* Semaphore.make(1);
-      const editingSkills = yield* Semaphore.make(1);
+      /** One change to the config repo at a time: skills, approvals, rejections. */
+      const editingRepo = yield* Semaphore.make(1);
       const encodeStatus = Schema.encodeEffect(Schema.fromJsonString(UiStatus));
+      const encodeFailed = Schema.encodeEffect(Schema.fromJsonString(UiCheckFailed));
+      const encodeJob = Schema.encodeEffect(Schema.fromJsonString(UiJob));
 
-      /** One full check at a time; the result is kept and announced as a "check" event. */
-      const runCheck = checking.withPermits(1)(
-        Effect.gen(function* () {
-          const check = yield* actions.check.pipe(Effect.tapError((e) => Ref.set(lastError, e)));
-          const status = toUiStatus(check, yield* Clock.currentTimeMillis);
-          yield* Ref.set(latest, { check, status });
-          yield* Ref.set(lastError, null);
-          const data = yield* encodeStatus(status).pipe(Effect.orElseSucceed(() => ""));
-          if (data !== "") yield* PubSub.publish(events, { type: "check", data });
-          return { check, status };
-        }),
-      );
+      const publish = (type: string, data: string) =>
+        Ref.updateAndGet(eventId, (n) => n + 1).pipe(Effect.flatMap((id) => PubSub.publish(events, { id, type, data })));
 
-      /** The kept check, or a fresh one when there is none yet (or a previous one is still running). */
-      const current = Effect.gen(function* () {
-        const kept = yield* Ref.get(latest);
-        if (kept !== null) return kept;
-        return yield* checking.withPermits(1)(Ref.get(latest)).pipe(
-          Effect.flatMap((after) => (after === null ? runCheck : Effect.succeed(after))),
+      // ── checks ──
+
+      /** One full check, kept and announced; a failure is kept and announced too. */
+      const probe = machines
+        .withPermits(1)(
+          Effect.gen(function* () {
+            const check = yield* actions.check;
+            return { check, status: toUiStatus(check, yield* Clock.currentTimeMillis) } satisfies Kept;
+          }),
+        )
+        .pipe(
+          Effect.tap((kept) =>
+            Effect.gen(function* () {
+              yield* Ref.set(latest, kept);
+              yield* Ref.set(lastError, null);
+              const data = yield* encodeStatus(kept.status).pipe(Effect.orElseSucceed(() => ""));
+              if (data !== "") yield* publish("check", data);
+            }),
+          ),
+          Effect.tapError((message) =>
+            Effect.gen(function* () {
+              const failed = { at: yield* Clock.currentTimeMillis, message };
+              yield* Ref.set(lastError, failed);
+              const data = yield* encodeFailed(failed).pipe(Effect.orElseSucceed(() => ""));
+              if (data !== "") yield* publish("check-failed", data);
+            }),
+          ),
         );
-      });
 
-      const stale = Effect.gen(function* () {
-        const kept = yield* Ref.get(latest);
-        return kept === null || (yield* Clock.currentTimeMillis) - kept.status.checkedAt >= Duration.toMillis(Duration.fromInputUnsafe(every));
-      });
+      /**
+       * The kept check if it is younger than `maxAgeMs`, else the one running,
+       * else a new one. Everyone who asks while a check runs shares it, and the
+       * check runs in the server, so a caller that goes away does not stop it.
+       */
+      const checked = (maxAgeMs: number) =>
+        Effect.gen(function* () {
+          const next = yield* starting.withPermits(1)(
+            Effect.gen(function* () {
+              const kept = yield* Ref.get(latest);
+              if (kept !== null && (yield* Clock.currentTimeMillis) - kept.status.checkedAt < maxAgeMs) return { kept };
+              const running = yield* Ref.get(inflight);
+              if (running !== null) return { wait: running };
+              const done = yield* Deferred.make<Kept, string>();
+              yield* Ref.set(inflight, done);
+              yield* probe.pipe(
+                Effect.onExit((exit) => Ref.set(inflight, null).pipe(Effect.andThen(Deferred.done(done, exit)))),
+                Effect.ignore,
+                Effect.forkIn(scope),
+              );
+              return { wait: done };
+            }),
+          );
+          return "kept" in next ? next.kept : yield* Deferred.await(next.wait);
+        });
 
-      // A check at start, then every minute while someone is looking.
-      yield* runCheck.pipe(Effect.ignore, Effect.forkDetach);
+      /** The kept check, or the first one when there is none yet. */
+      const current = checked(Number.POSITIVE_INFINITY);
+
+      // A check at start, then every minute while a tab is looking.
+      yield* checked(0).pipe(Effect.ignore, Effect.forkIn(scope));
       yield* Effect.gen(function* () {
-        if ((yield* Ref.get(clients)) > 0 && (yield* stale)) yield* runCheck.pipe(Effect.ignore);
-      }).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(5))), Effect.forkDetach);
+        if ((yield* Ref.get(clients)) > 0) yield* checked(everyMs).pipe(Effect.ignore);
+      }).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(5))), Effect.forkIn(scope));
+
+      // ── jobs ──
+
+      const announce = (job: UiJob) =>
+        encodeJob(job).pipe(
+          Effect.flatMap((data) => publish("job", data)),
+          Effect.ignore,
+        );
+
+      const updateJob = (id: string, change: (job: UiJob) => UiJob) =>
+        Ref.modify(jobs, (all): [UiJob | null, ReadonlyMap<string, UiJob>] => {
+          const job = all.get(id);
+          if (job === undefined) return [null, all];
+          const next = change(job);
+          return [next, new Map(all).set(id, next)];
+        }).pipe(Effect.flatMap((job) => (job === null ? Effect.void : announce(job))));
+
+      /**
+       * Start `work` as a job: it waits for `lock`, runs in the server's scope
+       * rather than the request's, and reports each step as a "job" event.
+       */
+      const startJob = (
+        kind: UiJobKind,
+        title: string,
+        lock: Semaphore.Semaphore,
+        work: (step: (text: string) => Effect.Effect<void>) => Effect.Effect<Partial<JobResult>, string>,
+      ) =>
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          const job: UiJob = {
+            id: yield* randomHex(8),
+            kind,
+            title,
+            state: "waiting",
+            step: "waiting for another change to finish",
+            startedAt: now,
+            finishedAt: null,
+            error: null,
+            applied: null,
+            landed: null,
+          };
+          const keepAfter = now - Duration.toMillis(JOBS_KEPT);
+          yield* Ref.update(jobs, (all) => {
+            const kept = [...all.values()].filter((j) => j.finishedAt === null || j.finishedAt > keepAfter);
+            return new Map([...kept, job].map((j) => [j.id, j]));
+          });
+          yield* announce(job);
+          const step = (text: string) => updateJob(job.id, (j) => ({ ...j, state: "running", step: text }));
+          yield* lock
+            .withPermits(1)(step("starting").pipe(Effect.andThen(work(step))))
+            .pipe(
+              Effect.matchEffect({
+                onFailure: (error) =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.flatMap((at) => updateJob(job.id, (j) => ({ ...j, state: "failed", step: null, finishedAt: at, error }))),
+                  ),
+                onSuccess: (result) =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.flatMap((at) => updateJob(job.id, (j) => ({ ...j, ...result, state: "done", step: null, finishedAt: at }))),
+                  ),
+              }),
+              Effect.forkIn(scope),
+            );
+          return job;
+        });
 
       // Relay events pass through, so the app hears about syncs and the hub as they happen.
       if (options.relay !== null) {
@@ -401,26 +576,79 @@ export const uiLayer = (options: UiServerOptions) =>
                   const type = /^event: ([\w-]+)$/m.exec(frame)?.[1];
                   const data = /^data: (.*)$/m.exec(frame)?.[1] ?? "";
                   if (id !== undefined) lastId = Number(id);
-                  if (type !== undefined) yield* PubSub.publish(events, { type, data });
+                  // The relay's own names only; the server's events are its own.
+                  if (type !== undefined && type !== "check" && type !== "check-failed" && type !== "job") yield* publish(type, data);
                 }
               }),
             ),
           );
           return yield* Effect.fail("relay closed the stream");
-        }).pipe(Effect.retry(Schedule.spaced(Duration.seconds(15))), Effect.ignore, Effect.forkDetach);
+        }).pipe(Effect.retry(Schedule.spaced(Duration.seconds(15))), Effect.ignore, Effect.forkIn(scope));
       }
 
+      // ── routes ──
+
       /** Guard, then run: every /api route goes through here. */
-      const api = <E, R>(handler: (request: HttpServerRequest.HttpServerRequest, query: URLSearchParams) => Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+      const api = <E, R>(
+        handler: (request: HttpServerRequest.HttpServerRequest, query: URLSearchParams) => Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
+        guard: { readonly queryToken?: boolean; readonly ticket?: boolean } = {},
+      ) =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const query = new URL(request.url, "http://ui").searchParams;
-          const refused = refusal(request, options, query);
+          const refused = refusal(
+            request,
+            { port: options.port, tokens: guard.ticket === true ? null : yield* Ref.get(tokens), queryToken: guard.queryToken === true },
+            query,
+          );
           if (refused !== null) return plain(refused.message, refused.status);
           return yield* handler(request, query);
         });
 
       const fail = (status: number) => (message: string) => Effect.succeed(plain(message, status));
+
+      /** Decode a JSON body, or fail with `what` was expected. */
+      const body = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S, what = "the request was not understood") => {
+        const decode = Schema.decodeEffect(Schema.fromJsonString(schema));
+        return (request: HttpServerRequest.HttpServerRequest) =>
+          request.text.pipe(
+            Effect.orElseSucceed(() => ""),
+            Effect.flatMap(decode),
+            Effect.mapError(() => what),
+          );
+      };
+
+      const accepted = jsonResponse(UiJob, 202);
+
+      // The ticket is good once. A second use means the link went somewhere else too.
+      const trade = HttpRouter.add(
+        "POST",
+        "/api/session",
+        api(
+          (request) =>
+            Effect.gen(function* () {
+              const given = request.headers["x-t3-fleet-ticket"] ?? "";
+              const expected = yield* Ref.get(ticket);
+              if (!constantTimeEqual(given, expected)) {
+                const reused = given !== "" && (yield* Ref.get(usedTickets)).has(given);
+                return reused
+                  ? plain(
+                      "this link was already used. If that was not you, someone else on this machine opened it: stop t3-fleet ui. For another tab, use the newest link it printed.",
+                      410,
+                    )
+                  : plain("not this run's link: open the link `t3-fleet ui` printed", 401);
+              }
+              const token = yield* randomHex(24);
+              const next = yield* randomHex(24);
+              yield* Ref.update(tokens, (all) => new Set(all).add(token));
+              yield* Ref.update(usedTickets, (all) => new Set(all).add(given));
+              yield* Ref.set(ticket, next);
+              if (options.onTicketUsed !== undefined) yield* options.onTicketUsed(next);
+              return yield* jsonResponse(UiSessionGrant)({ token });
+            }),
+          { ticket: true },
+        ),
+      );
 
       const session = HttpRouter.add("GET", "/api/session", api(() => jsonResponse(UiSession)(options.session)));
 
@@ -428,41 +656,102 @@ export const uiLayer = (options: UiServerOptions) =>
         "GET",
         "/api/status",
         api((_, query) =>
-          (query.get("fresh") === "1" ? runCheck : current).pipe(
+          checked(query.get("fresh") === "1" ? 0 : Number.POSITIVE_INFINITY).pipe(
             Effect.flatMap((c) => jsonResponse(UiStatus)(c.status)),
             Effect.catch(fail(500)),
           ),
         ),
       );
 
-      const decodeApply = Schema.decodeEffect(Schema.fromJsonString(UiApplyRequest));
+      /** Each asked-for finding's fix as it stands in `check`, with its digest, or why there is none. */
+      const plan = (check: UiCheck, ids: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          const byId = new Map(check.report.findings.map((f) => [findingId(f), f]));
+          const fixes: Array<{ readonly planned: UiPlannedFix; readonly finding: Finding & { readonly fix: Fix } }> = [];
+          const notApplicable: Array<{ id: string; reason: string }> = [];
+          for (const id of new Set(ids)) {
+            const finding = byId.get(id);
+            if (finding === undefined) notApplicable.push({ id, reason: "no longer found; it may already be fixed" });
+            else if (finding.fix === undefined) notApplicable.push({ id, reason: "this finding has no automatic fix" });
+            else {
+              const fixable = finding as Finding & { readonly fix: Fix };
+              const { command, safe, disrupts, on } = fixable.fix;
+              fixes.push({
+                finding: fixable,
+                planned: {
+                  id,
+                  node: finding.node,
+                  title: finding.title,
+                  command,
+                  safe,
+                  ...(disrupts === undefined ? {} : { disrupts }),
+                  ...(on === undefined ? {} : { on }),
+                  digest: yield* fixDigest(fixable),
+                },
+              });
+            }
+          }
+          return { fixes, notApplicable };
+        });
+
+      const fixPlan = HttpRouter.add(
+        "POST",
+        "/api/fixes/plan",
+        api((request) =>
+          Effect.gen(function* () {
+            const asked = yield* body(UiFixPlanRequest, 'expected {"ids": [...]}')(request);
+            const planned = yield* plan((yield* current).check, asked.ids);
+            return yield* jsonResponse(UiFixPlan)({ fixes: planned.fixes.map((f) => f.planned), notApplicable: planned.notApplicable });
+          }).pipe(Effect.catch(fail(400))),
+        ),
+      );
+
+      /** Check again, run only the fixes still exactly as reviewed, check again. */
+      const applyJob = (asked: typeof UiApplyRequest.Type) => (step: (text: string) => Effect.Effect<void>) =>
+        Effect.gen(function* () {
+          yield* step("checking every machine first");
+          const before = yield* checked(0);
+          const now = yield* plan(before.check, asked.fixes.map((f) => f.id));
+          const notApplied = [...now.notApplicable];
+          const chosen: Array<Finding & { readonly fix: Fix }> = [];
+          for (const reviewed of asked.fixes) {
+            const fix = now.fixes.find((f) => f.planned.id === reviewed.id);
+            if (fix === undefined) continue;
+            if (fix.planned.digest !== reviewed.digest) notApplied.push({ id: reviewed.id, reason: "changed since you reviewed it; review it again" });
+            else if (fix.planned.disrupts !== undefined && !asked.acknowledged.includes(reviewed.id)) {
+              notApplied.push({ id: reviewed.id, reason: `interrupts ${fix.planned.disrupts}, and that was not confirmed` });
+            } else chosen.push(fix.finding);
+          }
+          let outcomes: ReadonlyArray<FixOutcome> = [];
+          if (chosen.length > 0) {
+            yield* step(`running ${plural(chosen.length, "fix", "fixes")}`);
+            outcomes = yield* machines.withPermits(1)(actions.apply(chosen));
+            yield* step("checking every machine again");
+            yield* checked(0).pipe(Effect.ignore);
+          }
+          const applied: UiApplyResult = {
+            results: outcomes.map((o) => ({ id: findingId(o.finding), node: o.finding.node, title: o.finding.title, ok: o.ok, output: o.summary })),
+            notApplied,
+          };
+          return { applied };
+        });
+
       const fixes = HttpRouter.add(
         "POST",
         "/api/fixes",
         api((request) =>
-          applying.withPermits(1)(
-            Effect.gen(function* () {
-              const body = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
-              const asked = yield* decodeApply(body).pipe(Effect.mapError(() => "expected {\"ids\": [...]}"));
-              const before = yield* runCheck;
-              const byId = new Map(before.check.report.findings.map((f) => [findingId(f), f]));
-              const chosen: Array<Finding & { readonly fix: Fix }> = [];
-              const notApplied: Array<{ id: string; reason: string }> = [];
-              for (const id of asked.ids) {
-                const finding = byId.get(id);
-                if (finding === undefined) notApplied.push({ id, reason: "no longer found; it may already be fixed" });
-                else if (finding.fix === undefined) notApplied.push({ id, reason: "this finding has no automatic fix" });
-                else chosen.push(finding as Finding & { readonly fix: Fix });
-              }
-              const outcomes = yield* actions.apply(chosen);
-              const after = chosen.length === 0 ? before : yield* runCheck;
-              return yield* jsonResponse(UiApplyResult)({
-                results: outcomes.map((o) => ({ id: findingId(o.finding), node: o.finding.node, title: o.finding.title, ok: o.ok, output: o.summary })),
-                notApplied,
-                status: after.status,
-              });
-            }),
-          ).pipe(Effect.catch(fail(400))),
+          Effect.gen(function* () {
+            const asked = yield* body(UiApplyRequest, 'expected {"fixes": [{"id", "digest"}], "acknowledged": [...]}')(request);
+            if (asked.fixes.length === 0) return plain("no fixes asked for", 400);
+            const machinesNamed = new Set(asked.fixes.map((f) => f.id.slice(0, f.id.indexOf(":")))).size;
+            const job = yield* startJob(
+              "fixes",
+              `Apply ${plural(asked.fixes.length, "fix", "fixes")} on ${plural(machinesNamed, "machine")}`,
+              applying,
+              applyJob(asked),
+            );
+            return yield* accepted(job);
+          }).pipe(Effect.catch(fail(400))),
         ),
       );
 
@@ -476,15 +765,28 @@ export const uiLayer = (options: UiServerOptions) =>
         HttpRouter.add(
           "POST",
           `/api/proposals/:node/${verb}`,
-          api(() =>
+          api((request) =>
             Effect.gen(function* () {
               const node = (yield* HttpRouter.params)["node"] ?? "";
               if (!NAME.test(node)) return plain("not a machine name", 400);
-              yield* (verb === "approve" ? actions.approve(node) : actions.reject(node));
-              return HttpServerResponse.empty({ status: 204, headers: SECURITY_HEADERS });
-            }).pipe(Effect.catch(fail(409))),
+              const { commit } = yield* body(UiDecideRequest, 'expected {"commit": "<the commit you reviewed>"}')(request);
+              if (!/^[0-9a-f]{7,64}$/.test(commit)) return plain("not a commit", 400);
+              const job = yield* startJob(verb, `${verb === "approve" ? "Approve" : "Reject"} ${node}'s proposal`, editingRepo, (step) =>
+                step(verb === "approve" ? "landing the proposal on the branch" : "moving the proposal aside").pipe(
+                  Effect.andThen(verb === "approve" ? actions.approve(node, commit) : actions.reject(node, commit)),
+                  Effect.as({}),
+                ),
+              );
+              return yield* accepted(job);
+            }).pipe(Effect.catch(fail(400))),
           ),
         );
+
+      const jobList = HttpRouter.add(
+        "GET",
+        "/api/jobs",
+        api(() => Ref.get(jobs).pipe(Effect.flatMap((all) => jsonResponse(Schema.Array(UiJob))([...all.values()])))),
+      );
 
       const alerts = HttpRouter.add(
         "GET",
@@ -521,52 +823,65 @@ export const uiLayer = (options: UiServerOptions) =>
         ),
       );
 
-      /** A skills POST: decode the body, refuse what `invalid` finds wrong, change the repo one request at a time. */
-      const skillsEdit = <S extends Schema.Top & { readonly DecodingServices: never }, O extends Schema.Top & { readonly EncodingServices: never }>(
+      /** A skills POST: decode the body and refuse what `invalid` finds wrong. */
+      const skillsRoute = <S extends Schema.Top & { readonly DecodingServices: never }>(
         path: `/api/skills/${string}`,
-        body: S,
-        response: O,
+        schema: S,
         invalid: (request: S["Type"]) => string | null,
-        run: (request: S["Type"]) => Effect.Effect<O["Type"], string>,
-      ) => {
-        const decode = Schema.decodeEffect(Schema.fromJsonString(body));
-        return HttpRouter.add(
+        run: (request: S["Type"]) => Effect.Effect<HttpServerResponse.HttpServerResponse, string>,
+      ) =>
+        HttpRouter.add(
           "POST",
           path,
           api((request) =>
             Effect.gen(function* () {
-              const text = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
-              const asked = yield* decode(text).pipe(Effect.mapError(() => "the request was not understood"));
+              const asked = yield* body(schema)(request);
               const why = invalid(asked);
               if (why !== null) return plain(why, 400);
-              return yield* editingSkills.withPermits(1)(run(asked)).pipe(Effect.flatMap(jsonResponse(response)), Effect.catch(fail(409)));
+              return yield* run(asked).pipe(Effect.catch(fail(409)));
             }).pipe(Effect.catch(fail(400))),
           ),
         );
-      };
+
+      /**
+       * A look at the repo the request waits for. It runs to the end even if
+       * the tab goes away: a preview changes the repo and puts it back.
+       */
+      const readRepo = <S extends Schema.Top & { readonly EncodingServices: never }>(schema: S, run: Effect.Effect<S["Type"], string>) =>
+        editingRepo.withPermits(1)(run).pipe(Effect.uninterruptible, Effect.flatMap(jsonResponse(schema)));
+
+      /** A change to the repo, as a job. */
+      const changeRepo = (kind: UiJobKind, title: string, run: Effect.Effect<UiSkillsLanded, string>) =>
+        startJob(kind, title, editingRepo, (step) => step("changing the config repo").pipe(Effect.andThen(run), Effect.map((landed) => ({ landed })))).pipe(
+          Effect.flatMap(accepted),
+        );
 
       const badNames = (names: ReadonlyArray<string>) => {
         const bad = names.find((n) => !NAME.test(n));
         return bad === undefined ? null : `not a skill name: ${bad}`;
       };
       const badSource = (source: string) => (SKILL_SOURCE.test(source) ? null : "give owner/repo, or an https or ssh git URL");
+      const names = (skills: ReadonlyArray<string>) => (skills.length === 0 ? "every skill with a source" : skills.join(", "));
 
-      const skillsLookup = skillsEdit("/api/skills/lookup", UiSkillsLookupRequest, UiSkillsLookup, (r) => badSource(r.source), (r) => actions.skills.lookup(r.source));
-      const skillsAdd = skillsEdit(
+      const skillsLookup = skillsRoute("/api/skills/lookup", UiSkillsLookupRequest, (r) => badSource(r.source), (r) => readRepo(UiSkillsLookup, actions.skills.lookup(r.source)));
+      const skillsAdd = skillsRoute(
         "/api/skills/add",
         UiSkillsAddRequest,
-        UiSkillsLanded,
         (r) => badSource(r.source) ?? badNames(r.as === undefined ? r.skills : [...r.skills, r.as]),
-        (r) => actions.skills.add(r.source, r.skills, r.as),
+        (r) => changeRepo("skills-add", `Add ${r.as ?? names(r.skills)} from ${r.source}`, actions.skills.add(r.source, r.skills, r.as)),
       );
-      const skillsPreview = skillsEdit("/api/skills/preview", UiSkillsNames, UiSkillsPreview, (r) => badNames(r.skills), (r) => actions.skills.preview(r.skills));
-      const skillsUpdate = skillsEdit("/api/skills/update", UiSkillsKeepRequest, UiSkillsLanded, (r) => badNames(r.skills), (r) => actions.skills.update(r.skills, r.digest));
-      const skillsRemove = skillsEdit(
+      const skillsPreview = skillsRoute("/api/skills/preview", UiSkillsNames, (r) => badNames(r.skills), (r) => readRepo(UiSkillsPreview, actions.skills.preview(r.skills)));
+      const skillsUpdate = skillsRoute(
+        "/api/skills/update",
+        UiSkillsKeepRequest,
+        (r) => badNames(r.skills),
+        (r) => changeRepo("skills-update", `Update ${names(r.skills)}`, actions.skills.update(r.skills, r.digest)),
+      );
+      const skillsRemove = skillsRoute(
         "/api/skills/remove",
         UiSkillsNames,
-        UiSkillsLanded,
         (r) => (r.skills.length === 0 ? "name the skills to remove" : badNames(r.skills)),
-        (r) => actions.skills.remove(r.skills),
+        (r) => changeRepo("skills-remove", `Remove ${names(r.skills)}`, actions.skills.remove(r.skills)),
       );
 
       /** Forward to the relay's hub, with the relay token, and check the answer's shape. */
@@ -625,25 +940,49 @@ export const uiLayer = (options: UiServerOptions) =>
           ),
         );
 
+      const frame = (type: string, data: string, id?: number) => `${id === undefined ? "" : `id: ${id}\n`}event: ${type}\ndata: ${data}\n\n`;
+
+      /**
+       * Live updates. A tab that connects (or reconnects) first gets where
+       * things stand: the latest status, the last failed check if it is newer,
+       * and every job; then each event as it happens.
+       */
       const eventStream = HttpRouter.add(
         "GET",
         "/api/events",
-        api(() =>
-          Effect.gen(function* () {
-            yield* Ref.update(clients, (n) => n + 1);
-            if (yield* stale) yield* runCheck.pipe(Effect.ignore, Effect.forkDetach);
-            const frame = (e: ServerEvent) => `event: ${e.type}\ndata: ${e.data}\n\n`;
-            const keepalive = Stream.tick(Duration.seconds(25)).pipe(Stream.map(() => ": keepalive\n\n"));
-            const body = Stream.make(": connected\n\n").pipe(
-              Stream.concat(Stream.merge(Stream.fromPubSub(events).pipe(Stream.map(frame)), keepalive)),
-              Stream.ensuring(Ref.update(clients, (n) => n - 1)),
-              Stream.encodeText,
+        api(
+          () => {
+            const stream = Stream.unwrap(
+              Effect.gen(function* () {
+                // Subscribed before the snapshot is taken, so nothing falls between them.
+                const subscription = yield* PubSub.subscribe(events);
+                yield* Ref.update(clients, (n) => n + 1);
+                yield* Effect.addFinalizer(() => Ref.update(clients, (n) => n - 1));
+                yield* checked(everyMs).pipe(Effect.ignore, Effect.forkIn(scope));
+                const snapshot: Array<string> = [": connected\n\n"];
+                const kept = yield* Ref.get(latest);
+                if (kept !== null) snapshot.push(frame("check", yield* encodeStatus(kept.status).pipe(Effect.orElseSucceed(() => "null"))));
+                const failed = yield* Ref.get(lastError);
+                if (failed !== null && (kept === null || failed.at > kept.status.checkedAt)) {
+                  snapshot.push(frame("check-failed", yield* encodeFailed(failed).pipe(Effect.orElseSucceed(() => "null"))));
+                }
+                for (const job of (yield* Ref.get(jobs)).values()) {
+                  snapshot.push(frame("job", yield* encodeJob(job).pipe(Effect.orElseSucceed(() => "null"))));
+                }
+                const keepalive = Stream.tick(Duration.seconds(25)).pipe(Stream.map(() => ": keepalive\n\n"));
+                return Stream.fromIterable(snapshot).pipe(
+                  Stream.concat(Stream.merge(Stream.fromSubscription(subscription).pipe(Stream.map((e) => frame(e.type, e.data, e.id))), keepalive)),
+                );
+              }),
             );
-            return HttpServerResponse.stream(body, {
-              contentType: "text/event-stream",
-              headers: { ...SECURITY_HEADERS, "cache-control": "no-cache", connection: "keep-alive" },
-            });
-          }),
+            return Effect.succeed(
+              HttpServerResponse.stream(stream.pipe(Stream.encodeText), {
+                contentType: "text/event-stream",
+                headers: { ...SECURITY_HEADERS, "cache-control": "no-cache", connection: "keep-alive" },
+              }),
+            );
+          },
+          { queryToken: true },
         ),
       );
 
@@ -655,7 +994,7 @@ export const uiLayer = (options: UiServerOptions) =>
         "/*",
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          const refused = refusal(request, { port: options.port, token: null }, new URLSearchParams());
+          const refused = refusal(request, { port: options.port, tokens: null }, new URLSearchParams());
           if (refused !== null) return plain(refused.message, refused.status);
           const path = new URL(request.url, "http://ui").pathname;
           const asset = options.assets.get(path);
@@ -663,23 +1002,22 @@ export const uiLayer = (options: UiServerOptions) =>
           if (served === undefined) {
             return plain(options.assets.size === 0 ? "this build of T3 Fleet has no UI; build it with `pnpm --filter t3-fleet build`" : "not found", 404);
           }
-          return HttpServerResponse.uint8Array(served.body, {
-            contentType: served.type,
-            headers: {
-              ...SECURITY_HEADERS,
-              "cache-control": asset !== undefined && path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache",
-            },
-          });
+          // Nothing is cached: a loopback port can be someone else's between runs, and a
+          // cached script from then must not run in this one.
+          return HttpServerResponse.uint8Array(served.body, { contentType: served.type, headers: { ...SECURITY_HEADERS, "cache-control": "no-store" } });
         }),
       );
 
       return Layer.mergeAll(
+        trade,
         session,
         status,
+        fixPlan,
         fixes,
         proposals,
         decide("approve"),
         decide("reject"),
+        jobList,
         alerts,
         models,
         config,

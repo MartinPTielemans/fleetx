@@ -12,10 +12,14 @@ import {
   SunIcon,
   WrenchIcon,
   ActivityIcon,
+  PlugZapIcon,
 } from "lucide-react";
 import type * as React from "react";
 
 import { Dot } from "./components/common";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { JobsTray } from "./components/Jobs";
+import { Empty } from "./components/ui/empty";
 import { follow, useRoute, type View } from "./lib/router";
 import { StoreProvider, useStore } from "./lib/store";
 import { useTheme, type ThemeChoice } from "./lib/theme";
@@ -48,6 +52,30 @@ export function App() {
   );
 }
 
+/** This tab could not get a token: the link was used, or there was none. */
+export function NoSession({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="flex h-full items-center justify-center p-8">
+      <Empty icon={<PlugZapIcon className="text-destructive" />} title={title}>
+        <span className="block max-w-md break-words">{message}</span>
+      </Empty>
+    </div>
+  );
+}
+
+/** Shown once the server says this page's token is not one it gave out: it was restarted. */
+function Stale() {
+  const { connection } = useStore();
+  if (connection !== "stale") return null;
+  return (
+    <div role="alert" className="shrink-0 border-b border-destructive/30 bg-error-surface px-4 py-2 text-destructive-foreground text-xs">
+      This page belongs to an earlier run of <code>t3-fleet ui</code>, so what it shows may be old and nothing here works. Open the newest link it printed.
+    </div>
+  );
+}
+
+const CONNECTION_TEXT = { live: "live", lost: "reconnecting…", connecting: "connecting…", paused: "paused while hidden", stale: "from an earlier run" } as const;
+
 function Shell() {
   const { view, rest } = useRoute();
   return (
@@ -67,16 +95,20 @@ function Shell() {
             </a>
           ))}
         </nav>
+        <Stale />
         <div className="min-h-0 flex-1">
-        {view === "environments" && <EnvironmentsView open={rest} />}
-        {view === "findings" && <FindingsView />}
-        {view === "proposals" && <ProposalsView />}
-        {view === "alerts" && <AlertsView />}
-        {view === "skills" && <SkillsView />}
-        {view === "mcp" && <McpView />}
-        {view === "models" && <ModelsView />}
-        {view === "config" && <ConfigView node={rest} />}
+          <ErrorBoundary resetKey={`${view}/${rest}`}>
+            {view === "environments" && <EnvironmentsView open={rest} />}
+            {view === "findings" && <FindingsView />}
+            {view === "proposals" && <ProposalsView />}
+            {view === "alerts" && <AlertsView />}
+            {view === "skills" && <SkillsView />}
+            {view === "mcp" && <McpView />}
+            {view === "models" && <ModelsView />}
+            {view === "config" && <ConfigView node={rest} />}
+          </ErrorBoundary>
         </div>
+        <JobsTray />
       </div>
     </div>
   );
@@ -119,9 +151,9 @@ function Sidebar({ active }: { active: View }) {
       </nav>
       <div className="mt-auto flex flex-col gap-2 border-t border-sidebar-border/70 px-3 py-3">
         <div className="flex items-center gap-2 text-2xs text-sidebar-muted-foreground">
-          <Dot tone={connection === "live" ? "live" : connection === "lost" ? "error" : "muted"} />
+          <Dot tone={connection === "live" ? "live" : connection === "lost" || connection === "stale" ? "error" : "muted"} />
           <span className="truncate">
-            {connection === "live" ? "live" : connection === "lost" ? "reconnecting…" : "connecting…"}
+            {CONNECTION_TEXT[connection]}
             {session === null ? "" : ` · on ${session.self}`}
           </span>
         </div>

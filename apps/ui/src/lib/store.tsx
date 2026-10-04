@@ -1,13 +1,29 @@
 /**
- * What every view shares: the session, the latest check, and the live event
- * stream. A "check" event replaces the status in place; any other event (the
- * relay's "state", "pull", "hub") is handed to whoever listens for it.
+ * What every view shares: the session, the latest check, the jobs, and the
+ * live event stream. On connecting, the server first sends where things
+ * stand (the latest status, a newer failed check, every job), so a reload or
+ * reconnect needs nothing else. A "check" event replaces the status in place,
+ * "check-failed" keeps it and says why the next one did not come, "job"
+ * updates a job; any other event (the relay's "state", "pull", "hub") is
+ * handed to whoever listens for it, and after a gap each listener runs once,
+ * since some may have been missed.
+ *
+ * A hidden tab closes its stream after a while, so the server stops checking
+ * for nobody, and opens it again when it is shown.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { api, decodeStatusEvent, type UiSession, type UiStatus } from "./api";
+import { ApiError, api, decodeCheckFailedEvent, decodeJobEvent, decodeStatusEvent, isUnauthorized, type UiJobT, type UiSession, type UiStatus } from "./api";
 
-export type Connection = "connecting" | "live" | "lost";
+/** "paused": closed while the tab is hidden; "stale": this page's token is from an earlier run. */
+export type Connection = "connecting" | "live" | "lost" | "paused" | "stale";
+
+const RELAY_EVENTS = ["state", "pull", "hub"];
+
+/** How long a hidden tab keeps its stream open. */
+const HIDDEN_GRACE_MS = 30_000;
+
+export const finished = (job: UiJobT) => job.state === "done" || job.state === "failed";
 
 interface Store {
   readonly session: UiSession | null;
@@ -18,9 +34,14 @@ interface Store {
   readonly checking: boolean;
   readonly connection: Connection;
   readonly now: number;
+  /** Jobs the server knows, oldest first. */
+  readonly jobs: ReadonlyArray<UiJobT>;
+  /** Jobs a dialog in this tab is showing; the tray leaves them out. */
+  readonly watched: ReadonlySet<string>;
   readonly recheck: () => Promise<void>;
-  readonly setStatus: (status: UiStatus) => void;
   readonly subscribe: (type: string, listener: (data: string) => void) => () => void;
+  /** Start a job and settle with it, rejected with its error if it failed; `started` hears its id first. */
+  readonly runJob: (start: () => Promise<UiJobT>, started?: (id: string) => void) => Promise<UiJobT>;
 }
 
 const StoreContext = createContext<Store | null>(null);
@@ -33,9 +54,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [checking, setChecking] = useState(false);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [now, setNow] = useState(() => Date.now());
+  const [jobs, setJobs] = useState<ReadonlyMap<string, UiJobT>>(new Map());
+  const [watched, setWatched] = useState<ReadonlySet<string>>(new Set());
   const listeners = useRef(new Map<string, Set<(data: string) => void>>());
-  /** Adds an event type to the open EventSource; set once it exists. */
-  const listenRef = useRef<(type: string) => void>(() => undefined);
+  const waiters = useRef(new Map<string, Array<(job: UiJobT) => void>>());
+
+  const updateJob = useCallback((job: UiJobT) => {
+    setJobs((all) => {
+      const known = all.get(job.id);
+      // Events can overtake the answer that started the job; never go back.
+      if (known !== undefined && finished(known) && !finished(job)) return all;
+      return new Map(all).set(job.id, job);
+    });
+    if (finished(job)) {
+      for (const resolve of waiters.current.get(job.id) ?? []) resolve(job);
+      waiters.current.delete(job.id);
+    }
+  }, []);
 
   useEffect(() => {
     api.session().then(setSession, setSessionError);
@@ -53,47 +88,111 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let source: EventSource | null = null;
     let retry: number | undefined;
-    const known = new Set<string>();
-    const listen = (type: string) => {
-      if (source === null || known.has(type)) return;
-      known.add(type);
-      source.addEventListener(type, (event) => {
-        const data = (event as MessageEvent<string>).data;
-        if (type === "check") {
-          try {
-            setStatus(decodeStatusEvent("/api/events", data));
-            setStatusError(null);
-          } catch (error) {
-            setStatusError(error);
-          }
-        }
-        for (const listener of listeners.current.get(type) ?? []) listener(data);
-      });
+    let hiding: number | undefined;
+    let stopped = false;
+    let opened = false;
+    const dispatch = (type: string, data: string) => {
+      for (const listener of listeners.current.get(type) ?? []) listener(data);
+    };
+    const close = () => {
+      source?.close();
+      source = null;
     };
     const open = () => {
-      source = new EventSource(api.eventsUrl());
-      known.clear();
-      source.onopen = () => setConnection("live");
-      source.onerror = () => {
-        setConnection("lost");
-        source?.close();
-        retry = window.setTimeout(open, 3000);
+      if (stopped || source !== null) return;
+      window.clearTimeout(retry);
+      const current = new EventSource(api.eventsUrl());
+      source = current;
+      current.onopen = () => {
+        setConnection("live");
+        // The snapshot brings status and jobs; anything else from the gap is fetched again.
+        if (opened) for (const type of RELAY_EVENTS) dispatch(type, "");
+        opened = true;
       };
-      for (const type of ["check", "state", "pull", "hub", ...listeners.current.keys()]) listen(type);
+      current.onerror = () => {
+        close();
+        // A restarted t3-fleet ui does not know this page's token: say so instead of retrying forever.
+        api.session().then(
+          () => {
+            setConnection("lost");
+            retry = window.setTimeout(open, 3000);
+          },
+          (error: unknown) => {
+            if (isUnauthorized(error)) {
+              stopped = true;
+              setConnection("stale");
+            } else {
+              setConnection("lost");
+              retry = window.setTimeout(open, 3000);
+            }
+          },
+        );
+      };
+      current.addEventListener("check", (event) => {
+        try {
+          setStatus(decodeStatusEvent("/api/events", (event as MessageEvent<string>).data));
+          setStatusError(null);
+        } catch (error) {
+          setStatusError(error);
+        }
+        dispatch("check", (event as MessageEvent<string>).data);
+      });
+      current.addEventListener("check-failed", (event) => {
+        try {
+          setStatusError(new ApiError(500, decodeCheckFailedEvent("/api/events", (event as MessageEvent<string>).data).message));
+        } catch (error) {
+          setStatusError(error);
+        }
+      });
+      current.addEventListener("job", (event) => {
+        try {
+          updateJob(decodeJobEvent("/api/events", (event as MessageEvent<string>).data));
+        } catch {
+          // A job this page cannot read stays out of the tray; the next event replaces it.
+        }
+      });
+      for (const type of RELAY_EVENTS) current.addEventListener(type, (event) => dispatch(type, (event as MessageEvent<string>).data));
+    };
+    const visibility = () => {
+      if (document.visibilityState === "visible") {
+        window.clearTimeout(hiding);
+        if (source === null && !stopped) {
+          setConnection("connecting");
+          open();
+        }
+      } else {
+        hiding = window.setTimeout(() => {
+          if (source === null) return;
+          close();
+          window.clearTimeout(retry);
+          setConnection("paused");
+        }, HIDDEN_GRACE_MS);
+      }
     };
     open();
-    listenRef.current = listen;
+    document.addEventListener("visibilitychange", visibility);
     return () => {
+      stopped = true;
       window.clearTimeout(retry);
-      source?.close();
+      window.clearTimeout(hiding);
+      document.removeEventListener("visibilitychange", visibility);
+      close();
     };
-  }, []);
+  }, [updateJob]);
+
+  // Leaving the page does not stop a job, but it does lose sight of it.
+  const busy = [...jobs.values()].some((j) => !finished(j));
+  useEffect(() => {
+    if (!busy) return;
+    const guard = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [busy]);
 
   const subscribe = useCallback((type: string, listener: (data: string) => void) => {
     const set = listeners.current.get(type) ?? new Set();
     set.add(listener);
     listeners.current.set(type, set);
-    listenRef.current(type);
     return () => {
       set.delete(listener);
     };
@@ -111,9 +210,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const runJob = useCallback(
+    async (start: () => Promise<UiJobT>, started?: (id: string) => void) => {
+      const job = await start();
+      setWatched((w) => new Set(w).add(job.id));
+      started?.(job.id);
+      updateJob(job);
+      const done = finished(job)
+        ? job
+        : await new Promise<UiJobT>((resolve) => {
+            waiters.current.set(job.id, [...(waiters.current.get(job.id) ?? []), resolve]);
+          });
+      if (done.state === "failed") throw new Error(done.error ?? "it failed");
+      return done;
+    },
+    [updateJob],
+  );
+
+  const jobList = useMemo(() => [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt), [jobs]);
   const value = useMemo(
-    () => ({ session, sessionError, status, statusError, checking, connection, now, recheck, setStatus, subscribe }),
-    [session, sessionError, status, statusError, checking, connection, now, recheck, subscribe],
+    () => ({ session, sessionError, status, statusError, checking, connection, now, jobs: jobList, watched, recheck, subscribe, runJob }),
+    [session, sessionError, status, statusError, checking, connection, now, jobList, watched, recheck, subscribe, runJob],
   );
   return <StoreContext value={value}>{children}</StoreContext>;
 }
@@ -157,4 +274,39 @@ export function useResource<T>(load: () => Promise<T>, deps: ReadonlyArray<unkno
     void reload();
   }, [reload]);
   return { data, error, loading, reload, setData };
+}
+
+/**
+ * Something a button starts: whether it runs, how it ended, and a reset for
+ * when its dialog closes. A result from before a reset is dropped.
+ */
+export function useAction<A extends ReadonlyArray<unknown>, T>(run: (...args: A) => Promise<T>) {
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [result, setResult] = useState<T | null>(null);
+  const latest = useRef(run);
+  latest.current = run;
+  const generation = useRef(0);
+  const start = useCallback(async (...args: A) => {
+    const mine = ++generation.current;
+    setRunning(true);
+    setError(null);
+    try {
+      const value = await latest.current(...args);
+      if (mine === generation.current) setResult(value);
+      return value;
+    } catch (e) {
+      if (mine === generation.current) setError(e);
+      return null;
+    } finally {
+      if (mine === generation.current) setRunning(false);
+    }
+  }, []);
+  const reset = useCallback(() => {
+    generation.current++;
+    setRunning(false);
+    setError(null);
+    setResult(null);
+  }, []);
+  return { running, error, result, start, reset };
 }
