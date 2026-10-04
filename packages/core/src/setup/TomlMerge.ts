@@ -49,7 +49,11 @@ interface Additions {
  * What `side` appended to `base`'s lists, when that is all it changed.
  * Null for anything else.
  */
-export const additions = (base: unknown, side: unknown): Additions | null => {
+export const additions = (
+  base: unknown,
+  side: unknown,
+  root: ReadonlyArray<string> = [],
+): Additions | null => {
   const out: Additions = { lists: new Map(), tables: new Map() };
   const walk = (b: unknown, s: unknown, path: ReadonlyArray<string>): boolean => {
     if (same(b, s)) return true;
@@ -68,10 +72,14 @@ export const additions = (base: unknown, side: unknown): Additions | null => {
     if (!isTable(b) || !isTable(s)) return false;
     for (const k of new Set([...Object.keys(b), ...Object.keys(s)])) {
       if (!(k in s)) return false;
-      // A whole new table is an addition; a new value in a table that was there only as one of the
-      // lists, `[[defaults.instructions]]` included when it is not there yet.
+      // A new table holding only list additions (a `[defaults]` the base lacks) is those
+      // additions, so two sides that each create it merge; any other new table is one whole.
       if (!(k in b) && isTable(s[k])) {
-        out.tables.set(JSON.stringify([...path, k]), s[k]);
+        const inner = additions({}, s[k], [...path, k]);
+        if (inner !== null && inner.lists.size > 0) {
+          for (const [id, items] of inner.lists) out.lists.set(id, items);
+          for (const [id, table] of inner.tables) out.tables.set(id, table);
+        } else out.tables.set(JSON.stringify([...path, k]), s[k]);
         continue;
       }
       const list = LISTS.has(k) || ENTRY_LISTS.has(JSON.stringify([...path, k]));
@@ -80,7 +88,7 @@ export const additions = (base: unknown, side: unknown): Additions | null => {
     }
     return true;
   };
-  return walk(base, side, []) ? out : null;
+  return walk(base, side, root) ? out : null;
 };
 
 const at = (table: Table, path: ReadonlyArray<string>): unknown =>
@@ -142,6 +150,10 @@ export const mergeAdditions = (base: string, ours: string, theirs: string): stri
     if (!added.every((x) => expected.some((e) => same(e, x)))) return null;
     if (!expected.every((e) => added.some((x) => same(e, x)))) return null;
   }
+  // One entry per instruction file, whichever side added them.
+  const entries = at(merged, ["defaults", "instructions"]);
+  const dests = Array.isArray(entries) ? entries.map((e) => (isTable(e) ? e["dest"] : e)) : [];
+  if (new Set(dests).size !== dests.length) return null;
   const tables = new Set(
     [...all.lists.keys()].map((id) =>
       JSON.stringify((JSON.parse(id) as Array<string>).slice(0, -1)),

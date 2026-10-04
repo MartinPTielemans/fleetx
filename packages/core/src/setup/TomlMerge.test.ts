@@ -69,6 +69,29 @@ describe("mergeAdditions", () => {
     expect(mergeAdditions(base, a, `${base}${other}`)).toBeNull();
   });
 
+  it("merges two machines that each create [defaults] on a fleet without one", () => {
+    const base = "[fleet]\ninterval = 900\n";
+    const a = `${base}\n[defaults.mcp]\nservers = ["notes"]\n\n[[defaults.instructions]]\nsrc = "instructions/claude/CLAUDE.md"\ndest = "~/.claude/CLAUDE.md"\n`;
+    const b = `${base}\n[defaults.mcp]\nservers = ["weather"]\n\n[defaults.models]\negress = "direct"\n${ENTRY}`;
+    expect(parse(mergeAdditions(base, a, b) ?? "")).toMatchObject({
+      fleet: { interval: 900 },
+      defaults: {
+        mcp: { servers: ["notes", "weather"] },
+        models: { egress: "direct" },
+        instructions: [{ dest: "~/.claude/CLAUDE.md" }, { dest: "~/.codex/AGENTS.md" }],
+      },
+    });
+    // A new [defaults] with a value of its own is one table: two different ones conflict.
+    const own = (v: string) => `${base}\n[defaults]\nx = "${v}"\n`;
+    expect(mergeAdditions(base, own("1"), own("2"))).toBeNull();
+  });
+
+  it("refuses two entries for one instruction file, even from one side", () => {
+    const twice = `${BASE}${ENTRY}${ENTRY.replace("instructions/codex/AGENTS.md", "instructions/codex/OTHER.md")}`;
+    expect(mergeAdditions(BASE, BASE.replace('["fetch"]', '["fetch", "notes"]'), twice)).toBeNull();
+    expect(mergeAdditions(BASE, twice, BASE.replace('["fetch"]', '["fetch", "notes"]'))).toBeNull();
+  });
+
   it("refuses anything else: removals, changed values, new tables, reorders, conflicts", () => {
     const adds = BASE.replace('["fetch"]', '["fetch", "notes"]');
     const refused = {
