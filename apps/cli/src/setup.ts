@@ -618,7 +618,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
     // 5. Apply: the run is saved first, so a resume does exactly this.
     let plain = "";
     for (const s of secretsToStore(input)) plain = setVar(plain, s.name, s.value);
-    yield* saveRunSecrets(home, plain);
+    yield* saveRunSecrets(home, now, plain);
     const progress: Progress = {
       startedAt: now,
       mode,
@@ -645,8 +645,13 @@ const resumeRun = (progress: Progress, flags: Flags) =>
       .readFileString(`${saved.checkout}/nodes/${saved.node}.toml`)
       .pipe(Effect.option);
     const pre = yield* preflight;
+    const back = restored(saved, yield* loadRunSecrets(home, progress.startedAt));
+    if ("missing" in back)
+      return yield* Effect.fail(
+        `the saved values of ${back.missing.join(", ")} are missing; this run cannot resume without them. \`t3-fleet setup --abandon\` drops it, then run setup again`,
+      );
     const input: SetupInput = {
-      ...restored(saved, yield* loadRunSecrets(home)),
+      ...back,
       commits:
         saved.mode === "first" ||
         (Option.isSome(nodeText) ? /^roles\s*=.*"authority"/m.test(nodeText.value) : saved.commits),

@@ -189,8 +189,14 @@ export const persistable = (input: SetupInput): SetupInput => ({
   },
 });
 
-/** A saved run with its secret values back, from the NAME=value text saved beside it. */
-export const restored = (saved: SetupInput, secrets: string): SetupInput => {
+/**
+ * A saved run with its secret values back, from the NAME=value text saved
+ * beside it; or the names it lacks, which a resume must not write empty.
+ */
+export const restored = (
+  saved: SetupInput,
+  secrets: string,
+): SetupInput | { readonly missing: ReadonlyArray<string> } => {
   const values = new Map<string, string>();
   for (const line of secrets.split("\n")) {
     const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
@@ -199,6 +205,11 @@ export const restored = (saved: SetupInput, secrets: string): SetupInput => {
     values.set(m[1], /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(["\\$`])/g, "$1") : raw);
   }
   const value = (name: string) => values.get(name) ?? null;
+  const missing = [
+    ...saved.actions.secrets.map((s) => s.name),
+    ...(saved.extras.relay === null ? [] : ["T3_FLEET_RELAY_TOKEN"]),
+  ].filter((n) => !values.has(n) || values.get(n) === "");
+  if (missing.length > 0) return { missing };
   return {
     ...saved,
     actions: {

@@ -89,7 +89,7 @@ describe("a setup that stops part-way", () => {
     const saved = JSON.parse(JSON.stringify(persistable(first))) as SetupInput;
     let plain = "";
     for (const s of secretsToStore(first)) plain = setVar(plain, s.name, s.value);
-    await run(saveRunSecrets(home, plain));
+    await run(saveRunSecrets(home, 7, plain));
     expect(JSON.stringify(saved)).not.toContain("SEKRIT");
 
     const done: Array<string> = [];
@@ -106,7 +106,9 @@ describe("a setup that stops part-way", () => {
 
     // Resume: nothing is planned again; the saved run gets its values back.
     fs.writeFileSync(fleetFile, good);
-    const resumed = restored(saved, await run(loadRunSecrets(home)));
+    const back = restored(saved, await run(loadRunSecrets(home, 7)));
+    if ("missing" in back) return expect.unreachable();
+    const resumed = back;
     expect(resumed.actions.secrets).toEqual(first.actions.secrets);
     expect(resumed.extras.relay?.token).toBe(RELAY);
     expect(await runSteps(resumed, done)).toBeNull();
@@ -121,5 +123,20 @@ describe("a setup that stops part-way", () => {
     expect(node).toContain('"ignore.add" = ["node_repl"]');
     expect(node).toContain("timer = false");
     expect(fs.readlinkSync(join(home, ".agents/skills/demo"))).toBe(join(repo, "skills/demo"));
+  });
+
+  it("refuses to resume without its values: missing, another run's, or incomplete", async () => {
+    const stopped = await run(Effect.flip(loadRunSecrets(home, 8)));
+    expect(stopped).toContain("belongs to another run");
+    expect(stopped).toContain("t3-fleet setup --abandon");
+    const saved = persistable(input());
+    expect(restored(saved, "# run 7\nCTX_API_KEY=x\n")).toEqual({
+      missing: ["T3_FLEET_RELAY_TOKEN"],
+    });
+    expect(restored(saved, "# run 7\n")).toEqual({
+      missing: ["CTX_API_KEY", "T3_FLEET_RELAY_TOKEN"],
+    });
+    fs.rmSync(join(home, ".local/state/t3-fleet/setup/secrets.age"));
+    expect(await run(Effect.flip(loadRunSecrets(home, 7)))).toContain("is missing");
   });
 });

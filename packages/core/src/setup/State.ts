@@ -157,23 +157,37 @@ export const writeProgress = (home: string, progress: Progress) =>
   writePrivate(setupStatePath(home), progress);
 
 /** The run's secret values (NAME=value lines), encrypted to this machine's own key. */
-export const saveRunSecrets = (home: string, plaintext: string) =>
+/** The run's secret values (NAME=value lines), encrypted to this machine's own key, marked with the run. */
+export const saveRunSecrets = (home: string, startedAt: number, plaintext: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const { recipient } = yield* ensureIdentity;
-    const armored = yield* encryptFor([recipient], plaintext);
+    const armored = yield* encryptFor([recipient], `# run ${startedAt}\n${plaintext}`);
     yield* fs.makeDirectory(`${stateDir(home)}/setup`, { recursive: true });
     yield* fs.writeFileString(runSecretsPath(home), armored, { mode: 0o600 });
     yield* fs.chmod(runSecretsPath(home), 0o600);
   });
 
-export const loadRunSecrets = (home: string) =>
+/**
+ * The secret values of the run started at `startedAt`: missing, unreadable,
+ * or another run's, the resume stops rather than write empty values.
+ */
+export const loadRunSecrets = (home: string, startedAt: number) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const stop = (why: string) =>
+      Effect.fail(
+        `${why}; this run cannot resume without them. \`t3-fleet setup --abandon\` drops it (what it did stays), then run setup again`,
+      );
     const armored = yield* fs.readFileString(runSecretsPath(home)).pipe(Effect.option);
-    if (Option.isNone(armored)) return "";
+    if (Option.isNone(armored)) return yield* stop(`${runSecretsPath(home)} is missing`);
     const { identity } = yield* ensureIdentity;
-    return yield* decryptWith(identity, armored.value);
+    const text = yield* decryptWith(identity, armored.value).pipe(Effect.option);
+    if (Option.isNone(text))
+      return yield* stop(`${runSecretsPath(home)} does not decrypt with this machine's key`);
+    if (!text.value.startsWith(`# run ${startedAt}\n`))
+      return yield* stop(`${runSecretsPath(home)} belongs to another run`);
+    return text.value;
   });
 
 /** Forget an unfinished run: its progress and its secret values. What it changed stays. */
