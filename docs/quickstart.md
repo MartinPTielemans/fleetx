@@ -68,7 +68,9 @@ alerts, skills, the MCP hub, models, and each machine's config.
 
 Every machine runs `t3-fleet sync` on a timer: it pulls the repository, converges,
 and publishes its state. Changes a machine makes under `[fleet] auto_commit`
-paths (new skills, say) are proposed for an authority to `t3-fleet approve`.
+paths (new skills, say) are proposed for an authority: `t3-fleet review` shows
+each proposal with its commit, and `t3-fleet approve <node> <commit>` applies
+what it changed on top of whatever the branch has now.
 `t3-fleet status --all` shows every machine from their published state without
 contacting any of them.
 

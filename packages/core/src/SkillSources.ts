@@ -7,7 +7,8 @@
  *                                "renamed": { localName: upstreamName } } } }
  *
  * Skills are copied, not referenced, so every node works offline and gets
- * exactly what was reviewed.
+ * exactly what was reviewed. Everything here that writes to the checkout
+ * holds the sync lock, so no sync commits or proposes half a change.
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -18,9 +19,10 @@ import * as Schema from "effect/Schema";
 
 import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
-import { commitAndPush, git, ok, why } from "./Git.ts";
+import { commitAndPush, git, literal, nulList, ok, why } from "./Git.ts";
 import { sha256 } from "./Hash.ts";
 import { stateDir } from "./Names.ts";
+import { underSyncLock } from "./SyncLock.ts";
 
 const Source = Schema.Struct({
   type: Schema.String,
@@ -94,7 +96,7 @@ const copyDir = (from: string, to: string) =>
  * Returns the repo paths changed.
  */
 export const addSkills = (repo: string, spec: string, names: ReadonlyArray<string>, as?: string) =>
-  Effect.gen(function* () {
+  underSyncLock(Effect.gen(function* () {
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url, name: sourceName } = parseSource(spec);
@@ -129,23 +131,25 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
       sources: { ...sources.sources, [sourceName]: { ...entry, url, skills, paths, ...(Object.keys(renamed).length > 0 ? { renamed } : {}) } },
     });
     return [...changed, "skills/SOURCES.json"];
-  });
+  }));
 
-/** Re-pull vendored skills from their sources; `only` limits which. Returns the paths that changed on disk. */
-export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
+const stagePath = () => `${stateDir(process.env["HOME"] ?? "/tmp")}/skill-update`;
+
+/**
+ * Pull `only` (all when empty) from upstream into a scratch directory, never
+ * the checkout, and compare that with the checkout's last commit: what
+ * keeping the update would change. The digest names exactly this change.
+ */
+const stageUpdate = (repo: string, only: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
     const sources = yield* readSources(repo);
-    // Updating replaces a skill's whole directory, and git can only put back what it tracks.
-    const paths = Object.values(sources.sources ?? {})
-      .flatMap((s) => s.skills)
-      .filter((s) => only.length === 0 || only.includes(s))
-      .map((s) => `skills/${s}`);
-    if (paths.length > 0) {
-      const ignored = yield* git(repo, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...paths]);
-      const lost = ignored.stdout.split("\n").filter((l) => l.startsWith("!! ")).map((l) => l.slice(3));
-      if (lost.length > 0) return yield* Effect.fail(`updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`);
-    }
+    const stage = stagePath();
+    yield* exec({ command: "rm", args: ["-rf", stage], timeout: Duration.seconds(30) });
+    yield* fs.makeDirectory(path.join(stage, "skills"), { recursive: true });
+    // The same ignore rules as the checkout, so the comparison sees what git would.
+    for (const ignore of [".gitignore", "skills/.gitignore"]) yield* fs.copyFile(path.join(repo, ignore), path.join(stage, ignore)).pipe(Effect.ignore);
     const touched: Array<string> = [];
     for (const [, source] of Object.entries(sources.sources ?? {})) {
       const mine = source.skills.filter((s) => only.length === 0 || only.includes(s));
@@ -156,16 +160,52 @@ export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
         const upstream = source.renamed?.[local] ?? local;
         const rel = source.paths?.[local] ?? available.get(upstream);
         if (rel === undefined) continue;
-        yield* copyDir(path.join(scratch, rel), path.join(repo, "skills", local));
+        yield* copyDir(path.join(scratch, rel), path.join(stage, "skills", local));
         touched.push(`skills/${local}`);
       }
     }
-    return touched;
+    return { stage, ...(yield* compareStaged(repo, stage, touched)) };
+  });
+
+/**
+ * `touched` in the stage against the checkout's HEAD, through a scratch
+ * index so the checkout's own index stays as it is.
+ */
+const compareStaged = (repo: string, stage: string, touched: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (touched.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-update-index`, ...literal };
+    const read = yield* git(repo, ["read-tree", "HEAD"], { env });
+    if (!ok(read)) return yield* Effect.fail(`reading the branch: ${why(read)}`);
+    const add = yield* git(repo, ["--work-tree", stage, "add", "-A", "--", ...touched], { env });
+    if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
+    const files = nulList((yield* git(repo, ["diff", "--cached", "--name-only", "-z", "HEAD", "--", ...touched], { env })).stdout);
+    if (files.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+    const stat = yield* git(repo, ["diff", "--cached", "--stat", "HEAD", "--", ...touched], { env });
+    const diff = yield* git(repo, ["diff", "--cached", "HEAD", "--", ...touched], { env });
+    const digest = yield* Effect.promise(() => sha256(diff.stdout));
+    return { files: [...new Set(files.map((f) => f.split("/").slice(0, 2).join("/")))], stat: stat.stdout.trimEnd(), diff: diff.stdout, digest };
+  });
+
+/**
+ * The checkout must be able to take an update: no edits of the skills' own,
+ * which it would overwrite, and nothing git ignores in them, which git could
+ * not put back.
+ */
+const readyForUpdate = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (paths.length === 0) return;
+    const status = yield* git(repo, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...paths], { env: literal });
+    const lines = status.stdout.split("\n").filter(Boolean);
+    const lost = lines.filter((l) => l.startsWith("!! ")).map((l) => l.slice(3));
+    if (lost.length > 0) return yield* Effect.fail(`updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`);
+    const dirty = lines.filter((l) => !l.startsWith("!! "));
+    if (dirty.length > 0) return yield* Effect.fail(`these skills have changes not yet committed or proposed; the next sync takes care of them, then try again:\n${dirty.join("\n")}`);
   });
 
 /** Drop vendored skills and their provenance. Returns the repo paths changed. */
 export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
+  underSyncLock(Effect.gen(function* () {
     const sources = yield* readSources(repo);
     const next: Record<string, typeof Source.Type> = {};
     for (const [key, s] of Object.entries(sources.sources ?? {})) {
@@ -178,17 +218,17 @@ export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
       if (!ok(rm)) return yield* Effect.fail(`removing skills/${name}: ${why(rm)}`);
     }
     return [...names.map((n) => `skills/${n}`), "skills/SOURCES.json"];
-  });
+  }));
 
 /** An authority commits and pushes; any other node leaves the change for its next sync to propose. */
 export const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
-  Effect.gen(function* () {
+  underSyncLock(Effect.gen(function* () {
     if (config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
       const rev = yield* commitAndPush(config.repo, paths, message);
       return `committed and pushed (${rev})`;
     }
     return "the next sync proposes it for an authority's approval";
-  });
+  }));
 
 /** The one-line `description:` in a SKILL.md's front matter, or null. */
 export const skillDescription = (text: string) => {
@@ -239,62 +279,38 @@ const sourced = (repo: string, only: ReadonlyArray<string>) =>
   );
 
 /**
- * Pull `only` from upstream, read what changed, and put the repo back as it
- * was. Refuses when those skills have edits of their own, which putting back
- * would lose. The digest names exactly this change, for keepUpdate.
+ * Pull `only` from upstream and show what keeping it would change; the
+ * checkout is not touched. Refuses when those skills have edits of their
+ * own, which keeping would overwrite. The digest names exactly this change,
+ * for keepUpdate.
  */
 export const previewUpdate = (repo: string, only: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    const names = yield* sourced(repo, only);
-    if (names.length === 0) return { files: [], stat: "", diff: "", digest: "" };
-    const paths = names.map((n) => `skills/${n}`);
-    const dirty = yield* git(repo, ["status", "--porcelain", "--", ...paths]);
-    if (dirty.stdout.trim() !== "") return yield* Effect.fail(`these skills have changes not yet committed or proposed; the next sync takes care of them, then try again:\n${dirty.stdout.trim()}`);
-    return yield* updateSkills(repo, only).pipe(
-      Effect.flatMap((touched) => readStaged(repo, touched)),
-      Effect.ensuring(restore(repo, paths)),
-    );
-  });
+  underSyncLock(
+    Effect.gen(function* () {
+      const names = yield* sourced(repo, only);
+      if (names.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+      yield* readyForUpdate(repo, names.map((n) => `skills/${n}`));
+      const { files, stat, diff, digest } = yield* stageUpdate(repo, only);
+      return { files, stat, diff, digest };
+    }),
+  );
 
-/** Pull `only` again and keep it, if it is still the change `digest` names. Returns the paths to land. */
+/**
+ * Pull `only` again and, if it is still the change `digest` names, copy it
+ * into the checkout. Returns the paths to land.
+ */
 export const keepUpdate = (repo: string, only: ReadonlyArray<string>, digest: string) =>
-  Effect.gen(function* () {
-    const names = yield* sourced(repo, only);
-    const paths = names.map((n) => `skills/${n}`);
-    const dirty = yield* git(repo, ["status", "--porcelain", "--", ...paths]);
-    if (paths.length === 0 || dirty.stdout.trim() !== "") return yield* Effect.fail("these skills changed since the preview; preview again");
-    const now = yield* updateSkills(repo, only).pipe(
-      Effect.flatMap((touched) => readStaged(repo, touched)),
-      Effect.tapError(() => restore(repo, paths)),
-    );
-    if (now.digest === "" || now.digest !== digest) {
-      yield* restore(repo, paths);
-      return yield* Effect.fail(now.digest === "" ? "nothing to update any more" : "upstream changed since the preview; preview again");
-    }
-    yield* git(repo, ["reset", "-q", "--", ...paths]);
-    return now.files;
-  });
-
-/** Stage `touched` to see new files too; return what changed. */
-const readStaged = (repo: string, touched: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    if (touched.length === 0) return { files: [], stat: "", diff: "", digest: "" };
-    const add = yield* git(repo, ["add", "-A", "--", ...touched]);
-    if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
-    const names = yield* git(repo, ["diff", "--cached", "--name-only", "--", ...touched]);
-    const files = names.stdout.split("\n").filter(Boolean);
-    if (files.length === 0) return { files: [], stat: "", diff: "", digest: "" };
-    const stat = yield* git(repo, ["diff", "--cached", "--stat", "--", ...touched]);
-    const diff = yield* git(repo, ["diff", "--cached", "--", ...touched]);
-    const digest = yield* Effect.promise(() => sha256(diff.stdout));
-    return { files: [...new Set(files.map((f) => f.split("/").slice(0, 2).join("/")))], stat: stat.stdout.trimEnd(), diff: diff.stdout, digest };
-  });
-
-/** Put `paths` back to the last commit: index, tracked files, and new files. */
-const restore = (repo: string, paths: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    if (paths.length === 0) return;
-    yield* git(repo, ["reset", "-q", "--", ...paths]);
-    yield* git(repo, ["checkout", "-q", "--", ...paths]);
-    yield* git(repo, ["clean", "-qfd", "--", ...paths]);
-  });
+  underSyncLock(
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const names = yield* sourced(repo, only);
+      if (names.length === 0) return yield* Effect.fail("these skills changed since the preview; preview again");
+      yield* readyForUpdate(repo, names.map((n) => `skills/${n}`)).pipe(Effect.mapError(() => "these skills changed since the preview; preview again"));
+      const now = yield* stageUpdate(repo, only);
+      if (now.digest === "" || now.digest !== digest) {
+        return yield* Effect.fail(now.digest === "" ? "nothing to update any more" : "upstream changed since the preview; preview again");
+      }
+      for (const file of now.files) yield* copyDir(path.join(now.stage, file), path.join(repo, file));
+      return now.files;
+    }),
+  );

@@ -105,8 +105,12 @@ export const listenCommand = Command.make("listen").pipe(
               const head = out(yield* git(config.repo, ["rev-parse", "--short", "HEAD"]));
               if (rev !== "" && head.startsWith(rev)) return;
               yield* log(`branch moved to ${rev}; syncing`);
-              const result = yield* syncRun(config, { apply: true }).pipe(Effect.result);
-              yield* log(result._tag === "Success" ? (result.success.state?.message ?? "done") : `sync failed: ${String(result.failure)}`);
+              // A sync already running may have started before the branch moved: wait for it, then sync again.
+              const result = yield* syncRun(config, { apply: true }).pipe(
+                Effect.repeat({ while: (r) => r.state === null, schedule: Schedule.spaced(Duration.seconds(20)), times: 45 }),
+                Effect.result,
+              );
+              yield* log(result._tag === "Success" ? (result.success.state?.message ?? (result.success.lines.join("; ") || "done")) : `sync failed: ${String(result.failure)}`);
             }),
           log,
         ),

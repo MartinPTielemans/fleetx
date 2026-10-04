@@ -275,7 +275,30 @@ Nobody can do this unattended.
 
 **A proposal never arrives** — only changes under `[fleet] auto_commit` paths
 are proposed, and only by `t3-fleet sync`. `t3-fleet review` on an authority lists
-what is waiting.
+what is waiting. A machine whose pull failed (its own edits overlap incoming
+changes, say) proposes nothing until a sync there pulls again.
+
+**"…'s proposal is … now, not the … reviewed"** — the proposal changed after
+`t3-fleet review` showed it. Review it again and approve the commit it shows:
+`t3-fleet approve <node> <commit>`.
+
+**"…'s proposal conflicts with what reached main since it was made"** — an
+approval applies only what the proposal itself changed, merged with what the
+branch has now, and never undoes newer work. When both changed the same lines
+it refuses: reject the proposal, or let that machine pull and propose again.
+
+**"a sync is running on this machine; try again in a moment"** — every command
+that writes to the config repo (approve, reject, skills, secrets, invite, `repo
+rename`) waits its turn with sync, so sync never commits or proposes half an
+edit. The lock is `~/.local/state/t3-fleet/sync.lock`, holding the pid of its
+run; it is taken over once that process has died, never just because it is
+old, so a laptop asleep mid-sync keeps it. `listen` retries a sync it could
+not start.
+
+**"local edits to … conflicted with incoming changes; they are kept in git
+stash"** — the pull put the branch's version in place rather than leave
+conflict markers in a live file. `git stash list` in the checkout has your
+edits.
 
 **Logs** — `~/.local/state/t3-fleet/sync.log`, `listen.log`, `serve.log` (the
 relay and its hub), `models.log`; the hub's call log is `~/.local/state/t3-fleet/hub/calls.jsonl`.

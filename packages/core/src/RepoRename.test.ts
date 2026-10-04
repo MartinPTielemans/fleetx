@@ -99,3 +99,28 @@ describe("renaming a config repo", () => {
     expect(await run(renameRepo(repo, "main"))).toEqual([]);
   });
 });
+
+describe("renaming with other work staged", () => {
+  it("commits only the rename's own files, leaving the rest staged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-fleet-rename-staged-"));
+    process.env["HOME"] = root;
+    const origin = join(root, "origin.git");
+    const repo = join(root, "fleet");
+    git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
+    git(root, "init", "-q", "-b", "main", "fleet");
+    git(repo, "remote", "add", "origin", origin);
+    mkdirSync(join(repo, "nodes"));
+    writeFileSync(join(repo, "fleetx.toml"), '[fleet]\nbranch = "main"\n');
+    writeFileSync(join(repo, "nodes", "box.toml"), 'roles = ["authority"]\n');
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "fleet");
+    git(repo, "push", "-q", "-u", "origin", "HEAD:main");
+    // A staged, half-finished edit.
+    writeFileSync(join(repo, "nodes", "box.toml"), 'roles = ["authority"]\n# WIP, not ready\n');
+    git(repo, "add", "nodes/box.toml");
+
+    await run(renameRepo(repo, "main"));
+    expect(git(origin, "show", "--name-only", "--no-renames", "--format=", "main").trim().split("\n").sort()).toEqual(["fleetx.toml", "t3-fleet.toml"]);
+    expect(git(repo, "status", "--porcelain").trim()).toBe("M  nodes/box.toml");
+  });
+});

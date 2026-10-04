@@ -18,7 +18,7 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
-import { ensureGitConfig, git, ok, out, why } from "./Git.ts";
+import { ensureGitConfig, git, literal, nulList, ok, out, pullBranch, why } from "./Git.ts";
 import { FLEET_FILE, LEGACY_FLEET_FILE, LEGACY_SECRET_PREFIX, repoRenamed, SECRET_PREFIX } from "./Names.ts";
 import { encryptedPath, installSecrets, readSecrets, writeSecrets } from "./Secrets.ts";
 
@@ -47,13 +47,12 @@ export const renameRepo = (repo: string, branch: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     yield* ensureGitConfig;
-    // Other local edits are fine: they are set aside for the pull and never committed.
+    // Other local edits are fine, staged or not: they are set aside for the pull and never committed.
     const touched = [LEGACY_FLEET_FILE, FLEET_FILE, encryptedPath(repo).slice(repo.length + 1)];
-    if (out(yield* git(repo, ["status", "--porcelain", "--", ...touched])) !== "") {
+    if (out(yield* git(repo, ["status", "--porcelain", "--", ...touched], { env: literal })) !== "") {
       return yield* Effect.fail(`${repo} has uncommitted changes to ${touched.join(" or ")}; commit or stash them first`);
     }
-    const pull = yield* git(repo, ["pull", "-q", "--rebase", "--autostash", "origin", branch]);
-    if (!ok(pull)) return yield* Effect.fail(`pull failed: ${why(pull)}`);
+    yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
     const done: Array<string> = [];
 
     if (!repoRenamed(repo)) {
@@ -72,8 +71,9 @@ export const renameRepo = (repo: string, branch: string) =>
       }
     }
 
-    if ((yield* git(repo, ["diff", "--cached", "--quiet"])).code !== 0) {
-      const commit = yield* git(repo, ["commit", "-q", "-m", "Rename the config repo's names to T3 Fleet's\n\nt3-fleet.toml, and every FLEETX_ secret also as T3_FLEET_."]);
+    const staged = nulList((yield* git(repo, ["diff", "--cached", "--name-only", "-z", "--no-renames", "--", ...touched], { env: literal })).stdout);
+    if (staged.length > 0) {
+      const commit = yield* git(repo, ["commit", "-q", "-m", "Rename the config repo's names to T3 Fleet's\n\nt3-fleet.toml, and every FLEETX_ secret also as T3_FLEET_.", "--", ...staged], { env: literal });
       if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
       const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
       if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
