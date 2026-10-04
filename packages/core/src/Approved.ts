@@ -98,9 +98,17 @@ const merge3 = (
       yield* fs.writeFileString(b, base, { mode: 0o600 });
       yield* fs.writeFileString(o, ours, { mode: 0o600 });
       yield* fs.writeFileString(t, theirs, { mode: 0o600 });
+      // In its own directory, looking for no repository above it: whatever the
+      // process's directory is (a broken worktree's .git, say), it is not in play.
       return yield* exec({
         command: "git",
-        args: ["merge-file", "-p", o, b, t],
+        args: ["-C", dir, "merge-file", "-p", "ours", "base", "theirs"],
+        env: {
+          ...process.env,
+          GIT_DIR: undefined,
+          GIT_WORK_TREE: undefined,
+          GIT_CEILING_DIRECTORIES: dir.slice(0, dir.lastIndexOf("/")),
+        },
         timeout: Duration.seconds(30),
       });
     }).pipe(Effect.ensuring(fs.remove(dir, { recursive: true, force: true }).pipe(Effect.ignore)));
@@ -257,4 +265,4 @@ const removeEmpty = (held: ReadonlyArray<Held>) =>
 
 /** What gets past a pull refused for an edit that does not merge: works as written. */
 export const unmergedStep = (repo: string, files: ReadonlyArray<string>) =>
-  `this machine's edit to ${files.join(", ")} does not merge with the branch's change. To keep both: \`git -C ${repo} stash push -m t3-fleet -- ${files.join(" ")}\`, then \`t3-fleet sync\`, then make the edit again (\`t3-fleet setup\` proposes what setup added again); \`git -C ${repo} stash show -p\` shows what it was.`;
+  `this machine's edit to ${files.join(", ")} does not merge with the branch's change. To keep both: \`git -C ${repo} -c user.name=t3-fleet -c user.email=t3-fleet@localhost stash push -m t3-fleet -- ${files.join(" ")}\`, then \`t3-fleet sync\`, then make the edit again (\`t3-fleet setup\` proposes what setup added again); \`git -C ${repo} stash show -p\` shows what it was.`;

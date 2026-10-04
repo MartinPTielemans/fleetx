@@ -171,21 +171,28 @@ export const pullBranch = (
         .stdout,
     );
     const overlap: Array<string> = [];
+    const identical: Array<string> = [];
     for (const file of incoming.filter((f) => dirty.has(f))) {
       // A local edit identical to what arrives (an approved proposal coming
-      // back) is not a conflict: drop the local copy and take the branch's.
+      // back) is not a conflict: the local copy goes and the branch's comes.
       const local = out(yield* git(repo, ["hash-object", "--", file]));
       const remote = out(yield* git(repo, ["rev-parse", `origin/${branch}:${file}`]));
-      if (local !== "" && local === remote) {
-        if (dirty.get(file) === "??")
-          yield* git(repo, ["clean", "-q", "-f", "--", file], { env: literal });
-        else yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
-        continue;
-      }
-      overlap.push(file);
+      if (local !== "" && local === remote) identical.push(file);
+      else overlap.push(file);
     }
+    // Refused: nothing has changed yet, identical copies included.
     if (overlap.length > 0)
       return yield* Effect.fail(`local edits overlap incoming changes: ${overlap.join(", ")}`);
+    for (const file of identical)
+      if (dirty.get(file) === "??")
+        yield* git(repo, ["clean", "-q", "-f", "--", file], { env: literal });
+      else yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
+    /** The move failed: the identical copies back as they were (the branch's text, not in the index). */
+    const putBackIdentical = Effect.forEach(identical, (file) =>
+      git(repo, ["checkout", "-q", `origin/${branch}`, "--", file], { env: literal }).pipe(
+        Effect.andThen(git(repo, ["reset", "-q", "--", file], { env: literal })),
+      ),
+    );
     const move =
       how === "rebase"
         ? yield* git(repo, ["rebase", "-q", "--autostash", `origin/${branch}`])
@@ -193,6 +200,7 @@ export const pullBranch = (
           yield* git(repo, ["merge", "-q", "--ff-only", `origin/${branch}`]);
     if (!ok(move)) {
       if (how === "rebase") yield* git(repo, ["rebase", "--abort"]);
+      yield* putBackIdentical;
       return yield* Effect.fail(
         how === "rebase"
           ? `rebase onto origin/${branch} conflicted; resolve by hand`

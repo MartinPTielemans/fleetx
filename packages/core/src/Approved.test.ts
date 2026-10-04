@@ -177,13 +177,60 @@ describe("settleApproval", () => {
 
     // The step the refusal names gets past it, and keeps the edit.
     const step = unmergedStep(f.member, refused);
-    const stash = /`(git -C \S+ stash push -m t3-fleet -- [^`]+)`/.exec(step)?.[1] ?? "";
+    const stash = /`(git -C \S+ .*?stash push -m t3-fleet -- [^`]+)`/.exec(step)?.[1] ?? "";
     expect(stash).not.toBe("");
-    execFileSync("sh", ["-c", stash]);
+    // As written, on a machine where git has no identity of its own.
+    execFileSync("sh", ["-c", stash], {
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "user.useConfigOnly",
+        GIT_CONFIG_VALUE_0: "true",
+      },
+    });
     const again = await settle(f.member);
     expect(again.pulled._tag).toBe("Success");
     expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree, branch\n");
     expect(git(f.member, "stash", "show", "-p")).toContain("y, mine");
+  });
+
+  it("merges wherever it runs: a broken repository around its directory is not in play", async () => {
+    const f = fleet("broken");
+    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree\n", "x");
+    git(f.member, "pull", "-q");
+    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree, branch\n", "x again");
+    fs.writeFileSync(join(f.member, "skills/x/SKILL.md"), "x, mine\none\ntwo\nthree\n");
+    // Run from inside a worktree whose .git points nowhere.
+    const broken = join(home, "broken-worktree");
+    fs.mkdirSync(broken, { recursive: true });
+    fs.writeFileSync(join(broken, ".git"), "gitdir: /nonexistent/.git/worktrees/gone\n");
+    const cwd = process.cwd();
+    process.chdir(broken);
+    try {
+      const { held, pulled } = await settle(f.member);
+      expect(held.map((h) => [h.file, h.outcome])).toEqual([["skills/x/SKILL.md", "merged"]]);
+      expect(pulled._tag).toBe("Success");
+      expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree, branch\n");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  it("leaves everything as it was when the pull is refused, identical untracked copies included", async () => {
+    const f = fleet("refused");
+    commitOn(f.authority, "instructions/claude/CLAUDE.md", "rules\n", "instructions");
+    commitOn(f.authority, "skills/y/SKILL.md", "y, branch\n", "y");
+    // Not pulled yet: an identical copy of the incoming file, and an edit that does not merge.
+    fs.mkdirSync(join(f.member, "instructions/claude"), { recursive: true });
+    fs.writeFileSync(join(f.member, "instructions/claude/CLAUDE.md"), "rules\n");
+    fs.mkdirSync(join(f.member, "skills/y"), { recursive: true });
+    fs.writeFileSync(join(f.member, "skills/y/SKILL.md"), "y, mine\n");
+    const status = git(f.member, "status", "--porcelain", "-uall");
+    const { pulled } = await settle(f.member);
+    expect(pulled._tag).toBe("Failure");
+    expect(read(f.member, "instructions/claude/CLAUDE.md")).toBe("rules\n");
+    expect(read(f.member, "skills/y/SKILL.md")).toBe("y, mine\n");
+    expect(git(f.member, "status", "--porcelain", "-uall")).toBe(status);
   });
 
   it("never touches what sync holds back, and keeps copies only when it must, mode 600", async () => {
