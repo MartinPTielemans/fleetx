@@ -171,22 +171,41 @@ export const serveUntilIdle = <E, R>(served: Layer.Layer<never, E, R>, inFlight:
 
 // ---- the upstream client ---------------------------------------------------
 
+/** How long to wait for a connection to an upstream, and to the relay, which is either up or should be skipped quickly. */
+export const CONNECT_TIMEOUT_MS = 30_000;
+export const RELAY_CONNECT_TIMEOUT_MS = 5_000;
+
+/** The connect timeout for an origin: short for the ones in `quick` (the relay). */
+export const connectTimeoutFor = (origin: string | URL, quick: ReadonlyArray<string>) => {
+  const of = (url: string | URL) => URL.parse(String(url))?.origin ?? String(url);
+  return quick.some((q) => of(q) === of(origin)) ? RELAY_CONNECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
+};
+
 /**
  * The HTTP client the proxy and the relay's egress route forward with: an
  * undici agent whose header and body timeouts are the proxy's own, where
  * Node's fetch would give up waiting for headers after 300s and on a body
- * quiet for 300s, whatever the proxy says.
+ * quiet for 300s, whatever the proxy says. Connections to the `quick`
+ * origins (the relay) give up after 5s, so a relay host that is offline
+ * sends requests direct without a long wait.
  */
-export const forwardingClient = (timeouts: { readonly headersTimeout: Duration.Input; readonly bodyTimeout: Duration.Input }) => {
+export const forwardingClient = (timeouts: {
+  readonly headersTimeout: Duration.Input;
+  readonly bodyTimeout: Duration.Input;
+  readonly quick?: ReadonlyArray<string>;
+}) => {
   const headersTimeout = Duration.toMillis(Duration.fromInputUnsafe(timeouts.headersTimeout));
   const bodyTimeout = Duration.toMillis(Duration.fromInputUnsafe(timeouts.bodyTimeout));
+  const quick = timeouts.quick ?? [];
   return NodeHttpClient.layerUndiciNoDispatcher.pipe(
     Layer.provide(
       Layer.effect(NodeHttpClient.Dispatcher)(
         Effect.acquireRelease(
           // Effect's undici client sets its own timeouts on every request; these replace them.
           Effect.sync(() =>
-            new Undici.Agent({ connectTimeout: 30_000 }).compose((dispatch) => (opts, handler) => dispatch({ ...opts, headersTimeout, bodyTimeout }, handler)),
+            new Undici.Agent({
+              factory: (origin, opts) => new Undici.Pool(origin, { ...opts, connectTimeout: connectTimeoutFor(origin, quick) }),
+            }).compose((dispatch) => (opts, handler) => dispatch({ ...opts, headersTimeout, bodyTimeout }, handler)),
           ),
           (dispatcher) => Effect.promise(() => dispatcher.destroy()),
         ),
@@ -485,7 +504,7 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
 
       return Layer.mergeAll(health, stats, HttpRouter.add("*", "/*", guarded(forward)));
     }),
-  ).pipe(Layer.provide(forwardingClient({ headersTimeout, bodyTimeout })));
+  ).pipe(Layer.provide(forwardingClient({ headersTimeout, bodyTimeout, ...(options.relay === undefined ? {} : { quick: [options.relay.url] }) })));
 };
 
 /** This node's proxy stats, or null when nothing answers on the port. */

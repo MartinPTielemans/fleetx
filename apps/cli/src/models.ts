@@ -48,6 +48,7 @@ const ownSettings = readSettings.pipe(Effect.orElseSucceed(() => ({ models: {} a
 
 /** How long the proxy keeps answering on the old build once a new one is installed, for its responses to finish. */
 const NEW_BUILD_DRAIN = Duration.minutes(15);
+const SERVER_CLOSE = Duration.seconds(3);
 
 const serve = Command.make("serve", {
   egress: Flag.Literals("egress", ["direct", "relay"]).pipe(
@@ -76,7 +77,9 @@ const serve = Command.make("serve", {
       const routes = modelProxyLayer({ home, version: packageJson.version, egress, upstreams, inFlight, ...(relay === undefined ? {} : { relay }) });
       // No per-request log: models.log would grow without end, and an error's request carries its query string.
       const served = HttpRouter.serve(routes, { disableLogger: true }).pipe(
-        Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT })),
+        // whenIdle has done the draining by the time the server closes; a request that lands in that
+        // moment should be refused quickly, not wait out platform-node's 20s default.
+        Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT, gracefulShutdownTimeout: SERVER_CLOSE })),
       );
       return yield* untilNewBuild(serveUntilIdle(served, inFlight, Duration.seconds(STOP_DRAIN_SECONDS)), { drain: whenIdle(inFlight, NEW_BUILD_DRAIN) });
     }).pipe(Effect.scoped, reportUserErrors),

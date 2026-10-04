@@ -29,7 +29,8 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { ModelProxyStats } from "../Api.ts";
 import { egressLayer } from "./Egress.ts";
-import { makeInFlight, modelProxyLayer, proxyRefusal, serveUntilIdle, whenIdle, type ModelProxyOptions } from "./Proxy.ts";
+import { untilReplaced } from "../Runtime.ts";
+import { connectTimeoutFor, makeInFlight, modelProxyLayer, proxyRefusal, RELAY_CONNECT_TIMEOUT_MS, serveUntilIdle, whenIdle, type ModelProxyOptions } from "./Proxy.ts";
 
 type Handler = (req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse, n: number) => void;
 
@@ -94,22 +95,26 @@ const options = (url: string, over: Partial<ModelProxyOptions> = {}): ModelProxy
 const proxy = (url: string, over: Partial<ModelProxyOptions> = {}) => serve(HttpRouter.serve(modelProxyLayer(options(url, over)), quiet));
 
 /**
- * The proxy as `t3-fleet models serve` runs it: serveUntilIdle in a fiber,
- * which a test interrupts the way SIGTERM does. `newBuild` stands in for
- * untilNewBuild's notice: completing it starts the wait for requests in flight.
+ * The proxy as `t3-fleet models serve` runs it: serveUntilIdle under
+ * untilReplaced, in a fiber a test interrupts the way SIGTERM does.
+ * `newBuild()` stands in for newBuild's notice, and `exitCalled` for the
+ * CLI's forced exit.
  */
 const service = async (url: string, over: Partial<ModelProxyOptions> = {}, limits: { stop?: Duration.Input; newBuild?: Duration.Input; graceful?: Duration.Input } = {}) => {
   const server = NodeHttp.createServer();
   const inFlight = makeInFlight();
   const served = HttpRouter.serve(modelProxyLayer(options(url, { ...over, inFlight })), quiet).pipe(
-    Layer.provide(NodeHttpServer.layer(() => server, { host: "127.0.0.1", port: 0, gracefulShutdownTimeout: limits.graceful ?? "20 seconds" })),
+    Layer.provide(NodeHttpServer.layer(() => server, { host: "127.0.0.1", port: 0, gracefulShutdownTimeout: limits.graceful ?? "3 seconds" })),
   );
   const newBuild = Deferred.makeUnsafe<void>();
+  let exitCalled = false;
   const fiber = Effect.runFork(
-    Effect.raceFirst(
-      serveUntilIdle(served, inFlight, limits.stop ?? "5 seconds"),
-      Deferred.await(newBuild).pipe(Effect.andThen(whenIdle(inFlight, limits.newBuild ?? "5 seconds", "10 millis"))),
-    ),
+    untilReplaced(serveUntilIdle(served, inFlight, limits.stop ?? "5 seconds"), Deferred.await(newBuild), {
+      drain: whenIdle(inFlight, limits.newBuild ?? "5 seconds", "10 millis"),
+      exit: () => {
+        exitCalled = true;
+      },
+    }),
   );
   while (!server.listening) await new Promise((r) => setTimeout(r, 5));
   const address = server.address();
@@ -122,6 +127,7 @@ const service = async (url: string, over: Partial<ModelProxyOptions> = {}, limit
     stop: () => Effect.runPromise(Fiber.interrupt(fiber)),
     newBuild: () => Effect.runSync(Deferred.succeed(newBuild, undefined)),
     exited: () => Effect.runPromise(Fiber.await(fiber)),
+    exitCalled: () => exitCalled,
   };
 };
 
@@ -417,6 +423,18 @@ describe("model proxy against a fake upstream", () => {
     expect(up.seen.length).toBe(2);
   });
 
+  it("with egress = relay, skips a relay host that does not answer after a few seconds, not 30", async () => {
+    expect(connectTimeoutFor("http://relay.tailnet:8399", ["http://relay.tailnet:8399/"])).toBe(RELAY_CONNECT_TIMEOUT_MS);
+    expect(connectTimeoutFor("https://api.anthropic.com", ["http://relay.tailnet:8399"])).toBeGreaterThan(RELAY_CONNECT_TIMEOUT_MS);
+    const up = await upstream((_req, res) => res.writeHead(200).end("direct"));
+    // TEST-NET-1: packets to it go nowhere, so a connection neither succeeds nor is refused.
+    const base = await proxy(up.url, { egress: "relay", relay: { url: "http://192.0.2.1:8399", token: "relay-secret" } });
+    const started = Date.now();
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    expect(await response.text()).toBe("direct");
+    expect(Date.now() - started).toBeLessThan(RELAY_CONNECT_TIMEOUT_MS + 3000);
+  }, 15_000);
+
   it("the relay forwards only to upstreams the fleet declares", async () => {
     const up = await upstream((_req, res) => res.writeHead(200).end("ok"));
     const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true, bases: () => ["https://api.anthropic.com"] }), quiet));
@@ -450,10 +468,12 @@ describe("model proxy against a fake upstream", () => {
     proxied.newBuild();
     await new Promise((r) => setTimeout(r, 100));
     expect(proxied.server.listening).toBe(true);
+    expect(proxied.exitCalled()).toBe(false);
     expect(await response.text()).toBe("event: a\ndata: 1\n\nevent: b\ndata: 2\n\n");
     await proxied.exited();
     expect(proxied.server.listening).toBe(false);
     expect(proxied.inFlight.count()).toBe(0);
+    expect(proxied.exitCalled()).toBe(true);
   });
 
   it("records a response cut by the proxy stopping as a failure, and the client sees an error", async () => {

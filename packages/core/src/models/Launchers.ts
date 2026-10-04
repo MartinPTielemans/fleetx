@@ -21,7 +21,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import { launchdLabel, SH_CONFIG_DIR, SH_STATE_DIR, STATE_DIR, systemdUnit } from "../Names.ts";
-import { retireLegacyUnit } from "../Runtime.ts";
+import { launchdReload, retireLegacyUnit } from "../Runtime.ts";
 import { MODELS_PORT, proxyUrl, type Recipe } from "./Recipes.ts";
 
 /** A double-quoted shell word, with {proxy} becoming the launcher's $proxy. */
@@ -100,9 +100,9 @@ export const serviceUnitPath = (platform: string, root: boolean, home: string) =
 
 /**
  * `t3-fleet models serve` with the absolute node and bundle and a fixed PATH,
- * restarted a second after it exits: it exits by itself once a new build is
- * installed and its requests are done, and the CLIs retry a refused
- * connection for about that long. A stop waits for the requests in flight
+ * restarted a second after it exits, with no limit on restarts: it exits by
+ * itself once a new build is installed and its requests are done, and the
+ * CLIs retry a refused connection for about that long. A stop waits for the requests in flight
  * (STOP_DRAIN_SECONDS). Egress is an argument, so changing it makes the unit
  * stale and its fix restarts the proxy.
  */
@@ -130,6 +130,9 @@ export const serviceUnitText = (platform: string, root: boolean, home: string, n
 Description=T3 Fleet model proxy
 After=network-online.target
 Wants=network-online.target
+# Restarted a second after any exit, so the default limit (5 starts in 10s) would leave
+# it failed for good after a few quick failures (the port still held, node mid-upgrade).
+StartLimitIntervalSec=0
 
 [Service]
 Environment=HOME=${home}
@@ -156,7 +159,8 @@ export const serviceInstall = (platform: string, root: boolean, text: string) =>
       retireLegacyUnit(platform, root, "models"),
       `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       write(plist),
-      `launchctl bootout "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
+      // The proxy being replaced may drain for up to its ExitTimeOut before it is gone.
+      launchdReload(SERVICE_LABEL, plist, STOP_TIMEOUT_SECONDS),
     ].join("\n");
   }
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';

@@ -20,7 +20,7 @@ import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
-import { installedBundle, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
+import { installedBundle, launchdReload, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
 
 const Observed = Schema.Struct({
   /** "serve", "listen", or null when this node runs neither. */
@@ -94,7 +94,7 @@ const install = (platform: string, root: boolean, role: "serve" | "listen", text
       retireLegacyUnit(platform, root, role),
       `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       write(plist),
-      `launchctl bootout "gui/$(id -u)/${label(role)}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
+      launchdReload(label(role), plist),
     ].join("\n");
   }
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';

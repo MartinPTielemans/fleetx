@@ -8,7 +8,7 @@ import { Flag } from "effect/unstable/cli";
 
 import type { CheckReport } from "@t3-fleet/core/Check";
 import { loadConfig } from "@t3-fleet/core/Config";
-import { newBuild } from "@t3-fleet/core/Runtime";
+import { newBuild, untilReplaced } from "@t3-fleet/core/Runtime";
 
 /**
  * The bundle that gets streamed to other machines. Running from dist/bin.mjs
@@ -78,36 +78,16 @@ export const nodeFlag = Flag.String("node").pipe(
 
 /**
  * Runs a long-running service until it stops or this bundle is replaced by a
- * new build; then it returns, the process exits, and its unit starts the new
- * build (see newBuild in Runtime.ts). With `drain`, the service keeps running
- * once the new build is seen until `drain` completes (the model proxy waits
- * for its responses in flight); without, it stops at once (the relay's event
- * streams never go idle). The exit is forced a few seconds later: a client's
- * open connection (a kept-alive socket, an event stream) would otherwise keep
- * the process alive with nothing listening, and its unit would never start
- * the new build.
+ * new build (untilReplaced and newBuild in Runtime.ts). The exit is forced a
+ * few seconds after: a client's open connection (a kept-alive socket, an
+ * event stream) would otherwise keep the process alive with nothing
+ * listening, and its unit would never start the new build. With `drain`, the
+ * service keeps running once the new build is seen until `drain` completes.
  */
 export const untilNewBuild = <A, E, R, R2 = never>(service: Effect.Effect<A, E, R>, options: { readonly drain?: Effect.Effect<unknown, never, R2> } = {}) =>
-  Effect.suspend(() => {
-    let replaced = false;
-    return Effect.raceFirst(
-      service,
-      newBuild(process.argv[1] ?? "").pipe(
-        Effect.flatMap(() =>
-          options.drain === undefined
-            ? Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it")
-            : Console.log("a new T3 Fleet build is installed; exiting once the requests in flight are done").pipe(
-                Effect.andThen(options.drain),
-                Effect.andThen(Console.log("exiting so the service restarts on the new build")),
-              ),
-        ),
-        Effect.andThen(Effect.sync(() => {
-          replaced = true;
-        })),
-      ),
-    ).pipe(
-      // Once the service has stopped, finalizers included. A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
-      // @effect-diagnostics-next-line globalTimersInEffect:off
-      Effect.tap(() => Effect.sync(() => replaced && setTimeout(() => process.exit(0), 5_000).unref())),
-    );
+  untilReplaced(service, newBuild(process.argv[1] ?? ""), {
+    ...(options.drain === undefined ? {} : { drain: options.drain }),
+    // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
+    // @effect-diagnostics-next-line globalTimers:off
+    exit: () => setTimeout(() => process.exit(0), 5_000).unref(),
   });

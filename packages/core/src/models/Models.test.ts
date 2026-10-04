@@ -22,7 +22,7 @@ import type { NodeResult } from "../Remote.ts";
 import { parseClaudeAuth, parseCodexLogin } from "../CliLogin.ts";
 import { fromSnapshot, t3CliFromCommandLine } from "../T3Access.ts";
 import { endsAtEventBoundary, errorCode, isTimeoutCode, neverSent, requestHeaders, responseHeaders, retryAfterMs, retryAfterOf, retryDelay, splitPath, targetUrl } from "./Forward.ts";
-import { findCli, launcherText, serviceUnitText } from "./Launchers.ts";
+import { findCli, launcherText, serviceInstall, serviceUnitText } from "./Launchers.ts";
 import { followUpstreams, makeInFlight, whenIdle } from "./Proxy.ts";
 import { BUILTIN_UPSTREAMS, resolveRecipe, upstreamBases, upstreamsOf, type ModelsSettings, type Recipe } from "./Recipes.ts";
 import { withBinaryPath } from "./Route.ts";
@@ -348,10 +348,16 @@ describe("launchers", () => {
     expect(linux).toContain("ExecStart=/usr/bin/node /b.mjs models serve --egress relay");
     expect(linux).toContain("RestartSec=1\n");
     expect(linux).toMatch(/TimeoutStopSec=(\d+)/);
+    expect(linux).toMatch(/\[Unit\][^[]*StartLimitIntervalSec=0\n/);
     const darwin = serviceUnitText("darwin", false, "/h", "/n", "/b.mjs");
     expect(darwin).toContain("<string>models</string><string>serve</string></array>");
     expect(darwin).toContain("<key>ThrottleInterval</key><integer>1</integer>");
     expect(darwin).toContain("<key>ExitTimeOut</key>");
+    // Reinstalling waits for the old proxy to be gone before bootstrapping the new one.
+    const install = serviceInstall("darwin", false, darwin);
+    expect(install).toContain("launchctl print");
+    expect(install.indexOf("launchctl bootout \"gui/$(id -u)/dev.t3-fleet.models\"")).toBeLessThan(install.indexOf("launchctl print"));
+    expect(install.indexOf("launchctl print")).toBeLessThan(install.indexOf("launchctl bootstrap"));
   });
 });
 
