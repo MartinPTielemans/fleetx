@@ -1,9 +1,15 @@
 // The launcher test runs the real shell script against a fake CLI in a scratch HOME.
+// @effect-diagnostics globalTimers:off
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
@@ -15,9 +21,10 @@ import type { MachineObservation } from "../Observation.ts";
 import type { NodeResult } from "../Remote.ts";
 import { parseClaudeAuth, parseCodexLogin } from "../CliLogin.ts";
 import { fromSnapshot, t3CliFromCommandLine } from "../T3Access.ts";
-import { endsAtEventBoundary, requestHeaders, retryAfterMs, retryDelay, splitPath, targetUrl } from "./Forward.ts";
-import { launcherText, serviceUnitText } from "./Launchers.ts";
-import { BUILTIN_UPSTREAMS, resolveRecipe, upstreamsOf, type Recipe } from "./Recipes.ts";
+import { endsAtEventBoundary, errorCode, isTimeoutCode, neverSent, requestHeaders, responseHeaders, retryAfterMs, retryAfterOf, retryDelay, splitPath, targetUrl } from "./Forward.ts";
+import { findCli, launcherText, serviceUnitText } from "./Launchers.ts";
+import { followUpstreams, makeInFlight, whenIdle } from "./Proxy.ts";
+import { BUILTIN_UPSTREAMS, resolveRecipe, upstreamBases, upstreamsOf, type ModelsSettings, type Recipe } from "./Recipes.ts";
 import { withBinaryPath } from "./Route.ts";
 import { parseFallbacks, percentile, proxyStats, type RequestRecord } from "./Stats.ts";
 
@@ -32,10 +39,37 @@ describe("retries", () => {
   it("passes other statuses on", () => {
     for (const status of [200, 400, 401, 403, 404, 413, 501]) expect(retryDelay({ ...base, status })).toBeNull();
   });
-  it("honours retry-after up to 30s, and gives up beyond it", () => {
+  it("honours retry-after within 10s of waiting in all, and gives up beyond it", () => {
     expect(retryDelay({ ...base, status: 429, retryAfter: 7000 })).toBe(7000);
-    expect(retryDelay({ ...base, status: 429, retryAfter: 30_000 })).toBe(30_000);
-    expect(retryDelay({ ...base, status: 429, retryAfter: 31_000 })).toBeNull();
+    expect(retryDelay({ ...base, status: 429, retryAfter: 10_000 })).toBe(10_000);
+    expect(retryDelay({ ...base, status: 429, retryAfter: 11_000 })).toBeNull();
+    expect(retryDelay({ ...base, status: 429, retryAfter: 4000, waited: 6000 })).toBe(4000);
+    expect(retryDelay({ ...base, status: 429, retryAfter: 4000, waited: 6500 })).toBeNull();
+    expect(retryDelay({ ...base, attempt: 2, waited: 8500 })).toBeNull();
+  });
+  it("obeys x-should-retry before the status", () => {
+    expect(retryDelay({ ...base, status: 503, shouldRetry: "false" })).toBeNull();
+    expect(retryDelay({ ...base, status: null, shouldRetry: "false" })).toBeNull();
+    expect(retryDelay({ ...base, status: 409, shouldRetry: "true" })).toBe(500);
+    expect(retryDelay({ ...base, status: 409 })).toBeNull();
+  });
+  it("reads retry-after-ms before retry-after", () => {
+    expect(retryAfterOf({ "retry-after-ms": "1500", "retry-after": "9" }, 0)).toBe(1500);
+    expect(retryAfterOf({ "retry-after": "2" }, 0)).toBe(2000);
+    expect(retryAfterOf({ "retry-after-ms": "soon", "retry-after": "2" }, 0)).toBe(2000);
+    expect(retryAfterOf({}, 0)).toBeNull();
+  });
+  it("retries only network errors that happened before the request left", () => {
+    for (const code of ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "ERR_TLS_CERT_ALTNAME_INVALID", "refused"]) expect(neverSent(code)).toBe(true);
+    for (const code of ["ECONNRESET", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "EPIPE", null]) expect(neverSent(code)).toBe(false);
+    expect(isTimeoutCode("UND_ERR_HEADERS_TIMEOUT")).toBe(true);
+  });
+  it("finds a network error's code in its causes", () => {
+    // Effect's HttpClientError around fetch's TypeError around Node's error, and around an undici error.
+    expect(errorCode({ reason: { cause: { message: "fetch failed", cause: { code: "ECONNREFUSED" } } } })).toBe("ECONNREFUSED");
+    expect(errorCode({ reason: { cause: { code: "UND_ERR_HEADERS_TIMEOUT", message: "Headers Timeout Error" } } })).toBe("UND_ERR_HEADERS_TIMEOUT");
+    expect(errorCode(new Error("x"))).toBeNull();
+    expect(errorCode("nothing")).toBeNull();
   });
   it("jitters the backoff", () => {
     expect(retryDelay({ ...base, random: 0 })).toBe(250);
@@ -66,6 +100,23 @@ describe("forwarding", () => {
     expect(
       requestHeaders({ authorization: "a", "user-agent": "u", host: "h", connection: "keep-alive", "content-length": "3", "x-t3-fleet-relay-token": "t", "x-t3-fleet-egress-base": "b", version: "1" }),
     ).toEqual({ authorization: "a", "user-agent": "u", version: "1" });
+  });
+  it("never finds an upstream or recipe on Object.prototype", () => {
+    const split = splitPath("/constructor/x");
+    expect(split).toEqual({ upstream: "constructor", rest: "/x" });
+    expect(targetUrl(BUILTIN_UPSTREAMS, "constructor", "/x", {})).toBeNull();
+    expect(targetUrl(BUILTIN_UPSTREAMS, "toString", "/x", {})).toBeNull();
+    expect(resolveRecipe("constructor", "constructor", {}, BUILTIN_UPSTREAMS)._tag).toBe("unroutable");
+    expect(resolveRecipe("codex", "codex", { providers: { codex: { upstream: "constructor" } } }, BUILTIN_UPSTREAMS)._tag).toBe("unroutable");
+  });
+  it("keeps the relay's and its own headers away from the client, and a compressed body's encoding with it", () => {
+    expect(responseHeaders({ "content-encoding": "gzip", "x-t3-fleet-egress-failure": "ECONNRESET", "content-length": "3", "request-id": "r" })).toEqual({
+      "content-encoding": "gzip",
+      "request-id": "r",
+    });
+  });
+  it("lists every base an upstream forwards to", () => {
+    expect(upstreamBases(BUILTIN_UPSTREAMS)).toEqual(["https://api.anthropic.com", "https://api.openai.com/v1", "https://chatgpt.com/backend-api/codex"]);
   });
   it("knows where an event ends", () => {
     expect(endsAtEventBoundary("")).toBe(true);
@@ -232,9 +283,107 @@ describe("launchers", () => {
     expect(() => readFileSync(`${home}/.local/state/t3-fleet/models-fallback.log`, "utf8")).toThrow();
   });
 
-  it("start the proxy with its egress", () => {
-    expect(serviceUnitText("linux", false, "/h", "/usr/bin/node", "/b.mjs", "relay")).toContain("ExecStart=/usr/bin/node /b.mjs models serve --egress relay");
-    expect(serviceUnitText("darwin", false, "/h", "/n", "/b.mjs")).toContain("<string>models</string><string>serve</string></array>");
+  // A PATH with what the launcher needs and none of curl or wget, as on a minimal machine.
+  const bareBin = (home: string) => {
+    const bin = `${home}/bare-bin`;
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ["sed", "tail", "mkdir", "wc", "mv", "date", "bash", "cat"]) {
+      const found = ["/bin", "/usr/bin"].map((d) => `${d}/${tool}`).find((f) => existsSync(f));
+      if (found !== undefined) symlinkSync(found, `${bin}/${tool}`);
+    }
+    return bin;
+  };
+  const runAsync = (file: string, args: ReadonlyArray<string>, env: Record<string, string>) =>
+    new Promise<string>((resolve, reject) => execFile("/bin/sh", [file, ...args], { env, encoding: "utf8" }, (error, stdout) => (error === null ? resolve(stdout) : reject(error))));
+  const healthServer = async () => {
+    const server = createServer((req, res) => res.writeHead(req.url === "/health" ? 200 : 404).end("ok"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    return { port: typeof address === "object" && address !== null ? address.port : 0, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  };
+
+  it("find a listening proxy without curl or wget, and fall back when none listens", async () => {
+    const home = scratch();
+    const bin = bareBin(home);
+    const health = await healthServer();
+    try {
+      writeFileSync(`${home}/.local/bin/t3-fleet-claude`, launcherText("claudeAgent", recipe("claudeAgent", "claudeAgent"), health.port));
+      const env = { HOME: home, PATH: bin };
+      expect(await runAsync(`${home}/.local/bin/t3-fleet-claude`, ["-p", "hi"], env)).toContain(`base=http://127.0.0.1:${health.port}/anthropic`);
+      expect(existsSync(`${home}/.local/state/t3-fleet/models-fallback.log`)).toBe(false);
+      // With curl, the same.
+      expect(await runAsync(`${home}/.local/bin/t3-fleet-claude`, ["-p", "hi"], { HOME: home, PATH: "/usr/bin:/bin" })).toContain(`base=http://127.0.0.1:${health.port}/anthropic`);
+    } finally {
+      await health.close();
+    }
+    expect(await runAsync(`${home}/.local/bin/t3-fleet-claude`, ["-p", "hi"], { HOME: home, PATH: bin })).toContain("base=\n");
+    expect(readFileSync(`${home}/.local/state/t3-fleet/models-fallback.log`, "utf8")).toMatch(/\tanthropic\tproxy not listening\n$/);
+  });
+
+  it("run the CLI from PATH when the recipe's ~/ path is not there", () => {
+    const home = scratch();
+    const bin = bareBin(home);
+    rmSync(`${home}/.local/bin/claude`);
+    writeFileSync(`${bin}/claude`, '#!/bin/sh\necho "from PATH $*"\n');
+    chmodSync(`${bin}/claude`, 0o755);
+    const out = execFileSync("/bin/sh", [`${home}/.local/bin/t3-fleet-claude`, "--version"], { env: { HOME: home, PATH: bin }, encoding: "utf8" });
+    expect(out).toBe("from PATH --version\n");
+  });
+
+  it("know whether the CLI a recipe runs is installed", async () => {
+    const home = scratch();
+    const bin = bareBin(home);
+    const find = (command: string, path: string) => Effect.runPromise(findCli(home, command, path).pipe(Effect.provide(NodeServices.layer)));
+    expect(await find("~/.local/bin/claude", "")).toBe(`${home}/.local/bin/claude`);
+    rmSync(`${home}/.local/bin/claude`);
+    expect(await find("~/.local/bin/claude", bin)).toBeNull();
+    writeFileSync(`${bin}/claude`, "#!/bin/sh\n");
+    expect(await find("~/.local/bin/claude", bin)).toBe(`${bin}/claude`);
+    expect(await find("grok", "")).toBe(`${home}/.local/bin/grok`);
+    expect(await find("/nowhere/grok", bin)).toBeNull();
+  });
+
+  it("start the proxy with its egress, back a second after it exits, and give it time to finish when stopped", () => {
+    const linux = serviceUnitText("linux", false, "/h", "/usr/bin/node", "/b.mjs", "relay");
+    expect(linux).toContain("ExecStart=/usr/bin/node /b.mjs models serve --egress relay");
+    expect(linux).toContain("RestartSec=1\n");
+    expect(linux).toMatch(/TimeoutStopSec=(\d+)/);
+    const darwin = serviceUnitText("darwin", false, "/h", "/n", "/b.mjs");
+    expect(darwin).toContain("<string>models</string><string>serve</string></array>");
+    expect(darwin).toContain("<key>ThrottleInterval</key><integer>1</integer>");
+    expect(darwin).toContain("<key>ExitTimeOut</key>");
+  });
+});
+
+describe("the proxy's lifetime", () => {
+  it("keeps the last good upstreams when a reload fails", async () => {
+    let reads = 0;
+    const declared: ModelsSettings = { upstreams: { xai: { url: "https://api.x.ai/v1" } } };
+    const load = Effect.suspend(() => (++reads === 1 ? Effect.succeed(declared) : Effect.fail("config mid-sync")));
+    const names = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const upstreams = yield* followUpstreams(load, {}, Duration.millis(10));
+          yield* Effect.sleep(Duration.millis(60));
+          return Object.keys(upstreams());
+        }),
+      ),
+    );
+    expect(reads).toBeGreaterThan(2);
+    expect(names).toContain("xai");
+  });
+
+  it("waits for the requests in flight, up to a limit", async () => {
+    const inFlight = makeInFlight();
+    const leave = inFlight.enter();
+    leave();
+    leave();
+    expect(inFlight.count()).toBe(0);
+    expect(await Effect.runPromise(whenIdle(inFlight, Duration.seconds(1)))).toBe(true);
+    const stuck = inFlight.enter();
+    expect(await Effect.runPromise(whenIdle(inFlight, Duration.millis(50), Duration.millis(10)))).toBe(false);
+    setTimeout(stuck, 30);
+    expect(await Effect.runPromise(whenIdle(inFlight, Duration.seconds(1), Duration.millis(10)))).toBe(true);
   });
 });
 
@@ -405,6 +554,23 @@ describe("models area", () => {
     expect(missing?.key).toBe("provider-token-missing-claudeAgent");
     expect(missing?.detail).toContain("claude setup-token");
     expect(missing?.detail).toContain("t3-fleet secrets set CLAUDE_CODE_OAUTH_TOKEN=<token>");
+  });
+  it("does not count client errors, or a failure or two in a quiet hour", () => {
+    const tooLong: ModelProxyStats = { ...healthy, upstreams: [{ ...healthy.upstreams[0]!, h1: window(3, 3, { "4xx": 3 }) }] };
+    expect(keys(observed({ stats: tooLong }))).toEqual([]);
+    const quiet: ModelProxyStats = { ...healthy, upstreams: [{ ...healthy.upstreams[0]!, h1: window(4, 2, { "529": 2 }) }] };
+    expect(keys(observed({ stats: quiet }))).toEqual([]);
+    const mixed: ModelProxyStats = { ...healthy, upstreams: [{ ...healthy.upstreams[0]!, h1: window(20, 13, { "4xx": 10, "5xx": 3 }) }] };
+    expect(findings(observed({ stats: mixed }))[0]?.title).toBe("anthropic: 3 of 20 requests failed in the last hour");
+  });
+  it("does not route a provider whose CLI is not installed", () => {
+    const direct = { ...claudeProvider, binaryPath: "claude", launcher: { ...LAUNCHER, cli: { command: "~/.local/bin/claude", found: false } } };
+    const [finding] = findings(observed({ stats: healthy, providers: [direct] }));
+    expect(finding?.key).toBe("models-not-routed-claudeAgent");
+    expect(finding?.fix).toBeUndefined();
+    expect(finding?.detail).toContain("~/.local/bin/claude, which is not installed here");
+    const found = { ...direct, launcher: { ...LAUNCHER, cli: { command: "~/.local/bin/claude", found: true } } };
+    expect(findings(observed({ stats: healthy, providers: [found] }))[0]?.fix).toEqual({ command: "t3-fleet models route claudeAgent", safe: false });
   });
   it("warns above 5% failures in the last hour, naming the class, or on fallbacks", () => {
     const bad: ModelProxyStats = { ...healthy, upstreams: [{ ...healthy.upstreams[0]!, h1: window(100, 6, { "529": 5, connect: 1 }) }] };

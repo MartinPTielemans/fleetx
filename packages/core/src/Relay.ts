@@ -65,6 +65,8 @@ export interface RelayOptions {
   readonly hub: Omit<HubConfig, "relayToken">;
   /** How often to look for new commits. */
   readonly pollEvery?: Duration.Input;
+  /** The upstream bases /egress may forward to (models/Egress.ts); the built-in ones when absent. */
+  readonly egressBases?: () => ReadonlyArray<string>;
 }
 
 const MAX_EVENTS = 500;
@@ -160,6 +162,6 @@ export const relayLayer = (options: RelayOptions) =>
         }),
       );
 
-      return Layer.mergeAll(health, report, fleet, eventStream, hubRoutes(hubService, options.token), egressLayer(options.token));
+      return Layer.mergeAll(health, report, fleet, eventStream, hubRoutes(hubService, options.token), egressLayer(options.token, options.egressBases === undefined ? {} : { bases: options.egressBases }));
     }),
   );

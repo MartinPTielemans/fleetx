@@ -193,12 +193,23 @@ the model providers. It serves `/<upstream>/*` for each upstream: `anthropic`
 ChatGPT login), and any that `[models.upstreams.<name>]` declares (`url`,
 optionally `chatgpt_url`). It is a pass-through: each CLI makes its own
 requests with its own credential, and the proxy forwards them unchanged. It
-retries connection errors and 408, 429, 500, 502, 503, 504 and 529 up to
-three times, only before the first byte reaches the client; sends SSE
-keepalives while an event stream is quiet; and keeps per-upstream stats for
-5 minutes, 1 hour and 24 hours (`t3-fleet models stats`, and the UI). It logs
-metadata only, to `~/.local/state/t3-fleet/models.jsonl`; never bodies or auth
-headers.
+retries 408, 429, 500, 502, 503, 504 and 529, and network errors from before
+the request left the machine (refused, unresolvable, a connect timeout), up
+to three times, only before the first byte reaches the client. It obeys
+`x-should-retry`, honours `retry-after-ms` and `retry-after`, and waits 10
+seconds at most in all; after that the answer goes to the CLI, which retries
+on its own. A request the upstream may have received (a reset, a timeout
+waiting for the answer) is never sent twice. A response that breaks off after
+it started reaches the client as a dropped connection, never as a body that
+ends cleanly. The proxy sends SSE keepalives while an event stream is quiet,
+and keeps per-upstream stats for 5 minutes, 1 hour and 24 hours
+(`t3-fleet models stats`, and the UI). It logs metadata only, to
+`~/.local/state/t3-fleet/models.jsonl`; never bodies or auth headers.
+
+Installing a new build does not cut a response: the proxy notices the build,
+keeps answering until its last response is done (15 minutes at most), and
+exits; its service starts the new build a second later. Stopping the service
+waits up to 45 seconds the same way.
 
 The area installs `t3-fleet models serve` as a service, writes a launcher per
 enabled T3 provider instance it can route (`~/.local/bin/t3-fleet-claude`,
@@ -217,10 +228,15 @@ built in:
 Any other driver whose CLI takes a base URL is routed by declaring its recipe;
 one that runs inside T3 without a CLI, or has no recipe, is a note. When the
 proxy is not listening a launcher runs the CLI directly and notes it in
-`~/.local/state/t3-fleet/models-fallback.log`.
+`~/.local/state/t3-fleet/models-fallback.log`; it asks the proxy with curl,
+wget or bash, whichever the machine has. A recipe's CLI under `~/` that is not
+there is looked up on PATH, and T3 is only pointed at a launcher whose CLI is
+installed.
 
 With `egress = "relay"` the proxy sends traffic through the relay's `/egress`
-route instead of directly, for a node on a bad network.
+route instead of directly, for a node on a bad network. The relay forwards
+only to upstreams some node's `[models]` declares. When the relay cannot be
+reached, or will not forward, the request goes direct.
 
 Independently of `[models]`, every node reports each T3 provider's login and
 health as T3 itself sees it (`provider-logged-out-<instance>`,

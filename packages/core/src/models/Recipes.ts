@@ -64,6 +64,13 @@ export type ModelsSettings = typeof ModelsSettings.Type;
 export const decodeModelsSettings = (raw: unknown): ModelsSettings =>
   Option.getOrElse(Schema.decodeUnknownOption(ModelsSettings)(raw ?? {}), () => ({}));
 
+/**
+ * `record[key]` when the record itself has it, never what it inherits: a
+ * path like /constructor/… must not find Object.prototype.constructor.
+ */
+export const own = <V>(record: Readonly<Record<string, V>> | undefined, key: string): V | undefined =>
+  record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+
 // ---- upstreams ----------------------------------------------------------------
 
 export interface UpstreamDef {
@@ -87,7 +94,7 @@ export const upstreamsOf = (settings: ModelsSettings): Upstreams => {
   const out: Record<string, UpstreamDef> = { ...BUILTIN_UPSTREAMS };
   for (const [name, declared] of Object.entries(settings.upstreams ?? {})) {
     if (!NAME.test(name) || RESERVED.has(name)) continue;
-    const base = out[name];
+    const base = own(out, name);
     const url = (declared.url ?? base?.url ?? "").replace(/\/+$/, "");
     if (!/^https?:\/\//.test(url)) continue;
     const chatgpt = declared.chatgpt_url ?? base?.chatgptUrl;
@@ -96,7 +103,11 @@ export const upstreamsOf = (settings: ModelsSettings): Upstreams => {
   return out;
 };
 
-export const proxyUrl = (upstream: string) => `http://127.0.0.1:${MODELS_PORT}/${upstream}`;
+export const proxyUrl = (upstream: string, port: number = MODELS_PORT) => `http://127.0.0.1:${port}/${upstream}`;
+
+/** Every base URL these upstreams forward to: what a relay's /egress route may send to. */
+export const upstreamBases = (upstreams: Upstreams): ReadonlyArray<string> =>
+  Object.values(upstreams).flatMap((u) => (u.chatgptUrl === undefined ? [u.url] : [u.url, u.chatgptUrl]));
 
 // ---- recipes ------------------------------------------------------------------
 
@@ -146,15 +157,15 @@ export type Resolved =
 
 /** The recipe for one T3 instance: the driver's built-in one overlaid with what the settings declare. */
 export const resolveRecipe = (instanceId: string, driver: string, settings: ModelsSettings, upstreams: Upstreams): Resolved => {
-  const declared = settings.providers?.[instanceId];
+  const declared = own(settings.providers, instanceId);
   if (declared?.route === false) return { _tag: "skip" };
   // Everything here ends up in a shell script written through a heredoc; one line each, or none at all.
   const fields = [instanceId, driver, declared?.upstream, declared?.command, declared?.token_env, ...Object.entries(declared?.env ?? {}).flat(), ...(declared?.args ?? [])];
   if (fields.some((f) => f !== undefined && CONTROL.test(f))) {
     return { _tag: "unroutable", reason: `the recipe for ${JSON.stringify(instanceId)} has a newline or control character in it, so no launcher is written` };
   }
-  const builtin = BUILTIN_RECIPES[driver];
-  const bin = T3_DRIVERS[driver]?.bin;
+  const builtin = own(BUILTIN_RECIPES, driver);
+  const bin = own(T3_DRIVERS, driver)?.bin;
   const env = { ...builtin?.env, ...declared?.env };
   const args = declared?.args ?? builtin?.args ?? [];
   if (builtin === undefined && Object.keys(env).length === 0 && args.length === 0) {
@@ -169,7 +180,7 @@ export const resolveRecipe = (instanceId: string, driver: string, settings: Mode
   const command = declared?.command ?? builtin?.command ?? bin ?? null;
   if (command === null) return { _tag: "unroutable", reason: `${driver} has no CLI; set [models.providers.${instanceId}] command` };
   const upstream = declared?.upstream ?? builtin?.upstream ?? "";
-  if (upstreams[upstream] === undefined) {
+  if (own(upstreams, upstream) === undefined) {
     return { _tag: "unroutable", reason: upstream === "" ? `set [models.providers.${instanceId}] upstream` : `no upstream named ${upstream} in [models.upstreams]` };
   }
   const badEnv = Object.keys(env).find((k) => !ENV_NAME.test(k));

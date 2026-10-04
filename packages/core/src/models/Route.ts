@@ -24,6 +24,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { T3_DRIVERS, t3SettingsPath } from "../T3Settings.ts";
+import { own } from "./Recipes.ts";
 
 export class RouteError extends Schema.TaggedError<RouteError>()("RouteError", { message: Schema.String }) {}
 
@@ -53,7 +54,7 @@ const locate = (settings: Json, instanceId: string): { readonly holder: () => Js
       },
     };
   }
-  if (T3_DRIVERS[instanceId] === undefined) return null;
+  if (own(T3_DRIVERS, instanceId) === undefined) return null;
   const providers = settings["providers"];
   const legacy = isObject(providers) ? providers[instanceId] : undefined;
   return {

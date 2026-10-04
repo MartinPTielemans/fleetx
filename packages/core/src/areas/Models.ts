@@ -35,7 +35,7 @@ import { exec } from "../Exec.ts";
 import { installedBundle, legacyUnitInstalled, notInstalledTitle, stableNode } from "../Runtime.ts";
 import { localSecretsPath } from "../Secrets.ts";
 import { providerPlans, readT3Settings } from "../T3Settings.ts";
-import { launcherInstall, launcherText, SERVICE_LABEL, SERVICE_UNIT, serviceInstall, serviceUnitPath, serviceUnitText } from "../models/Launchers.ts";
+import { findCli, launcherInstall, launcherText, SERVICE_LABEL, SERVICE_UNIT, serviceInstall, serviceUnitPath, serviceUnitText } from "../models/Launchers.ts";
 import { fetchStats } from "../models/Proxy.ts";
 import { launcherPath, legacyLauncherPath, ModelsSettings, providerName, resolveRecipe, upstreamsOf } from "../models/Recipes.ts";
 import { loadFallbacks, WINDOWS } from "../models/Stats.ts";
@@ -64,7 +64,15 @@ const Observed = Schema.Struct({
       binaryPath: Schema.NullOr(Schema.String),
       upstream: Schema.NullOr(Schema.String),
       /** Its launcher, when it has a recipe. */
-      launcher: Schema.NullOr(Schema.Struct({ path: Schema.String, installed: Schema.NullOr(Schema.String), want: Schema.String })),
+      launcher: Schema.NullOr(
+        Schema.Struct({
+          path: Schema.String,
+          installed: Schema.NullOr(Schema.String),
+          want: Schema.String,
+          /** The CLI it would run, and whether that is there (absent from older builds: assumed there). */
+          cli: Schema.optionalKey(Schema.Struct({ command: Schema.String, found: Schema.Boolean })),
+        }),
+      ),
       /** Its fleetx-<name> launcher from before the rename, when one is still there. Until 1.0. */
       legacyLauncher: Schema.optionalKey(Schema.NullOr(Schema.String)),
       /** Why it cannot be routed; null when it can. */
@@ -137,7 +145,12 @@ export const ModelsArea = defineArea({
         providers.push({
           ...common,
           upstream: recipe.upstream,
-          launcher: { path, installed: yield* read(path), want: launcherText(plan.instanceId, recipe) },
+          launcher: {
+            path,
+            installed: yield* read(path),
+            want: launcherText(plan.instanceId, recipe),
+            cli: { command: recipe.command, found: (yield* findCli(ctx.home, recipe.command, ctx.env["PATH"] ?? "")) !== null },
+          },
           legacyLauncher: (yield* read(legacy)) === null ? null : legacy,
           unroutable: null,
           token: tokenEnv === null ? null : { env: tokenEnv, set: hasVar(secrets, tokenEnv) || (ctx.env[tokenEnv] ?? "") !== "", help: recipe.tokenHelp },
@@ -199,17 +212,21 @@ export const ModelsArea = defineArea({
         });
       }
       if (!isRouted(p.binaryPath, launcher.path)) {
+        // The launcher runs the recipe's CLI, not T3's binaryPath: routing to a CLI that is not there would break the provider.
+        const cli = launcher.cli;
         out.push({
           ...base,
           key: `models-not-routed-${p.instanceId}`,
           severity: "warn",
           title: `T3 starts ${name} directly, not through the model proxy`,
-          ...(ready
-            ? {
-                detail: `points T3's ${name} at ${basename(launcher.path)}; sessions already running keep their binary`,
-                fix: { command: `t3-fleet models route ${sh(p.instanceId)}`, safe: false },
-              }
-            : { detail: `install ${basename(launcher.path)} first` }),
+          ...(cli !== undefined && !cli.found
+            ? { detail: `${basename(launcher.path)} would run ${cli.command}, which is not installed here (nor ${basename(cli.command)} on PATH); set [models.providers.${p.instanceId}] command` }
+            : ready
+              ? {
+                  detail: `points T3's ${name} at ${basename(launcher.path)}; sessions already running keep their binary`,
+                  fix: { command: `t3-fleet models route ${sh(p.instanceId)}`, safe: false },
+                }
+              : { detail: `install ${basename(launcher.path)} first` }),
         });
       }
       if (p.token !== null && !p.token.set) {
@@ -229,15 +246,25 @@ export const ModelsArea = defineArea({
   },
 });
 
-/** More than 5% of the last hour's requests failed, or launches fell back to the CLI; null when traffic is healthy. */
+/** Fewer failures than this in an hour are noise, whatever share of a quiet hour's traffic they are. */
+const MIN_FAILURES = 3;
+
+/**
+ * More than 5% of the last hour's requests failed (and at least MIN_FAILURES),
+ * or launches fell back to the CLI; null when traffic is healthy. Client
+ * errors ("4xx": a prompt too long, a request too large) are the request's
+ * own problem and do not count.
+ */
 export const modelsFailing = (observed: Pick<Observed, "stats" | "fallbacksH1">): { title: string; detail: string } | null => {
   const parts: Array<string> = [];
   const details: Array<string> = [];
   for (const u of observed.stats?.upstreams ?? []) {
     const w = u.h1;
-    if (w.requests === 0 || w.failed / w.requests <= 0.05) continue;
-    const [worst] = Object.entries(w.failures).sort((a, b) => b[1] - a[1]);
-    parts.push(`${u.upstream}: ${w.failed} of ${w.requests} requests failed in the last hour`);
+    const failures = Object.entries(w.failures).filter(([k]) => k !== "4xx");
+    const failed = failures.reduce((n, [, v]) => n + v, 0);
+    if (failed < MIN_FAILURES || failed / w.requests <= 0.05) continue;
+    const [worst] = failures.sort((a, b) => b[1] - a[1]);
+    parts.push(`${u.upstream}: ${failed} of ${w.requests} requests failed in the last hour`);
     details.push(`${u.upstream} mostly ${worst?.[0] ?? "unknown"}${u.lastError === null ? "" : `; last: ${u.lastError.message}`}`);
   }
   const fallbacks = Math.max(observed.fallbacksH1, ...(observed.stats?.upstreams ?? []).map((u) => u.h1.fallbacks));

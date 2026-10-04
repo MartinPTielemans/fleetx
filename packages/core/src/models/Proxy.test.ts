@@ -1,13 +1,20 @@
 // The test is a black box: a plain Node server as the upstream, so it controls
 // bytes and timing exactly, and plain fetch as the client.
-// @effect-diagnostics globalFetch:off globalTimers:off
+// @effect-diagnostics globalFetch:off globalTimers:off globalDate:off
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -22,7 +29,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { ModelProxyStats } from "../Api.ts";
 import { egressLayer } from "./Egress.ts";
-import { modelProxyLayer, proxyRefusal, type ModelProxyOptions } from "./Proxy.ts";
+import { makeInFlight, modelProxyLayer, proxyRefusal, serveUntilIdle, whenIdle, type ModelProxyOptions } from "./Proxy.ts";
 
 type Handler = (req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse, n: number) => void;
 
@@ -74,18 +81,56 @@ const serve = async (
 
 const quiet = { disableLogger: true, disableListenLog: true } as const;
 
-const proxy = (url: string, over: Partial<ModelProxyOptions> = {}) =>
-  serve(
-    HttpRouter.serve(modelProxyLayer({
-      home: "/nonexistent",
-      version: "test",
-      egress: "direct",
-      persist: false,
-      retryBaseMs: 5,
-      upstreams: () => ({ anthropic: { url }, openai: { url: `${url}/v1`, chatgptUrl: `${url}/backend-api/codex` }, local: { url: `${url}/local` } }),
-      ...over,
-    }), quiet),
+const options = (url: string, over: Partial<ModelProxyOptions> = {}): ModelProxyOptions => ({
+  home: "/nonexistent",
+  version: "test",
+  egress: "direct",
+  persist: false,
+  retryBaseMs: 5,
+  upstreams: () => ({ anthropic: { url }, openai: { url: `${url}/v1`, chatgptUrl: `${url}/backend-api/codex` }, local: { url: `${url}/local` } }),
+  ...over,
+});
+
+const proxy = (url: string, over: Partial<ModelProxyOptions> = {}) => serve(HttpRouter.serve(modelProxyLayer(options(url, over)), quiet));
+
+/**
+ * The proxy as `t3-fleet models serve` runs it: serveUntilIdle in a fiber,
+ * which a test interrupts the way SIGTERM does. `newBuild` stands in for
+ * untilNewBuild's notice: completing it starts the wait for requests in flight.
+ */
+const service = async (url: string, over: Partial<ModelProxyOptions> = {}, limits: { stop?: Duration.Input; newBuild?: Duration.Input; graceful?: Duration.Input } = {}) => {
+  const server = NodeHttp.createServer();
+  const inFlight = makeInFlight();
+  const served = HttpRouter.serve(modelProxyLayer(options(url, { ...over, inFlight })), quiet).pipe(
+    Layer.provide(NodeHttpServer.layer(() => server, { host: "127.0.0.1", port: 0, gracefulShutdownTimeout: limits.graceful ?? "20 seconds" })),
   );
+  const newBuild = Deferred.makeUnsafe<void>();
+  const fiber = Effect.runFork(
+    Effect.raceFirst(
+      serveUntilIdle(served, inFlight, limits.stop ?? "5 seconds"),
+      Deferred.await(newBuild).pipe(Effect.andThen(whenIdle(inFlight, limits.newBuild ?? "5 seconds", "10 millis"))),
+    ),
+  );
+  while (!server.listening) await new Promise((r) => setTimeout(r, 5));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  cleanups.push(() => Effect.runPromise(Fiber.interrupt(fiber)).then(() => undefined));
+  return {
+    base: `http://127.0.0.1:${port}`,
+    inFlight,
+    server,
+    stop: () => Effect.runPromise(Fiber.interrupt(fiber)),
+    newBuild: () => Effect.runSync(Deferred.succeed(newBuild, undefined)),
+    exited: () => Effect.runPromise(Fiber.await(fiber)),
+  };
+};
+
+/** An event stream that takes a while: one event at once, the next after `ms`. */
+const slowStream = (ms: number) => (_req: NodeHttp.IncomingMessage, res: NodeHttp.ServerResponse) => {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.write("event: a\ndata: 1\n\n");
+  setTimeout(() => res.end("event: b\ndata: 2\n\n"), ms);
+};
 
 const stats = async (base: string) => Schema.decodeSync(Schema.fromJsonString(ModelProxyStats))(await (await fetch(`${base}/stats`)).text());
 
@@ -160,7 +205,7 @@ describe("model proxy against a fake upstream", () => {
     expect(up.seen.length).toBe(2);
   });
 
-  it("never retries once the response has started; a broken stream reaches the client", async () => {
+  it("never retries once the response has started; a broken stream reaches the client as an error", async () => {
     const up = await upstream((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write("event: message_start\ndata: {}\n\n");
@@ -169,12 +214,100 @@ describe("model proxy against a fake upstream", () => {
     const base = await proxy(up.url);
     const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
     expect(response.status).toBe(200);
-    const body = await response.text().catch(() => "broken");
-    expect(body === "broken" || body.startsWith("event: message_start")).toBe(true);
+    await expect(response.text()).rejects.toThrow();
     expect(up.seen.length).toBe(1);
     await new Promise((r) => setTimeout(r, 50));
     const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
     expect(anthropic?.m5.failures).toEqual({ stream: 1 });
+  });
+
+  it("passes a cut-off plain body on as an error too, never as a short complete one", async () => {
+    const up = await upstream((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+      res.write('{"partial":');
+      setTimeout(() => res.destroy(), 30);
+    });
+    const base = await proxy(up.url);
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    await expect(response.text()).rejects.toThrow();
+  });
+
+  it("does not count a client that hangs up as a failure", async () => {
+    const up = await upstream(slowStream(300));
+    const base = await proxy(up.url);
+    const abort = new AbortController();
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}", signal: abort.signal });
+    expect(response.status).toBe(200);
+    abort.abort();
+    await new Promise((r) => setTimeout(r, 100));
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5).toMatchObject({ requests: 1, failed: 0 });
+  });
+
+  it("never sends a POST again once the upstream may have received it", async () => {
+    // Reads the whole body, then resets the connection without answering.
+    const up = await upstream((_req, res) => res.socket?.destroy());
+    const base = await proxy(up.url);
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: '{"model":"m"}' });
+    expect(response.status).toBe(502);
+    expect(up.seen.length).toBe(1);
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5).toMatchObject({ requests: 1, failed: 1, failures: { connect: 1 } });
+  });
+
+  it("waits for headers as long as it says, and not longer, then answers 504 without retrying", async () => {
+    const up = await upstream(() => {});
+    const base = await proxy(up.url, { headersTimeout: "300 millis" });
+    const started = Date.now();
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    expect(response.status).toBe(504);
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(up.seen.length).toBe(1);
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5.failures).toEqual({ timeout: 1 });
+  });
+
+  it("gives up on a body that goes quiet for its timeout, as an error", async () => {
+    const up = await upstream((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("{");
+    });
+    const base = await proxy(up.url, { bodyTimeout: "300 millis" });
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    await expect(response.text()).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 50));
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5.failures).toEqual({ stream: 1 });
+  });
+
+  it("passes on at once an answer that says x-should-retry: false, and retries one that says true", async () => {
+    const up = await upstream((req, res, n) =>
+      req.url === "/no" ? res.writeHead(503, { "x-should-retry": "false" }).end("busy") : n <= 2 ? res.writeHead(409, { "x-should-retry": "true" }).end() : res.writeHead(200).end("ok"),
+    );
+    const base = await proxy(up.url);
+    const no = await fetch(`${base}/anthropic/no`, { method: "POST", body: "{}" });
+    expect(no.status).toBe(503);
+    expect(no.headers.get("x-should-retry")).toBe("false");
+    expect(up.seen.length).toBe(1);
+    expect((await fetch(`${base}/anthropic/yes`, { method: "POST", body: "{}" })).status).toBe(200);
+  });
+
+  it("records HEAD requests", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200, { "content-type": "text/plain" }).end());
+    const base = await proxy(up.url);
+    const response = await fetch(`${base}/anthropic/api/hello`, { method: "HEAD" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/plain");
+    expect(up.seen[0]?.url).toBe("/api/hello");
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5).toMatchObject({ requests: 1, failed: 0 });
+  });
+
+  it("answers /constructor/… with 404, not 500", async () => {
+    const up = await upstream((_req, res) => res.end());
+    const base = await proxy(up.url);
+    expect((await fetch(`${base}/constructor/x`)).status).toBe(404);
+    expect((await fetch(`${base}/__proto__/x`)).status).toBe(404);
   });
 
   it("sends keepalive comments between events while the upstream is quiet", async () => {
@@ -234,7 +367,7 @@ describe("model proxy against a fake upstream", () => {
 
   it("with egress = relay, goes through the relay's /egress route with the relay token", async () => {
     const up = await upstream((_req, res) => res.writeHead(200).end("via relay"));
-    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true }), quiet));
+    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true, bases: () => [up.url] }), quiet));
     const base = await proxy(up.url, { egress: "relay", relay: { url: relay, token: "relay-secret" } });
     const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", headers: { authorization: "Bearer client" }, body: "{}" });
     expect(await response.text()).toBe("via relay");
@@ -244,5 +377,95 @@ describe("model proxy against a fake upstream", () => {
     expect(up.seen[0]?.headers["x-t3-fleet-egress-base"]).toBeUndefined();
     const refused = await fetch(`${relay}/egress/anthropic/v1/messages`, { method: "POST", body: "{}" });
     expect(refused.status).toBe(401);
+  });
+
+  it("with egress = relay, a broken upstream stream reaches the client as an error and counts as one", async () => {
+    const up = await upstream((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("event: a\ndata: 1\n\n");
+      setTimeout(() => res.destroy(), 50);
+    });
+    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true, bases: () => [up.url] }), quiet));
+    const base = await proxy(up.url, { egress: "relay", relay: { url: relay, token: "relay-secret" } });
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    await expect(response.text()).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 50));
+    const anthropic = (await stats(base)).upstreams.find((u) => u.upstream === "anthropic");
+    expect(anthropic?.m5.failures).toEqual({ stream: 1 });
+  });
+
+  it("with egress = relay, a reset behind the relay is the node's own network error: no 502 from upstream, no second POST", async () => {
+    const up = await upstream((_req, res) => res.socket?.destroy());
+    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true, bases: () => [up.url] }), quiet));
+    const base = await proxy(up.url, { egress: "relay", relay: { url: relay, token: "relay-secret" } });
+    const response = await fetch(`${base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("at the relay");
+    expect(up.seen.length).toBe(1);
+  });
+
+  it("with egress = relay, sends the request direct when the relay is down or will not forward", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200).end("direct"));
+    const down = up.url.replace(/:\d+$/, ":1");
+    const viaDown = await proxy(up.url, { egress: "relay", relay: { url: down, token: "relay-secret" } });
+    expect(await (await fetch(`${viaDown}/anthropic/v1/messages`, { method: "POST", body: "{}" })).text()).toBe("direct");
+    const wrongToken = await serve(HttpRouter.serve(egressLayer("other-secret", { allowInsecure: true, bases: () => [up.url] }), quiet));
+    const viaRefusing = await proxy(up.url, { egress: "relay", relay: { url: wrongToken, token: "relay-secret" } });
+    const response = await fetch(`${viaRefusing}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("direct");
+    expect(up.seen.length).toBe(2);
+  });
+
+  it("the relay forwards only to upstreams the fleet declares", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200).end("ok"));
+    const relay = await serve(HttpRouter.serve(egressLayer("relay-secret", { allowInsecure: true, bases: () => ["https://api.anthropic.com"] }), quiet));
+    const response = await fetch(`${relay}/egress/anthropic/v1/messages`, {
+      method: "POST",
+      headers: { "x-t3-fleet-relay-token": "relay-secret", "x-t3-fleet-egress-base": up.url },
+      body: "{}",
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("x-t3-fleet-egress-failure")).toBe("refused");
+    expect(up.seen.length).toBe(0);
+  });
+
+  it("keeps answering after SIGTERM until the response in flight is done", async () => {
+    const up = await upstream(slowStream(400));
+    const proxied = await service(up.url);
+    const response = await fetch(`${proxied.base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    expect(response.status).toBe(200);
+    const stopped = proxied.stop();
+    // Still listening meanwhile.
+    expect((await fetch(`${proxied.base}/health`)).status).toBe(200);
+    expect(await response.text()).toBe("event: a\ndata: 1\n\nevent: b\ndata: 2\n\n");
+    await stopped;
+    expect(proxied.server.listening).toBe(false);
+  });
+
+  it("keeps answering once a new build is installed until the response in flight is done, then stops", async () => {
+    const up = await upstream(slowStream(400));
+    const proxied = await service(up.url);
+    const response = await fetch(`${proxied.base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    proxied.newBuild();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(proxied.server.listening).toBe(true);
+    expect(await response.text()).toBe("event: a\ndata: 1\n\nevent: b\ndata: 2\n\n");
+    await proxied.exited();
+    expect(proxied.server.listening).toBe(false);
+    expect(proxied.inFlight.count()).toBe(0);
+  });
+
+  it("records a response cut by the proxy stopping as a failure, and the client sees an error", async () => {
+    const home = mkdtempSync(`${tmpdir()}/t3-fleet-proxy-`);
+    mkdirSync(`${home}/.local/state/t3-fleet`, { recursive: true });
+    const up = await upstream(slowStream(5000));
+    const proxied = await service(up.url, { home, persist: true }, { stop: "100 millis", graceful: "100 millis" });
+    const response = await fetch(`${proxied.base}/anthropic/v1/messages`, { method: "POST", body: "{}" });
+    const body = response.text().then(() => "complete", () => "error");
+    await proxied.stop();
+    expect(await body).toBe("error");
+    const lines = readFileSync(`${home}/.local/state/t3-fleet/models.jsonl`, "utf8").trim().split("\n");
+    expect(JSON.parse(lines[lines.length - 1] ?? "{}")).toMatchObject({ failure: "stream", error: expect.stringContaining("the proxy stopped") });
   });
 });

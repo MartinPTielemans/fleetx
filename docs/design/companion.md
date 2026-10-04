@@ -61,13 +61,23 @@ existing `[proxy]` settings; that path stays as it is.
   (`https://api.anthropic.com`), `openai` (the ChatGPT backend for a ChatGPT
   login, `https://api.openai.com/v1` for an API key), and any upstream the
   settings declare. `GET /stats` returns `ModelProxyStats`; `GET /health`.
-- Retries: on connection errors, and on 408, 429 (honouring `retry-after` up
-  to 30s), 500, 502, 503, 504, 529, up to 3 retries with jittered backoff,
-  only before the first response byte. After streaming starts an error passes
-  through. SSE keepalive comments every 15s while waiting upstream.
+- Retries: on network errors from before the request left (refused,
+  unresolvable, connect timeout, TLS handshake), and on 408, 429, 500, 502,
+  503, 504, 529, up to 3 retries with jittered backoff, only before the first
+  response byte. `x-should-retry` is obeyed and `retry-after-ms` /
+  `retry-after` honoured, within 10s of waiting in all; then the CLI's own
+  retries take over. A request the upstream may have received is never sent
+  twice. Header and body timeouts are the proxy's (10 minutes), not Node's
+  fetch defaults. After streaming starts an error passes through as a dropped
+  connection. SSE keepalive comments every 15s while waiting upstream.
+- Restarts: the proxy counts requests in flight. A new build is not
+  restarted by the install: the proxy notices it, keeps serving until idle
+  (15 minutes at most) and exits; SIGTERM drains the same way for 45s. The
+  unit restarts it after a second.
 - Optional `egress = "relay"`: forward through the relay
   (`/egress/<upstream>/*`, relay token) instead of directly,
-  for a node on a bad network.
+  for a node on a bad network. The relay forwards only to declared upstream
+  bases; when it cannot be reached or refuses, the request goes direct.
 - Launchers: the area writes one small shell script per routed T3 provider
   instance (`~/.local/bin/t3-fleet-claude`, `t3-fleet-codex`,
   `t3-fleet-<instance>`). Each follows its instance's recipe: the variables or
