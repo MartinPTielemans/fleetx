@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   statSync,
   symlinkSync,
@@ -259,8 +260,11 @@ describe("Claude's lock, with faults injected", () => {
           Effect.suspend(() => {
             touches++;
             if (touches === 2) {
-              rmdirSync(lock);
+              // The original is moved aside before its replacement is made, so the replacement
+              // cannot reuse its inode: the same on every filesystem.
+              renameSync(lock, `${lock}-old`);
               mkdirSync(lock);
+              rmdirSync(`${lock}-old`);
             }
             return fs.utimes(path, atime, mtime);
           }),

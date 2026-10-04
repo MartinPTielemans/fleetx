@@ -90,12 +90,18 @@ const parseConfig = (file: string, text: Option.Option<string>) =>
 export const readClaudeConfig = (file: string) =>
   readConfigText(file).pipe(Effect.flatMap((text) => parseConfig(file, text)));
 
-/** Which lock directory is there: two readings are the same lock only with the same inode and mtime. */
+/**
+ * Which lock directory is there. Its identity is its inode and, where the
+ * platform reports one, its birthtime (statx on Linux): ext4 and overlayfs
+ * often give a directory removed and made again at once the same inode, so
+ * the inode alone would not tell them apart. Two readings are the same lock
+ * only with the same identity and mtime.
+ */
 interface Seen {
-  readonly ino: number | undefined;
+  readonly id: string;
   readonly mtime: number | undefined;
 }
-const sameLock = (a: Seen, b: Seen) => a.ino === b.ino && a.mtime === b.mtime;
+const sameLock = (a: Seen, b: Seen) => a.id === b.id && a.mtime === b.mtime;
 
 export interface LockTiming {
   readonly staleMs: number;
@@ -110,7 +116,7 @@ export interface LockTiming {
  *
  * `use` gets `whileOwned`, which runs an effect (the rename that publishes a
  * write) only after checking, under the same permit the heartbeat takes, that
- * the lock is still ours: the directory this run made (its inode), with the
+ * the lock is still ours: the directory this run made (its identity), with the
  * mtime this run last gave it, given less than `staleMs` ago. The heartbeat
  * refreshes it every `updateMs`: it checks the lock, sets its mtime, and looks
  * again. A failed refresh, a refresh that finds another directory or another
@@ -119,9 +125,12 @@ export interface LockTiming {
  * Release rmdirs the directory only while it is still ours.
  *
  * Windows that remain, as in proper-lockfile: a takeover between our check
- * and our utimes gets its mtime touched once (we then see its inode, and stop);
- * and between whileOwned's check and the rename another process may take a
- * lock it believes stale. Neither can be closed with a directory lock.
+ * and our utimes gets its mtime touched once. We see it, and stop, when the
+ * new directory has a new inode or a new birthtime; where it has neither (a
+ * reused inode on a filesystem that reports no birthtime), that replacement
+ * goes unnoticed. And between whileOwned's check and the rename another
+ * process may take a lock it believes stale. None of these can be closed
+ * with a directory lock, and proper-lockfile has them all.
  */
 export const withClaudeConfigLock = <A, E, R>(
   file: string,
@@ -136,7 +145,11 @@ export const withClaudeConfigLock = <A, E, R>(
     const waitMs = timing.waitMs ?? LOCK_WAIT_MS;
     const look = fs.stat(lock).pipe(
       Effect.map((info): Seen => ({
-        ino: Option.getOrUndefined(info.ino),
+        id: [
+          Option.getOrUndefined(info.ino),
+          // No birthtime, or none worth having (0): the inode alone.
+          Option.getOrUndefined(Option.filter(info.birthtime, (b) => b.getTime() > 0))?.getTime(),
+        ].join(":"),
         mtime: Option.getOrUndefined(info.mtime)?.getTime(),
       })),
     );
@@ -164,7 +177,7 @@ export const withClaudeConfigLock = <A, E, R>(
           Effect.mapError((e) => `cannot lock ${file}: ${e.message}`),
         );
         if (made) {
-          // Ours: give it our mtime (utimes takes seconds) and remember its inode.
+          // Ours: give it our mtime (utimes takes seconds) and remember its identity.
           const at = yield* Clock.currentTimeMillis;
           yield* fs.utimes(lock, at / 1000, at / 1000).pipe(Effect.ignore);
           const seen = yield* look.pipe(Effect.option);
@@ -199,7 +212,7 @@ export const withClaudeConfigLock = <A, E, R>(
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const first = yield* acquire;
-        const inode = first.seen.ino;
+        const identity = first.seen.id;
         /** The mtime our last refresh gave it, and when (the time that mtime stands for). */
         const mine = yield* Ref.make({ mtime: first.seen.mtime, at: first.at });
         const lost = yield* Ref.make<string | null>(null);
@@ -208,7 +221,7 @@ export const withClaudeConfigLock = <A, E, R>(
         // Released last: removed only if it is still the directory this run made, as we left it.
         yield* Effect.addFinalizer(() =>
           Ref.get(mine).pipe(
-            Effect.flatMap(({ mtime }) => removeIfStill({ ino: inode, mtime })),
+            Effect.flatMap(({ mtime }) => removeIfStill({ id: identity, mtime })),
             Effect.ignore,
           ),
         );
@@ -219,7 +232,7 @@ export const withClaudeConfigLock = <A, E, R>(
           const now = yield* look.pipe(Effect.option);
           const { mtime, at } = yield* Ref.get(mine);
           if (Option.isNone(now)) return "it was removed";
-          if (now.value.ino !== inode) return "another process made it anew";
+          if (now.value.id !== identity) return "another process made it anew";
           if (now.value.mtime !== mtime) return "another process touched it";
           if ((yield* Clock.currentTimeMillis) - at >= timing.staleMs)
             return "it was not refreshed in time";
@@ -235,7 +248,7 @@ export const withClaudeConfigLock = <A, E, R>(
           );
           if (touched !== null) return yield* lose(touched);
           const after = yield* look.pipe(Effect.option);
-          if (Option.isNone(after) || after.value.ino !== inode)
+          if (Option.isNone(after) || after.value.id !== identity)
             return yield* lose("another process made it anew");
           // A late refresh still counts from when it began: that is the mtime it set.
           yield* Ref.set(mine, { mtime: after.value.mtime, at });
