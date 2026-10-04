@@ -284,6 +284,9 @@ pass "an older controller offers no downgrade"
 on server 'printf "%s\n" "{\"node\":\"server\",\"repo\":\"/home/dev/fleet\",\"branch\":\"main\",\"roles\":[\"member\"],\"settings\":{},\"finished\":false}" > ~/.local/state/t3-fleet/leave.json'
 expect server "partway through leaving the fleet (server)" 't3-fleet setup'
 expect server "t3-fleet leave --retire" 't3-fleet setup'
+expect server "nothing was changed" 't3-fleet leave --retire --dry-run'
+on server '[ -f ~/.local/state/t3-fleet/leave.json ]' || fail "leave --retire --dry-run should leave the record where it is"
+expect server "partway through leaving" 't3-fleet setup'
 expect server "Set the departure's record aside" 't3-fleet leave --retire'
 expect server "Nothing here differs" 't3-fleet setup'
 pass "setup refuses to start while a departure is unfinished, until leave finishes it or --retire sets it aside"

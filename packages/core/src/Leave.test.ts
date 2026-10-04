@@ -47,7 +47,7 @@ import { writeAtomically } from "./leave/Files.ts";
 import { editCodexServers } from "./leave/Mcp.ts";
 import { settingsUpdates, throughT3, unrouted } from "./leave/Models.ts";
 import { removeService } from "./leave/Services.ts";
-import { approve, autoApprovable, listProposals } from "./Staging.ts";
+import { approve, autoApprovable, autoApproves, listProposals } from "./Staging.ts";
 import { exchange } from "./Sync.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -962,7 +962,9 @@ describe("round two", () => {
     await run(applyLeave(await f.plan()));
     const [departure] = await run(listProposals(f.box, "main"));
     if (departure === undefined) throw new Error("no proposal");
-    expect(autoApprovable(departure, ["nodes/", "secrets/"])).toBe(false);
+    // Under trusting prefixes, by its paths it would pass; as a departure it never does.
+    expect(autoApprovable(departure, ["nodes/", "secrets/"])).toBe(true);
+    expect(await run(autoApproves(f.box, departure, ["nodes/", "secrets/"]))).toBe(false);
     // A marked proposal that is not a departure gets no protection from sync.
     git(f.repo, "fetch", "-q", "origin");
     git(f.repo, "reset", "-q", "--hard", "origin/main");
@@ -1335,7 +1337,9 @@ describe("round three", () => {
       JSON.stringify({ takenAt: 1, moved: [] }),
     );
     const outcomes = await run(applyLeave(await f.plan(true)));
-    expect(outcomes.at(-1)?.lines.join("\n")).toContain("it still holds 1 file of setup's");
+    expect(outcomes.at(-1)?.lines.join("\n")).toContain(
+      "it still holds 2 things the snapshot does not account for",
+    );
     expect(read(f.home, ".local/state/t3-fleet/setup-backups/setup/backup/unlisted")).toBe(
       "user data",
     );
@@ -1391,7 +1395,7 @@ describe("round three", () => {
     put(f.home, ".config/t3-fleet/age-key.txt", `${await generateX25519Identity()}\n`, 0o600);
     const refused = await run(applyLeave(plan).pipe(Effect.flip));
     expect(refused).toContain("this machine changed since leave planned");
-    expect(refused).toContain("its key is a new one");
+    expect(refused).toContain("its key is another one");
     expect(exists(f.home, ".config/t3-fleet/age-key.txt")).toBe(true);
     expect(exists(f.home, ".local/state/t3-fleet/leave.json")).toBe(false);
     expect(
@@ -1508,5 +1512,125 @@ describe("an unfinished departure, and setup", () => {
     expect((await run(unfinishedDeparture(f.home)))._tag).toBe("None");
     expect((await run(currentDeparture(f.home))).resumed).toBe(false);
     expect(await run(retireDeparture(f.home))).toBeNull();
+  });
+});
+
+// ---- the final review ------------------------------------------------------------
+
+describe("final review", () => {
+  for (const [change, says] of [
+    ["deletes the key", "its key is gone or cannot be read"],
+    ["corrupts the key", "its key is gone or cannot be read"],
+    ["removes origin", "its config repo origin is gone or cannot be read"],
+  ] as const)
+    it(`runs nothing when, after planning, the machine ${change}`, async () => {
+      const f = await makeFleet({ node: 'roles = ["member"]\n' });
+      const plan = await f.plan(true);
+      if (change === "deletes the key") fs.rmSync(join(f.home, ".config/t3-fleet/age-key.txt"));
+      else if (change === "corrupts the key")
+        put(f.home, ".config/t3-fleet/age-key.txt", "not an identity\n", 0o600);
+      else git(f.repo, "remote", "remove", "origin");
+      const refused = await run(applyLeave(plan).pipe(Effect.flip));
+      expect(refused).toContain("this machine changed since leave planned");
+      expect(refused).toContain(says);
+      expect(exists(f.home, ".local/state/t3-fleet/leave.json")).toBe(false);
+      expect(exists(f.home, ".config/t3-fleet/config.toml")).toBe(true);
+      expect(
+        spawnSync("git", ["rev-parse", "--verify", "-q", "t3-fleet/staging/laptop"], {
+          cwd: f.origin,
+        }).status,
+      ).not.toBe(0);
+    });
+
+  it("keeps setup's directory when it holds an empty directory nobody listed", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    fs.mkdirSync(join(f.home, ".local/state/t3-fleet/setup/unlisted-empty-backup"), {
+      recursive: true,
+    });
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({ takenAt: 1, moved: [] }),
+    );
+    const outcomes = await run(applyLeave(await f.plan(true)));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(
+      fs
+        .statSync(join(f.home, ".local/state/t3-fleet/setup-backups/setup/unlisted-empty-backup"))
+        .isDirectory(),
+    ).toBe(true);
+  });
+
+  it("removes setup's directory when what is left are only the snapshot and its backups' emptied places", async () => {
+    const f = await makeFleet();
+    const backup = join(f.home, ".local/state/t3-fleet/setup/backup/1/.agents/skills/b");
+    put(backup, "SKILL.md", "b before setup\n");
+    fs.mkdirSync(join(f.home, ".agents/skills"), { recursive: true });
+    fs.symlinkSync(join(f.repo, "skills/b"), join(f.home, ".agents/skills/b"));
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({ takenAt: 1, moved: [{ path: "~/.agents/skills/b", backup }] }),
+    );
+    const outcomes = await run(applyLeave(await f.plan(true)));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(read(f.home, ".agents/skills/b/SKILL.md")).toBe("b before setup\n");
+    expect(exists(f.home, ".local/state/t3-fleet/setup")).toBe(false);
+    expect(exists(f.home, ".local/state/t3-fleet/setup-backups")).toBe(false);
+  });
+
+  it("says where --retire --dry-run would set the record aside, and moves nothing", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(f.home, ".local/state/t3-fleet/leave.json", JSON.stringify(departureOf(f.config)));
+    const to = await run(retireDeparture(f.home, { dryRun: true }));
+    expect(to).toMatch(/\/leave-retired-\d+\.json$/);
+    expect(exists(f.home, ".local/state/t3-fleet/leave.json")).toBe(true);
+    expect(fs.existsSync(to ?? "")).toBe(false);
+    expect((await run(unfinishedDeparture(f.home)))._tag).toBe("Some");
+  });
+
+  it("lets an authority's own sync approve a member's ordinary edit of its node file, never a departure", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(
+      f.box,
+      "t3-fleet.toml",
+      '[fleet]\nbranch = "main"\nauto_commit = ["skills/", "nodes/"]\nauto_approve = ["nodes/", "secrets/"]\n',
+    );
+    commitAll(f.box, "trust nodes/");
+    git(f.repo, "pull", "-q", "--ff-only", "origin", "main");
+    // The member edits its own node file; its sync proposes it.
+    put(f.repo, "nodes/laptop.toml", 'roles = ["member"]\n[mcp]\nservers = []\n');
+    const member = await run(loadConfigFrom(f.repo, "laptop"));
+    const laptop = member.nodes.find((n) => n.name === "laptop");
+    if (laptop === undefined) throw new Error("no laptop");
+    await run(underSyncLock(exchange(member, laptop, [])));
+    // The authority's own sync, unattended, approves it.
+    const authorityHome = join(f.root, "box-home");
+    process.env["HOME"] = authorityHome;
+    put(
+      authorityHome,
+      ".config/t3-fleet/gitconfig",
+      "[user]\n\tname = T\n\temail = t@example.com\n",
+    );
+    put(authorityHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
+    const authority = await run(loadConfigFrom(f.box, "box"));
+    const box = authority.nodes.find((n) => n.name === "box");
+    if (box === undefined) throw new Error("no box");
+    const lines: Array<string> = [];
+    await run(underSyncLock(exchange(authority, box, lines)));
+    expect(lines.join("\n")).toContain("approved laptop's proposal");
+    expect(onBranch(f.origin, "nodes/laptop.toml")).toContain("servers = []");
+    // A real departure under the same trust stays for a person to approve.
+    process.env["HOME"] = f.home;
+    git(f.repo, "checkout", "-q", "--", ".");
+    git(f.repo, "pull", "-q", "--ff-only", "origin", "main");
+    const again = await run(loadConfigFrom(f.repo, "laptop"));
+    await run(applyLeave(await f.planFor(departureOf(again))));
+    process.env["HOME"] = authorityHome;
+    const after: Array<string> = [];
+    await run(underSyncLock(exchange(await run(loadConfigFrom(f.box, "box")), box, after)));
+    expect(after.join("\n")).not.toContain("approved laptop's");
+    expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
+    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).not.toBeNull();
   });
 });

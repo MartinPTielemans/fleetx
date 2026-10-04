@@ -71,7 +71,7 @@ import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
-import { approve, autoApprovable, listProposals, settleRejection } from "./Staging.ts";
+import { approve, autoApproves, listProposals, settleRejection } from "./Staging.ts";
 import { isDepartureProposal } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { withSyncLock } from "./SyncLock.ts";
@@ -397,7 +397,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       if (authority) {
         const prefixes = settingList(config, "auto_approve", []);
         for (const p of yield* listProposals(repo, config.branch))
-          if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
+          if (yield* autoApproves(repo, p, prefixes)) for (const f of p.files) incoming.add(f);
       }
       const moving = [...movable].filter(([, files]) => files.some((f) => incoming.has(f)));
       // A member's file exactly as its approved proposal had it stays: the pull takes it as it
@@ -673,7 +673,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     if (self.roles.includes("authority") && !failed) {
       const prefixes = settingList(config, "auto_approve", []);
       for (const proposal of yield* listProposals(repo, config.branch)) {
-        if (!autoApprovable(proposal, prefixes)) continue;
+        if (!(yield* autoApproves(repo, proposal, prefixes))) continue;
         const rev = yield* approve(
           repo,
           config.branch,

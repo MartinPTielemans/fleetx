@@ -200,6 +200,32 @@ export const currentIdentity = (home: string, fallbackRepo: string, create = fal
   });
 export type Identity = { readonly node: string | null; readonly enrollment: Enrollment };
 
+/**
+ * What differs between the enrollment leave planned for and the one now,
+ * field by field and strictly: a key, origin, checkout or id that was there
+ * when it planned and is gone, unreadable or another now, and one that has
+ * appeared since. (A recorded departure is compared more leniently, below:
+ * a purge that stopped halfway has rightly removed the key.)
+ */
+const identityChanges = (planned: Enrollment, now: Enrollment) => {
+  const differs: Array<string> = [];
+  const field = (name: string, was: string | null | undefined, is: string | null | undefined) => {
+    if ((was ?? null) === (is ?? null)) return;
+    differs.push(
+      was === null || was === undefined
+        ? `it has ${name} now that it did not have`
+        : is === null || is === undefined
+          ? `its ${name} is gone or cannot be read`
+          : `its ${name} is another one`,
+    );
+  };
+  field("key", planned.key, now.key);
+  field("config repo origin", planned.remote, now.remote);
+  field("checkout", planned.checkout, now.checkout);
+  field("checkout id", planned.id, now.id);
+  return differs;
+};
+
 /** What differs between an enrollment recorded and one now, said for a person; empty when nothing does. */
 const enrollmentChanges = (was: Enrollment, now: Enrollment) => {
   const differs: Array<string> = [];
@@ -240,15 +266,18 @@ export const unfinishedDeparture = (home: string) =>
  * Sets the record of a departure aside (leave-retired-<time>.json beside
  * it), for a departure that is over or given up: nothing else changes, and
  * the next leave or setup starts from this machine as it is. Returns where
- * it went, or null when there was none.
+ * it goes, or null when there is none; with `dryRun`, only where it would go.
  */
-export const retireDeparture = (home: string) =>
+export const retireDeparture = (home: string, options: { readonly dryRun?: boolean } = {}) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const file = departurePath(home);
     if (!(yield* present(file))) return null;
     const to = `${stateDir(home)}/leave-retired-${yield* Clock.currentTimeMillis}.json`;
-    yield* fs.rename(file, to).pipe(Effect.mapError((e) => `setting ${file} aside: ${e.message}`));
+    if (options.dryRun !== true)
+      yield* fs
+        .rename(file, to)
+        .pipe(Effect.mapError((e) => `setting ${file} aside: ${e.message}`));
     return to;
   });
 
@@ -505,6 +534,15 @@ const purgeStep = (
     const exists = (p: string) => fs.exists(p).pipe(Effect.orElseSucceed(() => false));
     const state = stateDir(home);
     const setupDir = `${state}/setup`;
+    // The directories that hold the snapshot's backups, up to setup's own.
+    const holders = new Set<string>();
+    for (const m of moved)
+      for (
+        let d = path.dirname(m.backup);
+        within(d, setupDir) && d !== setupDir;
+        d = path.dirname(d)
+      )
+        holders.add(d);
     const notes: Array<string> = [];
     // Backups of the user's files that purge would otherwise take with the state dir.
     const rescued = moved
@@ -561,10 +599,12 @@ const purgeStep = (
             done.push(`kept ${tilde(r.from, home)} as ${tilde(yield* keep(r.from, r.to), home)}`);
         // Decided from what is on disk, not from the snapshot: anything left but the snapshot is someone's.
         if (yield* present(setupDir)) {
-          const left = (yield* filesUnder(setupDir)).filter((f) => f !== `${setupDir}/before.json`);
+          const left = (yield* leftUnder(setupDir, holders)).filter(
+            (f) => f !== `${setupDir}/before.json`,
+          );
           if (!snapshotReadable || left.length > 0)
             done.push(
-              `kept ${tilde(setupDir, home)} whole as ${tilde(yield* keep(setupDir, `${state}/setup-backups/setup`), home)}${left.length > 0 ? `: it still holds ${plural(left.length, "file")} of setup's` : ""}`,
+              `kept ${tilde(setupDir, home)} whole as ${tilde(yield* keep(setupDir, `${state}/setup-backups/setup`), home)}${left.length > 0 ? `: it still holds ${plural(left.length, "thing")} the snapshot does not account for` : ""}`,
             );
           else yield* fs.remove(setupDir, { recursive: true, force: true });
         }
@@ -575,8 +615,16 @@ const purgeStep = (
     return { step, notes };
   });
 
-/** Every file and link under `dir` (not following links), as paths. */
-const filesUnder = (dir: string): Effect.Effect<Array<string>, never, FileSystem.FileSystem> =>
+/**
+ * What is left under `dir` (not following links): every file and link, and
+ * every directory that is not one of `holders`, the directories setup made
+ * to hold the backups its snapshot lists (empty once those went back). An
+ * empty directory nobody listed is someone's too.
+ */
+const leftUnder = (
+  dir: string,
+  holders: ReadonlySet<string>,
+): Effect.Effect<Array<string>, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const found: Array<string> = [];
@@ -586,9 +634,10 @@ const filesUnder = (dir: string): Effect.Effect<Array<string>, never, FileSystem
       const at = `${dir}/${name}`;
       const isLink = Option.isSome(yield* fs.readLink(at).pipe(Effect.option));
       const info = yield* fs.stat(at).pipe(Effect.option);
-      if (!isLink && Option.isSome(info) && info.value.type === "Directory")
-        found.push(...(yield* filesUnder(at)));
-      else found.push(at);
+      if (!isLink && Option.isSome(info) && info.value.type === "Directory") {
+        if (!holders.has(at)) found.push(at);
+        found.push(...(yield* leftUnder(at, holders)));
+      } else found.push(at);
     }
     return found;
   });
@@ -832,10 +881,7 @@ export const applyLeave = (plan: LeavePlan) =>
           ...(plan.identity.node !== now.node
             ? [`it is ${now.node ?? "no node"} now, not ${plan.identity.node ?? "no node"}`]
             : []),
-          ...enrollmentChanges(plan.identity.enrollment, now.enrollment),
-          ...(plan.identity.enrollment.key === null && now.enrollment.key !== null
-            ? ["it has a new key"]
-            : []),
+          ...identityChanges(plan.identity.enrollment, now.enrollment),
         ];
         if (differs.length > 0)
           return yield* Effect.fail(

@@ -388,15 +388,19 @@ export const reject = (repo: string, proposal: Proposal, expected?: string) =>
 
 /** Under one of the auto-approve prefixes, every file. */
 export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<string>) =>
-  prefixes.length > 0 &&
-  proposal.files.every((f) => prefixes.some((p) => f.startsWith(p))) &&
-  // A machine's departure needs a person's approve, whatever the prefixes trust.
-  !(
-    proposal.files.includes(`nodes/${proposal.node}.toml`) &&
-    proposal.files.every(
-      (f) => f === `nodes/${proposal.node}.toml` || f === "secrets/recipients.toml",
-    )
-  );
+  prefixes.length > 0 && proposal.files.every((f) => prefixes.some((p) => f.startsWith(p)));
+
+/**
+ * Whether an authority approves `proposal` unattended: its files are all
+ * under the trusted prefixes, and it is not a machine's departure, which
+ * always needs a person's approve. A departure is told by what it changes
+ * (isDeparture), not by its file names: a member's edit to its own node file
+ * is an ordinary proposal.
+ */
+export const autoApproves = (repo: string, proposal: Proposal, prefixes: ReadonlyArray<string>) =>
+  autoApprovable(proposal, prefixes)
+    ? isDeparture(repo, proposal.commit, proposal.node).pipe(Effect.map((d) => !d))
+    : Effect.succeed(false);
 
 /**
  * On the proposing node: if its proposal was rejected, set aside its local

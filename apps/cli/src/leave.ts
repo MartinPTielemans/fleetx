@@ -10,6 +10,7 @@ import { Command, Flag, Prompt } from "effect/unstable/cli";
 import {
   applyLeave,
   currentDeparture,
+  departurePath,
   planLeave,
   retireDeparture,
   type LeaveOutcome,
@@ -81,11 +82,13 @@ export const leaveCommand = Command.make("leave", {
     Effect.gen(function* () {
       const home = process.env["HOME"] ?? "";
       if (retire) {
-        const to = yield* retireDeparture(home);
+        const to = yield* retireDeparture(home, { dryRun });
         yield* Console.log(
           to === null
             ? "No departure is recorded here."
-            : `Set the departure's record aside as ${to.replace(home, "~")}; nothing else changed.`,
+            : dryRun
+              ? `Would set ~/${departurePath(home).slice(home.length + 1)} aside as ${to.replace(home, "~")}; nothing was changed.`
+              : `Set the departure's record aside as ${to.replace(home, "~")}; nothing else changed.`,
         );
         return;
       }
