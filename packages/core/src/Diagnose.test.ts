@@ -5,6 +5,7 @@ import { diagnose, type Finding } from "./Diagnose.ts";
 import type { Latest } from "./Latest.ts";
 import type { MachineObservation, ProviderObservation } from "./Observation.ts";
 import { providerPlans } from "./Probe.ts";
+import { T3_DRIVERS } from "./T3Settings.ts";
 import type { NodeResult } from "./Remote.ts";
 
 const latest: Latest = {
@@ -231,6 +232,18 @@ describe("providerPlans", () => {
     ]);
   });
 
+  it("takes each driver's defaults from T3's own settings schema", () => {
+    expect(T3_DRIVERS).toEqual({
+      codex: { enabled: true, bin: "codex" },
+      claudeAgent: { enabled: true, bin: "claude" },
+      cursor: { enabled: false, bin: null },
+      grok: { enabled: false, bin: "grok" },
+      pi: { enabled: false, bin: "pi" },
+      opencode: { enabled: false, bin: "opencode" },
+      antigravity: { enabled: false, bin: null },
+    });
+  });
+
   it("prefers an instance's binaryPath, then the legacy provider setting", () => {
     const plans = providerPlans({
       providers: { codex: { binaryPath: "/legacy/codex" }, grok: { enabled: true } },
@@ -254,5 +267,66 @@ describe("without a proxy in the config", () => {
       ],
     });
     expect(diagnose([ok("a", direct), ok("c", direct)], latest)).toEqual([]);
+  });
+});
+
+describe("finding ids that stay put", () => {
+  const keys = (obs: MachineObservation) => diagnose([ok("a", obs)], latest).filter((f) => f.area === "t3").map((f) => f.key);
+
+  it("names each T3 problem by its kind, not its place in the list", () => {
+    const notRunning = { kind: "not-running", title: "T3 server (pid 9) is not running" };
+    const noEnv = { kind: "env-unreadable", title: "could not read the T3 server's environment; providers checked with the login PATH" };
+    expect(keys(machine({}, { problems: [noEnv] }))).toEqual(["t3-env-unreadable"]);
+    expect(keys(machine({}, { problems: [notRunning, noEnv] }))).toEqual(["t3-not-running", "t3-env-unreadable"]);
+  });
+
+  it("reads the kind from the text an older probe sent", () => {
+    expect(keys(machine({}, { problems: ["T3 server (pid 9) is not running", "server at http://x did not answer /.well-known/t3/environment"] }))).toEqual([
+      "t3-not-running",
+      "t3-no-descriptor",
+    ]);
+  });
+
+  it("names a plugin that failed by its path", () => {
+    const failed = machine({ areas: { _plugins: { problems: [{ plugin: "plugins/brew.mjs", title: "plugin plugins/brew.mjs cannot load: x" }] } } });
+    expect(diagnose([ok("a", failed)], latest).filter((f) => f.area === "plugins").map((f) => f.key)).toEqual(["plugin-failed-plugins/brew.mjs"]);
+  });
+});
+
+describe("sync-stale", () => {
+  const node = (interval?: number) => ({
+    name: "a",
+    ssh: "a",
+    roles: ["member" as const],
+    profiles: [],
+    tailnet: null,
+    settings: { table: interval === undefined ? {} : { engine: { interval } }, provenance: new Map() },
+  });
+  const ageMinutes = (minutes: number) => machine({ lastSync: { when: 1_791_000_000 - minutes * 60, result: "ok", message: "", streak: 0 } });
+  const stale = (minutes: number, interval?: number) =>
+    diagnose([ok("a", ageMinutes(minutes))], latest, {}, [node(interval)]).some((f) => f.key === "sync-stale");
+
+  it("waits four runs of the node's own interval", () => {
+    expect(stale(50)).toBe(false);
+    expect(stale(70)).toBe(true);
+    expect(stale(25, 300)).toBe(true);
+    expect(stale(70, 3600)).toBe(false);
+    expect(stale(250, 3600)).toBe(true);
+  });
+});
+
+describe("t3-access", () => {
+  const access = (state: "expiring" | "rejected" | "none", expiresAt: number | null, detail = "") =>
+    diagnose([ok("a", machine({}, { access: { state, expiresAt, detail, cli: true } }))], latest).find((f) => f.key === "t3-access");
+  const now = 1_791_000_000_000;
+
+  it("lets sync renew a token that is running out or has run out", () => {
+    expect(access("expiring", now + 86_400_000)?.fix).toEqual({ command: "t3-fleet t3 connect", safe: true });
+    expect(access("rejected", now - 1000, "T3 Fleet's T3 token has expired")?.fix?.safe).toBe(true);
+  });
+
+  it("leaves a first connection, or a token T3 refused before it ran out, to a person", () => {
+    expect(access("none", null)?.fix?.safe).toBe(false);
+    expect(access("rejected", now + 20 * 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(false);
   });
 });

@@ -52,8 +52,11 @@ const mergeInto = (
       continue;
     }
     const existing = base[rawKey];
-    if (isTable(value) && isTable(existing)) {
-      const copy: Record<string, Value> = { ...existing };
+    if (isTable(value)) {
+      // A table no lower layer has still merges into an empty one, so its
+      // "x.add" and "x.remove" edit a list instead of staying literal keys.
+      const copy: Record<string, Value> = isTable(existing) ? { ...existing } : {};
+      if (!isTable(existing)) provenance.set(prefix + rawKey, source);
       mergeInto(copy, value, source, `${prefix}${rawKey}.`, provenance);
       base[rawKey] = copy;
     } else {

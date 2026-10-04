@@ -79,7 +79,11 @@ export const T3Observation = Schema.Struct({
       cli: Schema.Boolean,
     }),
   ),
-  problems: Schema.Array(Schema.String),
+  /**
+   * What stood in the way of observing T3, each with a kind that names it
+   * (its finding is `t3-<kind>`). Older probes sent the text alone.
+   */
+  problems: Schema.Array(Schema.Union([Schema.Struct({ kind: Schema.String, title: Schema.String }), Schema.String])),
 });
 export type T3Observation = typeof T3Observation.Type;
 
@@ -98,10 +102,7 @@ export const ProxyObservation = Schema.Struct({
 });
 export type ProxyObservation = typeof ProxyObservation.Type;
 
-/**
- * The node's last sync: T3 Fleet's own record (~/.local/state/t3-fleet/last-sync),
- * or, where only a bash `fleet sync` timer runs, the record that one leaves.
- */
+/** The node's last sync, from T3 Fleet's own record (~/.local/state/t3-fleet/last-sync). */
 export const SyncObservation = Schema.Struct({
   when: Schema.Number,
   result: Schema.String,

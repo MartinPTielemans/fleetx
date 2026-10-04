@@ -9,6 +9,7 @@
  * failed in T3. The probe therefore reads the running server's environment and
  * launches each provider exactly the way T3 would.
  */
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -24,7 +25,8 @@ import type { ProviderAuth } from "./Api.ts";
 import { expandHome, type ProbeSettings } from "./Config.ts";
 import { exec, parseVersion } from "./Exec.ts";
 import { cliLogin } from "./CliLogin.ts";
-import { loadAreas } from "./Plugins.ts";
+import type { AnyArea } from "./Area.ts";
+import { loadAreas, why, type PluginProblem } from "./Plugins.ts";
 import {
   PROBE_PROTOCOL,
   type AgentObservation,
@@ -198,7 +200,8 @@ const observeProvider = (plan: ProviderPlan, env: Env) =>
 
 const observeT3 = (home: string, loginEnv: Env) =>
   Effect.gen(function* () {
-    const problems: Array<string> = [];
+    const problems: Array<{ kind: string; title: string }> = [];
+    const problem = (kind: string, title: string) => problems.push({ kind, title });
     const runtimeText = yield* readText(`${home}/.t3/userdata/server-runtime.json`);
     const runtimeFile = Option.isSome(runtimeText) ? yield* decodeJson(RuntimeFile, runtimeText.value) : Option.none();
 
@@ -223,31 +226,31 @@ const observeT3 = (home: string, loginEnv: Env) =>
             protocol: d.value.orchestrationProtocolVersion ?? 1,
           };
         } else {
-          problems.push(`server at ${r.origin} did not answer /.well-known/t3/environment`);
+          problem("no-descriptor", `server at ${r.origin} did not answer /.well-known/t3/environment`);
         }
         const fromCommandLine = yield* runtimeFromCommandLine(r.pid);
         runtimeBinary = fromCommandLine.binary;
         cli = fromCommandLine.cli;
         installedVersion = descriptor?.serverVersion ?? fromCommandLine.version;
         serverEnv = Option.getOrNull(yield* serverEnvironment(r.pid));
-        if (serverEnv === null) problems.push("could not read the T3 server's environment; providers checked with the login PATH");
+        if (serverEnv === null) problem("env-unreadable", "could not read the T3 server's environment; providers checked with the login PATH");
       } else {
-        problems.push(`T3 server (pid ${r.pid}) is not running`);
+        problem("not-running", `T3 server (pid ${r.pid}) is not running`);
       }
     } else if (Option.isSome(runtimeText)) {
-      problems.push("server-runtime.json is unreadable");
+      problem("runtime-unreadable", "server-runtime.json is unreadable");
     }
 
     const settingsText = yield* readText(`${home}/.t3/userdata/settings.json`);
     // T3 has run here but no server is up now (stopped, or mid-restart).
     if (Option.isNone(runtimeText) && Option.isSome(settingsText)) {
-      problems.push("the T3 server is not running");
+      problem("not-running", "the T3 server is not running");
     }
     let providers: Array<ProviderObservation> = [];
     if (Option.isSome(settingsText)) {
       const settings = yield* decodeJson(T3SettingsFile, settingsText.value);
       if (Option.isNone(settings)) {
-        problems.push("settings.json did not match the provider settings T3 Fleet understands");
+        problem("settings-unrecognized", "settings.json did not match the provider settings T3 Fleet understands");
       } else {
         providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, serverEnv ?? loginEnv), { concurrency: 4 });
       }
@@ -354,24 +357,61 @@ const observeProxy = (home: string, settings: ProbeSettings["proxy"]) =>
 /** Where `t3-fleet sync` records each run on the node: `<seconds>\t<ok|fail>\t<streak>\t<message>`. */
 export const lastSyncPath = (home: string) => `${stateDir(home)}/last-sync`;
 
-/** T3 Fleet's own record first; a bash `fleet sync` timer's only where T3 Fleet has never synced. */
+/** T3 Fleet's own record of the last sync here; null where it has never synced. */
 const observeLastSync = (home: string) =>
   Effect.gen(function* () {
     const own = yield* readText(lastSyncPath(home));
-    if (Option.isSome(own)) {
-      const [when, result, streak, ...message] = own.value.trim().split("\t");
-      return { when: Number(when) || 0, result: result ?? "unknown", message: message.join("\t"), streak: Number(streak) || 0 } satisfies SyncObservation;
-    }
-    const last = yield* readText(`${home}/.local/state/fleet/last-sync`);
-    if (Option.isNone(last)) return null;
-    const [when, result, ...message] = last.value.trim().split("\t");
-    const streak = Option.getOrElse(yield* readText(`${home}/.local/state/fleet/sync-streak`), () => "0");
-    return {
-      when: Number(when) || 0,
-      result: result ?? "unknown",
-      message: message.join("\t"),
-      streak: Number(streak.trim()) || 0,
-    } satisfies SyncObservation;
+    if (Option.isNone(own)) return null;
+    const [when, result, streak, ...message] = own.value.trim().split("\t");
+    return { when: Number(when) || 0, result: result ?? "unknown", message: message.join("\t"), streak: Number(streak) || 0 } satisfies SyncObservation;
+  });
+
+// ---- areas ------------------------------------------------------------------
+
+/**
+ * Every area's facts, keyed by its id; plugins that did not load under
+ * "_plugins". Each area runs on its own: one that fails or throws, a plugin's
+ * most of all, is recorded as unreadable and the others still observe.
+ */
+export const observeAreas = (
+  loaded: { readonly areas: ReadonlyArray<AnyArea>; readonly problems: ReadonlyArray<PluginProblem> },
+  settings: ProbeSettings,
+  base: { readonly home: string; readonly checkout: string; readonly env: Env },
+) =>
+  Effect.gen(function* () {
+    const areas: Record<string, unknown> = {};
+    if (loaded.problems.length > 0) areas["_plugins"] = { problems: loaded.problems };
+    yield* Effect.forEach(
+      loaded.areas,
+      (area) =>
+        Effect.gen(function* () {
+          const desired = yield* Schema.decodeUnknownEffect(area.desired)(settings.areas?.[area.id]).pipe(Effect.option);
+          if (Option.isNone(desired)) {
+            areas[area.id] = { invalidSettings: true };
+            return;
+          }
+          const observed = yield* Effect.suspend(() =>
+            area.observe(desired.value, {
+              ...base,
+              engine: settings.engine ?? null,
+              node: settings.node ?? null,
+              roles: settings.roles ?? [],
+              relay: settings.relay ?? null,
+            }),
+          ).pipe(Effect.mapError((e) => `could not observe it: ${why(e)}`));
+          areas[area.id] = yield* Schema.encodeUnknownEffect(area.observed)(observed).pipe(
+            Effect.mapError((e) => `what it observed does not match its schema: ${why(e)}`),
+          );
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.sync(() => {
+              areas[area.id] = { unreadable: why(Cause.squash(cause)) };
+            }),
+          ),
+        ),
+      { concurrency: "unbounded" },
+    );
+    return areas;
   });
 
 // ---- machine --------------------------------------------------------------
@@ -390,31 +430,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
     { concurrency: "unbounded" },
   );
   const checkout = expandHome(settings.checkout ?? "~/fleet", home);
-  const areas: Record<string, unknown> = {};
-  const loaded = yield* loadAreas(checkout, settings.plugins ?? []);
-  if (loaded.problems.length > 0) areas["_plugins"] = { problems: loaded.problems };
-  yield* Effect.forEach(
-    loaded.areas,
-    (area) =>
-      Effect.gen(function* () {
-        const desired = yield* Schema.decodeUnknownEffect(area.desired)(settings.areas?.[area.id]).pipe(Effect.option);
-        if (Option.isNone(desired)) {
-          areas[area.id] = { invalidSettings: true };
-          return;
-        }
-        const observed = yield* area.observe(desired.value, {
-          home,
-          checkout,
-          env,
-          engine: settings.engine ?? null,
-          node: settings.node ?? null,
-          roles: settings.roles ?? [],
-          relay: settings.relay ?? null,
-        });
-        areas[area.id] = yield* Schema.encodeUnknownEffect(area.observed)(observed).pipe(Effect.orElseSucceed(() => null));
-      }),
-    { concurrency: "unbounded" },
-  );
+  const areas = yield* observeAreas(yield* loadAreas(checkout, settings.plugins ?? []), settings, { home, checkout, env });
   return {
     protocol: PROBE_PROTOCOL,
     hostname,

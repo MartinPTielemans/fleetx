@@ -38,12 +38,18 @@ controller. The fix streams the controller's build over ssh to
 (and `~/.local/bin/fleetx`, until 1.0), and restarts T3 Fleet's services.
 
 **`engine-local-config`** — `~/.config/t3-fleet/config.toml` does not name this
-machine and its config repo. The fix writes it (as `t3-fleet join` would).
+machine and its config repo. The fix writes it (as `t3-fleet join` would). Sync
+never runs it: which repo a machine uses is a person's choice (`join --dir`,
+`T3_FLEET_CONFIG_REPO`), and pointing it at a missing one stops every sync. A
+machine's own sync checks the repo it loaded, so `join --dir` does not raise it.
 
 **`engine-timer`** — `[engine] timer = true` but the sync timer is missing,
 out of date, or not running. The fix installs a launchd agent (macOS) or a
 systemd timer (a user unit, or a system unit for root) that runs the absolute
-node binary with a fixed PATH. Logs: `~/.local/state/t3-fleet/sync.log`.
+node binary with a fixed PATH. Logs: `~/.local/state/t3-fleet/sync.log`. On
+macOS, when a sync the timer started applies this fix, reloading the agent
+would stop that sync and the fix with it, so a helper does the reload once the
+sync has finished (`~/.local/state/t3-fleet/sync-timer-reload.sh`).
 
 **`engine-timer-unwanted`** — a sync timer is installed but this machine's
 settings do not ask for one. The fix removes it.
@@ -95,7 +101,9 @@ machine has none, it expires within three days, or T3 refused it. The fix,
 read-only token, and writes it to `~/.config/t3-fleet/t3-access.json` (mode
 600). T3 lists it among its clients as "T3 Fleet", where it can be revoked.
 Until then only Claude and Codex are checked, through `claude auth status`
-and `codex login status`.
+and `codex login status`. Sync renews a token that expires within three days,
+or has expired, by itself (the `t3` area is in the default `[fleet] apply`); a
+first connection, or a token T3 refused before it ran out, waits for a person.
 
 ## models
 
@@ -160,7 +168,11 @@ is missing, invalid, or cannot be resolved (a hosted server with neither
 `[mcp] hub = true` and `gateway`, nor an `origin` and port).
 
 **`mcp-<name>-unregistered`** — Claude or Codex has the server registered
-differently from the definition, or not at all. The fix re-registers it.
+differently from the definition, or not at all. The fix re-registers it. When
+the existing registration has settings a definition cannot express (an `env`,
+headers besides Authorization, Codex's per-server options such as
+`startup_timeout_sec`), the detail names them and sync leaves the fix to a
+person, since re-registering would drop them.
 
 **`mcp-<name>-down`** — the server did not answer an `initialize`. With the
 hub, `t3-fleet mcp servers` on any machine shows why; a 401 means its
@@ -175,6 +187,34 @@ on any machine and open the URL it prints in any browser on the tailnet.
 still runs them on this machine. The fix runs `thv stop` for them (marked as
 disrupting them until the hub serves them; sign in to OAuth servers first).
 `thv start` brings one back; `thv rm` removes them for good.
+
+## T3
+
+Each problem observing T3 has a key of its own, so an `[[accept]]` for one
+never covers another:
+
+- **`t3-not-running`** — T3 has run here, but no server is up (stopped, or
+  mid-restart), or the one `server-runtime.json` names has exited.
+- **`t3-no-descriptor`** — the server did not answer `/.well-known/t3/environment`.
+- **`t3-env-unreadable`** — T3 Fleet could not read the running server's
+  environment, so providers were checked with the login PATH instead.
+- **`t3-runtime-unreadable`** — `~/.t3/userdata/server-runtime.json` is unreadable.
+- **`t3-settings-unrecognized`** — T3's `settings.json` did not match the
+  provider settings T3 Fleet reads.
+
+## Areas and plugins
+
+**`<area>-unreadable`** — an area could not check this machine: its observation
+failed or threw, did not match its own schema, or its diagnosis threw. The
+detail says which. The other areas are checked as usual; for a plugin area,
+fix the plugin.
+
+**`plugin-failed-<path>`** — a plugin listed in `[plugins] areas` did not load:
+the file is missing, does not export a default function, its function threw,
+or its area id is missing or taken.
+
+**`sync-stale`** — no sync has finished here for four of this machine's
+`[engine] interval`s (an hour, by default). Is the sync timer running?
 
 ## Other common findings
 

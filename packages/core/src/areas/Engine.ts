@@ -35,6 +35,7 @@ import {
   BUNDLE_FILE,
   CLI,
   launchdLabel,
+  legacyLaunchdLabel,
   SH_CONFIG_DIR,
   SHARE_DIR,
   STATE_DIR,
@@ -63,6 +64,12 @@ const Observed = Schema.Struct({
     loaded: Schema.Boolean,
     /** Still installed under its fleetx name. Until 1.0. */
     legacy: Schema.optionalKey(Schema.Boolean),
+    /**
+     * This probe runs inside the timer's own launchd job (a sync it started),
+     * where its fixes run too. Only launchd's main process sees its label in
+     * XPC_SERVICE_NAME; the fix's shell sees "0", so it is noted here.
+     */
+    inJob: Schema.optionalKey(Schema.Boolean),
   }),
   /** fleetx's directories still to move: config, state, share (Names.ts). Absent from older probes. */
   legacy: Schema.optionalKey(Schema.Array(Schema.Literals(["config", "state", "share"]))),
@@ -133,14 +140,35 @@ export const ENGINE_INSTALL = "t3-fleet:install-self";
 
 const heredoc = (file: string, text: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
 
-const installTimer = (platform: string, root: boolean, want: string) => {
+/**
+ * launchctl steps that stop the sync timer's job, for a fix that runs inside
+ * it: a sync the timer started runs its fixes in that job, and bootout stops
+ * the job's processes, the fix's shell with them, before the next step runs,
+ * leaving the Mac with no timer. Those steps go to a helper in its own
+ * session, which waits for the sync (the shell's parent) to exit first.
+ */
+export const outsideSyncJob = (nodePath: string, steps: string) =>
+  [
+    `mkdir -p "$HOME/${STATE_DIR}" && helper="$HOME/${STATE_DIR}/sync-timer-reload.sh"`,
+    heredoc('"$helper"', `i=0; while kill -0 "$1" 2>/dev/null && [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done\n${steps}`),
+    `${sh(nodePath)} -e 'require("node:child_process").spawn("/bin/sh", process.argv.slice(1), { detached: true, stdio: "ignore" }).unref()' "$helper" "$PPID"`,
+    `echo "the sync timer reloads once this sync finishes"`,
+  ].join("\n");
+
+/** The launchctl steps as they run: now, or, inside the timer's own job, once its sync has exited. */
+const launchctlSteps = (inJob: boolean, nodePath: string, steps: string) => (inJob ? outsideSyncJob(nodePath, steps) : steps);
+
+const installTimer = (platform: string, root: boolean, want: string, inJob: boolean, nodePath: string) => {
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"`;
     return [
-      retireLegacyUnit(platform, root, "sync"),
       `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       heredoc(plist, want),
-      `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
+      launchctlSteps(
+        inJob,
+        nodePath,
+        `${retireLegacyUnit(platform, root, "sync")}\nlaunchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
+      ),
     ].join("\n");
   }
   const [service, timer] = want.split("--- timer ---\n");
@@ -156,12 +184,16 @@ const installTimer = (platform: string, root: boolean, want: string) => {
   ].join("\n");
 };
 
-const removeTimer = (platform: string, root: boolean) =>
+const removeTimer = (platform: string, root: boolean, inJob: boolean, nodePath: string) =>
   platform === "darwin"
-    ? `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"`
+    ? `rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"\n${launchctlSteps(inJob, nodePath, `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; true`)}`
     : root
       ? `systemctl disable --now ${UNIT}.timer; rm -f /etc/systemd/system/${UNIT}.service /etc/systemd/system/${UNIT}.timer; systemctl daemon-reload`
       : `systemctl --user disable --now ${UNIT}.timer; rm -f "$HOME/.config/systemd/user/${UNIT}.service" "$HOME/.config/systemd/user/${UNIT}.timer"; systemctl --user daemon-reload`;
+
+/** Retiring fleetx's timer on macOS stops its job too, so it waits the same way. */
+const retireLegacyTimer = (platform: string, root: boolean, inJob: boolean, nodePath: string) =>
+  platform === "darwin" ? launchctlSteps(inJob, nodePath, retireLegacyUnit(platform, root, "sync")) : retireLegacyUnit(platform, root, "sync");
 
 /**
  * Move fleetx's directories to T3 Fleet's, leaving links at the old names so
@@ -271,6 +303,7 @@ export const EngineArea = defineArea({
           want,
           loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)),
           legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
+          inJob: platform === "darwin" && (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL || ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
         },
       };
     }),
@@ -283,7 +316,8 @@ export const EngineArea = defineArea({
         severity: "warn",
         area: "engine",
         title: "~/.config/t3-fleet/config.toml does not name this machine and its config repo",
-        fix: { command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`, safe: true },
+        // Not safe: which repo this machine uses is a person's choice (join --dir), and a wrong one stops every sync.
+        fix: { command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`, safe: false },
       });
     }
     const t = observed.timer;
@@ -295,7 +329,7 @@ export const EngineArea = defineArea({
         area: "engine",
         title: t.installed === null ? notInstalledTitle("sync timer", t.legacy) : t.installed !== t.want ? "the sync timer is out of date" : "the sync timer is not running",
         detail: `runs ${observed.nodePath} with a fixed PATH`,
-        fix: { command: installTimer(observed.platform, observed.root, t.want), safe: true },
+        fix: { command: installTimer(observed.platform, observed.root, t.want, t.inJob === true, observed.nodePath), safe: true },
       });
     }
     if (t.want === null && t.installed === null && t.legacy === true) {
@@ -305,7 +339,7 @@ export const EngineArea = defineArea({
         severity: "warn",
         area: "engine",
         title: "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
-        fix: { command: retireLegacyUnit(observed.platform, observed.root, "sync"), safe: true },
+        fix: { command: retireLegacyTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath), safe: true },
       });
     }
     if (t.want === null && t.installed !== null) {
@@ -315,7 +349,7 @@ export const EngineArea = defineArea({
         severity: "warn",
         area: "engine",
         title: "a sync timer is installed, but [engine] timer is not set for this machine",
-        fix: { command: `${removeTimer(observed.platform, observed.root)}\n${retireLegacyUnit(observed.platform, observed.root, "sync")}`, safe: true },
+        fix: { command: `${removeTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath)}\n${retireLegacyTimer(observed.platform, observed.root, t.inJob === true, observed.nodePath)}`, safe: true },
       });
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {

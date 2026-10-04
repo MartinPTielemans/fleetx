@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 
 import type { AnyArea } from "./Area.ts";
 import { AREAS } from "./Areas.ts";
+import { why } from "./Plugins.ts";
 import type { FleetSettings, Node, ProxySettings } from "./Config.ts";
 import type { Latest } from "./Latest.ts";
 import { releasesBehind } from "./Latest.ts";
@@ -220,6 +221,22 @@ const channelOf = (settings: unknown): string | null => {
   return typeof raw === "string" ? raw : null;
 };
 
+/** A problem as an older probe reported it, text only; its kind is read from the text. */
+const legacyProblem = (title: string): { kind: string; title: string } => ({
+  kind: /did not answer/.test(title)
+    ? "no-descriptor"
+    : /environment/.test(title)
+      ? "env-unreadable"
+      : /not running/.test(title)
+        ? "not-running"
+        : /server-runtime\.json/.test(title)
+          ? "runtime-unreadable"
+          : /settings\.json/.test(title)
+            ? "settings-unrecognized"
+            : "problem",
+  title,
+});
+
 const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantChannel: string | null = null): Array<Finding> => {
   const out: Array<Finding> = [];
   const t3 = obs.t3;
@@ -227,7 +244,10 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
     out.push({ node, key: "t3-not-installed", severity: "info", area: "t3", title: "T3 Code has never run here" });
     return out;
   }
-  t3.problems.forEach((problem, i) => out.push({ node, key: `t3-problem-${i + 1}`, severity: "warn", area: "t3", title: problem }));
+  for (const problem of t3.problems) {
+    const { kind, title } = typeof problem === "string" ? legacyProblem(problem) : problem;
+    out.push({ node, key: `t3-${kind}`, severity: "warn", area: "t3", title });
+  }
   // A CLI-installed server not under its service manager stops with the session that started it.
   if (t3.runtime !== null && t3.runtime.alive && t3.runtimeBinary !== null && !t3.runtime.serviceManaged) {
     out.push({
@@ -291,7 +311,14 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
   return out;
 };
 
-const syncFindings = (node: string, obs: MachineObservation): Array<Finding> => {
+/** How often a node's timer runs `t3-fleet sync`, from `[engine] interval` (seconds; 900 by default, as in the engine area). */
+const syncIntervalOf = (settings: unknown): number => {
+  const raw = (settings as { engine?: { interval?: unknown } } | undefined)?.engine?.interval;
+  return typeof raw === "number" && raw > 0 ? raw : 900;
+};
+
+/** A sync is stale once four runs in a row have been missed. */
+const syncFindings = (node: string, obs: MachineObservation, interval = 900): Array<Finding> => {
   const sync = obs.lastSync;
   if (sync === null) return [];
   const out: Array<Finding> = [];
@@ -301,8 +328,9 @@ const syncFindings = (node: string, obs: MachineObservation): Array<Finding> => 
     out.push({ node, key: "sync-failed", severity: "warn", area: "sync", title: "last fleet sync failed", detail: sync.message });
   }
   const ageMinutes = Math.round((obs.observedAt / 1000 - sync.when) / 60);
-  if (ageMinutes > 60) {
-    out.push({ node, key: "sync-stale", severity: "warn", area: "sync", title: `no fleet sync for ${ageMinutes} minutes`, detail: "is the sync timer running?" });
+  if (ageMinutes > (4 * interval) / 60) {
+    const every = interval % 60 === 0 ? `${interval / 60} minute${interval === 60 ? "" : "s"}` : `${interval} seconds`;
+    out.push({ node, key: "sync-stale", severity: "warn", area: "sync", title: `no fleet sync for ${ageMinutes} minutes`, detail: `it should run every ${every}; is the sync timer running?` });
   }
   return out;
 };
@@ -474,7 +502,9 @@ const providerAuthFindings = (node: string, obs: MachineObservation): Array<Find
 const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding> => {
   const access = obs.t3.access;
   if (access === null || access.state === "ok") return [];
-  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: false } : undefined;
+  // Renewing a token that is running out is what the person did to get it, with the same CLI and scope; sync may do it.
+  const renewal = access.expiresAt !== null && access.expiresAt - obs.observedAt < 3 * 86_400_000 && (access.state === "expiring" || access.state === "rejected");
+  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: renewal } : undefined;
   const how = fix === undefined ? "; T3's CLI was not found on this machine to issue one" : "";
   const title =
     access.state === "none"
@@ -499,7 +529,7 @@ const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding>
 
 const RANK: Readonly<Record<Severity, number>> = { error: 0, warn: 1, info: 2 };
 
-/** Every registered area's findings, each area seeing all nodes' facts. */
+/** Every registered area's findings, each area seeing all nodes' facts. One area failing does not stop the others. */
 const areaFindings = (
   observed: ReadonlyArray<{ name: string; obs: MachineObservation }>,
   nodes: ReadonlyArray<Node>,
@@ -507,28 +537,56 @@ const areaFindings = (
 ): Array<Finding> => {
   const out: Array<Finding> = [];
   for (const o of observed) {
-    const plugins = o.obs.areas["_plugins"] as { problems?: ReadonlyArray<string> } | undefined;
+    const plugins = o.obs.areas["_plugins"] as { problems?: ReadonlyArray<string | { plugin: string; title: string }> } | undefined;
     for (const [i, problem] of (plugins?.problems ?? []).entries()) {
-      out.push({ node: o.name, key: `plugin-problem-${i + 1}`, severity: "error", area: "plugins", title: problem });
+      // Older probes sent the text alone, without the plugin's path.
+      const { plugin, title } = typeof problem === "string" ? { plugin: String(i + 1), title: problem } : problem;
+      out.push({ node: o.name, key: `plugin-failed-${plugin}`, severity: "error", area: "plugins", title });
     }
   }
   for (const area of areas) {
+    const unreadable = (node: string, why: string, severity: Severity = "error"): Finding => ({
+      node,
+      key: `${area.id}-unreadable`,
+      severity,
+      area: area.id,
+      title: `the ${area.id} area could not check this machine`,
+      detail: why,
+    });
     const fleet: Array<{ node: string; desired: unknown; observed: unknown }> = [];
     for (const o of observed) {
       const raw = o.obs.areas[area.id];
+      // An area this node's build does not have.
+      if (raw === undefined) continue;
       const settings = nodes.find((n) => n.name === o.name)?.settings.table[area.id];
       if (raw !== null && typeof raw === "object" && "invalidSettings" in raw) {
         out.push({ node: o.name, key: `${area.id}-settings-invalid`, severity: "error", area: area.id, title: `the [${area.id}] settings for this machine are not valid` });
         continue;
       }
-      const decodedObserved = Schema.decodeUnknownOption(area.observed)(raw);
+      if (raw !== null && typeof raw === "object" && "unreadable" in raw) {
+        out.push(unreadable(o.name, String(raw.unreadable)));
+        continue;
+      }
       const decodedDesired = Schema.decodeUnknownOption(area.desired)(settings as unknown);
-      if (Option.isNone(decodedObserved) || Option.isNone(decodedDesired)) continue;
+      if (Option.isNone(decodedDesired)) continue;
+      const decodedObserved = Schema.decodeUnknownOption(area.observed)(raw);
+      if (Option.isNone(decodedObserved)) {
+        out.push(
+          raw === null
+            ? unreadable(o.name, "what it observed could not be recorded")
+            : unreadable(o.name, "what it observed is not in a form this build reads; does T3 Fleet there run another build?", "warn"),
+        );
+        continue;
+      }
       fleet.push({ node: o.name, desired: decodedDesired.value, observed: decodedObserved.value });
     }
     const authority = nodes.find((n) => n.roles.includes("authority"))?.name ?? null;
     for (const entry of fleet) {
-      out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority, nodes: nodes.map((n) => n.name) }));
+      try {
+        out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority, nodes: nodes.map((n) => n.name) }));
+      } catch (error) {
+        out.push(unreadable(entry.node, `its diagnosis failed: ${why(error)}`));
+      }
     }
   }
   return out;
@@ -557,7 +615,7 @@ export const diagnose = (
     findings.push(...t3Findings(r.node.name, r.observation, latest, channelOf(nodeSettings)));
     findings.push(...providerFindings(r.node.name, r.observation, proxy));
     findings.push(...proxyFindings(r.node.name, r.observation, proxy));
-    findings.push(...syncFindings(r.node.name, r.observation));
+    findings.push(...syncFindings(r.node.name, r.observation, syncIntervalOf(nodeSettings)));
     findings.push(...providerAuthFindings(r.node.name, r.observation));
     findings.push(...t3AccessFindings(r.node.name, r.observation));
   }
