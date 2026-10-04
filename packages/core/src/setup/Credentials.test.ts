@@ -216,7 +216,7 @@ describe("fromClaude", () => {
     expect(fromClaude("node_repl", { command: app }, ctx())?.leave).toContain("an app's own");
     const relative = "./Codex.app/Contents/MacOS/computer-use";
     expect(fromClaude("cu", { command: relative }, ctx())?.leave).toContain("an app's own");
-    const glued = fromClaude("x", { command: "x", args: [`--config={"key":"${SK}"}`] }, ctx());
+    const glued = fromClaude("x", { command: "x", args: [`mode:glued${SK}`] }, ctx());
     expect(glued?.leave).toContain("could not be separated");
     const pem = fromClaude(
       "y",
@@ -229,6 +229,73 @@ describe("fromClaude", () => {
   it("marks your own binaries outside the home directory as this machine's", () => {
     expect(fromClaude("x", { command: "/opt/x/bin/x" }, ctx())?.local).toContain("/opt/x/bin/x");
     expect(fromClaude("x", { command: "npx", args: ["x"] }, ctx())?.local).toBeNull();
+  });
+});
+
+describe("credentials in JSON, fragments and any credential flag", () => {
+  it("replaces a key inside a JSON argument, a URL fragment, and --pass, -apikey values", () => {
+    const got = clean(
+      fromClaude(
+        "x",
+        {
+          command: "x-mcp",
+          args: [
+            "--config",
+            '{"apiKey":"hunter2","region":"eu","nested":{"token":"abc"}}',
+            '--opts={"password":"pw1"}',
+            "https://x.example/mcp#key=frag-secret&view=1",
+            "--pass",
+            "hunter3",
+            "-apikey",
+            "short",
+            "--verbose",
+            "true",
+          ],
+        },
+        ctx(),
+      ),
+    );
+    expect(got.definition["args"]).toEqual([
+      "--config",
+      '{"apiKey":"$X_API_KEY","region":"eu","nested":{"token":"$X_TOKEN"}}',
+      '--opts={"password":"$X_PASSWORD"}',
+      "https://x.example/mcp#key=$X_KEY&view=1",
+      "--pass",
+      "$X_PASS",
+      "-apikey",
+      "$X_APIKEY",
+      "--verbose",
+      "true",
+    ]);
+  });
+
+  it("finds them in a definition even when nothing was extracted", () => {
+    expect(residue({ args: ['{"apiKey":"hunter2"}'] }, [])).toContain("JSON");
+    expect(residue({ url: "https://x.example/mcp#token=abc" }, [])).toContain("URL");
+    expect(residue({ args: ["--pass", "hunter3"] }, [])).toContain("--pass");
+    expect(residue({ args: ["--pass", "$X_PASS", '{"apiKey":"$X"}'] }, [])).toBeNull();
+  });
+
+  it("resolves mcp-remote's ${AUTH_HEADER} from the server's own env", () => {
+    const got = clean(
+      fromClaude(
+        "remote",
+        {
+          command: "npx",
+          args: ["mcp-remote", "https://r.example/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+          env: { AUTH_HEADER: `Bearer ${SK}` },
+        },
+        ctx(),
+      ),
+    );
+    expect(got.missing).toEqual([]);
+    expect(got.definition["env"]).toEqual({ AUTH_HEADER: "$REMOTE_AUTH_HEADER" });
+    expect(got.definition["args"]).toEqual([
+      "mcp-remote",
+      "https://r.example/mcp",
+      "--header",
+      "Authorization:$REMOTE_AUTH_HEADER",
+    ]);
   });
 });
 

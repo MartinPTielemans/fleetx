@@ -206,10 +206,12 @@ const secret = (f: Found, part: string, value: string, where: string) => {
  * Claude's `${VAR}` and `${VAR:-default}`: the value from the environment
  * setup runs in, as a secret; or missing, when it is not set here.
  */
-const fillPlaceholders = (f: Found, text: string, where: string) =>
+const fillPlaceholders = (f: Found, text: string, where: string, own: ReadonlyArray<string> = []) =>
   text.replace(
     /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
     (_, variable: string, fallback: string | undefined) => {
+      // The server's own env names it (mcp-remote's `Authorization:${AUTH_HEADER}`): that entry's value, later.
+      if (own.includes(variable)) return `${OWN}${own.indexOf(variable)}`;
       const value = f.ctx.env[variable] ?? fallback;
       if (value === undefined || value === "") {
         const name = f.ctx.name(f.server, variable, null);
@@ -220,6 +222,9 @@ const fillPlaceholders = (f: Found, text: string, where: string) =>
       return `$${secret(f, variable, value, `${where} (\${${variable}})`)}`;
     },
   );
+
+/** Stands for one of the server's own env entries in an argument, until the env is scrubbed: looks like a reference. */
+const OWN = "$T3_FLEET_OWN_ENV_";
 
 /**
  * A URL with its credentials replaced, rebuilt from its parsed parts: the
@@ -251,25 +256,57 @@ const scrubUrl = (f: Found, text: string, where: string) => {
       return `$${secret(f, "path_token", value, `${where} path`)}`;
     })
     .join("/");
-  const query = url.search
-    .replace(/^\?/, "")
-    .split("&")
-    .filter((p) => p !== "")
-    .map((pair) => {
-      const at = pair.indexOf("=");
-      if (at < 0) return pair;
-      const key = safeDecode(pair.slice(0, at));
-      const value = safeDecode(pair.slice(at + 1));
-      if (value === "" || isRef(value) || (!credentialName(key) && !looksLikeToken(value)))
-        return pair;
-      changed = true;
-      return `${pair.slice(0, at)}=$${secret(f, key, value, `${where} query ${key}`)}`;
-    });
+  // The query, and a fragment written like one (#key=…): each credential pair replaced.
+  const pairs = (text: string, label: string) =>
+    text
+      .split("&")
+      .filter((p) => p !== "")
+      .map((pair) => {
+        const at = pair.indexOf("=");
+        if (at < 0) return pair;
+        const key = safeDecode(pair.slice(0, at));
+        const value = safeDecode(pair.slice(at + 1));
+        if (value === "" || isRef(value) || (!credentialName(key) && !looksLikeToken(value)))
+          return pair;
+        changed = true;
+        return `${pair.slice(0, at)}=$${secret(f, key, value, `${where} ${label} ${key}`)}`;
+      });
+  const query = pairs(url.search.replace(/^\?/, ""), "query");
+  const hash = url.hash.replace(/^#/, "");
+  const fragment = hash.includes("=") ? pairs(hash, "fragment").join("&") : hash;
   if (!changed) return text;
   const enc = (s: string) => (isRef(s) ? s : encodeURIComponent(s));
   const userinfo =
     user === "" && pass === "" ? "" : `${enc(user)}${pass === "" ? "" : `:${enc(pass)}`}@`;
-  return `${url.protocol}//${userinfo}${url.host}${path}${query.length > 0 ? `?${query.join("&")}` : ""}${url.hash}`;
+  return `${url.protocol}//${userinfo}${url.host}${path}${query.length > 0 ? `?${query.join("&")}` : ""}${fragment === "" ? "" : `#${fragment}`}`;
+};
+
+/** A JSON argument (`--config '{"apiKey":"…"}'`), its credentials replaced; the text unchanged when it has none. */
+const scrubJson = (f: Found, text: string, where: string) => {
+  if (!/^\s*[[{]/.test(text)) return text;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  let changed = false;
+  const walk = (v: unknown, key: string): unknown => {
+    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (typeof v === "object" && v !== null)
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
+    if (typeof v !== "string" || v === "" || isRef(v)) return v;
+    const url = scrubUrl(f, v, `${where} ${key}`);
+    if (url !== v) {
+      changed = true;
+      return url;
+    }
+    if (!(credentialName(key) && !isHarmless(v)) && !looksLikeToken(v)) return v;
+    changed = true;
+    return `$${secret(f, key, v, `${where} ${key}`)}`;
+  };
+  const scrubbed = walk(value, "");
+  return changed ? JSON.stringify(scrubbed) : text;
 };
 
 /** An env or header value: `$NAME` for the whole value when it is a credential. */
@@ -296,8 +333,21 @@ const scrubHeaderArg = (f: Found, arg: string, where: string) => {
   return `${header}${sep}${scrubWhole(f, header, value, where)}`;
 };
 
-const FLAG = /^--?[\w-]*(key|token|secret|passw|credential|auth)[\w-]*$/i;
+/** A flag whose value is a credential: any name with key, token, secret, pass, pwd, credential or auth in it. */
+const FLAG = /^--?[\w.-]*(key|token|secret|pass|pwd|credential|auth)[\w.-]*$/i;
 const HEADER_FLAG = /^(-H|--header)$/;
+
+/**
+ * A flag's value: a JSON value or a URL has its credentials replaced; under a
+ * credential flag (`credential`), anything but a harmless value is one whole.
+ */
+const flagValue = (f: Found, flag: string, value: string, credential: boolean) => {
+  if (isRef(value)) return value;
+  const where = `arg ${flag}`;
+  const parsed = scrubJson(f, scrubUrl(f, value, where), where);
+  if (parsed !== value || !credential || isHarmless(value) || /^\s*[[{]/.test(value)) return parsed;
+  return `$${secret(f, flag.replace(/^-+/, ""), value, where)}`;
+};
 
 const scrubArgs = (f: Found, args: ReadonlyArray<string>) => {
   const out: Array<string> = [];
@@ -311,14 +361,8 @@ const scrubArgs = (f: Found, args: ReadonlyArray<string>) => {
         out.push(`${flag}=${scrubHeaderArg(f, value, `arg ${flag}`)}`);
         continue;
       }
-      if (FLAG.test(flag)) {
-        const url = scrubUrl(f, value, `arg ${flag}`);
-        const kept = url !== value || isRef(value) || isHarmless(value);
-        out.push(
-          `${flag}=${kept ? url : `$${secret(f, flag.replace(/^-+/, ""), value, `arg ${flag}`)}`}`,
-        );
-        continue;
-      }
+      out.push(`${flag}=${flagValue(f, flag, value, FLAG.test(flag))}`);
+      continue;
     }
     if (HEADER_FLAG.test(arg) && next !== undefined) {
       out.push(arg, scrubHeaderArg(f, next, `arg ${arg}`));
@@ -326,10 +370,7 @@ const scrubArgs = (f: Found, args: ReadonlyArray<string>) => {
       continue;
     }
     if (FLAG.test(arg) && next !== undefined && !next.startsWith("-")) {
-      const value = isRef(next)
-        ? next
-        : `$${secret(f, arg.replace(/^-+/, ""), next, `arg ${arg}`)}`;
-      out.push(arg, value);
+      out.push(arg, flagValue(f, arg, next, true));
       i++;
       continue;
     }
@@ -339,7 +380,7 @@ const scrubArgs = (f: Found, args: ReadonlyArray<string>) => {
       out.push(`${assign[1]}=${scrubWhole(f, assign[1], assign[2], `arg ${assign[1]}=`)}`);
       continue;
     }
-    const url = scrubUrl(f, arg, `arg ${i + 1}`);
+    const url = scrubJson(f, scrubUrl(f, arg, `arg ${i + 1}`), `arg ${i + 1}`);
     if (url !== arg) {
       out.push(url);
       continue;
@@ -392,7 +433,12 @@ const appReason = (command: string | undefined) =>
     ? `an app's own server (${command}); the app keeps it`
     : null;
 
-/** Where any secret's value, or anything shaped like a token, is still in a definition; null when nothing is. */
+/**
+ * Where a definition still holds a credential; null when it holds none. It
+ * looks for each secret's value in any encoding, for anything shaped like a
+ * token, and at the places credentials sit: a credential flag's value, a key
+ * of a JSON argument, a URL's user, password, query or fragment.
+ */
 export const residue = (
   definition: Readonly<Record<string, unknown>>,
   secrets: ReadonlyArray<Secret>,
@@ -410,8 +456,47 @@ export const residue = (
     if (forms.some((v) => text.includes(v))) return s.where;
   }
   const refs = new Set([...text.matchAll(/\$([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]));
-  const token = text.split(/[^A-Za-z0-9_\-.=+]+/).find((w) => !refs.has(w) && looksLikeToken(w));
-  return token === undefined ? null : "something shaped like a token";
+  if (text.split(/[^A-Za-z0-9_\-.=+]+/).some((w) => !refs.has(w) && looksLikeToken(w)))
+    return "something shaped like a token";
+  const bare = (v: string) => v !== "" && !isRef(v) && !/^\$[A-Z_]/.test(v);
+  const inUrl = (v: string) => {
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return false;
+    const url = URL.parse(v);
+    if (url === null) return false;
+    const params = [...url.searchParams, ...new URLSearchParams(url.hash.replace(/^#/, ""))];
+    return bare(safeDecode(url.password)) || params.some(([k, x]) => credentialName(k) && bare(x));
+  };
+  const inJson = (v: string) => {
+    if (!/^\s*[[{]/.test(v)) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(v);
+    } catch {
+      return false;
+    }
+    const walk = (x: unknown, key: string): boolean =>
+      Array.isArray(x)
+        ? x.some((y) => walk(y, key))
+        : typeof x === "object" && x !== null
+          ? Object.entries(x).some(([k, y]) => walk(y, k))
+          : typeof x === "string" && credentialName(key) && bare(x) && !isHarmless(x);
+    return walk(parsed, "");
+  };
+  const values = [
+    ...(typeof definition["url"] === "string" ? [definition["url"]] : []),
+    ...(Array.isArray(definition["args"]) ? (definition["args"] as Array<unknown>) : []),
+  ].filter((v): v is string => typeof v === "string");
+  const args = Array.isArray(definition["args"]) ? (definition["args"] as Array<unknown>) : [];
+  for (const [i, a] of args.entries()) {
+    if (typeof a !== "string") continue;
+    const eq = /^(--?[\w.-]+)=(.*)$/s.exec(a);
+    const value =
+      eq?.[1] !== undefined && FLAG.test(eq[1]) ? eq[2] : FLAG.test(a) ? args[i + 1] : undefined;
+    if (typeof value === "string" && bare(value) && !isHarmless(value) && !value.startsWith("-"))
+      return `the value of ${eq?.[1] ?? a}`;
+  }
+  const where = values.find((v) => inUrl(v) || inJson(v) || inJson(v.replace(/^--?[\w.-]+=/, "")));
+  return where === undefined ? null : "a credential in a URL or a JSON argument";
 };
 
 const definitionOf = (
@@ -510,15 +595,23 @@ export const fromClaude = (
     Object.fromEntries(Object.entries(t).map(([k, v]) => [k, fill(v, `${label} ${k}`)]));
   const url = typeof entry["url"] === "string" ? entry["url"] : undefined;
   const command = typeof entry["command"] === "string" ? entry["command"] : undefined;
+  const own = Object.keys(stringTable(entry["env"]));
   const definition = definitionOf(f, {
     url: url === undefined ? undefined : fill(url, "url"),
     sse: entry["type"] === "sse",
     command: command === undefined ? undefined : fill(command, "command"),
-    args: strings(entry["args"]).map((a, i) => fill(a, `arg ${i + 1}`)),
+    args: strings(entry["args"]).map((a, i) => fillPlaceholders(f, a, `arg ${i + 1}`, own)),
     env: fillTable(stringTable(entry["env"]), "env"),
     headers: fillTable(stringTable(entry["headers"]), "header"),
   });
   if (definition === null) return null;
+  // Each of the server's own env entries named in an argument becomes what that entry became.
+  if (Array.isArray(definition["args"])) {
+    const env = (definition["env"] ?? {}) as Record<string, string>;
+    definition["args"] = (definition["args"] as Array<string>).map((a) =>
+      a.replace(/\$T3_FLEET_OWN_ENV_(\d+)/g, (_, i: string) => env[own[Number(i)] ?? ""] ?? ""),
+    );
+  }
   const dropped = Object.keys(entry).filter((k) => !CLAUDE_KNOWN.has(k));
   return finish(f, definition, { url, command }, dropped, null);
 };
