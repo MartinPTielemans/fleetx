@@ -429,7 +429,11 @@ export const setupSteps = (
     steps.push({
       id: "t3",
       title: "T3 Fleet's read-only token for T3",
-      run: hooks.t3Connect.pipe(Effect.map((line) => [line])),
+      // Optional: without it T3 Fleet reads less about T3, and says so in status.
+      run: hooks.t3Connect.pipe(
+        Effect.map((line) => [line]),
+        Effect.catch((why) => Effect.succeed([`skipped (${why}); later: t3-fleet t3 connect`])),
+      ),
     });
 
   steps.push({

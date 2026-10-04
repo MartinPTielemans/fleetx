@@ -56,7 +56,7 @@ export const readSnapshot = (home: string) =>
     const text = yield* fs.readFileString(snapshotPath(home)).pipe(Effect.option);
     if (Option.isNone(text)) return Option.none<Snapshot>();
     return yield* decodeSnapshot(text.value).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.mapError(
         () => `${snapshotPath(home)} is not readable; move it aside to take a new one`,
       ),

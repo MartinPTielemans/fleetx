@@ -393,7 +393,7 @@ const setup = (flags: {
     // 2. Discover.
     const found = yield* discover({
       taken: fleet.secretNames,
-      managed: mode === "again" ? checkout : null,
+      managed: mode === "again" || resumed !== null ? checkout : null,
     });
     if (node === "") node = found.node;
     if (!NAME.test(node))
