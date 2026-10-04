@@ -1,55 +1,35 @@
 /**
  * Findings by machine and area, and applying their fixes the way `t3-fleet fix`
- * does: the exact commands first, what each interrupts marked, an explicit
- * confirmation, then results and a fresh check. The server checks again before
- * running anything and skips fixes that no longer apply.
+ * does (see components/fixes.tsx). Notes can have fixes too, as `t3-fleet fix`
+ * offers them; they are there to pick, never picked for you.
  */
 import type { UiFinding } from "@t3-fleet/core/Api";
-import { CheckCircle2Icon, ChevronRightIcon, CircleXIcon, PlayIcon, WrenchIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckCircle2Icon, ChevronRightIcon, PlayIcon } from "lucide-react";
+import { useId, useState } from "react";
 
+import { CheckButton, CheckedLine, CheckFailed } from "../components/check";
 import { Code, ErrorState, LoadingRows, Page, SeverityIcon, worst } from "../components/common";
-import {
-  AlertDialog,
-  AlertDialogBody,
-  AlertDialogClose,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogPopup,
-  AlertDialogTitle,
-} from "../components/ui/alert-dialog";
+import { ApplyDialog, byNode, fixable } from "../components/fixes";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Empty } from "../components/ui/empty";
 import { Group, GroupLabel } from "../components/ui/group";
-import { Spinner } from "../components/ui/spinner";
-import { api, type UiApplyResultT } from "../lib/api";
 import { useStore } from "../lib/store";
 import { cn, plural } from "../lib/utils";
-import { CheckButton, CheckedLine } from "./Environments";
-
-export type Fixable = UiFinding & { readonly fix: NonNullable<UiFinding["fix"]> };
-export const fixable = (f: UiFinding): f is Fixable => f.fix !== undefined;
-
-const byNode = <T extends { readonly node: string }>(items: ReadonlyArray<T>) => {
-  const groups = new Map<string, Array<T>>();
-  for (const item of items) groups.set(item.node, [...(groups.get(item.node) ?? []), item]);
-  return [...groups.entries()];
-};
 
 export function FindingsView() {
   const { status, statusError, recheck } = useStore();
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [reviewing, setReviewing] = useState(false);
+  const [reviewing, setReviewing] = useState<ReadonlyArray<string> | null>(null);
 
   const findings = status?.findings ?? [];
   const active = findings.filter((f) => f.severity !== "info");
   const accepted = findings.filter((f) => f.accepted !== undefined);
   const notes = findings.filter((f) => f.severity === "info" && f.accepted === undefined);
   const fixes = active.filter(fixable);
+  const noteFixes = notes.filter(fixable);
   // A finding can disappear between checks; only what is still there counts.
-  const chosen = fixes.filter((f) => selected.has(f.id));
+  const chosen = [...fixes, ...noteFixes].filter((f) => selected.has(f.id));
   const interrupting = chosen.filter((f) => f.fix.disrupts !== undefined).length;
 
   const toggle = (id: string) =>
@@ -66,6 +46,7 @@ export function FindingsView() {
       description={<CheckedLine />}
       actions={<CheckButton />}
     >
+      <CheckFailed />
       {status === null ? (
         <Group>{statusError === null ? <LoadingRows /> : <ErrorState error={statusError} what="the check" onRetry={() => void recheck()} />}</Group>
       ) : active.length === 0 ? (
@@ -78,7 +59,8 @@ export function FindingsView() {
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="text-muted-foreground">
-              {plural(fixes.length, "fix", "fixes")} available · {plural(active.length - fixes.length, "finding")} need{active.length - fixes.length === 1 ? "s" : ""} a decision
+              {plural(fixes.length + noteFixes.length, "fix", "fixes")} available{noteFixes.length === 0 ? "" : ` (${noteFixes.length} on notes)`} ·{" "}
+              {plural(active.length - fixes.length, "finding")} need{active.length - fixes.length === 1 ? "s" : ""} a decision
             </span>
             <span className="ml-auto flex gap-1">
               <Button size="xs" variant="ghost-muted" onClick={() => setSelected(new Set(fixes.map((f) => f.id)))} disabled={fixes.length === 0}>
@@ -133,7 +115,7 @@ export function FindingsView() {
         </section>
       ) : null}
 
-      {notes.length > 0 ? <Notes notes={notes} /> : null}
+      {notes.length > 0 ? <Notes notes={notes} selected={selected} onToggle={toggle} /> : null}
 
       {chosen.length > 0 ? (
         <div className="sticky bottom-4 z-10 mx-auto flex w-full max-w-lg items-center gap-3 rounded-xl border surface-glass px-4 py-2.5 shadow-lg/10">
@@ -143,20 +125,21 @@ export function FindingsView() {
               <span className="text-warning-foreground"> · {interrupting === 1 ? "1 interrupts" : `${interrupting} interrupt`} something</span>
             )}
           </span>
-          <Button size="sm" onClick={() => setReviewing(true)}>
+          <Button size="sm" onClick={() => setReviewing(chosen.map((f) => f.id))}>
             <PlayIcon />
             Review and apply
           </Button>
         </div>
       ) : null}
 
-      <ApplyDialog open={reviewing} fixes={chosen} onClose={() => setReviewing(false)} onApplied={() => setSelected(new Set())} />
+      <ApplyDialog ids={reviewing} onClose={() => setReviewing(null)} onApplied={() => setSelected(new Set())} />
     </Page>
   );
 }
 
-function FindingRow({ finding: f, selected, onToggle }: { finding: UiFinding; selected: boolean; onToggle: () => void }) {
+function FindingRow({ finding: f, selected, onToggle, showNode = false }: { finding: UiFinding; selected: boolean; onToggle: () => void; showNode?: boolean }) {
   const [open, setOpen] = useState(false);
+  const command = useId();
   return (
     <div className={cn("flex gap-3 px-4 py-3", selected && "bg-primary/4")}>
       <div className="flex w-4 shrink-0 justify-center pt-0.5">
@@ -173,7 +156,10 @@ function FindingRow({ finding: f, selected, onToggle }: { finding: UiFinding; se
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex items-start gap-2">
           <SeverityIcon severity={f.severity} className="mt-0.5 size-3.5" />
-          <span className="min-w-0 flex-1 text-sm leading-5">{f.title}</span>
+          <span className="min-w-0 flex-1 text-sm leading-5">
+            {showNode ? <span className="font-medium">{f.node} </span> : null}
+            {f.title}
+          </span>
           <Badge variant="outline">{f.area}</Badge>
         </div>
         {f.detail === undefined ? null : <div className="pl-5.5 text-muted-foreground text-xs leading-5">{f.detail}</div>}
@@ -182,7 +168,13 @@ function FindingRow({ finding: f, selected, onToggle }: { finding: UiFinding; se
             <span className="text-muted-foreground">needs a decision rather than a command</span>
           ) : (
             <>
-              <button type="button" onClick={() => setOpen((o) => !o)} className="flex cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground">
+              <button
+                type="button"
+                aria-expanded={open}
+                aria-controls={command}
+                onClick={() => setOpen((o) => !o)}
+                className="flex cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground"
+              >
                 <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
                 fix
               </button>
@@ -198,181 +190,54 @@ function FindingRow({ finding: f, selected, onToggle }: { finding: UiFinding; se
           )}
           <code className="ml-auto text-2xs text-muted-foreground/70">{f.id}</code>
         </div>
-        {open && f.fix !== undefined ? <Code className="ml-5.5">$ {f.fix.command}</Code> : null}
+        {open && f.fix !== undefined ? (
+          <div id={command}>
+            <Code className="ml-5.5">$ {f.fix.command}</Code>
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function Notes({ notes }: { notes: ReadonlyArray<UiFinding> }) {
+/** Notes, folded away; one with a fix can be picked here like any other. */
+function Notes({ notes, selected, onToggle }: { notes: ReadonlyArray<UiFinding>; selected: ReadonlySet<string>; onToggle: (id: string) => void }) {
   const [open, setOpen] = useState(false);
+  const list = useId();
+  const withFix = notes.filter(fixable).length;
   return (
     <section>
-      <button type="button" onClick={() => setOpen((o) => !o)} className="mb-2 flex cursor-pointer items-center gap-1 px-1 font-medium text-muted-foreground text-xs hover:text-foreground">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={list}
+        onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex cursor-pointer items-center gap-1 px-1 font-medium text-muted-foreground text-xs hover:text-foreground"
+      >
         <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
         {plural(notes.length, "note")}
+        {withFix === 0 ? null : ` · ${withFix} with a fix`}
       </button>
       {open ? (
-        <Group>
-          {notes.map((f) => (
-            <div key={f.id} className="flex items-start gap-2 px-4 py-2 text-xs">
-              <SeverityIcon severity="info" className="mt-px size-3.5" />
-              <span className="w-24 shrink-0 font-medium">{f.node}</span>
-              <span className="min-w-0 flex-1">
-                {f.title}
-                {f.detail === undefined ? null : <span className="block text-muted-foreground">{f.detail}</span>}
-              </span>
-            </div>
-          ))}
-        </Group>
+        <div id={list}>
+          <Group>
+            {notes.map((f) =>
+              fixable(f) ? (
+                <FindingRow key={f.id} finding={f} selected={selected.has(f.id)} onToggle={() => onToggle(f.id)} showNode />
+              ) : (
+                <div key={f.id} className="flex items-start gap-2 px-4 py-2 text-xs">
+                  <SeverityIcon severity="info" className="mt-px size-3.5" />
+                  <span className="w-24 shrink-0 font-medium">{f.node}</span>
+                  <span className="min-w-0 flex-1">
+                    {f.title}
+                    {f.detail === undefined ? null : <span className="block text-muted-foreground">{f.detail}</span>}
+                  </span>
+                </div>
+              ),
+            )}
+          </Group>
+        </div>
       ) : null}
     </section>
-  );
-}
-
-/** Shows the fixes' commands, asks, applies them, and shows the outcome; also used by the Skills view. */
-export function ApplyDialog({
-  open,
-  fixes,
-  onClose,
-  onApplied,
-}: {
-  open: boolean;
-  fixes: ReadonlyArray<Fixable>;
-  onClose: () => void;
-  onApplied: () => void;
-}) {
-  const { setStatus } = useStore();
-  const [understood, setUnderstood] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<UiApplyResultT | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const disrupting = fixes.filter((f) => f.fix.disrupts !== undefined);
-  const machines = useMemo(() => byNode(fixes), [fixes]);
-
-  const reset = () => {
-    setUnderstood(false);
-    setResult(null);
-    setError(null);
-  };
-
-  const apply = async () => {
-    setRunning(true);
-    setError(null);
-    try {
-      const outcome = await api.applyFixes(fixes.map((f) => f.id));
-      setResult(outcome);
-      setStatus(outcome.status);
-      onApplied();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  return (
-    <AlertDialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next && !running) {
-          onClose();
-          reset();
-        }
-      }}
-    >
-      <AlertDialogPopup className="max-w-2xl">
-        {result === null ? (
-          <>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                Apply {plural(fixes.length, "fix", "fixes")} on {plural(new Set(fixes.map((f) => f.fix.on ?? f.node)).size, "machine")}?
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                T3 Fleet checks every machine again first and runs only fixes that still apply, in order per machine, machines in parallel.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogBody className="flex flex-col gap-4">
-              {machines.map(([node, items]) => (
-                <div key={node} className="flex flex-col gap-2">
-                  <div className="font-semibold text-sm">{node}</div>
-                  {items.map((f) => (
-                    <div key={f.id} className="flex flex-col gap-1.5 border-l-2 pl-3" style={{ borderColor: f.fix.disrupts === undefined ? undefined : "var(--warning)" }}>
-                      <div className="text-sm">{f.title}</div>
-                      <Code>
-                        $ {f.fix.command}
-                        {f.fix.on !== undefined && f.fix.on !== f.node ? `\n  (runs on ${f.fix.on})` : ""}
-                      </Code>
-                      {f.fix.disrupts === undefined ? null : (
-                        <div className="font-medium text-warning-foreground text-xs">interrupts: {f.fix.disrupts}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {disrupting.length > 0 ? (
-                <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-warning/32 bg-warning-surface px-3 py-2.5 text-warning-foreground text-xs">
-                  <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} className="mt-0.5 size-3.5 accent-[var(--warning)]" />
-                  <span>
-                    {disrupting.length === 1 ? "One fix interrupts" : `${disrupting.length} fixes interrupt`} running work, as marked above. Apply anyway.
-                  </span>
-                </label>
-              ) : null}
-              {error === null ? null : (
-                <div className="rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs">
-                  {error instanceof Error ? error.message : String(error)}
-                </div>
-              )}
-            </AlertDialogBody>
-            <AlertDialogFooter>
-              <AlertDialogClose render={<Button variant="ghost" disabled={running} />}>Cancel</AlertDialogClose>
-              <Button
-                variant={disrupting.length > 0 ? "destructive" : "default"}
-                disabled={running || fixes.length === 0 || (disrupting.length > 0 && !understood)}
-                onClick={() => void apply()}
-              >
-                {running ? <Spinner className="size-3.5" /> : <PlayIcon />}
-                {running ? "Applying…" : `Apply ${plural(fixes.length, "fix", "fixes")}`}
-              </Button>
-            </AlertDialogFooter>
-          </>
-        ) : (
-          <>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                {result.results.every((r) => r.ok) && result.notApplied.length === 0
-                  ? `Applied ${plural(result.results.length, "fix", "fixes")}`
-                  : `${result.results.filter((r) => r.ok).length} of ${fixes.length} applied`}
-              </AlertDialogTitle>
-              <AlertDialogDescription>The machines were checked again afterwards; the findings are up to date.</AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogBody className="flex flex-col gap-2">
-              {result.results.map((r) => (
-                <div key={r.id} className="flex items-start gap-2 text-sm">
-                  {r.ok ? <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" /> : <CircleXIcon className="mt-0.5 size-4 shrink-0 text-destructive" />}
-                  <div className="min-w-0">
-                    <div>
-                      <span className="font-medium">{r.node}</span> {r.title}
-                    </div>
-                    {r.output === "" ? null : <div className="break-words text-muted-foreground text-xs">{r.output}</div>}
-                  </div>
-                </div>
-              ))}
-              {result.notApplied.map((n) => (
-                <div key={n.id} className="flex items-start gap-2 text-sm">
-                  <WrenchIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                  <div>
-                    <code className="text-xs">{n.id}</code> <span className="text-muted-foreground text-xs">not applied: {n.reason}</span>
-                  </div>
-                </div>
-              ))}
-            </AlertDialogBody>
-            <AlertDialogFooter>
-              <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
-            </AlertDialogFooter>
-          </>
-        )}
-      </AlertDialogPopup>
-    </AlertDialog>
   );
 }

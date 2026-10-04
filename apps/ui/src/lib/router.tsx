@@ -4,10 +4,19 @@ import { useEffect, useState, type MouseEvent } from "react";
 export const VIEWS = ["environments", "findings", "proposals", "alerts", "skills", "mcp", "models", "config"] as const;
 export type View = (typeof VIEWS)[number];
 
-const parse = (): { view: View; rest: string } => {
-  const [, first = "", ...rest] = window.location.pathname.split("/");
+/** A path segment as text; a malformed escape ("/config/%") stays as typed rather than breaking the page. */
+const decode = (text: string) => {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+};
+
+export const parse = (pathname = window.location.pathname): { view: View; rest: string } => {
+  const [, first = "", ...rest] = pathname.split("/");
   const view = (VIEWS as ReadonlyArray<string>).includes(first) ? (first as View) : "environments";
-  return { view, rest: decodeURIComponent(rest.join("/")) };
+  return { view, rest: decode(rest.join("/")) };
 };
 
 const listeners = new Set<() => void>();
@@ -20,7 +29,7 @@ export function navigate(path: string) {
 }
 
 export function useRoute() {
-  const [route, setRoute] = useState(parse);
+  const [route, setRoute] = useState(() => parse());
   useEffect(() => {
     const update = () => setRoute(parse());
     listeners.add(update);

@@ -2,13 +2,14 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite-plus";
 
-import { fixtureResponse } from "./dev/fixtures.ts";
+import { fixtureEvents, fixtureResponse } from "./dev/fixtures.ts";
 
 /**
- * `vp dev` proxies /api to a running `t3-fleet ui` (port 8397, or
- * T3_FLEET_UI_PORT). With T3_FLEET_UI_FIXTURES=1 it answers /api itself from
- * dev/fixtures.ts instead, so every view, the hub's and the models' too, can
- * be worked on without a fleet.
+ * `vp dev` proxies /api to a running `t3-fleet ui --port 8397` (or
+ * T3_FLEET_UI_PORT); open the dev server with the `#ticket=…` it printed.
+ * With T3_FLEET_UI_FIXTURES=1 it answers /api itself from dev/fixtures.ts
+ * instead, so every view, the hub's and the models' too, can be worked on
+ * without a fleet; open it at /#ticket=f (the fixtures take any ticket).
  */
 const fixtures = (): Plugin => ({
   name: "t3-fleet-ui-fixtures",
@@ -16,14 +17,18 @@ const fixtures = (): Plugin => ({
     server.middlewares.use((req, res, next) => {
       const url = new URL(req.url ?? "/", "http://dev");
       if (!url.pathname.startsWith("/api/")) return next();
-      const answer = fixtureResponse(req.method ?? "GET", url.pathname);
-      if (answer === "events") {
-        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-        res.write(": connected\n\n");
-        return;
-      }
-      res.writeHead(answer.status, { "content-type": answer.body === "" ? "text/plain" : "application/json" });
-      res.end(answer.body);
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        const answer = fixtureResponse(req.method ?? "GET", url.pathname, body);
+        if (answer === "events") {
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+          res.write(fixtureEvents);
+          return;
+        }
+        res.writeHead(answer.status, { "content-type": answer.body === "" ? "text/plain" : "application/json" });
+        res.end(answer.body);
+      });
     });
   },
 });

@@ -4,15 +4,7 @@ import { ExternalLinkIcon, LogInIcon, LogOutIcon, PlugIcon, RefreshCwIcon, Rotat
 import { useState } from "react";
 
 import { ErrorState, LoadingRows, Page, UnavailableState } from "../components/common";
-import {
-  AlertDialog,
-  AlertDialogClose,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogPopup,
-  AlertDialogTitle,
-} from "../components/ui/alert-dialog";
+import { ConfirmDialog } from "../components/dialogs";
 import { Badge, type BadgeVariant } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Empty } from "../components/ui/empty";
@@ -158,44 +150,21 @@ function ServerRow({ server: s, onChanged }: { server: HubServerT; onChanged: ()
 }
 
 function ConfirmHub({ server, verb, onClose, onDone }: { server: HubServerT; verb: "logout" | "restart" | null; onClose: () => void; onDone: () => void }) {
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = async () => {
-    setRunning(true);
-    setError(null);
-    try {
-      await (verb === "logout" ? api.hubLogout(server.name) : api.hubRestart(server.name));
-      onClose();
-      onDone();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRunning(false);
-    }
-  };
   return (
-    <AlertDialog open={verb !== null} onOpenChange={(open) => !open && !running && onClose()}>
-      <AlertDialogPopup>
-        <AlertDialogHeader>
-          <AlertDialogTitle>
-            {verb === "logout" ? "Sign out of" : "Restart"} {server.name}?
-          </AlertDialogTitle>
-          <AlertDialogDescription>
-            {verb === "logout"
-              ? "The hub forgets this server's tokens. Every client loses it until someone signs in again."
-              : "Calls in flight through this server fail while it restarts."}
-          </AlertDialogDescription>
-          {error === null ? null : <div className="text-destructive-foreground text-xs">{error}</div>}
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogClose render={<Button variant="ghost" disabled={running} />}>Cancel</AlertDialogClose>
-          <Button variant={verb === "logout" ? "destructive" : "default"} disabled={running} onClick={() => void run()}>
-            {running ? <Spinner className="size-3.5" /> : null}
-            {verb === "logout" ? "Sign out" : "Restart"}
-          </Button>
-        </AlertDialogFooter>
-      </AlertDialogPopup>
-    </AlertDialog>
+    <ConfirmDialog
+      open={verb !== null}
+      title={`${verb === "logout" ? "Sign out of" : "Restart"} ${server.name}?`}
+      description={
+        verb === "logout"
+          ? "The hub forgets this server's tokens. Every client loses it until someone signs in again."
+          : "Calls in flight through this server fail while it restarts."
+      }
+      confirm={verb === "logout" ? "Sign out" : "Restart"}
+      variant={verb === "logout" ? "destructive" : "default"}
+      onConfirm={() => (verb === "logout" ? api.hubLogout(server.name) : api.hubRestart(server.name))}
+      onClose={onClose}
+      onDone={onDone}
+    />
   );
 }
 

@@ -7,17 +7,18 @@
  */
 import type { UiSkill, UiSkillsNode } from "@t3-fleet/core/Api";
 import { CheckCircle2Icon, DownloadIcon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, Trash2Icon, WrenchIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ErrorState, LoadingRows, Page, SeverityIcon } from "../components/common";
+import { ActionDialog, ConfirmDialog, Failure } from "../components/dialogs";
+import { Diff } from "../components/Diff";
+import { ApplyDialog, fixable } from "../components/fixes";
 import {
-  AlertDialog,
   AlertDialogBody,
   AlertDialogClose,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
-  AlertDialogPopup,
   AlertDialogTitle,
 } from "../components/ui/alert-dialog";
 import { Badge } from "../components/ui/badge";
@@ -25,11 +26,9 @@ import { Button } from "../components/ui/button";
 import { Empty } from "../components/ui/empty";
 import { Group, GroupLabel } from "../components/ui/group";
 import { Spinner } from "../components/ui/spinner";
-import { api, type UiSkillsLandedT, type UiSkillsLookupT, type UiSkillsPreviewT } from "../lib/api";
-import { useEvent, useResource, useStore } from "../lib/store";
+import { api, type UiJobT, type UiSkillsLandedT } from "../lib/api";
+import { useAction, useEvent, useResource, useStore } from "../lib/store";
 import { plural } from "../lib/utils";
-import { ApplyDialog, fixable, type Fixable } from "./Findings";
-import { Diff } from "./Proposals";
 
 const tilde = (dir: string) => dir.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
 
@@ -40,7 +39,7 @@ type Dialog =
   | { readonly kind: "add" }
   | { readonly kind: "update"; readonly skills: ReadonlyArray<string> }
   | { readonly kind: "remove"; readonly skill: string }
-  | { readonly kind: "fix"; readonly fixes: ReadonlyArray<Fixable> };
+  | { readonly kind: "fix"; readonly ids: ReadonlyArray<string> };
 
 export function SkillsView() {
   const { session, status, recheck, checking } = useStore();
@@ -83,7 +82,7 @@ export function SkillsView() {
           <GroupLabel className="flex items-center gap-2">
             <span>Needs attention</span>
             {fixes.length > 1 ? (
-              <Button size="xs" variant="outline" className="ml-auto" onClick={() => setDialog({ kind: "fix", fixes })}>
+              <Button size="xs" variant="outline" className="ml-auto" onClick={() => setDialog({ kind: "fix", ids: fixes.map((f) => f.id) })}>
                 <WrenchIcon />
                 Fix all {fixes.length}
               </Button>
@@ -100,7 +99,7 @@ export function SkillsView() {
                   {f.detail === undefined ? null : <div className="text-muted-foreground text-xs">{f.detail}</div>}
                 </div>
                 {fixable(f) ? (
-                  <Button size="xs" variant="outline" onClick={() => setDialog({ kind: "fix", fixes: [f] })}>
+                  <Button size="xs" variant="outline" onClick={() => setDialog({ kind: "fix", ids: [f.id] })}>
                     <WrenchIcon />
                     {f.fix.command.startsWith("t3-fleet skills adopt") ? "Adopt" : "Fix"}
                   </Button>
@@ -140,7 +139,7 @@ export function SkillsView() {
       <AddDialog open={dialog?.kind === "add"} onClose={() => setDialog(null)} onChanged={changed} />
       <UpdateDialog skills={dialog?.kind === "update" ? dialog.skills : null} onClose={() => setDialog(null)} onChanged={changed} />
       <RemoveDialog skill={dialog?.kind === "remove" ? dialog.skill : null} onClose={() => setDialog(null)} onChanged={changed} />
-      <ApplyDialog open={dialog?.kind === "fix"} fixes={dialog?.kind === "fix" ? dialog.fixes : []} onClose={() => setDialog(null)} onApplied={changed} />
+      <ApplyDialog ids={dialog?.kind === "fix" ? dialog.ids : null} onClose={() => setDialog(null)} onApplied={changed} />
     </Page>
   );
 }
@@ -231,24 +230,21 @@ function LinkCell({ skill, node: n }: { skill: string; node: UiSkillsNode }) {
   const links = n.links.filter((l) => l.skill === skill);
   if (links.length === 0) return quiet("not yet", "not in this machine's checkout yet; it arrives with the next sync");
   const broken = links.filter((l) => l.state !== "ok");
-  const title = links.map((l) => `${tilde(l.dir)}: ${STATE_TEXT[l.state]}`).join("\n");
+  const each = links.map((l) => `${tilde(l.dir)}: ${STATE_TEXT[l.state]}`);
   return (
-    <span className="inline-flex" title={title}>
+    <span className="inline-flex items-center gap-1" title={each.join("\n")}>
       <SeverityIcon severity={broken.length === 0 ? "ok" : "warn"} className="size-3.5" />
+      {broken.length === 0 ? null : (
+        <span aria-hidden className="text-2xs text-warning-foreground">
+          {links.length - broken.length}/{links.length}
+        </span>
+      )}
+      <span className="sr-only">{each.join("; ")}</span>
     </span>
   );
 }
 
 // ── dialogs ─────────────────────────────────────────────────────────────
-
-function Failure({ error }: { error: unknown }) {
-  if (error === null) return null;
-  return (
-    <div className="whitespace-pre-wrap break-words rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs">
-      {error instanceof Error ? error.message : String(error)}
-    </div>
-  );
-}
 
 function Landed({ landed, verb }: { landed: UiSkillsLandedT; verb: string }) {
   const names = landed.paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.replace(/^skills\//, ""));
@@ -265,67 +261,36 @@ function Landed({ landed, verb }: { landed: UiSkillsLandedT; verb: string }) {
   );
 }
 
-/** Shared frame: the dialog stays open while something runs. */
-function SkillDialog({ open, busy, onClose, className, children }: { open: boolean; busy: boolean; onClose: () => void; className?: string; children: ReactNode }) {
-  return (
-    <AlertDialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next && !busy) onClose();
-      }}
-    >
-      <AlertDialogPopup className={className}>{children}</AlertDialogPopup>
-    </AlertDialog>
-  );
-}
+/** What a skills job changed; a job always carries it when it is done. */
+const landedOf = (job: UiJobT): UiSkillsLandedT => job.landed ?? { paths: [], landed: "done" };
 
 function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () => void; onChanged: () => void }) {
+  const { runJob } = useStore();
   const [source, setSource] = useState("");
-  const [found, setFound] = useState<UiSkillsLookupT | null>(null);
   const [chosen, setChosen] = useState<ReadonlySet<string>>(new Set());
   const [as, setAs] = useState("");
-  const [busy, setBusy] = useState<"lookup" | "add" | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [landed, setLanded] = useState<UiSkillsLandedT | null>(null);
+  const lookup = useAction(async (from: string) => {
+    const result = await api.skillsLookup(from);
+    const fresh = result.skills.filter((s) => !s.exists);
+    setChosen(new Set(result.skills.length === 1 ? result.skills.map((s) => s.name) : fresh.length === 1 ? fresh.map((s) => s.name) : []));
+    return result;
+  });
+  const add = useAction(async (from: string, names: ReadonlyArray<string>, rename: string | undefined) => {
+    const job = await runJob(() => api.skillsAdd(from, names, rename));
+    onChanged();
+    return landedOf(job);
+  });
+  const found = lookup.result;
+  const landed = add.result;
+  const busy = lookup.running || add.running;
 
-  useEffect(() => {
-    if (open) return;
+  const close = () => {
     setSource("");
-    setFound(null);
     setChosen(new Set());
     setAs("");
-    setError(null);
-    setLanded(null);
-  }, [open]);
-
-  const lookup = async () => {
-    setBusy("lookup");
-    setError(null);
-    setFound(null);
-    try {
-      const result = await api.skillsLookup(source.trim());
-      setFound(result);
-      const fresh = result.skills.filter((s) => !s.exists);
-      setChosen(new Set(result.skills.length === 1 ? result.skills.map((s) => s.name) : fresh.length === 1 ? fresh.map((s) => s.name) : []));
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const add = async () => {
-    setBusy("add");
-    setError(null);
-    try {
-      const rename = chosen.size === 1 && as.trim() !== "" ? as.trim() : undefined;
-      setLanded(await api.skillsAdd(source.trim(), [...chosen], rename));
-      onChanged();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(null);
-    }
+    lookup.reset();
+    add.reset();
+    onClose();
   };
 
   const toggle = (name: string) => {
@@ -336,7 +301,7 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
   };
 
   return (
-    <SkillDialog open={open} busy={busy !== null} onClose={onClose} className="max-w-xl">
+    <ActionDialog open={open} busy={add.running} onClose={close} className="max-w-xl">
       <AlertDialogHeader>
         <AlertDialogTitle>Add skills from a git repository</AlertDialogTitle>
         <AlertDialogDescription>
@@ -352,24 +317,25 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
               className="flex gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (source.trim() !== "" && busy === null) void lookup();
+                if (source.trim() !== "" && !busy) void lookup.start(source.trim());
               }}
             >
               <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[var(--control-radius)] border border-input bg-popover px-2.5 text-sm shadow-xs/5 focus-within:ring-2 focus-within:ring-ring">
                 <SearchIcon className="size-3.5 text-muted-foreground" />
                 <input
                   autoFocus
+                  aria-label="Repository"
                   value={source}
                   onChange={(e) => {
                     setSource(e.target.value);
-                    setFound(null);
+                    lookup.reset();
                   }}
                   placeholder="owner/repo or a git URL"
                   className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
                 />
               </label>
-              <Button type="submit" variant="outline" disabled={source.trim() === "" || busy !== null}>
-                {busy === "lookup" ? <Spinner className="size-3.5" /> : null}
+              <Button type="submit" variant="outline" disabled={source.trim() === "" || busy}>
+                {lookup.running ? <Spinner className="size-3.5" /> : null}
                 Look up
               </Button>
             </form>
@@ -402,77 +368,62 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
             )}
           </>
         )}
-        <Failure error={error} />
+        <Failure error={lookup.error ?? add.error} />
       </AlertDialogBody>
       <AlertDialogFooter>
         {landed !== null ? (
           <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
         ) : (
           <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={busy !== null} />}>Cancel</AlertDialogClose>
-            <Button disabled={found === null || chosen.size === 0 || busy !== null} onClick={() => void add()}>
-              {busy === "add" ? <Spinner className="size-3.5" /> : <PlusIcon />}
+            <AlertDialogClose render={<Button variant="ghost" disabled={add.running} />}>Cancel</AlertDialogClose>
+            <Button
+              disabled={found === null || chosen.size === 0 || busy}
+              onClick={() => void add.start(source.trim(), [...chosen], chosen.size === 1 && as.trim() !== "" ? as.trim() : undefined)}
+            >
+              {add.running ? <Spinner className="size-3.5" /> : <PlusIcon />}
               {chosen.size === 0 ? "Add" : `Add ${plural(chosen.size, "skill")}`}
             </Button>
           </>
         )}
       </AlertDialogFooter>
-    </SkillDialog>
+    </ActionDialog>
   );
 }
 
 /** Preview what upstream changed (the repo is left as it was), then keep it. */
 function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<string> | null; onClose: () => void; onChanged: () => void }) {
-  const [preview, setPreview] = useState<UiSkillsPreviewT | null>(null);
-  const [busy, setBusy] = useState<"preview" | "keep" | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [landed, setLanded] = useState<UiSkillsLandedT | null>(null);
+  const { runJob } = useStore();
+  const preview = useAction((names: ReadonlyArray<string>) => api.skillsPreview(names));
+  const keep = useAction(async (names: ReadonlyArray<string>, digest: string) => {
+    const job = await runJob(() => api.skillsUpdate(names, digest));
+    onChanged();
+    return landedOf(job);
+  });
   const open = skills !== null;
   const which = skills === null || skills.length === 0 ? "every skill with a source" : skills.join(", ");
+  const startPreview = preview.start;
+  const resetPreview = preview.reset;
+  const resetKeep = keep.reset;
 
   useEffect(() => {
-    setPreview(null);
-    setError(null);
-    setLanded(null);
-    if (skills === null) return;
-    let live = true;
-    setBusy("preview");
-    api.skillsPreview(skills).then(
-      (p) => live && setPreview(p),
-      (e) => live && setError(e),
-    ).finally(() => live && setBusy(null));
-    return () => {
-      live = false;
-    };
-  }, [skills]);
+    resetPreview();
+    resetKeep();
+    if (skills !== null) void startPreview(skills);
+  }, [skills, startPreview, resetPreview, resetKeep]);
 
-  const keep = async () => {
-    if (skills === null || preview === null) return;
-    setBusy("keep");
-    setError(null);
-    try {
-      setLanded(await api.skillsUpdate(skills, preview.digest));
-      onChanged();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const current = preview !== null && preview.digest === "";
+  const shown = preview.result;
+  const landed = keep.result;
+  const current = shown !== null && shown.digest === "";
   return (
-    <SkillDialog open={open} busy={busy === "keep"} onClose={onClose} className="max-w-3xl">
+    <ActionDialog open={open} busy={keep.running} onClose={onClose} className="max-w-3xl">
       <AlertDialogHeader>
         <AlertDialogTitle>Update {which}</AlertDialogTitle>
-        <AlertDialogDescription>
-          T3 Fleet pulls from upstream and shows the change; nothing is kept until you say so.
-        </AlertDialogDescription>
+        <AlertDialogDescription>T3 Fleet pulls from upstream and shows the change; nothing is kept until you say so.</AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogBody className="flex flex-col gap-3">
         {landed !== null ? (
           <Landed landed={landed} verb="Updated" />
-        ) : busy === "preview" ? (
+        ) : preview.running ? (
           <div className="flex items-center gap-2 text-muted-foreground text-sm">
             <Spinner className="size-3.5" />
             Pulling from upstream…
@@ -482,87 +433,50 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
             <CheckCircle2Icon className="size-4 text-success" />
             Already up to date.
           </div>
-        ) : preview === null ? null : (
+        ) : shown === null ? null : (
           <>
-            <pre className="overflow-x-auto font-mono text-muted-foreground text-xs">{preview.stat}</pre>
+            <pre className="overflow-x-auto font-mono text-muted-foreground text-xs">{shown.stat}</pre>
             <div className="overflow-hidden rounded-lg border">
-              <Diff text={preview.diff} />
+              <Diff text={shown.diff} />
             </div>
           </>
         )}
-        <Failure error={error} />
+        <Failure error={preview.error ?? keep.error} />
       </AlertDialogBody>
       <AlertDialogFooter>
         {landed !== null || current ? (
           <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
         ) : (
           <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={busy === "keep"} />}>Cancel</AlertDialogClose>
-            <Button disabled={preview === null || busy !== null} onClick={() => void keep()}>
-              {busy === "keep" ? <Spinner className="size-3.5" /> : <DownloadIcon />}
+            <AlertDialogClose render={<Button variant="ghost" disabled={keep.running} />}>Cancel</AlertDialogClose>
+            <Button disabled={skills === null || shown === null || preview.running || keep.running} onClick={() => skills !== null && shown !== null && void keep.start(skills, shown.digest)}>
+              {keep.running ? <Spinner className="size-3.5" /> : <DownloadIcon />}
               Keep the update
             </Button>
           </>
         )}
       </AlertDialogFooter>
-    </SkillDialog>
+    </ActionDialog>
   );
 }
 
 function RemoveDialog({ skill, onClose, onChanged }: { skill: string | null; onClose: () => void; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [landed, setLanded] = useState<UiSkillsLandedT | null>(null);
+  const { runJob } = useStore();
+  // Kept while the dialog closes, so its title does not go blank.
   const [shown, setShown] = useState(skill);
   if (skill !== null && skill !== shown) setShown(skill);
-
-  useEffect(() => {
-    if (skill !== null) return;
-    setError(null);
-    setLanded(null);
-  }, [skill]);
-
-  const remove = async () => {
-    if (skill === null) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setLanded(await api.skillsRemove([skill]));
-      onChanged();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
-    <SkillDialog open={skill !== null} busy={busy} onClose={onClose}>
-      <AlertDialogHeader>
-        <AlertDialogTitle>Remove {shown}?</AlertDialogTitle>
-        <AlertDialogDescription>
-          It leaves the config repo (git history keeps it). On their next sync, machines report its links as pointing at nothing, with a fix to clean them up.
-        </AlertDialogDescription>
-      </AlertDialogHeader>
-      {landed === null && error === null ? null : (
-        <AlertDialogBody>
-          {landed === null ? null : <Landed landed={landed} verb="Removed" />}
-          <Failure error={error} />
-        </AlertDialogBody>
-      )}
-      <AlertDialogFooter>
-        {landed !== null ? (
-          <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
-        ) : (
-          <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={busy} />}>Cancel</AlertDialogClose>
-            <Button variant="destructive" disabled={busy} onClick={() => void remove()}>
-              {busy ? <Spinner className="size-3.5" /> : <Trash2Icon />}
-              Remove
-            </Button>
-          </>
-        )}
-      </AlertDialogFooter>
-    </SkillDialog>
+    <ConfirmDialog
+      open={skill !== null}
+      title={`Remove ${shown}?`}
+      description="It leaves the config repo (git history keeps it). On their next sync, machines report its links as pointing at nothing, with a fix to clean them up."
+      confirm="Remove"
+      icon={<Trash2Icon />}
+      variant="destructive"
+      onConfirm={() => runJob(() => api.skillsRemove([shown ?? ""])).then(landedOf)}
+      onClose={onClose}
+      onDone={onChanged}
+      done={(landed) => <Landed landed={landed} verb="Removed" />}
+    />
   );
 }

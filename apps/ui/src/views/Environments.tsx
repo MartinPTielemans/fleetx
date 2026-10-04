@@ -1,41 +1,18 @@
 /** The status table, live; each machine opens to everything T3 Fleet saw there. */
 import type { UiEnvironment, UiFinding } from "@t3-fleet/core/Api";
-import { ChevronRightIcon, RefreshCwIcon, ServerIcon, TerminalIcon } from "lucide-react";
+import { ChevronRightIcon, ServerIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
 
+import { CheckButton, CheckedLine, CheckFailed } from "../components/check";
 import { Code, ErrorState, LoadingRows, Page, SeverityIcon, worst, type Severity } from "../components/common";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Empty } from "../components/ui/empty";
 import { Group, GroupLabel } from "../components/ui/group";
-import { Spinner } from "../components/ui/spinner";
 import { providerLogins, statusText } from "../lib/providers";
 import { follow, navigate } from "../lib/router";
 import { useStore } from "../lib/store";
 import { ago, cn, plural, shortT3 } from "../lib/utils";
-
-export function CheckButton() {
-  const { checking, recheck } = useStore();
-  return (
-    <Button size="sm" variant="outline" disabled={checking} onClick={() => void recheck()}>
-      {checking ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
-      {checking ? "Checking…" : "Check now"}
-    </Button>
-  );
-}
-
-export function CheckedLine() {
-  const { status, now } = useStore();
-  if (status === null) return <>checking every machine…</>;
-  const errors = status.findings.filter((f) => f.severity === "error").length;
-  const warns = status.findings.filter((f) => f.severity === "warn").length;
-  const parts = [plural(status.environments.length, "environment")];
-  if (errors + warns === 0) parts.push("everything matches");
-  if (errors > 0) parts.push(plural(errors, "problem"));
-  if (warns > 0) parts.push(plural(warns, "warning"));
-  parts.push(`checked ${ago(status.checkedAt, now)} in ${(status.elapsedMs / 1000).toFixed(1)}s`);
-  return <>{parts.join(" · ")}</>;
-}
 
 export function EnvironmentsView({ open }: { open: string }) {
   const { status, statusError, recheck } = useStore();
@@ -69,11 +46,7 @@ export function EnvironmentsView({ open }: { open: string }) {
         )
       ) : (
         <>
-          {statusError === null ? null : (
-            <div className="rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs">
-              The last check failed: {statusError instanceof Error ? statusError.message : String(statusError)}. Showing the one before.
-            </div>
-          )}
+          <CheckFailed />
           {showText ? <Code className="text-[0.6875rem]">{status.summary}</Code> : null}
           {status.environments.length === 0 ? (
             <Group>
@@ -170,21 +143,28 @@ function EnvironmentRow({
     );
   };
   const enabled = env.providers.filter((p) => p.enabled);
-  const toggle = () => navigate(open ? "/environments" : `/environments/${encodeURIComponent(env.name)}`);
+  const href = open ? "/environments" : `/environments/${encodeURIComponent(env.name)}`;
   return (
     <>
-      <tr
-        className={cn("cursor-pointer border-b transition-colors last:border-0 hover:bg-muted/60", open && "bg-muted/60")}
-        onClick={toggle}
-        aria-expanded={open}
-      >
+      {/* The whole row opens it for the mouse; the machine's name is the link for everyone else. */}
+      <tr className={cn("cursor-pointer border-b transition-colors last:border-0 hover:bg-muted/60", open && "bg-muted/60")} onClick={() => navigate(href)}>
         <td className="py-2.5 pl-3">
           <ChevronRightIcon className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")} />
         </td>
         <td className="px-2 py-2.5">
           <span className="flex items-center gap-2 whitespace-nowrap">
             <SeverityIcon severity={overall} className="size-3.5" />
-            <span className="font-medium">{env.name}</span>
+            <a
+              href={href}
+              aria-expanded={open}
+              onClick={(event) => {
+                event.stopPropagation();
+                follow(event);
+              }}
+              className="rounded-sm font-medium underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {env.name}
+            </a>
             {env.roles
               .filter((r) => r !== "member")
               .map((r) => (

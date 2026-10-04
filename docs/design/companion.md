@@ -26,7 +26,7 @@ consumes those schemas; nobody invents a second shape for the same data.
 |---|---|---|
 | 8399 | relay node, 127.0.0.1, published to the tailnet | relay: sync events, state, MCP gateway, hub management, OAuth callback |
 | 8398 | every node, 127.0.0.1 only | model proxy |
-| 8397 | the machine running `t3-fleet ui`, 127.0.0.1 only | UI and its `/api` |
+| random (or `--port`) | the machine running `t3-fleet ui`, 127.0.0.1 only | UI and its `/api` |
 | 18200–18299 | relay node, 127.0.0.1 only | hub-run MCP servers (allocated by the hub) |
 
 ## 1. models: the model proxy
@@ -239,7 +239,8 @@ command; there is no automatic fix, because a person signs in.
 
 A local web app, `apps/ui` (React, Vite, Tailwind), in T3 Code's visual
 language: its colours, type, density, dark and light modes. `t3-fleet ui` serves
-the built app and `/api` on 127.0.0.1:8397 and opens the browser. It runs
+the built app and `/api` on 127.0.0.1, on a random port unless `--port` names
+one, and opens the browser with a one-use link. It runs
 where the user is (usually the authority), so it can ssh to nodes for checks
 and fixes, and it reads the relay for live state and the hub.
 
@@ -251,9 +252,11 @@ still works.
 - **Environments**: the status table, live; each machine opens to its
   providers, agent CLIs, sync, model proxy and areas.
 - **Findings**: grouped by machine and area; apply fixes with the same plan,
-  disruption marks and confirmation as `t3-fleet fix`; accepted notes shown with
-  their reasons.
-- **Proposals**: review, approve and reject staged changes, with diffs.
+  disruption marks and confirmation as `t3-fleet fix`; notes with a fix can be
+  picked too; accepted notes shown with their reasons.
+- **Proposals**: review, approve and reject staged changes, with diffs; a
+  decision names the change that was shown, so a sync that re-creates the
+  same commit does not void it, and a different one is not decided unseen.
 - **Alerts**: the alert history.
 - **Skills**: the repo's skills against every machine, each link's state;
   add from a git repository (looked up first, then chosen), update (a diff
@@ -269,10 +272,25 @@ still works.
 
 ### API
 
-Defined in `Api.ts` (`UiApi*` schemas). Updates arrive on `GET /api/events`
-(server-sent events): relay events passed through, plus `check` when a fresh
-check finishes. The server runs a full check on start and every 60 seconds
-while a browser is connected.
+Defined in `Api.ts` (`Ui*` schemas). The link's ticket is traded once for a
+tab token (`POST /api/session`); every other `/api` request carries the token
+as a header, and only `GET /api/events` may take it in the query.
+
+Updates arrive on `GET /api/events` (server-sent events): first where things
+stand (the latest `check`, a newer `check-failed`, every `job`), then relay
+events passed through, `check` when a check finishes, `check-failed` when one
+does not, and `job` as jobs move. Checks run one at a time and are shared by
+everyone who asks meanwhile; one runs on start and every 60 seconds while a
+tab is open and visible, and never while fixes run.
+
+Fixes are planned (`POST /api/fixes/plan`: each fix's command, node, `on`,
+interruption and a digest), shown, and applied by digest: the server checks
+again and runs only fixes whose digest still matches, and fixes that
+interrupt something only if acknowledged. Applying fixes, approving or
+rejecting a proposal (by its change: each file's blob on the branch and in
+the proposal), and adding, updating or removing skills
+are jobs: they run in the server, survive the tab, are listed at `GET /api/jobs` for half an hour after they
+finish, and stopping `t3-fleet ui` waits for them (a second Ctrl-C does not).
 
 ## Who builds what
 
