@@ -321,7 +321,7 @@ export const uiCommand = Command.make("ui", {
             live((config) =>
               proposalFrom(config, node, change).pipe(
                 Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)),
-                Effect.asVoid,
+                Effect.map((approved) => approved.notes),
               ),
             ),
           reject: (node, change) =>

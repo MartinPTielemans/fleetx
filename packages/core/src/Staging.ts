@@ -173,6 +173,16 @@ export const approve = (
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
       const files = yield* ownChange(repo, tip);
+      // A proposal carries its own machine's secrets, and no one else's.
+      const foreign = files.filter(
+        (f) =>
+          f.startsWith(`${PROPOSED_SECRETS}/`) &&
+          f !== `${PROPOSED_SECRETS}/${proposal.node}.env.age`,
+      );
+      if (foreign.length > 0)
+        return yield* Effect.fail(
+          `${proposal.node}'s proposal changes ${foreign.join(", ")}, secrets that are not its own; reject it`,
+        );
       const dirty = yield* changedFiles(repo, files);
       if (dirty.length > 0) {
         // Edits sync holds back never get committed: approving sets those aside in git stash.
@@ -204,13 +214,20 @@ export const approve = (
         repo,
         Effect.fnUntraced(function* (scratch: string) {
           const pick = yield* git(scratch, ["cherry-pick", "--no-commit", tip]);
-          // Two proposals that each only add to a TOML file (two machines joining at once) both go in.
-          const unresolved = ok(pick) ? [] : yield* mergeTomlAdditions(scratch);
-          if (!ok(pick) && unresolved.length > 0) {
-            const conflicted = unresolved;
-            return yield* Effect.fail(
-              `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made${conflicted.length > 0 ? ` (${conflicted.join(", ")})` : ""}; reject it, or have ${proposal.node} sync and propose again`,
+          if (!ok(pick)) {
+            const conflicted = nulList(
+              (yield* git(scratch, ["diff", "--name-only", "-z", "--diff-filter=U"])).stdout,
             );
+            if (conflicted.length === 0)
+              return yield* Effect.fail(
+                `applying ${proposal.node}'s proposal failed: ${why(pick)}`,
+              );
+            // Only what two machines joining at once both add (TomlMerge.ts) merges; the rest refuses.
+            const unresolved = yield* mergeTomlAdditions(scratch);
+            if (unresolved.length > 0)
+              return yield* Effect.fail(
+                `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made (${unresolved.join(", ")}). Reject it (t3-fleet reject ${proposal.node}): ${proposal.node}'s next sync sets those edits aside, and \`t3-fleet setup\` there offers what setup added again, on top of ${branch}`,
+              );
           }
           // Only the files the proposal names, which is what was reviewed and
           // what auto_approve trusts: a cherry-pick follows renames, so an
@@ -251,18 +268,21 @@ export const approve = (
           );
         const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
         if (!ok(push)) return yield* Effect.fail(`push failed: ${why(push)}`);
-        // Secrets the proposal brought (setup on a joining machine), now that what uses them is in.
-        const secrets = files.filter((f) => f.startsWith(`${PROPOSED_SECRETS}/`));
-        if (secrets.length > 0)
-          yield* mergeProposedSecrets(repo, secrets).pipe(
-            Effect.mapError(
-              (e) =>
-                `approved, but merging its secrets failed: ${typeof e === "string" ? e : e.message}`,
-            ),
-          );
       }
+      // Secrets the proposal brought (setup on a joining machine), now that what uses them is in;
+      // also when it was on the branch already, so approving again retries a merge that failed.
+      const secrets = files.filter((f) => f.startsWith(`${PROPOSED_SECRETS}/`));
+      const notes =
+        secrets.length === 0
+          ? []
+          : yield* mergeProposedSecrets(repo, secrets).pipe(
+              Effect.mapError(
+                (e) =>
+                  `approved, but merging its secrets failed (the next sync here tries again): ${typeof e === "string" ? e : e.message}`,
+              ),
+            );
       yield* dropStaging(repo, proposal, tip);
-      return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+      return { rev: out(yield* git(repo, ["rev-parse", "--short", "HEAD"])), notes };
     }),
   );
 

@@ -16,7 +16,7 @@ import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 import { expandHome, loadConfig, loadConfigFrom, type Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { exec } from "@t3-fleet/core/Exec";
-import { git, indexEntries, out, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
+import { indexEntries, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
@@ -217,7 +217,7 @@ export const approveCommand = Command.make("approve", {
       const proposal = yield* proposalOf(config, node);
       for (const line of yield* describeProposed(config.repo, proposal.commit, node))
         yield* Console.log(line);
-      const rev = yield* approve(
+      const { rev, notes } = yield* approve(
         config.repo,
         config.branch,
         proposal,
@@ -225,10 +225,7 @@ export const approveCommand = Command.make("approve", {
         Option.getOrUndefined(commit),
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
-      // What approving did with the secrets it proposed, as the merge commit records it.
-      const merge = out(yield* git(config.repo, ["log", "-1", "--format=%s%n%b"]));
-      if (merge.startsWith("Merge proposed secrets"))
-        for (const line of merge.split("\n").slice(1).filter(Boolean)) yield* Console.log(line);
+      for (const line of notes) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );

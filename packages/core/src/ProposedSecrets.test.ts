@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import { generateX25519Identity, identityToRecipient } from "age-encryption";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
+import { pullBranch } from "./Git.ts";
 import { mergeProposedSecrets, sortProposed } from "./ProposedSecrets.ts";
 import {
   encryptFor,
@@ -20,6 +21,7 @@ import {
   writeRecipients,
   writeSecrets,
 } from "./Secrets.ts";
+import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
@@ -104,5 +106,86 @@ describe("mergeProposedSecrets", () => {
     expect(fs.existsSync(join(repo, "secrets-proposed/desktop.env.age"))).toBe(false);
     expect(fs.existsSync(join(repo, "secrets-proposed/server.env.age"))).toBe(true);
     expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("Merge proposed secrets");
+  });
+});
+
+/** An authority's checkout and a member's, of a fresh origin holding `fleet` as t3-fleet.toml. */
+const twoMachines = async (name: string, fleet: string) => {
+  const root = join(home, name);
+  const origin = join(root, "origin.git");
+  git(home, "init", "-q", "--bare", "-b", "main", origin);
+  const authority = join(root, "authority");
+  git(home, "clone", "-q", origin, authority);
+  const { recipient } = await run(ensureIdentity);
+  fs.writeFileSync(join(authority, "t3-fleet.toml"), fleet);
+  await run(writeRecipients(authority, { laptop: recipient }));
+  await run(writeSecrets(authority, "A=1\n"));
+  git(authority, "add", "-A");
+  git(authority, "commit", "-qm", "start");
+  git(authority, "push", "-q", "-u", "origin", "main");
+  const member = join(root, "member");
+  git(home, "clone", "-q", origin, member);
+  return { origin, authority, member };
+};
+/** The member's proposal: its edits, committed on t3-fleet/staging/member. */
+const proposeFrom = (member: string, files: Record<string, string>) => {
+  for (const [file, text] of Object.entries(files)) {
+    fs.mkdirSync(join(member, file, ".."), { recursive: true });
+    fs.writeFileSync(join(member, file), text);
+  }
+  git(member, "add", "-A");
+  git(member, "commit", "-qm", "Proposed by member");
+  git(member, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/member");
+  git(member, "reset", "-q", "--soft", "HEAD~1");
+  git(member, "reset", "-q");
+};
+const proposalOf = async (repo: string) => {
+  const [p] = await run(listProposals(repo, "main"));
+  if (p === undefined) throw new Error("no proposal");
+  return p;
+};
+
+describe("approve", () => {
+  const FLEET = '[fleet]\nauto_approve = []\ninterval = 900\n\n[models]\negress = "direct"\n';
+
+  it("refuses a merge that is more than list additions, and the recovery it names works", async () => {
+    const f = await twoMachines("removal", FLEET);
+    // The member removes [models] and adds z = 3; main changes the line next to it meanwhile.
+    proposeFrom(f.member, {
+      "t3-fleet.toml": "[fleet]\nauto_approve = []\ninterval = 900\nz = 3\n",
+    });
+    fs.writeFileSync(join(f.authority, "t3-fleet.toml"), FLEET.replace("900", "600"));
+    git(f.authority, "commit", "-qam", "interval");
+    git(f.authority, "push", "-q");
+    const refused = await run(
+      Effect.flip(approve(f.authority, "main", await proposalOf(f.authority), "laptop")),
+    );
+    expect(refused).toContain("t3-fleet reject member");
+    expect(git(f.origin, "show", "main:t3-fleet.toml")).toContain("[models]");
+    expect(git(f.origin, "show", "main:t3-fleet.toml")).not.toContain("z = 3");
+    // Rejected, the member's next sync sets its edit aside, and its pull goes through.
+    await run(reject(f.authority, await proposalOf(f.authority)));
+    expect(await run(settleRejection(f.member, "member", "main"))).toEqual(["t3-fleet.toml"]);
+    expect(await run(pullBranch(f.member, "main", "ff-only"))).toBe(1);
+  });
+
+  it("refuses a proposal carrying another machine's secrets, and reports what its own merge did", async () => {
+    const f = await twoMachines("secrets", FLEET);
+    const stranger = await identityToRecipient(await generateX25519Identity());
+    proposeFrom(f.member, {
+      "secrets-proposed/other.env.age": await run(encryptFor([stranger], "X=1\n")),
+    });
+    expect(
+      await run(Effect.flip(approve(f.authority, "main", await proposalOf(f.authority), "laptop"))),
+    ).toContain("secrets that are not its own");
+
+    const g = await twoMachines("unreadable", FLEET);
+    proposeFrom(g.member, {
+      "secrets-proposed/member.env.age": await run(encryptFor([stranger], "X=1\n")),
+    });
+    const { notes } = await run(
+      approve(g.authority, "main", await proposalOf(g.authority), "laptop"),
+    );
+    expect(notes.join("\n")).toContain("could not decrypt secrets-proposed/member.env.age");
   });
 });

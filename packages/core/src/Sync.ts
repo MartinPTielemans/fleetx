@@ -52,9 +52,17 @@ import {
 import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
-import { lastProposalPath, reapplyHeld, settleApproval, type Held } from "./Approved.ts";
+import {
+  lastProposalPath,
+  reapplyHeld,
+  restoreHeld,
+  settleApproval,
+  unmergedStep,
+  type Held,
+} from "./Approved.ts";
 import { clearSetupProposed, setupProposed } from "./setup/State.ts";
 import { applyAccepted } from "./Memory.ts";
+import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
@@ -303,20 +311,6 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         lines.push(
           `set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`,
         );
-      const approved = yield* settleApproval(repo, self.name, config.branch).pipe(
-        Effect.catch((e: string) =>
-          Effect.sync(() => {
-            failed = true;
-            message = e;
-            return { dropped: [] as Array<string>, held: [] as Array<Held> };
-          }),
-        ),
-      );
-      carried = approved.held;
-      if (approved.dropped.length > 0)
-        lines.push(
-          `took the branch's version of ${approved.dropped.length} approved file${approved.dropped.length === 1 ? "" : "s"}`,
-        );
     }
     // What would add a secret is held back, whole skill by whole skill.
     const edited = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
@@ -426,7 +420,10 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     //    fast-forwards: it never commits. Commits made there by hand are
     //    rebased along, as before, and named, since they reach no one.
     let how: "rebase" | "ff-only" = authority ? "rebase" : "ff-only";
-    if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+    // One fetch for a member's whole exchange: settling and the pull use it.
+    const fetched =
+      how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]));
+    if (fetched) {
       const local = out(
         yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`]),
       )
@@ -445,7 +442,34 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         });
       }
     }
-    const pulled = yield* pullBranch(repo, config.branch, how).pipe(
+    // A member's own copies of files the branch changed (Approved.ts); never what is held back for a secret.
+    if (fetched && !failed) {
+      const settled = yield* settleApproval(repo, self.name, config.branch, heldFiles).pipe(
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            failed = true;
+            message = e;
+            return { held: [] as Array<Held>, refused: [] as Array<string> };
+          }),
+        ),
+      );
+      carried = settled.held;
+      const proposed = carried.filter((h) => h.outcome === "proposed").length;
+      if (proposed > 0)
+        lines.push(
+          `took the branch's version of ${proposed} approved file${proposed === 1 ? "" : "s"}`,
+        );
+      if (settled.refused.length > 0)
+        findings.push({
+          node: self.name,
+          key: "sync-edit-unmerged",
+          severity: "warn",
+          area: "sync",
+          title: `this machine's edit to ${settled.refused.join(", ")} and the branch's change to it do not merge`,
+          detail: unmergedStep(repo, settled.refused),
+        });
+    }
+    const pulled = yield* pullBranch(repo, config.branch, how, { fetched }).pipe(
       Effect.catch((e: string) =>
         Effect.sync(() => {
           failed = true;
@@ -455,18 +479,23 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
-    if (carried.length > 0)
+    // Pulled: merges go on top. Not pulled: every copy goes back exactly as it was.
+    if (carried.length > 0) {
+      const after = failed
+        ? restoreHeld(repo, carried).pipe(Effect.as([]))
+        : reapplyHeld(repo, carried);
       lines.push(
-        ...(failed
-          ? carried.map((h) => `this machine's edit to ${h.file} is kept in ${h.saved}`)
-          : yield* reapplyHeld(repo, carried).pipe(
-              Effect.catch((e: string) =>
-                Effect.succeed([
-                  `${e}; the edits are in ${carried.map((h) => h.saved).join(", ")}`,
-                ]),
-              ),
-            )),
+        ...(yield* after.pipe(
+          Effect.catch((e: string) =>
+            Effect.sync(() => {
+              failed = true;
+              message = message || e;
+              return [`${e}; the copies are in ${carried.map((h) => h.saved).join(", ")}`];
+            }),
+          ),
+        )),
       );
+    }
     if (authority && !failed) {
       const ahead = Number(
         out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])),
@@ -595,8 +624,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
             }),
           ),
         );
-        if (rev !== null) lines.push(`approved ${proposal.node}'s proposal (${rev})`);
+        if (rev !== null)
+          lines.push(`approved ${proposal.node}'s proposal (${rev.rev})`, ...rev.notes);
       }
+      // Proposed secrets whose merge failed or was left for an authority that can read them.
+      lines.push(
+        ...(yield* mergeProposedSecrets(repo).pipe(
+          Effect.catch((e) =>
+            Effect.succeed([
+              `merging proposed secrets failed: ${typeof e === "string" ? e : e.message}`,
+            ]),
+          ),
+        )),
+      );
     }
 
     return { failed, message, config, self, findings };

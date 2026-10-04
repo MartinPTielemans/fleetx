@@ -150,10 +150,18 @@ export const unmergedFiles = (repo: string) =>
  * commits). Refuses when an uncommitted edit touches an incoming file, and
  * fails rather than leave a conflict in a live file. The commits it pulled.
  */
-export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-only") =>
+export const pullBranch = (
+  repo: string,
+  branch: string,
+  how: "rebase" | "ff-only",
+  /** `fetched`: the caller fetched origin/<branch> just now; no second fetch. */
+  options: { readonly fetched?: boolean } = {},
+) =>
   Effect.gen(function* () {
-    const fetch = yield* git(repo, ["fetch", "-q", "origin", branch]);
-    if (!ok(fetch)) return yield* Effect.fail(`fetch failed: ${why(fetch)}`);
+    if (options.fetched !== true) {
+      const fetch = yield* git(repo, ["fetch", "-q", "origin", branch]);
+      if (!ok(fetch)) return yield* Effect.fail(`fetch failed: ${why(fetch)}`);
+    }
     const behind = Number(out(yield* git(repo, ["rev-list", "--count", `HEAD..origin/${branch}`])));
     if (behind === 0) return 0;
     const status = yield* git(repo, ["status", "--porcelain", "-z", "-uall"]);

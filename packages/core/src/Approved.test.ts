@@ -10,7 +10,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
-import { approvedFiles, lastProposalPath, reapplyHeld, settleApproval } from "./Approved.ts";
+import {
+  approvedDir,
+  approvedFiles,
+  lastProposalPath,
+  reapplyHeld,
+  restoreHeld,
+  settleApproval,
+  unmergedStep,
+} from "./Approved.ts";
 import { pullBranch } from "./Git.ts";
 
 describe("approvedFiles", () => {
@@ -69,43 +77,71 @@ const fleet = (name: string) => {
 const proposeAndApprove = (f: ReturnType<typeof fleet>, mine: string, merged: string) => {
   fs.writeFileSync(join(f.member, "t3-fleet.toml"), mine);
   git(f.member, "add", "t3-fleet.toml");
-  const proposal = git(
-    f.member,
-    "commit-tree",
-    git(f.member, "write-tree"),
-    "-p",
-    "HEAD",
-    "-m",
-    "p",
-  );
+  const tree = git(f.member, "write-tree");
+  const proposal = git(f.member, "commit-tree", tree, "-p", "HEAD", "-m", "p");
   git(f.member, "reset", "-q");
   fs.mkdirSync(join(home, ".local/state/t3-fleet"), { recursive: true });
   fs.writeFileSync(lastProposalPath(home), `${proposal}\n`);
-  fs.writeFileSync(join(f.authority, "t3-fleet.toml"), merged);
-  git(f.authority, "commit", "-qam", "Approve member's proposal (by authority)\n\nt3-fleet.toml");
-  git(f.authority, "push", "-q", "origin", "HEAD:main");
+  commitOn(
+    f.authority,
+    "t3-fleet.toml",
+    merged,
+    "Approve member's proposal (by authority)\n\nt3-fleet.toml",
+  );
 };
+const commitOn = (repo: string, file: string, text: string, message: string) => {
+  fs.mkdirSync(join(repo, file, ".."), { recursive: true });
+  fs.writeFileSync(join(repo, file), text);
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", message);
+  git(repo, "push", "-q", "origin", "HEAD:main");
+};
+/** Settle, pull as Sync does with one fetch, then write back or restore. */
 const settle = async (member: string) => {
-  const { dropped, held } = await run(settleApproval(member, "member", "main"));
-  await run(pullBranch(member, "main", "ff-only"));
-  const lines = await run(reapplyHeld(member, held));
-  return { dropped, lines, file: fs.readFileSync(join(member, "t3-fleet.toml"), "utf8") };
+  git(member, "fetch", "-q", "origin", "main");
+  const { held, refused } = await run(settleApproval(member, "member", "main"));
+  const pulled = await run(Effect.result(pullBranch(member, "main", "ff-only", { fetched: true })));
+  const lines =
+    pulled._tag === "Success"
+      ? await run(reapplyHeld(member, held))
+      : (await run(restoreHeld(member, held)), []);
+  return { held, refused, pulled, lines };
 };
+const read = (repo: string, file: string) => fs.readFileSync(join(repo, file), "utf8");
+const savedRuns = () => fs.readdirSync(approvedDir(home)).filter((n) => /^\d+$/.test(n));
 
 describe("settleApproval", () => {
-  it("drops a copy that is what was proposed, without stashing anything", async () => {
+  it("drops a copy that is what was proposed, keeping no copy and stashing nothing", async () => {
     const f = fleet("same");
-    const mine = '[defaults.mcp]\nservers = ["fetch", "notes"]\n';
-    proposeAndApprove(f, mine, '[defaults.mcp]\nservers = ["fetch", "posthog", "notes"]\n');
-    const { dropped, file } = await settle(f.member);
-    expect(dropped).toEqual(["t3-fleet.toml"]);
-    expect(file).toContain('"posthog", "notes"');
+    const before = fs.existsSync(approvedDir(home)) ? savedRuns() : [];
+    commitOn(
+      f.authority,
+      "t3-fleet.toml",
+      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
+      "other",
+    );
+    proposeAndApprove(
+      f,
+      '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
+      '[defaults.mcp]\nservers = ["fetch", "posthog", "notes"]\n',
+    );
+    const { held } = await settle(f.member);
+    expect(held.map((h) => h.outcome)).toEqual(["proposed"]);
+    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
     expect(git(f.member, "status", "--porcelain")).toBe("");
     expect(git(f.member, "stash", "list")).toBe("");
+    expect(savedRuns()).toEqual(before);
   });
 
-  it("keeps a later edit, on top of the approved version, and saves the copy", async () => {
+  it("puts a later edit on top of the approved version", async () => {
     const f = fleet("later");
+    commitOn(
+      f.authority,
+      "t3-fleet.toml",
+      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
+      "other",
+    );
+    git(f.member, "fetch", "-q");
     proposeAndApprove(
       f,
       '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
@@ -116,32 +152,73 @@ describe("settleApproval", () => {
       join(f.member, "t3-fleet.toml"),
       '[defaults.mcp]\nservers = ["fetch", "notes", "x"]\n',
     );
-    const { lines, file } = await settle(f.member);
+    const { lines } = await settle(f.member);
     expect(lines[0]).toContain("kept this machine's edit to t3-fleet.toml");
-    expect(file).toContain('"x"');
-    expect(file).toContain('"posthog"');
-    expect(git(f.member, "stash", "list")).toBe("");
+    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes", "x"]');
   });
 
-  it("carries an unapproved TOML addition across another machine's approved one", async () => {
-    const f = fleet("other");
-    fs.writeFileSync(
-      join(f.authority, "t3-fleet.toml"),
-      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
-    );
-    git(
+  it("puts every copy back exactly when the pull fails, and leaves the unmergeable one alone", async () => {
+    const f = fleet("fails");
+    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree\n", "x");
+    commitOn(f.authority, "skills/y/SKILL.md", "y v1\n", "y");
+    git(f.member, "pull", "-q");
+    commitOn(f.authority, "skills/x/SKILL.md", "x\none\ntwo\nthree, branch\n", "x again");
+    commitOn(f.authority, "skills/y/SKILL.md", "y, branch\n", "y again");
+    // x merges cleanly with the branch; y does not.
+    fs.writeFileSync(join(f.member, "skills/x/SKILL.md"), "x, mine\none\ntwo\nthree\n");
+    fs.writeFileSync(join(f.member, "skills/y/SKILL.md"), "y, mine\n");
+    const { held, refused, pulled } = await settle(f.member);
+    expect(held.map((h) => [h.file, h.outcome])).toEqual([["skills/x/SKILL.md", "merged"]]);
+    expect(refused).toEqual(["skills/y/SKILL.md"]);
+    expect(pulled._tag).toBe("Failure");
+    expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree\n");
+    expect(read(f.member, "skills/y/SKILL.md")).toBe("y, mine\n");
+    expect(fs.existsSync(held[0]?.saved ?? "")).toBe(false);
+
+    // The step the refusal names gets past it, and keeps the edit.
+    const step = unmergedStep(f.member, refused);
+    const stash = /`(git -C \S+ stash push -m t3-fleet -- [^`]+)`/.exec(step)?.[1] ?? "";
+    expect(stash).not.toBe("");
+    execFileSync("sh", ["-c", stash]);
+    const again = await settle(f.member);
+    expect(again.pulled._tag).toBe("Success");
+    expect(read(f.member, "skills/x/SKILL.md")).toBe("x, mine\none\ntwo\nthree, branch\n");
+    expect(git(f.member, "stash", "show", "-p")).toContain("y, mine");
+  });
+
+  it("never touches what sync holds back, and keeps copies only when it must, mode 600", async () => {
+    const f = fleet("held");
+    commitOn(
       f.authority,
-      "commit",
-      "-qam",
-      "Approve desktop's proposal (by authority)\n\nt3-fleet.toml",
+      "t3-fleet.toml",
+      '[defaults.mcp]\nservers = ["fetch", "posthog"]\n',
+      "other",
     );
-    git(f.authority, "push", "-q", "origin", "HEAD:main");
     fs.writeFileSync(
       join(f.member, "t3-fleet.toml"),
       '[defaults.mcp]\nservers = ["fetch", "notes"]\n',
     );
-    const { file } = await settle(f.member);
-    expect(file).toContain('"posthog"');
-    expect(file).toContain('"notes"');
+    git(f.member, "fetch", "-q", "origin", "main");
+    const { held } = await run(
+      settleApproval(f.member, "member", "main", new Set(["t3-fleet.toml"])),
+    );
+    expect(held).toEqual([]);
+    expect(read(f.member, "t3-fleet.toml")).toContain("notes");
+    // Not held back: saved at 600 until the pull, then gone.
+    const settled = await run(settleApproval(f.member, "member", "main"));
+    expect(fs.statSync(settled.held[0]?.saved ?? "").mode & 0o777).toBe(0o600);
+    await run(pullBranch(f.member, "main", "ff-only", { fetched: true }));
+    await run(reapplyHeld(f.member, settled.held));
+    expect(fs.existsSync(settled.held[0]?.saved ?? "")).toBe(false);
+    expect(read(f.member, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
+  });
+
+  it("prunes old copies", async () => {
+    const f = fleet("prune");
+    fs.mkdirSync(join(approvedDir(home), "1000", "skills"), { recursive: true });
+    fs.writeFileSync(join(approvedDir(home), "1000", "skills", "old"), "old");
+    git(f.member, "fetch", "-q", "origin", "main");
+    await run(settleApproval(f.member, "member", "main"));
+    expect(fs.existsSync(join(approvedDir(home), "1000"))).toBe(false);
   });
 });

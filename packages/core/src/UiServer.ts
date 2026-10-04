@@ -131,7 +131,8 @@ export interface UiActions {
   ) => Effect.Effect<ReadonlyArray<FixOutcome>>;
   readonly proposals: Effect.Effect<ReadonlyArray<UiProposal>, string>;
   /** Approve `node`'s proposal, failing unless it still makes the reviewed `change` (UiProposal.change). */
-  readonly approve: (node: string, change: string) => Effect.Effect<void, string>;
+  /** What approving did besides (the secrets it merged), a line each. */
+  readonly approve: (node: string, change: string) => Effect.Effect<ReadonlyArray<string>, string>;
   readonly reject: (node: string, change: string) => Effect.Effect<void, string>;
   readonly alerts: Effect.Effect<ReadonlyArray<typeof UiAlert.Type>, string>;
   readonly config: (node: string) => Effect.Effect<ReadonlyArray<UiConfigRow>, string>;
@@ -1030,7 +1031,9 @@ export const uiLayer = (options: UiServerOptions) =>
                   ).pipe(
                     Effect.andThen(
                       verb === "approve"
-                        ? actions.approve(node, change)
+                        ? actions
+                            .approve(node, change)
+                            .pipe(Effect.flatMap((notes) => Effect.forEach(notes, (n) => step(n))))
                         : actions.reject(node, change),
                     ),
                     Effect.as({}),
