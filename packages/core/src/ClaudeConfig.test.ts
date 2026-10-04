@@ -23,6 +23,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -239,6 +240,44 @@ const patched = <A, E, R>(
 
 describe("Claude's lock, with faults injected", () => {
   const timing = { staleMs: 600, updateMs: 50 } as const;
+
+  /** A lock taken with `utimes` refused (EPERM) from its `from`th call on: the error it ends with. */
+  const refused = (file: string, from: number) => {
+    let touches = 0;
+    return Effect.runPromise(
+      patched(
+        withClaudeConfigLock(file, () => Effect.void, timing),
+        (fs) => ({
+          utimes: (path, atime, mtime) =>
+            ++touches < from
+              ? fs.utimes(path, atime, mtime)
+              : Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "utime",
+                    pathOrDescriptor: path,
+                  }),
+                ),
+        }),
+      ).pipe(Effect.flip, Effect.provide(NodeServices.layer)),
+    );
+  };
+
+  it("removes the lock it made, and says why, when the precision probe fails", async () => {
+    const dir = home("{}");
+    const error = await refused(join(dir, ".claude.json"), 1);
+    expect(String(error)).toContain("PermissionDenied");
+    expect(existsSync(join(dir, ".claude.json.lock"))).toBe(false);
+  });
+
+  it("removes the lock it made, and says why, when its first mtime cannot be written", async () => {
+    const dir = home("{}");
+    const error = await refused(join(dir, ".claude.json"), 2);
+    expect(String(error)).toContain("PermissionDenied");
+    expect(String(error)).not.toContain("another process");
+    expect(existsSync(join(dir, ".claude.json.lock"))).toBe(false);
+  });
   const locked = (file: string, wait: number, published: { value: boolean }) =>
     withClaudeConfigLock(
       file,
