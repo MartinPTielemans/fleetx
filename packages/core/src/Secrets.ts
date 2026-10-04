@@ -3,7 +3,9 @@
  * in the config repo.
  *
  *   secrets/secrets.env.age      armored age file (in git)
- *   secrets/recipients.toml      node = "age1…" public keys (in git)
+ *   secrets/recipients.toml      node = "age1…" public keys (in git), and in a
+ *                                comment the hash of the keys secrets.env.age
+ *                                was last encrypted to
  *   ~/.config/t3-fleet/age-key.txt this node's private key (never leaves it)
  *   ~/.config/t3-fleet/secrets.env decrypted, mode 600, what fixes and
  *                                templates read
@@ -25,6 +27,8 @@ import {
   identityToRecipient,
 } from "age-encryption";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+
+import { sha256 } from "./Hash.ts";
 import { configDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -86,17 +90,48 @@ export const readRecipients = (repo: string) =>
     return out;
   });
 
-export const writeRecipients = (repo: string, recipients: Record<string, string>) =>
+const ENCRYPTED_FOR = "# encrypted-for: ";
+
+/** The set of keys, whoever holds them: SHA-256 of the distinct keys, sorted. */
+export const recipientSet = (keys: ReadonlyArray<string>) =>
+  Effect.promise(() => sha256([...new Set(keys)].sort().join("\n")));
+
+/** The recipient set secrets.env.age was last encrypted to, as recipients.toml records it. */
+export const encryptedFor = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(recipientsPath(repo)).pipe(Effect.option);
+    if (Option.isNone(text)) return null;
+    const line = text.value.split("\n").find((l) => l.startsWith(ENCRYPTED_FOR));
+    return line === undefined ? null : line.slice(ENCRYPTED_FOR.length).trim();
+  });
+
+/**
+ * Write the recipients. `encrypted` is the recipient set the secrets were
+ * just encrypted to; without it the recorded one is kept, so listing a key
+ * without re-encrypting never claims the file is readable by it.
+ */
+export const writeRecipients = (
+  repo: string,
+  recipients: Record<string, string>,
+  encrypted?: string,
+) =>
   underSyncLock(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const recorded = encrypted ?? (yield* encryptedFor(repo));
       yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
       const sorted = Object.fromEntries(
         Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)),
       );
       yield* fs.writeFileString(
         recipientsPath(repo),
-        `# Public age keys of the nodes that can read secrets.env.age.\n${stringifyToml(sorted)}\n`,
+        [
+          "# Public age keys of the nodes that can read secrets.env.age.",
+          ...(recorded === null ? [] : [`${ENCRYPTED_FOR}${recorded}`]),
+          stringifyToml(sorted),
+          "",
+        ].join("\n"),
       );
     }),
   );
@@ -127,54 +162,48 @@ export const readSecrets = (repo: string) =>
     return yield* decryptWith(identity, armored.value);
   });
 
-/** Re-encrypt `plaintext` to every recipient and write it into the repo. */
-export const writeSecrets = (repo: string, plaintext: string) =>
+/**
+ * Encrypt `plaintext` to `recipients` (by default those listed) and write it
+ * into the repo, then the recipients with the set it was encrypted to. In
+ * that order: a crash between the two leaves a recorded set that matches
+ * neither, and the next change re-encrypts.
+ */
+export const writeSecrets = (
+  repo: string,
+  plaintext: string,
+  recipients?: Record<string, string>,
+) =>
   underSyncLock(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const recipients = Object.values(yield* readRecipients(repo));
-      const armored = yield* encryptFor(recipients, plaintext);
+      const to = recipients ?? (yield* readRecipients(repo));
+      const armored = yield* encryptFor(Object.values(to), plaintext);
       yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
       yield* fs.writeFileString(encryptedPath(repo), armored);
+      yield* writeRecipients(repo, to, yield* recipientSet(Object.values(to)));
     }),
   );
 
 /**
- * How many recipients an armored age file was encrypted to: one stanza each
- * in its header. Which ones, age does not say.
- */
-export const stanzaCount = (armored: string) =>
-  Effect.try({
-    try: () => {
-      const bytes = armor.decode(armored);
-      const header = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 64 * 1024)));
-      const end = header.indexOf("\n---");
-      return (end < 0 ? header : header.slice(0, end))
-        .split("\n")
-        .filter((l) => l.startsWith("-> ")).length;
-    },
-    catch: () => new SecretsError({ message: "secrets.env.age is not an armored age file" }),
-  });
-
-/**
  * Let `node` read the secrets: list its key and re-encrypt to every key.
- * Nothing changes (false) when that key is already listed and the file was
- * encrypted to as many keys as are listed, so to it as well: re-encrypting
- * again would only commit the same secrets anew.
+ * Nothing changes (false) when that key is listed and the secrets were last
+ * encrypted to exactly the listed keys: re-encrypting again would only
+ * commit the same secrets anew.
  */
 export const addRecipient = (repo: string, node: string, recipient: string) =>
   underSyncLock(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const recipients = yield* readRecipients(repo);
-      const armored = yield* fs.readFileString(encryptedPath(repo)).pipe(Effect.option);
-      if (recipients[node] === recipient && Option.isSome(armored)) {
-        const keys = new Set(Object.values(recipients)).size;
-        if ((yield* stanzaCount(armored.value)) === keys) return false;
-      }
+      const exists = yield* fs.exists(encryptedPath(repo)).pipe(Effect.orElseSucceed(() => false));
+      if (
+        recipients[node] === recipient &&
+        exists &&
+        (yield* encryptedFor(repo)) === (yield* recipientSet(Object.values(recipients)))
+      )
+        return false;
       const text = yield* readSecrets(repo);
-      yield* writeRecipients(repo, { ...recipients, [node]: recipient });
-      yield* writeSecrets(repo, text);
+      yield* writeSecrets(repo, text, { ...recipients, [node]: recipient });
       return true;
     }),
   );

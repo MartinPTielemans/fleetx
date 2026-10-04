@@ -37,7 +37,8 @@ const relayNode = (url: string) => {
   const ctx = {
     home,
     checkout,
-    env: { HOME: home, PATH: bin },
+    // No Tailscale app either, unless a test puts one here.
+    env: { HOME: home, PATH: bin, T3_FLEET_TAILSCALE_APP: join(home, "Tailscale.app/Tailscale") },
     engine: null,
     engineBuild: null,
     node: "box",
@@ -54,7 +55,7 @@ const relayNode = (url: string) => {
     writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
     chmodSync(join(bin, name), 0o755);
   };
-  return { home, findings, tool };
+  return { home, bin, findings, tool };
 };
 
 describe("the relay before its service", () => {
@@ -82,6 +83,20 @@ describe("the relay before its service", () => {
     const findings = await node.findings();
     expect(findings.map((f) => f.key)).toEqual(["relay-serve", "relay-unpublished"]);
     expect(findings.every((f) => f.fix?.safe === true)).toBe(true);
+  });
+
+  it("finds Tailscale inside the macOS app when it is not on PATH", async () => {
+    const node = relayNode("https://server.tailnet.ts.net:8399");
+    mkdirSync(configDir(node.home), { recursive: true });
+    writeFileSync(join(configDir(node.home), "secrets.env"), "T3_FLEET_RELAY_TOKEN=abc123\n");
+    node.tool("docker", "exit 0");
+    const app = join(node.home, "Tailscale.app/Tailscale");
+    mkdirSync(join(node.home, "Tailscale.app"));
+    writeFileSync(app, "#!/bin/sh\nexit 0\n");
+    chmodSync(app, 0o755);
+    const findings = await node.findings();
+    expect(findings.map((f) => f.key)).toEqual(["relay-serve", "relay-unpublished"]);
+    expect(findings[1]?.fix?.command).toContain(`${app} serve --bg`);
   });
 
   it("needs no Tailscale when the relay is reached some other way", async () => {

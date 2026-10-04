@@ -8,6 +8,7 @@
  *   unset KEY…
  *   import FILE              replace every secret from a dotenv file
  *   add-node NODE RECIPIENT  let a node read the secrets (authority)
+ *   scan                     what in this checkout's edits looks like a secret, and how to allow it
  *   allow FILE HASH          a line T3 Fleet refused to commit is not a secret (authority)
  */
 import * as Console from "effect/Console";
@@ -16,8 +17,8 @@ import * as FileSystem from "effect/FileSystem";
 import { Argument, Command } from "effect/unstable/cli";
 
 import { loadConfig } from "@t3-fleet/core/Config";
-import { commitAndPush } from "@t3-fleet/core/Git";
-import { allowSecret } from "@t3-fleet/core/SecretScan";
+import { allowedAt, changedFiles, commitAndPush, scanEdits } from "@t3-fleet/core/Git";
+import { allowSecret, readAllowed, refusal } from "@t3-fleet/core/SecretScan";
 import { underSyncLock } from "@t3-fleet/core/Sync";
 import {
   addRecipient,
@@ -208,6 +209,27 @@ const addNode = Command.make("add-node", {
   ),
 );
 
+const scan = Command.make("scan").pipe(
+  Command.withDescription(
+    "Show what in this checkout's uncommitted edits looks like a secret, with the command that allows each line.",
+  ),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const authority =
+        config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
+      const hits = yield* scanEdits(config.repo, yield* changedFiles(config.repo), {
+        allowed: authority
+          ? yield* readAllowed(config.repo)
+          : yield* allowedAt(config.repo, `origin/${config.branch}`),
+      });
+      yield* Console.log(
+        hits.length === 0 ? "nothing here looks like a secret" : refusal(hits, "commit or propose"),
+      );
+    }).pipe(reportUserErrors),
+  ),
+);
+
 const allow = Command.make("allow", {
   file: Argument.String("FILE").pipe(Argument.withDescription("The file, relative to the repo.")),
   hash: Argument.String("HASH").pipe(
@@ -241,5 +263,5 @@ const allow = Command.make("allow", {
 
 export const secretsCommand = Command.make("secrets").pipe(
   Command.withDescription("The fleet's encrypted secrets."),
-  Command.withSubcommands([init, install, list, set, unset, importFile, addNode, allow]),
+  Command.withSubcommands([init, install, list, set, unset, importFile, addNode, scan, allow]),
 );

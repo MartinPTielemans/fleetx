@@ -19,7 +19,18 @@ import * as Schema from "effect/Schema";
 
 import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
-import { commitAndPush, git, literal, nulList, ok, why } from "./Git.ts";
+import {
+  allowedAt,
+  commitAndPush,
+  git,
+  literal,
+  nulList,
+  ok,
+  restorePaths,
+  scanEdits,
+  why,
+} from "./Git.ts";
+import { readAllowed, refusal } from "./SecretScan.ts";
 import { sha256 } from "./Hash.ts";
 import { stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
@@ -294,11 +305,28 @@ export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
     }),
   );
 
-/** An authority commits and pushes; any other node leaves the change for its next sync to propose. */
+/**
+ * An authority commits and pushes; any other node leaves the change for its
+ * next sync to propose. `paths` are files the command just wrote: when they
+ * add what looks like a secret, they are put back as the branch has them, on
+ * any node, so no later sync commits or proposes part of them. What was
+ * fetched can be fetched again once the line is allowed.
+ */
 export const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
   underSyncLock(
     Effect.gen(function* () {
-      if (config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
+      const authority =
+        config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
+      const hits = yield* scanEdits(config.repo, paths, {
+        allowed: authority
+          ? yield* readAllowed(config.repo)
+          : yield* allowedAt(config.repo, `origin/${config.branch}`),
+      });
+      if (hits.length > 0) {
+        yield* restorePaths(config.repo, paths);
+        return yield* Effect.fail(`${refusal(hits)}\nNothing was changed.`);
+      }
+      if (authority) {
         const rev = yield* commitAndPush(config.repo, paths, message);
         return `committed and pushed (${rev})`;
       }

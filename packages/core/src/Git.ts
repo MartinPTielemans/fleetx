@@ -13,11 +13,14 @@ import { exec, type ExecResult } from "./Exec.ts";
 import { configDir } from "./Names.ts";
 import {
   addedLines,
+  parseAllowed,
   readAllowed,
   refusal,
-  scanLines,
+  settle,
+  suspectLines,
   type Allowed,
   type SecretHit,
+  type Suspect,
 } from "./SecretScan.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -238,9 +241,57 @@ export const addPaths = (repo: string, paths: ReadonlyArray<string>) =>
   });
 
 /**
+ * What a diff adds that looks like a secret. `range` is git diff's own
+ * (["--cached", "HEAD"], ["origin/main", "HEAD"]); `side` is where the new
+ * version of a file is read, to know an age file by its first line.
+ */
+const scanDiff = (
+  repo: string,
+  range: ReadonlyArray<string>,
+  side: string,
+  options: {
+    readonly paths?: ReadonlyArray<string>;
+    readonly env?: Readonly<Record<string, string>>;
+    readonly allowed?: ReadonlyArray<Allowed>;
+  },
+) =>
+  Effect.gen(function* () {
+    const env = { ...literal, ...options.env };
+    const diff = yield* git(
+      repo,
+      [
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "-U0",
+        ...range,
+        "--",
+        ...(options.paths ?? []),
+      ],
+      { env },
+    );
+    if (!ok(diff)) return yield* Effect.fail(`scanning for secrets: ${why(diff)}`);
+    const suspects: Array<Suspect> = [];
+    for (const [file, lines] of addedLines(diff.stdout)) {
+      let found = suspectLines(file, lines);
+      // Only the first line says whether the file is an age file; read it when the diff lacks it.
+      if (found.length > 0 && !lines.some((l) => l.line === 1)) {
+        const first = out(yield* git(repo, ["show", `${side}${file}`], { env })).split("\n")[0];
+        found = suspectLines(file, lines, first ?? null);
+      }
+      suspects.push(...found);
+    }
+    if (suspects.length === 0) return [] as Array<SecretHit>;
+    return yield* settle(suspects, options.allowed ?? (yield* readAllowed(repo)));
+  });
+
+/**
  * What the index (or the one `env` names) adds against `base`, HEAD by
  * default (every staged line, in a repo without commits), that looks like a
- * secret. The allow-list is the repo's own t3-fleet.toml unless given.
+ * secret. The allow-list is the checkout's own t3-fleet.toml unless given.
  */
 export const scanStaged = (
   repo: string,
@@ -251,30 +302,58 @@ export const scanStaged = (
     readonly allowed?: ReadonlyArray<Allowed>;
   } = {},
 ) =>
+  scanDiff(repo, ["--cached", ...(options.base === undefined ? [] : [options.base])], ":", options);
+
+/** What the commits in `from..to` add that looks like a secret: commits made by hand too. */
+export const scanCommits = (
+  repo: string,
+  from: string,
+  to: string,
+  options: { readonly allowed?: ReadonlyArray<Allowed> } = {},
+) => scanDiff(repo, [from, to], `${to}:`, options);
+
+/**
+ * What the checkout's edits to `paths` (new files too) would add against
+ * `base`, built in a scratch index so neither the real index nor the
+ * working tree is touched.
+ */
+export const scanEdits = (
+  repo: string,
+  paths: ReadonlyArray<string>,
+  options: { readonly base?: string; readonly allowed?: ReadonlyArray<Allowed> } = {},
+) =>
   Effect.gen(function* () {
-    const allowed = options.allowed ?? (yield* readAllowed(repo));
-    const diff = yield* git(
-      repo,
-      [
-        "-c",
-        "core.quotepath=off",
-        "diff",
-        "--cached",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-renames",
-        "-U0",
-        ...(options.base === undefined ? [] : [options.base]),
-        "--",
-        ...(options.paths ?? []),
-      ],
-      { env: { ...literal, ...options.env } },
+    if (paths.length === 0) return [] as Array<SecretHit>;
+    const base = options.base ?? "HEAD";
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-scan-index`, ...literal };
+    const read = yield* git(repo, ["read-tree", base], { env });
+    if (!ok(read)) return yield* Effect.fail(`scanning for secrets: ${why(read)}`);
+    yield* git(repo, ["add", "-A", "--", ...paths], { env });
+    return yield* scanStaged(repo, { ...options, base, paths, env });
+  });
+
+/** t3-fleet.toml's allow_secret entries as committed at `ref`: what a member trusts. */
+export const allowedAt = (repo: string, ref: string) =>
+  git(repo, ["show", `${ref}:t3-fleet.toml`]).pipe(
+    Effect.flatMap((r) => parseAllowed(ok(r) ? r.stdout : "")),
+  );
+
+/**
+ * Put `paths` back as HEAD has them, new files removed: for undoing what a
+ * refused command wrote. Only for files that command wrote itself.
+ */
+export const restorePaths = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (paths.length === 0) return;
+    yield* git(repo, ["reset", "-q", "--", ...paths], { env: literal });
+    const tracked = nulList(
+      (yield* git(repo, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...paths], {
+        env: literal,
+      })).stdout,
     );
-    if (!ok(diff)) return yield* Effect.fail(`scanning for secrets: ${why(diff)}`);
-    const hits: Array<SecretHit> = [];
-    for (const [file, lines] of addedLines(diff.stdout))
-      hits.push(...scanLines(file, lines, allowed));
-    return hits;
+    if (tracked.length > 0)
+      yield* git(repo, ["checkout", "-q", "HEAD", "--", ...tracked], { env: literal });
+    yield* git(repo, ["clean", "-q", "-f", "-d", "--", ...paths], { env: literal });
   });
 
 /**
@@ -291,9 +370,7 @@ export const refuseSecrets = (repo: string, paths: ReadonlyArray<string> = []) =
       head
         ? ["reset", "-q", "--", ...paths]
         : ["rm", "-rq", "--cached", "--", ...(paths.length > 0 ? paths : ["."])],
-      {
-        env: literal,
-      },
+      { env: literal },
     );
     return yield* Effect.fail(refusal(hits));
   });
@@ -312,7 +389,8 @@ const upstreamBranch = (repo: string) =>
  * Commit `paths` in the repo and push, as an authority changing the config.
  * Pulls first (rebase) so the push lands on what other nodes see. Takes the
  * sync lock, so callers that write files before this should hold it too.
- * Refuses, committing nothing, when what it adds looks like a secret.
+ * Refuses, committing nothing, when what it adds looks like a secret, and
+ * pushing nothing when an unpushed commit made by hand does.
  */
 export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, message: string) =>
   underSyncLock(
@@ -332,9 +410,16 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
         env: literal,
       });
       if (!ok(commit)) return yield* Effect.fail(`git commit failed: ${why(commit)}`);
-      yield* pullBranch(repo, yield* upstreamBranch(repo), "rebase").pipe(
+      const branch = yield* upstreamBranch(repo);
+      yield* pullBranch(repo, branch, "rebase").pipe(
         Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),
       );
+      // A commit made here by hand rides along with the push: it is checked too.
+      const unpushed = yield* scanCommits(repo, `origin/${branch}`, "HEAD");
+      if (unpushed.length > 0)
+        return yield* Effect.fail(
+          `committed, but not pushed: a commit here that ${branch} lacks adds what looks like a secret\n${refusal(unpushed, "push")}`,
+        );
       const push = yield* git(repo, ["push", "-q"]);
       if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
       return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));

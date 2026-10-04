@@ -194,7 +194,7 @@ the fleet's secrets yet: see the secrets findings for it.
 **`relay-tailscale-missing`** — the relay is reached at a tailnet name (a
 MagicDNS name such as `server.tailnet.ts.net`, or a 100.x address) and its
 port is published with `tailscale serve`, but the `tailscale` command is not
-on this machine.
+on this machine, on PATH or inside the macOS app.
 Install Tailscale and run `tailscale up`.
 
 **`relay-docker-missing`** — the hub runs `container` or `registry` servers
@@ -276,26 +276,44 @@ are proposed, and only by `t3-fleet sync`. `t3-fleet review` on an authority lis
 what is waiting. A machine whose pull failed (its own edits overlap incoming
 changes, say) proposes nothing until a sync there pulls again.
 
-**`sync-secret-<file>`** — sync would not commit (an authority) or propose
-(any other machine) that file, because a line it adds looks like a secret: a
-token, a password in a URL, a private key. The finding names the line and the
-kind, never the value. Move the value into the fleet's secrets
+**`sync-secret-<unit>`** — sync would not commit (an authority), propose
+(any other machine) or push something, because a line it adds looks like a
+secret: a token, a password in a URL, a bearer header, a private key. A unit
+is a whole skill (`skills/<name>`), with `skills/SOURCES.json` when it
+changed alongside, or a single file elsewhere: half a skill never reaches
+the other machines. The finding names the line and the kind, never the value
+or its hash. Move the value into the fleet's secrets
 (`t3-fleet secrets set NAME=VALUE` on an authority) and refer to it as
-`${NAME}`. Every commit T3 Fleet makes is checked the same way, and refuses
-with the same names. If the line is not a secret (an example in a vendored
-skill's docs, say), an authority lets it through with the command the
-finding gives, `t3-fleet secrets allow <file> <hash>`, which adds to
-`t3-fleet.toml`:
+`${NAME}`.
+
+If the line is not a secret (an example in a vendored skill's docs, say),
+`t3-fleet secrets scan` on that machine prints each line's
+`t3-fleet secrets allow <file> <hash>` command; an authority runs it, which
+adds to `t3-fleet.toml`:
 
 ```toml
 [[allow_secret]]
 file = "skills/mapbox/README.md"
-line = "9f2c4a1e07b3d855"   # the line's hash, from the refusal
+line = "<the line's SHA-256, from the refusal>"
 ```
 
 The hash is of that line's text, so the entry stops matching when the line
-changes. Only the lines a commit adds are checked: what is already committed
-never blocks a later change to the same file.
+changes. A machine without the authority role trusts only the entries
+committed on the branch. Only the lines a commit adds are checked: what is
+already committed never blocks a later change to the same file.
+
+A held-back unit stays in the checkout as an edit. When a change from the
+branch (or a proposal the authority approves) touches it, sync sets it aside
+in `git stash` as `T3 Fleet: held back <unit>`, so pulling keeps working, and
+the finding says so until the stash entry is dropped:
+`git -C <repo> stash apply <entry>` brings the edits back. A commit made by
+hand that adds a secret is not pushed; `git -C <repo> reset --soft
+origin/main` turns it back into edits for sync to sort.
+
+Commands refuse the same way, naming file, line and kind with the allow
+command. A refused `skills add`, `skills update` or `mcp add` puts back the
+files it wrote, so no later sync commits part of them; run it again once the
+line is allowed.
 
 **`sync-local-commits`** — a machine without the authority role has commits
 of its own in the config repo. Only an authority's commits reach the other

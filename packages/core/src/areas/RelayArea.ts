@@ -20,7 +20,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { defineArea } from "../Area.ts";
+import { defineArea, sh } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
@@ -43,6 +43,8 @@ const Observed = Schema.Struct({
   token: Schema.optionalKey(Schema.Boolean),
   /** Relay node reached on the tailnet: whether the tailscale CLI is there; null when not needed. */
   tailscale: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  /** How to run it: `tailscale`, or the macOS app's own CLI when that is all there is. */
+  tailscaleCommand: Schema.optionalKey(Schema.String),
   /** Relay node: the hub's servers that run in Docker, and whether docker is there. */
   containers: Schema.optionalKey(Schema.Array(Schema.String)),
   docker: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
@@ -97,6 +99,19 @@ const hasSecret = (home: string, env: Readonly<Record<string, string | undefined
   });
 
 /** Whether `command` is on the node's PATH. */
+/**
+ * The Tailscale CLI: on PATH, or inside the macOS app, which installs none on
+ * PATH by default. T3_FLEET_TAILSCALE_APP names another app CLI to look for.
+ */
+export const TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const findTailscale = (env: Readonly<Record<string, string | undefined>>) =>
+  Effect.gen(function* () {
+    if (yield* onPath("tailscale", env)) return "tailscale";
+    const fs = yield* FileSystem.FileSystem;
+    const app = env["T3_FLEET_TAILSCALE_APP"] ?? TAILSCALE_APP;
+    return (yield* fs.exists(app).pipe(Effect.orElseSucceed(() => false))) ? app : null;
+  });
+
 const onPath = (command: string, env: Readonly<Record<string, string | undefined>>) =>
   exec({
     command: "sh",
@@ -249,13 +264,14 @@ export const RelayArea = defineArea({
           : check.code === 0;
       const token = yield* hasSecret(ctx.home, ctx.env, RELAY_TOKEN);
       const tailnet = role === "serve" && onTailnet(ctx.relay?.url ?? null);
-      const tailscale = tailnet ? yield* onPath("tailscale", ctx.env) : null;
+      const tailscaleCommand = tailnet ? yield* findTailscale(ctx.env) : null;
+      const tailscale = tailnet ? tailscaleCommand !== null : null;
       const containers = role === "serve" ? yield* containerServers(ctx.checkout) : [];
       const docker = containers.length > 0 ? yield* onPath("docker", ctx.env) : null;
       let published: boolean | null = null;
       if (tailnet && tailscale === true) {
         const serve = yield* exec({
-          command: "tailscale",
+          command: tailscaleCommand ?? "tailscale",
           args: ["serve", "status"],
           env: ctx.env,
           timeout: Duration.seconds(10),
@@ -276,6 +292,7 @@ export const RelayArea = defineArea({
         port,
         token,
         tailscale,
+        ...(tailscaleCommand === null ? {} : { tailscaleCommand }),
         containers,
         docker,
       };
@@ -345,7 +362,7 @@ export const RelayArea = defineArea({
         area: "relay",
         title: `the relay's port ${observed.port} is not published to the tailnet`,
         fix: {
-          command: `tailscale serve --bg --https=${observed.port} http://127.0.0.1:${observed.port}`,
+          command: `${sh(observed.tailscaleCommand ?? "tailscale")} serve --bg --https=${observed.port} http://127.0.0.1:${observed.port}`,
           safe: true,
         },
       });

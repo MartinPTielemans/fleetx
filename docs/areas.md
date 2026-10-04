@@ -46,11 +46,13 @@ Every node can read the fleet's secrets and has the current ones.
 `t3-fleet secrets set KEY=VALUE` on an authority; nodes pick them up on sync.
 A new node's key is added once, by the authority's sync; until the node
 pulls, later syncs see it can already read the file and commit nothing.
+`secrets/recipients.toml` records which keys the file was last encrypted to,
+so a key listed without re-encrypting is never taken as able to read it.
 
 No commit T3 Fleet makes may add a secret anywhere else: every commit, sync
 proposal and approval checks the lines it adds for tokens, passwords in URLs
 and private keys, and refuses, naming the file and line but never the value.
-See `sync-secret-<file>` in troubleshooting.md for letting a false positive
+See `sync-secret-<unit>` in troubleshooting.md for letting a false positive
 through with `t3-fleet secrets allow`.
 
 ## relay

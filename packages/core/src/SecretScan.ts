@@ -1,30 +1,49 @@
 /**
  * Credentials in what T3 Fleet is about to commit. Every commit it makes
- * (commitAndPush, sync's commits and proposals, approvals, init) scans the
- * lines it adds and refuses one that looks like a secret: secrets belong in
- * secrets/secrets.env.age, which `t3-fleet secrets set` encrypts.
+ * (commitAndPush, sync's commits and proposals, approvals, init) and every
+ * push scans the lines it adds and refuses one that looks like a secret:
+ * secrets belong in secrets/secrets.env.age, which `t3-fleet secrets set`
+ * encrypts.
  *
  * Only added lines are scanned, so a file already committed (a vendored skill
  * whose docs show an example token) never blocks an unrelated change to it.
  * What it finds is named by file, line and kind, never by value.
  *
+ * Two kinds of rule. One knows a credential by its shape (ghp_…, a JWT, a
+ * private key block). The other knows it by its name (`api_key = …`,
+ * `--token …`, `?sig=…`, `Bearer …`): the name must end in key, token,
+ * secret, password or the like, and the value must look like a token, one
+ * run of letters, digits and `_-+/=.`, varied, with a digit, and not a
+ * variable name, a path, a reference ($NAME) or a placeholder (YOUR_…).
+ *
  * A false positive is let through by an entry in t3-fleet.toml, keyed by the
- * file and a hash of the line, which `t3-fleet secrets allow FILE HASH` adds:
+ * file and the SHA-256 of the line, which `t3-fleet secrets allow FILE HASH`
+ * adds. The hash is shown only in the refusal on the machine itself.
  *
  *   [[allow_secret]]
  *   file = "skills/mapbox/README.md"
- *   line = "9f2c4a1e07b3d855"
+ *   line = "<sha-256 of the line>"
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
-export interface SecretHit {
+import { sha256 } from "./Hash.ts";
+
+/** A line that looks like a secret, before the allow-list is consulted. */
+export interface Suspect {
   readonly file: string;
   readonly line: number;
   /** What it looks like: "a GitHub token", "a password in a URL". */
   readonly kind: string;
-  /** Hash of the line, the key an allow_secret entry uses. */
+  readonly text: string;
+}
+
+export interface SecretHit {
+  readonly file: string;
+  readonly line: number;
+  readonly kind: string;
+  /** SHA-256 of the line, the key an allow_secret entry uses. Never published. */
   readonly hash: string;
 }
 
@@ -33,19 +52,8 @@ export interface Allowed {
   readonly line: string;
 }
 
-/** A line's identity for the allow-list: FNV-1a, twice, over its trimmed text. Not the value. */
-export const lineHash = (line: string) => {
-  const text = line.trim();
-  const fnv = (seed: number) => {
-    let h = seed >>> 0;
-    for (let i = 0; i < text.length; i++) {
-      h ^= text.charCodeAt(i);
-      h = Math.imul(h, 0x01000193) >>> 0;
-    }
-    return h.toString(16).padStart(8, "0");
-  };
-  return fnv(0x811c9dc5) + fnv(0x050c5d1f);
-};
+/** A line's identity for the allow-list: SHA-256 of its trimmed text. */
+export const lineHash = (line: string) => Effect.promise(() => sha256(line.trim()));
 
 /** Bits per character: a real token is varied, an example (`xxxx`, `1234…`) is not. */
 export const entropy = (value: string) => {
@@ -63,10 +71,10 @@ const PLACEHOLDER =
 const isReference = (value: string) =>
   /^\$|\$\{|^\{env:|^%[A-Za-z_]+%$|process\.env|os\.environ|getenv/.test(value);
 
-/** A publishable key (Mapbox's pk.…, Stripe's pk_…) is meant to be shown. */
-const isPublic = (value: string) => /^pk[._]/.test(value);
+/** Publishable keys, meant to be shown: Mapbox's pk.…, Stripe's pk_…, PostHog's phc_…. */
+const isPublic = (value: string) => /^(?:pk[._]|phc_)/.test(value);
 
-/** A value worth calling a secret: long, varied, not a reference or a placeholder. */
+/** Varied, with letters and a digit, not a reference, placeholder or publishable key. */
 const looksReal = (value: string, minLength: number) =>
   value.length >= minLength &&
   !isReference(value) &&
@@ -76,15 +84,51 @@ const looksReal = (value: string, minLength: number) =>
   /[0-9]/.test(value) &&
   /[A-Za-z]/.test(value);
 
+/** One run of token characters: no call, index, space or quote, as code has. */
+const tokenShaped = (value: string) => /^[A-Za-z0-9_\-+/=.]+$/.test(value);
+
+/** An environment variable's name (T3_FLEET_MCP_TOKEN_MAC), which says where a value is. */
+const isVariableName = (value: string) => /^[A-Z][A-Z0-9_]*$/.test(value);
+
+/** A file path: rooted (~/, /, ./), or with directories and an extension (renders/out-1.mp4). */
+const isPath = (value: string) =>
+  /^(?:~\/|\/|\.\.?\/)/.test(value) || (value.includes("/") && /\.[A-Za-z0-9]{1,5}$/.test(value));
+
+/** Code reaching into an object (config.oauth.clientSecret), not a value. */
+const isMemberAccess = (value: string) => /^[A-Za-z_]+(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value);
+
+/** A kebab-case name (t3-not-installed, docker-http): words, each perhaps ending in a number. */
+const isSlug = (value: string) => /^[a-z]+[0-9]*(?:-[a-z]+[0-9]*)+$/.test(value);
+
+/** A value a name-based rule calls a secret. */
+const looksLikeToken = (value: string, minLength: number) =>
+  tokenShaped(value) &&
+  !isVariableName(value) &&
+  !isPath(value) &&
+  !isMemberAccess(value) &&
+  !isSlug(value) &&
+  looksReal(value, minLength);
+
 interface Rule {
   readonly kind: string | ((m: RegExpExecArray) => string);
   readonly pattern: RegExp;
   /** The group holding the value; the whole match when absent. */
   readonly value?: number;
   readonly minLength: number;
+  /** Known by its name, not its shape: the value must look like a token. */
+  readonly byName?: boolean;
 }
 
-const NAME = String.raw`[A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|credential)[A-Za-z0-9_.-]*`;
+/**
+ * A name that ends in what a credential is called: api_key, apiKey,
+ * access_token, client_secret, passwd, DB_AUTH, X_BEARER. Not one that only
+ * contains it: keyframeInterval, token_env, subject_token_type.
+ */
+const NAME = String.raw`[A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|credentials?|auth|bearer)`;
+/** A query parameter's name: the same, or a signature (`sig`, `signature`). */
+const QUERY_NAME = String.raw`(?:${NAME}|[A-Za-z0-9_.-]*(?:sig|signature))`;
+/** Where a name-based rule's value ends. */
+const VALUE = String.raw`[^\s"'\`,;}]+`;
 
 const RULES: ReadonlyArray<Rule> = [
   {
@@ -106,6 +150,16 @@ const RULES: ReadonlyArray<Rule> = [
     kind: "a Slack token",
     pattern: /(?<![A-Za-z0-9_])xox[abposr]-[A-Za-z0-9-]{10,}/g,
     minLength: 15,
+  },
+  {
+    kind: "a Slack webhook",
+    pattern: /hooks\.slack\.com\/(?:services|workflows|triggers)\/[A-Za-z0-9_/-]{20,}/g,
+    minLength: 20,
+  },
+  {
+    kind: "a Discord webhook",
+    pattern: /discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
+    minLength: 20,
   },
   {
     kind: "a Linear API key",
@@ -133,31 +187,58 @@ const RULES: ReadonlyArray<Rule> = [
     minLength: 50,
   },
   {
+    kind: "a JWT",
+    pattern:
+      /(?<![A-Za-z0-9_.-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])/g,
+    minLength: 30,
+  },
+  {
+    // An empty user too (redis://:pw@host). A Sentry DSN carries only a public key, and no colon.
     kind: "a password in a URL",
-    pattern: /[a-z][a-z0-9+.-]*:\/\/[^\s/:@"']+:([^\s/@"']+)@/gi,
+    pattern: /[a-z][a-z0-9+.-]*:\/\/[^\s/:@"']*:([^\s/@"']+)@/gi,
     value: 1,
     minLength: 8,
   },
   {
+    kind: "a bearer token",
+    pattern: new RegExp(String.raw`\bBearer\s+(${VALUE})`, "gi"),
+    value: 1,
+    minLength: 20,
+    byName: true,
+  },
+  {
     kind: (m) => `a token in a URL query (${m[1]})`,
-    pattern: new RegExp(String.raw`[?&](${NAME})=([^&\s"'#]+)`, "gi"),
+    pattern: new RegExp(String.raw`[?&](${QUERY_NAME})=([^&\s"'#]+)`, "gi"),
     value: 2,
     minLength: 12,
+    byName: true,
   },
   {
     kind: (m) => `a secret in a command-line flag (--${m[1]})`,
-    pattern: new RegExp(String.raw`--(${NAME})(?:=|\s+|["']\s*,\s*["'])["']?([^\s"',]+)`, "gi"),
+    pattern: new RegExp(
+      String.raw`--(${NAME})(?![A-Za-z0-9_-])(?:=|\s+|["']\s*,\s*["'])["']?(${VALUE})`,
+      "gi",
+    ),
     value: 2,
-    minLength: 16,
+    minLength: 20,
+    byName: true,
+  },
+  {
+    kind: "a password in a .netrc line",
+    pattern: /(?:^\s*|\b(?:machine|login|default)\s+\S+\s+)password\s+(\S+)/gi,
+    value: 1,
+    minLength: 8,
+    byName: true,
   },
   {
     kind: (m) => `a secret assigned to ${m[1]}`,
     pattern: new RegExp(
-      String.raw`(?<![-A-Za-z0-9_])(${NAME})["']?\s*[:=]\s*["']?([^\s"',;}]+)`,
+      String.raw`(?<![-A-Za-z0-9_])(${NAME})(?![A-Za-z0-9_])["']?\s*[:=]\s*["']?(${VALUE})`,
       "gi",
     ),
     value: 2,
-    minLength: 16,
+    minLength: 20,
+    byName: true,
   },
 ];
 
@@ -171,36 +252,58 @@ export const scanLine = (text: string): string | null => {
     rule.pattern.lastIndex = 0;
     for (let m = rule.pattern.exec(text); m !== null; m = rule.pattern.exec(text)) {
       const value = (rule.value === undefined ? m[0] : m[rule.value]) ?? "";
-      if (looksReal(value, rule.minLength))
-        return typeof rule.kind === "string" ? rule.kind : rule.kind(m);
+      const real =
+        rule.byName === true
+          ? looksLikeToken(value, rule.minLength)
+          : looksReal(value, rule.minLength);
+      if (real) return typeof rule.kind === "string" ? rule.kind : rule.kind(m);
     }
   }
   return null;
 };
 
-/** Lines of `file` (numbered from `first`) that look like secrets, less those allowed. */
-export const scanLines = (
+/** The fleet's own encrypted secrets, and any file that is an age file: never scanned. */
+export const isEncrypted = (file: string, firstLine: string | null) =>
+  file.startsWith("secrets/") || (firstLine !== null && firstLine.trim() === AGE_ARMOR);
+
+/**
+ * Lines of `file` that look like secrets. `firstLine` is the file's first
+ * line, when the lines given do not include it, to know an age file.
+ */
+export const suspectLines = (
   file: string,
   lines: ReadonlyArray<{ readonly line: number; readonly text: string }>,
-  allowed: ReadonlyArray<Allowed> = [],
-): Array<SecretHit> => {
-  if (file.endsWith(".age") || lines.some((l) => l.text.includes(AGE_ARMOR))) return [];
-  const hits: Array<SecretHit> = [];
+  firstLine: string | null = null,
+): Array<Suspect> => {
+  const first = lines.find((l) => l.line === 1)?.text ?? firstLine;
+  if (isEncrypted(file, first)) return [];
+  const suspects: Array<Suspect> = [];
   for (const { line, text } of lines) {
     const kind = scanLine(text);
-    if (kind === null) continue;
-    const hash = lineHash(text);
-    if (allowed.some((a) => a.file === file && a.line === hash)) continue;
-    hits.push({ file, line, kind, hash });
+    if (kind !== null) suspects.push({ file, line, kind, text });
   }
-  return hits;
+  return suspects;
 };
+
+/** Hash the suspects and drop the lines the allow-list lets through. */
+export const settle = (suspects: ReadonlyArray<Suspect>, allowed: ReadonlyArray<Allowed>) =>
+  Effect.gen(function* () {
+    const hits: Array<SecretHit> = [];
+    for (const s of suspects) {
+      const hash = yield* lineHash(s.text);
+      if (allowed.some((a) => a.file === s.file && a.line === hash)) continue;
+      hits.push({ file: s.file, line: s.line, kind: s.kind, hash });
+    }
+    return hits;
+  });
 
 /** Every line of a whole text, for a file not yet in git. */
 export const scanText = (file: string, text: string, allowed: ReadonlyArray<Allowed> = []) =>
-  scanLines(
-    file,
-    text.split("\n").map((t, i) => ({ line: i + 1, text: t })),
+  settle(
+    suspectLines(
+      file,
+      text.split("\n").map((t, i) => ({ line: i + 1, text: t })),
+    ),
     allowed,
   );
 
@@ -229,13 +332,9 @@ export const addedLines = (diff: string) => {
   return files;
 };
 
-/** The repo's allow_secret entries, from its t3-fleet.toml; none when it has none or cannot be read. */
-export const readAllowed = (repo: string) =>
+/** allow_secret entries in a t3-fleet.toml's text; none when it has none or does not parse. */
+export const parseAllowed = (text: string) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const text = yield* fs
-      .readFileString(`${repo}/t3-fleet.toml`)
-      .pipe(Effect.orElseSucceed(() => ""));
     const parsed = yield* Effect.try(() => parseToml(text) as unknown).pipe(
       Effect.orElseSucceed(() => ({})),
     );
@@ -247,26 +346,37 @@ export const readAllowed = (repo: string) =>
     });
   });
 
-/** One hit, for a person: where and what, and how to let it through if it is not a secret. */
-export const describeHit = (hit: SecretHit) => `${hit.file}:${hit.line} looks like ${hit.kind}`;
+/** The allow_secret entries in the checkout's t3-fleet.toml, as an authority has them. */
+export const readAllowed = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs
+      .readFileString(`${repo}/t3-fleet.toml`)
+      .pipe(Effect.orElseSucceed(() => ""));
+    return yield* parseAllowed(text);
+  });
+
+/** One hit, for a person: where and what. Never the value, and never its hash. */
+export const describeHit = (hit: Pick<SecretHit, "file" | "line" | "kind">) =>
+  `${hit.file}:${hit.line} looks like ${hit.kind}`;
 
 export const allowCommand = (hit: SecretHit) => `t3-fleet secrets allow ${hit.file} ${hit.hash}`;
 
-/** The refusal for hits: each named, never its value, and the ways forward. */
-export const refusal = (hits: ReadonlyArray<SecretHit>) =>
+/** The refusal for hits, on the machine itself: each named, the ways forward, and the allow commands. */
+export const refusal = (hits: ReadonlyArray<SecretHit>, doing = "commit") =>
   [
-    "refusing to commit what looks like a secret:",
+    `refusing to ${doing} what looks like a secret:`,
     ...hits.map((h) => `  ${describeHit(h)}`),
     "Move it into the fleet's secrets (`t3-fleet secrets set NAME=VALUE`, then refer to it as ${NAME}).",
-    "If it is not a secret, allow that line and try again:",
+    "If it is not a secret, an authority allows that line, then try again:",
     ...[...new Set(hits.map(allowCommand))].map((c) => `  ${c}`),
   ].join("\n");
 
 /** Add an allow_secret entry to the repo's t3-fleet.toml, unless it is there. Whether it was added. */
 export const allowSecret = (repo: string, file: string, hash: string, reason?: string) =>
   Effect.gen(function* () {
-    if (!/^[0-9a-f]{16}$/.test(hash))
-      return yield* Effect.fail(`not a line hash (16 hex digits, from the refusal): ${hash}`);
+    if (!/^[0-9a-f]{64}$/.test(hash))
+      return yield* Effect.fail(`not a line hash (64 hex digits, from the refusal): ${hash}`);
     if ((yield* readAllowed(repo)).some((a) => a.file === file && a.line === hash)) return false;
     const fs = yield* FileSystem.FileSystem;
     const path = `${repo}/t3-fleet.toml`;

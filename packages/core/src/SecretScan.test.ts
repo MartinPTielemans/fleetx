@@ -1,6 +1,9 @@
+import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { addedLines, lineHash, refusal, scanLine, scanText } from "./SecretScan.ts";
+
+const scan = (...args: Parameters<typeof scanText>) => Effect.runPromise(scanText(...args));
 
 // Built at run time so this file holds nothing a scanner would flag.
 const token = (prefix: string, n = 36) =>
@@ -34,6 +37,49 @@ describe("what looks like a secret", () => {
     );
   });
 
+  it("finds bearer tokens, JWTs, webhooks and the other shapes MCP configs carry", () => {
+    const b64 = (json: string) =>
+      btoa(json).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const jwt = [
+      b64('{"alg":"HS256","typ":"JWT"}'),
+      b64('{"sub":"1234567890","n":"x"}'),
+      token("", 30),
+    ];
+    for (const [line, kind] of [
+      [`"Authorization": "Bearer ${token("", 32)}"`, "a bearer token"],
+      [
+        `"args": ["mcp-remote", "--header", "Authorization: Bearer ${token("", 32)}"]`,
+        "a bearer token",
+      ],
+      [`"token": "${jwt.join(".")}"`, "a JWT"],
+      [
+        ["https://hooks.slack", "com/services/T0123ABCD/B0456EFGH", token("", 24)]
+          .join(".")
+          .replace(".com/services/T0123ABCD/B0456EFGH.", ".com/services/T0123ABCD/B0456EFGH/"),
+        "a Slack webhook",
+      ],
+      [
+        ["https://discord.com/api/webhooks/123456789012345678", token("", 40)].join("/"),
+        "a Discord webhook",
+      ],
+      [`REDIS_URL=redis://:${token("", 20)}@cache:6379`, "a password in a URL"],
+      [`https://api.example.com/v1?auth=${token("", 24)}`, "a token in a URL query (auth)"],
+      [
+        `https://storage.example.com/blob?sv=2024&sig=${token("", 24)}`,
+        "a token in a URL query (sig)",
+      ],
+      [`AUTH=${token("", 24)}`, "a secret assigned to AUTH"],
+      [`SERVICE_BEARER=${token("", 24)}`, "a secret assigned to SERVICE_BEARER"],
+      [`machine api.example.com login me password ${token("", 20)}`, "a password in a .netrc line"],
+      [`password ${token("", 20)}`, "a password in a .netrc line"],
+      [
+        `SENTRY_DSN=https://${"a1b2c3d4".repeat(4)}:${"e5f6a7b8".repeat(4)}@sentry.io/42`,
+        "a password in a URL",
+      ],
+    ])
+      expect([line, scanLine(line ?? "")]).toEqual([line, kind]);
+  });
+
   it("skips references, placeholders and examples", () => {
     for (const line of [
       'url = "https://mcp.exa.ai/mcp?exaApiKey=${EXA_API_KEY}"',
@@ -52,34 +98,64 @@ describe("what looks like a secret", () => {
       // A publishable key, shaped like Mapbox's: varied, but meant to be shown.
       `mapboxgl.accessToken = '${["pk", token("eyJ1Ijoi", 40), token("", 22)].join(".")}';`,
       "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+      `posthog.init('${"phc_" + token("", 40)}', { api_host: 'https://us.i.posthog.com' })`,
+      // A modern Sentry DSN carries only its public key.
+      `SENTRY_DSN=https://${"a1b2c3d4".repeat(4)}@o450000.ingest.sentry.io/5500000`,
+      // -k is curl's --insecure, not a key.
+      `curl -k -H "Accept: application/json" https://api.example.com/v1/items/${token("", 24)}`,
     ])
       expect([line, scanLine(line)]).toEqual([line, null]);
   });
 
-  it("never scans an age-armored file", () => {
-    const armored = `-----BEGIN AGE ENCRYPTED FILE-----\n${token("ghp_")}\n-----END AGE ENCRYPTED FILE-----\n`;
-    expect(scanText("secrets/secrets.env.age", armored)).toEqual([]);
-    expect(scanText("notes.txt", armored)).toEqual([]);
+  it("leaves ordinary code, paths and variable names alone", () => {
+    // Shaped like lines in a real config repo and in T3 Fleet's own output.
+    for (const line of [
+      '  "token_env": "T3_FLEET_MCP_TOKEN_MAC"',
+      '"auth": { "type": "bearer", "token_env": "MCP_SERVER_123_TOKEN" }',
+      "\tsigningkey = ~/.ssh/id_ed25519.pub",
+      "api_key = secrets.token_urlsafe(48)",
+      "const key = fam[2].trim().toLowerCase()",
+      "ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 in.mp4",
+      'outputKey: "renders/out-1.mp4"',
+      "keyframeInterval = 30",
+      '      key: "t3-fleet-git-config-missing",',
+      `CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-abc"`,
+      "const bulletKey = `${section.id}-${index}-${item.slug}`",
+      'subject_token_type = "urn:ietf:params:oauth:token-type:access_token"',
+      "client_secret = config.oauth.clientSecret2",
+      "--token-env T3_FLEET_MCP_TOKEN_LAPTOP",
+      "Bearer tokens expire after 3600 seconds",
+    ])
+      expect([line, scanLine(line)]).toEqual([line, null]);
   });
 
-  it("lets an allowed line through, by file and line hash", () => {
+  it("skips only an age file or the fleet's secrets, not a file that mentions the armor", async () => {
+    const armored = `-----BEGIN AGE ENCRYPTED FILE-----\n${token("ghp_")}\n-----END AGE ENCRYPTED FILE-----\n`;
+    expect(await scan("secrets/secrets.env.age", armored)).toEqual([]);
+    expect(await scan("backup/old.age", armored)).toEqual([]);
+    expect(await scan("secrets/anything.txt", `${token("ghp_")}\n`)).toEqual([]);
+    expect(await scan("notes.md", `How age armor looks:\n${armored}`)).toHaveLength(1);
+  });
+
+  it("lets an allowed line through, by file and the line's SHA-256", async () => {
     const text = `a\nkey = "${token("", 32)}"\n`;
-    const [hit] = scanText("skills/x/README.md", text);
+    const [hit] = await scan("skills/x/README.md", text);
     expect(hit).toMatchObject({ file: "skills/x/README.md", line: 2 });
     if (hit === undefined) return;
-    expect(hit.hash).toBe(lineHash(`key = "${token("", 32)}"`));
+    expect(hit.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(hit.hash).toBe(await Effect.runPromise(lineHash(`key = "${token("", 32)}"`)));
     expect(
-      scanText("skills/x/README.md", text, [{ file: "skills/x/README.md", line: hit.hash }]),
+      await scan("skills/x/README.md", text, [{ file: "skills/x/README.md", line: hit.hash }]),
     ).toEqual([]);
     // The same line in another file is not allowed by it.
     expect(
-      scanText("skills/y/README.md", text, [{ file: "skills/x/README.md", line: hit.hash }]),
+      await scan("skills/y/README.md", text, [{ file: "skills/x/README.md", line: hit.hash }]),
     ).toHaveLength(1);
   });
 
-  it("names the file, line and kind, never the value", () => {
+  it("names the file, line and kind, never the value", async () => {
     const value = token("ghp_");
-    const hits = scanText("mcp/github.json", `{\n  "token": "${value}"\n}\n`);
+    const hits = await scan("mcp/github.json", `{\n  "token": "${value}"\n}\n`);
     const message = refusal(hits);
     expect(message).toContain("mcp/github.json:2 looks like a GitHub token");
     expect(message).toContain(`t3-fleet secrets allow mcp/github.json ${hits[0]?.hash}`);

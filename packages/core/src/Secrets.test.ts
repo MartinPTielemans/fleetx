@@ -11,8 +11,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   addRecipient,
+  encryptedFor,
   encryptedPath,
   ensureIdentity,
+  recipientSet,
+  recipientsPath,
   readSecrets,
   writeRecipients,
   writeSecrets,
@@ -43,7 +46,7 @@ describe("letting a node read the secrets", () => {
     expect(await run(addRecipient(repo, "laptop", fresh))).toBe(true);
   });
 
-  it("re-encrypts when the key is listed but the file was not encrypted to it", async () => {
+  it("re-encrypts when the key is listed but the file was not encrypted to that set", async () => {
     const home = mkdtempSync(join(tmpdir(), "t3f-secrets-"));
     process.env["HOME"] = home;
     const repo = join(home, "fleet");
@@ -55,5 +58,36 @@ describe("letting a node read the secrets", () => {
     await run(writeRecipients(repo, { box: own, laptop }));
     expect(await run(addRecipient(repo, "laptop", laptop))).toBe(true);
     expect(await run(addRecipient(repo, "laptop", laptop))).toBe(false);
+  });
+
+  it("tells whose stanzas they are: same count, different keys, re-encrypts", async () => {
+    const home = mkdtempSync(join(tmpdir(), "t3f-secrets-"));
+    process.env["HOME"] = home;
+    const repo = join(home, "fleet");
+    const { recipient: own } = await run(ensureIdentity);
+    const departed = await identityToRecipient(await generateX25519Identity());
+    await run(writeRecipients(repo, { box: own, old: departed }));
+    await run(writeSecrets(repo, "A=1\n"));
+    // A node leaves without re-encrypting (its secrets could not be read), and another joins:
+    // two keys listed, two stanzas, but not the same two.
+    const laptop = await identityToRecipient(await generateX25519Identity());
+    await run(writeRecipients(repo, { box: own, laptop }));
+    expect(await run(addRecipient(repo, "laptop", laptop))).toBe(true);
+    expect(await run(encryptedFor(repo))).toBe(await run(recipientSet([own, laptop])));
+  });
+
+  it("encrypts before it lists: a crash between the two never claims the file is readable", async () => {
+    const home = mkdtempSync(join(tmpdir(), "t3f-secrets-"));
+    process.env["HOME"] = home;
+    const repo = join(home, "fleet");
+    const { recipient: own } = await run(ensureIdentity);
+    await run(writeRecipients(repo, { box: own }));
+    await run(writeSecrets(repo, "A=1\n"));
+    const recorded = await run(encryptedFor(repo));
+    const laptop = await identityToRecipient(await generateX25519Identity());
+    // Listing alone keeps the set the file was encrypted to.
+    await run(writeRecipients(repo, { box: own, laptop }));
+    expect(await run(encryptedFor(repo))).toBe(recorded);
+    expect(readFileSync(recipientsPath(repo), "utf8")).toContain(`laptop = "${laptop}"`);
   });
 });
