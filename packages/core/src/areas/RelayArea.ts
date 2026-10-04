@@ -8,7 +8,11 @@
  *                                     syncs as soon as the branch moves
  *
  * Services run the absolute node binary and bundle with a fixed PATH, like
- * the sync timer, and restart when they exit.
+ * the sync timer, and restart when they exit. Before offering one it checks
+ * what the service needs, since a service missing it would only restart
+ * forever: the relay token in the node's secrets, and on the relay node
+ * Tailscale (when nodes reach it on the tailnet) and Docker (when the hub
+ * runs container or registry servers).
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -20,7 +24,9 @@ import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
+import { RELAY_TOKEN } from "../RelayClient.ts";
 import { installedBundle, launchdReload, stableNode } from "../Runtime.ts";
+import { localSecretsPath } from "../Secrets.ts";
 
 const Observed = Schema.Struct({
   /** "serve", "listen", or null when this node runs neither. */
@@ -33,7 +39,68 @@ const Observed = Schema.Struct({
   /** Relay node: whether the port is published on the tailnet. */
   published: Schema.NullOr(Schema.Boolean),
   port: Schema.Number,
+  /** Whether the node's secrets hold the relay token. Absent in reports from before it was observed. */
+  token: Schema.optionalKey(Schema.Boolean),
+  /** Relay node reached on the tailnet: whether the tailscale CLI is there; null when not needed. */
+  tailscale: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  /** Relay node: the hub's servers that run in Docker, and whether docker is there. */
+  containers: Schema.optionalKey(Schema.Array(Schema.String)),
+  docker: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
 });
+
+/**
+ * Whether `url` names a host on a tailnet: a MagicDNS name (`box`,
+ * `box.tail1234.ts.net`) or a Tailscale address (100.64.0.0/10). No URL: the
+ * relay is published on the tailnet, as the service does by default.
+ */
+export const onTailnet = (url: string | null) => {
+  if (url === null) return true;
+  const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^:/?#]+)/i.exec(url)?.[1]?.toLowerCase() ?? "";
+  if (host.endsWith(".ts.net")) return true;
+  const ip = /^100\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (ip !== null) return Number(ip[1]) >= 64 && Number(ip[1]) < 128;
+  return host !== "" && host !== "localhost" && !host.includes(".") && !host.includes("[");
+};
+
+/** The hub's servers of a kind that runs in Docker, from the repo's mcp/*.json. */
+const containerServers = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const files = yield* fs
+      .readDirectory(`${repo}/mcp`)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+    const names: Array<string> = [];
+    for (const file of files.filter((f) => f.endsWith(".json")).sort()) {
+      const kind = yield* fs.readFileString(`${repo}/mcp/${file}`).pipe(
+        Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(KindOnly))),
+        Effect.map((d) => d.kind ?? null),
+        Effect.orElseSucceed(() => null),
+      );
+      if (kind === "container" || kind === "registry") names.push(file.slice(0, -".json".length));
+    }
+    return names;
+  });
+const KindOnly = Schema.Struct({ kind: Schema.optionalKey(Schema.String) });
+
+/** Whether the node's installed secrets, or its environment, hold `name`. */
+const hasSecret = (home: string, env: Readonly<Record<string, string | undefined>>, name: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs
+      .readFileString(localSecretsPath(home))
+      .pipe(Effect.orElseSucceed(() => ""));
+    const line = new RegExp(`^\\s*(?:export\\s+)?${name}=["']?([^"'\\s]+)`, "m");
+    return line.test(text) || (env[name] ?? "") !== "";
+  });
+
+/** Whether `command` is on the node's PATH. */
+const onPath = (command: string, env: Readonly<Record<string, string | undefined>>) =>
+  exec({
+    command: "sh",
+    args: ["-c", `command -v ${command}`],
+    env,
+    timeout: Duration.seconds(5),
+  }).pipe(Effect.map((r) => r.code === 0));
 
 const label = launchdLabel;
 const unitName = systemdUnit;
@@ -177,8 +244,13 @@ export const RelayArea = defineArea({
         platform === "darwin"
           ? check.code === 0 && /state = running/.test(check.stdout)
           : check.code === 0;
+      const token = yield* hasSecret(ctx.home, ctx.env, RELAY_TOKEN);
+      const tailnet = role === "serve" && onTailnet(ctx.relay?.url ?? null);
+      const tailscale = tailnet ? yield* onPath("tailscale", ctx.env) : null;
+      const containers = role === "serve" ? yield* containerServers(ctx.checkout) : [];
+      const docker = containers.length > 0 ? yield* onPath("docker", ctx.env) : null;
       let published: boolean | null = null;
-      if (role === "serve") {
+      if (tailnet && tailscale === true) {
         const serve = yield* exec({
           command: "tailscale",
           args: ["serve", "status"],
@@ -199,13 +271,52 @@ export const RelayArea = defineArea({
         running,
         published,
         port,
+        token,
+        tailscale,
+        containers,
+        docker,
       };
     }),
   diagnose: ({ node, observed }) => {
     const out: Array<Finding> = [];
     if (observed.role === null || observed.want === null) return out;
     const what = observed.role === "serve" ? "relay" : "relay listener";
-    if (observed.installed !== observed.want || !observed.running) {
+    // Without its token the service exits at once and restarts forever: no service until it has one.
+    if (observed.token === false) {
+      out.push({
+        node,
+        key: "relay-token-missing",
+        severity: "error",
+        area: "relay",
+        title: `the ${what} cannot start: ${RELAY_TOKEN} is not in this machine's secrets`,
+        detail: `On an authority, if the fleet has no relay token yet: t3-fleet secrets set ${RELAY_TOKEN}="$(openssl rand -hex 32)". Then t3-fleet sync here. If it has one, this machine cannot read the fleet's secrets yet; the secrets findings say why.`,
+      });
+    }
+    if (observed.tailscale === false) {
+      out.push({
+        node,
+        key: "relay-tailscale-missing",
+        severity: "error",
+        area: "relay",
+        title:
+          "Tailscale is not installed here, and the other machines reach the relay on the tailnet",
+        detail:
+          "Install Tailscale (https://tailscale.com/download) and run `tailscale up`; then the relay's port can be published to the tailnet.",
+      });
+    }
+    if (observed.docker === false) {
+      const names = observed.containers ?? [];
+      out.push({
+        node,
+        key: "relay-docker-missing",
+        severity: "error",
+        area: "relay",
+        title: `Docker is not installed here, and the hub runs ${names.join(", ")} in ${names.length === 1 ? "a container" : "containers"}`,
+        detail:
+          "Install Docker (https://docs.docker.com/engine/install/) and let this user run it; until then those servers do not answer.",
+      });
+    }
+    if (observed.token !== false && (observed.installed !== observed.want || !observed.running)) {
       out.push({
         node,
         key: `relay-${observed.role}`,
@@ -223,7 +334,7 @@ export const RelayArea = defineArea({
         },
       });
     }
-    if (observed.role === "serve" && observed.published === false) {
+    if (observed.role === "serve" && observed.published === false && observed.tailscale !== false) {
       out.push({
         node,
         key: "relay-unpublished",

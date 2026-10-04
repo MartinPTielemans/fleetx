@@ -33,8 +33,10 @@ import {
   ok,
   out,
   pullBranch,
+  scanStaged,
   why,
 } from "./Git.ts";
+import { allowCommand, describeHit, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
@@ -115,15 +117,19 @@ const publishState = (repo: string, state: NodeState) =>
 /**
  * Propose `files` on t3-fleet/staging/<node>: one commit on top of the branch
  * tip with exactly these files, built in a scratch index so the working tree
- * and real index are untouched. No files: the proposal is withdrawn.
+ * and real index are untouched. No files: the proposal is withdrawn. A file
+ * that adds what looks like a secret is left out, and returned in `blocked`.
  */
 const propose = (repo: string, node: string, branch: string, files: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const ref = `refs/heads/${branchPrefix("staging")}${node}`;
-    if (files.length === 0) {
+    const withdraw = Effect.gen(function* () {
       const exists = yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]);
       if (ok(exists)) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
-      return null;
+    });
+    if (files.length === 0) {
+      yield* withdraw;
+      return { commit: null, files, blocked: [] as Array<SecretHit> };
     }
     // A scratch index: the working tree and the real index stay untouched.
     const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-propose-index`, ...literal };
@@ -131,6 +137,16 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
     if (!ok(read)) return yield* Effect.fail(`proposing: ${why(read)}`);
     const add = yield* git(repo, ["add", "-A", "--", ...files], { env });
     if (!ok(add)) return yield* Effect.fail(`proposing: ${why(add)}`);
+    // A file adding what looks like a secret is left out, back at the branch's version.
+    const blocked = yield* scanStaged(repo, { base: `origin/${branch}`, paths: files, env });
+    const held = [...new Set(blocked.map((h) => h.file))];
+    if (held.length > 0)
+      yield* git(repo, ["reset", "-q", `origin/${branch}`, "--", ...held], { env });
+    const kept = files.filter((f) => !held.includes(f));
+    if (kept.length === 0) {
+      yield* withdraw;
+      return { commit: null, files: kept, blocked };
+    }
     const tree = out(yield* git(repo, ["write-tree"], { env }));
     // The same change on the same base is already proposed: keep its commit, the one an authority may be reviewing.
     const existing = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
@@ -140,7 +156,7 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
         out(yield* git(repo, ["rev-parse", `${existing}^`])) ===
           out(yield* git(repo, ["rev-parse", `origin/${branch}`])),
       ];
-      if (sameTree && sameBase) return existing.slice(0, 7);
+      if (sameTree && sameBase) return { commit: existing.slice(0, 7), files: kept, blocked };
     }
     const commit = yield* git(repo, [
       "commit-tree",
@@ -148,11 +164,29 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
       "-p",
       `origin/${branch}`,
       "-m",
-      `Proposed by ${node}: ${files.length} file${files.length === 1 ? "" : "s"}\n\n${files.join("\n")}`,
+      `Proposed by ${node}: ${kept.length} file${kept.length === 1 ? "" : "s"}\n\n${kept.join("\n")}`,
     ]);
     const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:${ref}`]);
     if (!ok(push)) return yield* Effect.fail(`proposing: ${why(push)}`);
-    return out(commit).slice(0, 7);
+    return { commit: out(commit).slice(0, 7), files: kept, blocked };
+  });
+
+/** What sync would not commit or propose: one finding per file, naming lines and kinds, never values. */
+const secretFindings = (
+  node: string,
+  hits: ReadonlyArray<SecretHit>,
+  verb: string,
+): Array<Finding> =>
+  [...new Set(hits.map((h) => h.file))].map((file) => {
+    const inFile = hits.filter((h) => h.file === file);
+    return {
+      node,
+      key: `sync-secret-${file}`,
+      severity: "error",
+      area: "sync",
+      title: `sync will not ${verb} ${file}: ${inFile.map((h) => describeHit(h).slice(file.length + 1)).join("; ")}`,
+      detail: `Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as \${NAME}. If it is not a secret, an authority lets the line through: ${[...new Set(inFile.map(allowCommand))].join("; ")}`,
+    };
   });
 
 /**
@@ -198,7 +232,23 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     }
     if (self.roles.includes("authority") && autoCommit.length > 0) {
       // Exactly the changed files: an auto_commit path that does not exist would fail the whole add.
-      const changed = yield* changedFiles(repo, autoCommit);
+      const edited = yield* changedFiles(repo, autoCommit);
+      // A file adding what looks like a secret stays an uncommitted edit, and a finding says why.
+      yield* addPaths(repo, edited).pipe(Effect.ignore);
+      const scanned =
+        edited.length === 0 ? null : yield* scanStaged(repo, { paths: edited }).pipe(Effect.result);
+      // Unscanned is uncommitted.
+      if (scanned?._tag === "Failure") {
+        failed = true;
+        message = scanned.failure;
+      }
+      const blocked = scanned?._tag === "Success" ? scanned.success : [];
+      const held = scanned?._tag === "Failure" ? edited : [...new Set(blocked.map((h) => h.file))];
+      if (held.length > 0) {
+        yield* git(repo, ["reset", "-q", "--", ...held], { env: literal });
+        findings.push(...secretFindings(self.name, blocked, "commit"));
+      }
+      const changed = edited.filter((f) => !held.includes(f));
       if (changed.length > 0) {
         const committed = yield* addPaths(repo, changed).pipe(
           Effect.andThen(
@@ -288,10 +338,13 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           }),
         ),
       );
-      if (proposal !== null)
-        lines.push(
-          `proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`,
-        );
+      if (proposal !== null) {
+        findings.push(...secretFindings(self.name, proposal.blocked, "propose"));
+        if (proposal.commit !== null)
+          lines.push(
+            `proposed ${proposal.files.length} file${proposal.files.length === 1 ? "" : "s"} for approval (${proposal.commit})`,
+          );
+      }
     }
 
     // The pull may have changed the config; reload it.

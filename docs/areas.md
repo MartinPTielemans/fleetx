@@ -44,11 +44,22 @@ interval = 900
 
 Every node can read the fleet's secrets and has the current ones.
 `t3-fleet secrets set KEY=VALUE` on an authority; nodes pick them up on sync.
+A new node's key is added once, by the authority's sync; until the node
+pulls, later syncs see it can already read the file and commit nothing.
+
+No commit T3 Fleet makes may add a secret anywhere else: every commit, sync
+proposal and approval checks the lines it adds for tokens, passwords in URLs
+and private keys, and refuses, naming the file and line but never the value.
+See `sync-secret-<file>` in troubleshooting.md for letting a false positive
+through with `t3-fleet secrets allow`.
 
 ## relay
 
 With `[relay]` in t3-fleet.toml: the relay service on the node with the relay
-role (published to the tailnet), and a listener on every other node. A
+role (published to the tailnet), and a listener on every other node. Neither
+service is offered before the machine has the relay token; on the relay node,
+status also says when Tailscale or Docker (for `container` and `registry` hub
+servers) is missing. A
 listener that reconnects gets the events it missed; when the relay cannot
 know what that was (it restarted since), the listener gets a "pull" and
 syncs.

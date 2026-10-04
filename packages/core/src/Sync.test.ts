@@ -22,6 +22,7 @@ import { lastSyncPath } from "./Probe.ts";
 import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
+import { allowSecret } from "./SecretScan.ts";
 import { stateDir } from "./Names.ts";
 import {
   processIdentity,
@@ -490,6 +491,96 @@ describe("writes outside sync", () => {
     );
     if (token !== null) await run(releaseSyncLock(token));
     expect(await run(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(/^[0-9a-f]{7,}$/);
+  });
+});
+
+// Built at run time so this file holds nothing a scanner would flag.
+const fakeToken = () => "ghp_" + "aZ3kQ9mX7pL2vB8nR4tY6wC1eF5gH0jK9sD2";
+
+describe("secrets never reach git", () => {
+  it("commitAndPush refuses a token in an MCP URL, naming file and line, never the value", async () => {
+    const f = makeFleet();
+    const key = "3f9a1c2e-7b4d-4e8a-9c1f-2d6b8e0a4c7f";
+    put(f.box, "mcp/exa.json", `{\n  "url": "https://mcp.exa.ai/mcp?exaApiKey=${key}"\n}\n`);
+    const refused = await fails(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"));
+    expect(refused).toContain("mcp/exa.json:2 looks like a token in a URL query (exaApiKey)");
+    expect(refused).not.toContain(key);
+    expect(onMain(f.origin, "mcp/exa.json")).toBeNull();
+    // Left as an edit, not staged for the next commit to take along.
+    expect(git(f.box, "status", "--porcelain", "--", "mcp")).toBe("?? mcp/\n");
+
+    // Not a secret after all: allowed by its line hash, and through.
+    const hash = /secrets allow mcp\/exa\.json ([0-9a-f]{16})/.exec(String(refused))?.[1] ?? "";
+    expect(await run(allowSecret(f.box, "mcp/exa.json", hash))).toBe(true);
+    expect(await run(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"))).toMatch(/^[0-9a-f]{7,}$/);
+  });
+
+  it("refuses a token in args", async () => {
+    const f = makeFleet();
+    put(
+      f.box,
+      "mcp/x.json",
+      `{"args": ["server", "--api-key", "${"Kq8".repeat(4)}Zr72mPw9xLt3"]}\n`,
+    );
+    expect(await fails(commitAndPush(f.box, ["mcp/x.json"], "x"))).toContain(
+      "mcp/x.json:1 looks like a secret in a command-line flag (--api-key)",
+    );
+  });
+
+  it("scans only what a commit adds: a skill already holding an example token still updates", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", `a v1\nEXAMPLE=${fakeToken()}\n`);
+    commitAll(f.box, "vendored with an example");
+    put(f.box, "skills/a/SKILL.md", `a v2\nEXAMPLE=${fakeToken()}\nAPI_KEY = "your-api-key"\n`);
+    expect(await run(commitAndPush(f.box, ["skills/a/SKILL.md"], "update a"))).toMatch(
+      /^[0-9a-f]{7,}$/,
+    );
+  });
+
+  it("an authority's sync leaves a file with a secret uncommitted and says why", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", "a v2\n");
+    put(f.box, "skills/c/SKILL.md", `token: ${fakeToken()}\n`);
+    const result = await f.sync(f.box, "box");
+    expect(result.lines.join("\n")).toContain("committed 1 file");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+    expect(onMain(f.origin, "skills/c/SKILL.md")).toBeNull();
+    const [finding] = result.findings;
+    expect(finding?.key).toBe("sync-secret-skills/c/SKILL.md");
+    expect(finding?.title).toContain(
+      "sync will not commit skills/c/SKILL.md: 1 looks like a GitHub token",
+    );
+    expect(JSON.stringify(finding)).not.toContain(fakeToken());
+  });
+
+  it("a member proposes everything but the file with a secret, and says why", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    put(f.laptop, "skills/d/SKILL.md", `x\nkey = "${fakeToken()}"\n`);
+    const result = await f.sync(f.laptop, "laptop");
+    expect(result.lines.join("\n")).toContain("proposed 1 file");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/d/SKILL.md"]);
+
+    // Only that file: withdrawn, not proposed empty.
+    put(f.laptop, "skills/a/SKILL.md", "a v1\n");
+    const again = await f.sync(f.laptop, "laptop");
+    expect(again.lines.join("\n")).not.toContain("proposed");
+    expect(await run(listProposals(f.box, "main"))).toEqual([]);
+  });
+
+  it("an approval refuses a proposal that adds a secret", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", `token: ${fakeToken()}\n`);
+    git(f.laptop, "add", "-A");
+    git(f.laptop, "commit", "-qm", "by hand");
+    git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    const refused = await fails(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(refused).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
   });
 });
 

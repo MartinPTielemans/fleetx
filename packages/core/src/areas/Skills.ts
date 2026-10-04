@@ -141,8 +141,15 @@ export const SkillsArea = defineArea({
         const target = isStore
           ? `"$T3_FLEET_CHECKOUT/skills/${l.skill}"`
           : `${shPath(storeConfigured)}/${sh(l.skill)}`;
-        // One backup directory per client directory, named after it: ~/.claude/skills → .claude-skills.
-        const backup = `"$backups"/${sh(tilde(l.dir).replace(/^~\/?/, "").replaceAll("/", "-") || "home")}`;
+        // One backup directory per client directory, named after it and visible to ls:
+        // ~/.claude/skills → claude-skills.
+        const name = tilde(l.dir)
+          .replace(/^~\/?/, "")
+          .split("/")
+          .map((part) => part.replace(/^\.+/, ""))
+          .filter(Boolean)
+          .join("-");
+        const backup = `"$backups"/${sh(name || "home")}`;
         const aside = l.state === "real-dir" ? `mkdir -p ${backup} && mv ${at} ${backup}/ && ` : "";
         commands.push(`mkdir -p ${shPath(tilde(l.dir))} && ${aside}ln -sfn ${target} ${at}`);
       }

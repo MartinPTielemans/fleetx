@@ -139,6 +139,46 @@ export const writeSecrets = (repo: string, plaintext: string) =>
     }),
   );
 
+/**
+ * How many recipients an armored age file was encrypted to: one stanza each
+ * in its header. Which ones, age does not say.
+ */
+export const stanzaCount = (armored: string) =>
+  Effect.try({
+    try: () => {
+      const bytes = armor.decode(armored);
+      const header = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 64 * 1024)));
+      const end = header.indexOf("\n---");
+      return (end < 0 ? header : header.slice(0, end))
+        .split("\n")
+        .filter((l) => l.startsWith("-> ")).length;
+    },
+    catch: () => new SecretsError({ message: "secrets.env.age is not an armored age file" }),
+  });
+
+/**
+ * Let `node` read the secrets: list its key and re-encrypt to every key.
+ * Nothing changes (false) when that key is already listed and the file was
+ * encrypted to as many keys as are listed, so to it as well: re-encrypting
+ * again would only commit the same secrets anew.
+ */
+export const addRecipient = (repo: string, node: string, recipient: string) =>
+  underSyncLock(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const recipients = yield* readRecipients(repo);
+      const armored = yield* fs.readFileString(encryptedPath(repo)).pipe(Effect.option);
+      if (recipients[node] === recipient && Option.isSome(armored)) {
+        const keys = new Set(Object.values(recipients)).size;
+        if ((yield* stanzaCount(armored.value)) === keys) return false;
+      }
+      const text = yield* readSecrets(repo);
+      yield* writeRecipients(repo, { ...recipients, [node]: recipient });
+      yield* writeSecrets(repo, text);
+      return true;
+    }),
+  );
+
 /** Decrypt the repo's secrets onto this node, where fixes and templates read them. */
 export const installSecrets = (repo: string) =>
   Effect.gen(function* () {

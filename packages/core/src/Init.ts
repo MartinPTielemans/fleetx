@@ -13,7 +13,7 @@ import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import { exec } from "./Exec.ts";
-import { commitAndPush, ensureGitConfig, git, ok, why } from "./Git.ts";
+import { commitAndPush, ensureGitConfig, git, ok, refuseSecrets, why } from "./Git.ts";
 import {
   ensureIdentity,
   installSecrets,
@@ -271,6 +271,7 @@ export const createRepo = (repo: string, found: Discovery) =>
     const init = yield* git(repo, ["init", "-q", "-b", "main"]);
     if (!ok(init)) return yield* Effect.fail(`git init: ${why(init)}`);
     yield* git(repo, ["add", "-A"]);
+    yield* refuseSecrets(repo);
     const commit = yield* git(repo, ["commit", "-q", "-m", `t3-fleet init on ${found.node}`]);
     if (!ok(commit)) return yield* Effect.fail(`git commit: ${why(commit)}`);
     yield* installSecrets(repo).pipe(Effect.ignore);

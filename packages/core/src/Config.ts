@@ -57,6 +57,13 @@ export type ProxySettings = typeof ProxySettings.Type;
 
 const Accepted = Schema.Struct({ id: Schema.String, reason: Schema.String });
 
+/** A line SecretScan.ts flagged that is not a secret: its file and line hash. */
+const AllowedSecret = Schema.Struct({
+  file: Schema.String,
+  line: Schema.String,
+  reason: Schema.optionalKey(Schema.String),
+});
+
 const FleetSection = Schema.Struct({
   /** Where every node keeps its clone of this repository. */
   checkout: Schema.optionalKey(Schema.String),
@@ -89,6 +96,7 @@ const FleetFile = Schema.Struct({
   relay: Schema.optionalKey(RelaySection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
+  allow_secret: Schema.optionalKey(Schema.Array(AllowedSecret)),
   defaults: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 export type FleetSettings = typeof FleetFile.Type;

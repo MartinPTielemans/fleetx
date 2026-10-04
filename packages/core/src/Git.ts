@@ -11,6 +11,14 @@ import * as FileSystem from "effect/FileSystem";
 
 import { exec, type ExecResult } from "./Exec.ts";
 import { configDir } from "./Names.ts";
+import {
+  addedLines,
+  readAllowed,
+  refusal,
+  scanLines,
+  type Allowed,
+  type SecretHit,
+} from "./SecretScan.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
 export const gitConfigPath = (home: string) => `${configDir(home)}/gitconfig`;
@@ -229,6 +237,67 @@ export const addPaths = (repo: string, paths: ReadonlyArray<string>) =>
     if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
   });
 
+/**
+ * What the index (or the one `env` names) adds against `base`, HEAD by
+ * default (every staged line, in a repo without commits), that looks like a
+ * secret. The allow-list is the repo's own t3-fleet.toml unless given.
+ */
+export const scanStaged = (
+  repo: string,
+  options: {
+    readonly base?: string;
+    readonly paths?: ReadonlyArray<string>;
+    readonly env?: Readonly<Record<string, string>>;
+    readonly allowed?: ReadonlyArray<Allowed>;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const allowed = options.allowed ?? (yield* readAllowed(repo));
+    const diff = yield* git(
+      repo,
+      [
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--cached",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "-U0",
+        ...(options.base === undefined ? [] : [options.base]),
+        "--",
+        ...(options.paths ?? []),
+      ],
+      { env: { ...literal, ...options.env } },
+    );
+    if (!ok(diff)) return yield* Effect.fail(`scanning for secrets: ${why(diff)}`);
+    const hits: Array<SecretHit> = [];
+    for (const [file, lines] of addedLines(diff.stdout))
+      hits.push(...scanLines(file, lines, allowed));
+    return hits;
+  });
+
+/**
+ * Fail, naming them, when the staged `paths` add a secret; they are unstaged
+ * again (the edits stay in the checkout) so nothing commits them by accident.
+ */
+export const refuseSecrets = (repo: string, paths: ReadonlyArray<string> = []) =>
+  Effect.gen(function* () {
+    const hits = yield* scanStaged(repo, { paths });
+    if (hits.length === 0) return;
+    const head = ok(yield* git(repo, ["rev-parse", "-q", "--verify", "HEAD"]));
+    yield* git(
+      repo,
+      head
+        ? ["reset", "-q", "--", ...paths]
+        : ["rm", "-rq", "--cached", "--", ...(paths.length > 0 ? paths : ["."])],
+      {
+        env: literal,
+      },
+    );
+    return yield* Effect.fail(refusal(hits));
+  });
+
 /** The branch the checkout tracks on origin: main, usually. */
 const upstreamBranch = (repo: string) =>
   Effect.gen(function* () {
@@ -243,6 +312,7 @@ const upstreamBranch = (repo: string) =>
  * Commit `paths` in the repo and push, as an authority changing the config.
  * Pulls first (rebase) so the push lands on what other nodes see. Takes the
  * sync lock, so callers that write files before this should hold it too.
+ * Refuses, committing nothing, when what it adds looks like a secret.
  */
 export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, message: string) =>
   underSyncLock(
@@ -257,6 +327,7 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
         )).stdout,
       );
       if (staged.length === 0) return "nothing to commit";
+      yield* refuseSecrets(repo, staged);
       const commit = yield* git(repo, ["commit", "-q", "-m", message, "--", ...staged], {
         env: literal,
       });

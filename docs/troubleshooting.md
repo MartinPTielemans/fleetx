@@ -181,6 +181,32 @@ still runs them on this machine. The fix runs `thv stop` for them (marked as
 disrupting them until the hub serves them; sign in to OAuth servers first).
 `thv start` brings one back; `thv rm` removes them for good.
 
+## relay
+
+**`relay-token-missing`** — the relay (or a machine's relay listener) reads
+`T3_FLEET_RELAY_TOKEN` from the machine's secrets and exits without it, so
+T3 Fleet offers no service until it is there. If the fleet has no relay token
+yet, on an authority run
+`t3-fleet secrets set T3_FLEET_RELAY_TOKEN="$(openssl rand -hex 32)"`, then
+`t3-fleet sync` on the machine. If the fleet has one, the machine cannot read
+the fleet's secrets yet: see the secrets findings for it.
+
+**`relay-tailscale-missing`** — the relay is reached at a tailnet name (a
+`*.ts.net` or MagicDNS name, or a 100.x address) and its port is published
+with `tailscale serve`, but the `tailscale` command is not on this machine.
+Install Tailscale and run `tailscale up`.
+
+**`relay-docker-missing`** — the hub runs `container` or `registry` servers
+from `mcp/` with Docker, and `docker` is not on the relay machine. Install
+Docker for the user T3 Fleet runs as; until then those servers do not answer.
+
+**`relay-<role>`** — the relay service (`relay-serve`, on the relay machine)
+or the listener (`relay-listen`, everywhere else) is missing, out of date or
+not running. The fix installs and restarts it.
+
+**`relay-unpublished`** — the relay's port is not published to the tailnet.
+The fix runs `tailscale serve` for it.
+
 ## T3
 
 Each problem observing T3 has a key of its own, so an `[[accept]]` for one
@@ -248,6 +274,27 @@ Nobody can do this unattended.
 are proposed, and only by `t3-fleet sync`. `t3-fleet review` on an authority lists
 what is waiting. A machine whose pull failed (its own edits overlap incoming
 changes, say) proposes nothing until a sync there pulls again.
+
+**`sync-secret-<file>`** — sync would not commit (an authority) or propose
+(any other machine) that file, because a line it adds looks like a secret: a
+token, a password in a URL, a private key. The finding names the line and the
+kind, never the value. Move the value into the fleet's secrets
+(`t3-fleet secrets set NAME=VALUE` on an authority) and refer to it as
+`${NAME}`. Every commit T3 Fleet makes is checked the same way, and refuses
+with the same names. If the line is not a secret (an example in a vendored
+skill's docs, say), an authority lets it through with the command the
+finding gives, `t3-fleet secrets allow <file> <hash>`, which adds to
+`t3-fleet.toml`:
+
+```toml
+[[allow_secret]]
+file = "skills/mapbox/README.md"
+line = "9f2c4a1e07b3d855"   # the line's hash, from the refusal
+```
+
+The hash is of that line's text, so the entry stops matching when the line
+changes. Only the lines a commit adds are checked: what is already committed
+never blocks a later change to the same file.
 
 **`sync-local-commits`** — a machine without the authority role has commits
 of its own in the config repo. Only an authority's commits reach the other
