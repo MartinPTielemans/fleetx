@@ -23,6 +23,7 @@ import {
   putBackConflicted,
   restorePaths,
   scanCommits,
+  scanEdits,
   snapshot,
   statusEntries,
   unmergedHits,
@@ -920,6 +921,7 @@ describe("secrets never reach git: round three", () => {
     mkdirSync(join(f.box, ".git/t3-fleet-scan-index"));
     const result = await f.sync(f.box, "box");
     expect(result.failed).toBe(true);
+    expect(result.findings.map((x) => x.key)).toContain("sync-scan-failed");
     expect(git(f.box, "stash", "list")).toBe("");
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited\n");
   });
@@ -1316,5 +1318,34 @@ describe("an approved file and a held-back edit in one skill", () => {
     const after = await f.sync(f.laptop, "laptop");
     expect(after.failed).toBe(false);
     expect(after.lines.join("\n")).toContain("proposed 1 file");
+  });
+});
+
+describe("every C0 control character and DEL in a path", () => {
+  // NUL cannot be in a file name; every other C0 character and DEL can.
+  const codes = [...Array.from({ length: 31 }, (_, i) => i + 1), 0x7f];
+  const named = (code: number) => `skills/a/c${code}-${String.fromCharCode(code)}.txt`;
+
+  it("sync reports them, proposes none of them, and never crashes", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    // One at a time, each reaching the scan on its own.
+    for (const code of codes) {
+      put(f.laptop, named(code), "x\n");
+      const synced = await f.sync(f.laptop, "laptop");
+      expect([code, synced.failed, synced.message]).toEqual([code, false, ""]);
+      const unsafe = synced.findings.find((x) => x.key === "sync-path-unsafe");
+      expect(unsafe?.title).toContain(JSON.stringify(named(code)));
+    }
+    // What is safe is still proposed; none of these is.
+    const [proposal] = await run(listProposals(f.box, "main"));
+    expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
+  }, 60_000);
+
+  it("the scanner reads every such name as it is, whatever git quotes", async () => {
+    const f = makeFleet();
+    for (const code of codes) put(f.box, named(code), `token: ${fakeToken()}\n`);
+    const hits = await run(scanEdits(f.box, ["skills"]));
+    expect([...new Set(hits.map((h) => h.file))].sort()).toEqual(codes.map(named).sort());
   });
 });

@@ -349,7 +349,12 @@ const scanDiff = (
     );
     if (!ok(diff)) return yield* Effect.fail(`scanning for secrets: ${why(diff)}`);
     const suspects: Array<Suspect> = [];
-    for (const [file, lines] of addedLines(diff.stdout)) {
+    // Never a defect: whatever git prints, a scan that cannot read it fails, and says so.
+    const added = yield* Effect.try({
+      try: () => addedLines(diff.stdout),
+      catch: (e) => `scanning for secrets: could not read git's diff (${String(e)})`,
+    });
+    for (const [file, lines] of added) {
       let found = suspectLines(file, lines);
       // Only the first line says whether the file is an age file; read it when the diff lacks it.
       if (found.length > 0 && !lines.some((l) => l.line === 1)) {

@@ -251,6 +251,16 @@ const secretFindings = (
   });
 
 /** Units set aside by an earlier run, until the stash entry is dropped. */
+/** A scan for secrets that could not run: nothing it would have looked at is committed or proposed. */
+const scanFailed = (node: string, why: string): Finding => ({
+  node,
+  key: "sync-scan-failed",
+  severity: "error",
+  area: "sync",
+  title: `sync could not scan this machine's edits for secrets, so it committed and proposed none of them: ${why}`,
+  detail: "t3-fleet secrets scan shows what the scan sees; the next sync tries again.",
+});
+
 const asideFindings = (node: string, repo: string, units: ReadonlySet<string>): Array<Finding> =>
   [...units].map((unit) => ({
     node,
@@ -328,19 +338,27 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         title: `sync will not commit or propose ${unsafe.map((f) => JSON.stringify(f)).join(", ")}: a newline or other control character in a path`,
         detail: "Rename it to a name without control characters; sync then takes it as usual.",
       });
-    const scanned = yield* scanEdits(repo, edited, { allowed: yield* allowedNow() }).pipe(
-      Effect.result,
-    );
+    const scanned = yield* scanEdits(
+      repo,
+      edited.filter((f) => !unsafePath(f)),
+      {
+        allowed: yield* allowedNow(),
+      },
+    ).pipe(Effect.result);
     // Unscanned is uncommitted.
     if (scanned._tag === "Failure") {
       failed = true;
       message = scanned.failure;
+      findings.push(scanFailed(self.name, scanned.failure));
     }
     // A file still conflicted is never committed or proposed either, nor a SOURCES.json that does not read.
     const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
     const hits = [
       ...(scanned._tag === "Success" ? scanned.success : []),
-      ...(yield* unmergedHits(repo, edited)),
+      ...(yield* unmergedHits(
+        repo,
+        edited.filter((f) => !unsafePath(f)),
+      )),
       ...(entries === null ? [UNREADABLE_SOURCES] : []),
     ];
     const held = heldBack(
@@ -608,6 +626,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           Effect.sync(() => {
             failed = true;
             message = message || e;
+            if (e.startsWith("scanning for secrets")) findings.push(scanFailed(self.name, e));
             return null;
           }),
         ),
