@@ -53,6 +53,6 @@ export const expectOk = (reply: HubReply) =>
         reply.text.trim() === "" ? `the relay answered HTTP ${reply.status}` : reply.text.trim(),
       );
 
-/** The secret a client token is kept under in this repo's secrets: T3_FLEET_MCP_TOKEN_<CLIENT>. */
-export const clientTokenEnv = (repo: string, client: string) =>
-  secretName(repo, `MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`);
+/** The secret a client token is kept under in the fleet's secrets: T3_FLEET_MCP_TOKEN_<CLIENT>. */
+export const clientTokenEnv = (client: string) =>
+  secretName(`MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`);

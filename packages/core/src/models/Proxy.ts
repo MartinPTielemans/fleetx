@@ -103,7 +103,6 @@ import {
   WINDOWS,
   type RequestRecord,
 } from "./Stats.ts";
-import { legacyHeader } from "../Names.ts";
 
 export { MODELS_PORT };
 
@@ -467,11 +466,8 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
                 url: `${relay.url.replace(/\/+$/, "")}/egress/${upstream}${rest}`,
                 headers: {
                   ...headers,
-                  // A relay on a build from before the rename reads only the fleetx names. Until 1.0.
                   [RELAY_TOKEN_HEADER]: relay.token,
-                  [legacyHeader("relay-token")]: relay.token,
                   [EGRESS_BASE_HEADER]: direct.slice(0, direct.length - rest.length),
-                  [legacyHeader("egress-base")]: direct.slice(0, direct.length - rest.length),
                 },
               };
         let target = relayed ?? { url: direct, headers };

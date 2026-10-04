@@ -36,7 +36,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { T3_DRIVERS } from "../T3Settings.ts";
-import { LAUNCHER_PREFIX, LEGACY_LAUNCHER_PREFIX } from "../Names.ts";
+import { LAUNCHER_PREFIX } from "../Names.ts";
 
 export const MODELS_PORT = 8398;
 
@@ -249,6 +249,3 @@ const launcherName = (instanceId: string) =>
   providerName(instanceId).replace(/[^A-Za-z0-9._-]/g, "-");
 export const launcherPath = (home: string, instanceId: string) =>
   `${home}/.local/bin/${LAUNCHER_PREFIX}${launcherName(instanceId)}`;
-/** Where the launcher was before the rename. Until 1.0. */
-export const legacyLauncherPath = (home: string, instanceId: string) =>
-  `${home}/.local/bin/${LEGACY_LAUNCHER_PREFIX}${launcherName(instanceId)}`;

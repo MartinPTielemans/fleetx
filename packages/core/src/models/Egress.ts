@@ -33,8 +33,10 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import {
+  EGRESS_BASE_HEADER,
   EGRESS_FAILURE_HEADER,
   errorCode,
+  RELAY_TOKEN_HEADER,
   requestHeaders,
   responseHeaders,
   splitPath,
@@ -42,7 +44,6 @@ import {
 import { constantTimeEqual, hashToken } from "../hub/Policy.ts";
 import { clientConnection, forwardingClient, sendUpstream } from "./Proxy.ts";
 import { BUILTIN_UPSTREAMS, upstreamBases } from "./Recipes.ts";
-import { readHeader } from "../Names.ts";
 
 export interface EgressOptions {
   /** Every base the relay may forward to; read on each request. Defaults to the built-in upstreams. */
@@ -65,11 +66,11 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
         "/egress/*",
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          const given = readHeader(request.headers, "relay-token") ?? "";
+          const given = request.headers[RELAY_TOKEN_HEADER] ?? "";
           if (token === "" || !constantTimeEqual(yield* hashToken(given), yield* hashToken(token)))
             return refused(401, "Unauthorized");
           const split = splitPath(request.url, "/egress");
-          const base = readHeader(request.headers, "egress-base") ?? "";
+          const base = request.headers[EGRESS_BASE_HEADER] ?? "";
           const scheme =
             base.startsWith("https://") ||
             (options.allowInsecure === true && base.startsWith("http://"));
@@ -79,10 +80,17 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
             request.method === "GET" || request.method === "HEAD"
               ? null
               : new Uint8Array(yield* request.arrayBuffer);
+          // Neither the token nor the base goes upstream under any name: a node on 0.7 also
+          // sends both under the names T3 Fleet had before.
+          const headers = Object.fromEntries(
+            Object.entries(requestHeaders(request.headers)).filter(
+              ([, value]) => value !== token && value !== base,
+            ),
+          );
           const sent = yield* sendUpstream({
             method: request.method,
             url: `${base}${split.rest}`,
-            headers: requestHeaders(request.headers),
+            headers,
             body,
           }).pipe(Effect.result);
           if (sent._tag === "Failure") {

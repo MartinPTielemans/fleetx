@@ -43,7 +43,7 @@ import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
 import { approve, autoApprovable, listProposals, settleRejection } from "./Staging.ts";
-import { branchPrefix, branchPrefixes, repoRenamed, stateDir } from "./Names.ts";
+import { branchPrefix, stateDir } from "./Names.ts";
 import { withSyncLock } from "./SyncLock.ts";
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
@@ -68,45 +68,30 @@ const settingList = (
   fallback: ReadonlyArray<string>,
 ) => config.settings.fleet?.[key] ?? fallback;
 
-/**
- * All nodes' published state, from their t3-fleet/state/<node> branches, and
- * fleetx/state/<node> until 1.0: a machine that has not pulled the repo's
- * rename still publishes there. A node on both counts with its newer state.
- */
+/** All nodes' published state, from their t3-fleet/state/<node> branches. */
 export const readStates = (repo: string) =>
   Effect.gen(function* () {
-    const prefixes = branchPrefixes("state");
+    const prefix = branchPrefix("state");
     yield* git(repo, [
       "fetch",
       "-q",
       "--prune",
       "origin",
-      ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`),
+      `+refs/heads/${prefix}*:refs/remotes/origin/${prefix}*`,
     ]);
     const refs = yield* git(repo, [
       "for-each-ref",
       "--format=%(refname:strip=3)",
-      ...prefixes.map((p) => `refs/remotes/origin/${p}`),
+      `refs/remotes/origin/${prefix}`,
     ]);
-    const byNode = new Map<string, NodeState>();
+    const states: Array<NodeState> = [];
     for (const ref of out(refs).split("\n").filter(Boolean)) {
       const show = yield* git(repo, ["show", `origin/${ref}:state.json`]);
       if (!ok(show)) continue;
       const state = yield* decodeState(show.stdout).pipe(Effect.option);
-      if (Option.isNone(state)) continue;
-      const seen = byNode.get(state.value.node);
-      if (seen === undefined || state.value.at > seen.at) byNode.set(state.value.node, state.value);
+      if (Option.isSome(state)) states.push(state.value);
     }
-    return [...byNode.values()];
-  });
-
-/** In a renamed repo, a branch this node still has under its fleetx name is deleted. Until 1.0. */
-const dropLegacyBranch = (repo: string, kind: "state" | "staging", node: string) =>
-  Effect.gen(function* () {
-    if (!repoRenamed(repo)) return;
-    const ref = `refs/heads/${branchPrefixes(kind)[1]}${node}`;
-    if (ok(yield* git(repo, ["ls-remote", "--exit-code", "origin", ref])))
-      yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
+    return states;
   });
 
 /** Publish this node's state as the single commit on its state branch. */
@@ -122,10 +107,9 @@ const publishState = (repo: string, state: NodeState) =>
       "-q",
       "--force",
       "origin",
-      `${out(commit)}:refs/heads/${branchPrefix(repo, "state")}${state.node}`,
+      `${out(commit)}:refs/heads/${branchPrefix("state")}${state.node}`,
     ]);
     if (!ok(push)) return yield* Effect.fail(`publishing state: ${why(push)}`);
-    yield* dropLegacyBranch(repo, "state", state.node);
   });
 
 /**
@@ -135,8 +119,7 @@ const publishState = (repo: string, state: NodeState) =>
  */
 const propose = (repo: string, node: string, branch: string, files: ReadonlyArray<string>) =>
   Effect.gen(function* () {
-    const ref = `refs/heads/${branchPrefix(repo, "staging")}${node}`;
-    yield* dropLegacyBranch(repo, "staging", node);
+    const ref = `refs/heads/${branchPrefix("staging")}${node}`;
     if (files.length === 0) {
       const exists = yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]);
       if (ok(exists)) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);

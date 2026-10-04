@@ -10,7 +10,7 @@
  */
 import type { ModelFailureClass } from "../Api.ts";
 import { own, type UpstreamDef, type Upstreams } from "./Recipes.ts";
-import { header, legacyHeader } from "../Names.ts";
+import { header } from "../Names.ts";
 
 /** Headers that describe one connection, not the request (RFC 9110 §7.6.1), plus what the client re-derives. */
 const HOP_BY_HOP = new Set([
@@ -39,14 +39,7 @@ export const EGRESS_BASE_HEADER = header("egress-base");
  * network error, never as the upstream's answer.
  */
 export const EGRESS_FAILURE_HEADER = header("egress-failure");
-/** Both, under their names and their fleetx names, which a node sends and the relay reads until 1.0. */
-const OWN_HEADERS = new Set([
-  RELAY_TOKEN_HEADER,
-  EGRESS_BASE_HEADER,
-  EGRESS_FAILURE_HEADER,
-  legacyHeader("relay-token"),
-  legacyHeader("egress-base"),
-]);
+const OWN_HEADERS = new Set([RELAY_TOKEN_HEADER, EGRESS_BASE_HEADER, EGRESS_FAILURE_HEADER]);
 
 export const requestHeaders = (
   headers: Readonly<Record<string, string | undefined>>,

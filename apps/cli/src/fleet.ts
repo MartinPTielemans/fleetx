@@ -25,7 +25,6 @@ import {
   removeSkills,
 } from "@t3-fleet/core/SkillSources";
 import { isSkillBackup } from "@t3-fleet/core/areas/Skills";
-import { renameRepo } from "@t3-fleet/core/RepoRename";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -177,26 +176,6 @@ const proposalOf = (config: Config, node: string) =>
     if (proposal === undefined) return yield* Effect.fail(`no proposal from ${node}`);
     return proposal;
   });
-
-const repoRenameCommand = Command.make("rename").pipe(
-  Command.withDescription(
-    "Move the config repo to T3 Fleet's names: t3-fleet.toml, t3-fleet/ branches, T3_FLEET_ secrets (authority).",
-  ),
-  Command.withHandler(() =>
-    Effect.gen(function* () {
-      const config = yield* asAuthority;
-      const done = yield* underSyncLock(renameRepo(config.repo, config.branch));
-      yield* Console.log(
-        done.length === 0 ? "the config repo already has T3 Fleet's names" : done.join("\n"),
-      );
-    }).pipe(reportUserErrors),
-  ),
-);
-
-export const repoCommand = Command.make("repo").pipe(
-  Command.withDescription("The config repo itself."),
-  Command.withSubcommands([repoRenameCommand]),
-);
 
 /** The commit `t3-fleet review` showed; the command refuses when the proposal moved on since. */
 const reviewedArg = Argument.String("commit").pipe(

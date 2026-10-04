@@ -6,8 +6,8 @@
  *   servers = ["fetch", "executor"]     # which to register on this node
  *   hub = true                          # the relay's MCP hub serves hosted kinds
  *   gateway = "https://relay.tailnet.ts.net:8399"   # the relay, for hosted servers
- *   token_env = "FLEETX_MCP_TOKEN_LAPTOP"   # optional: a client token instead
- *                                       # of the relay token
+ *   token_env = "T3_FLEET_MCP_TOKEN_LAPTOP"   # optional: a client token
+ *                                             # instead of the relay token
  *
  * Without the hub, hosted servers run elsewhere (ToolHive, say):
  *
@@ -47,7 +47,7 @@ import { expandHome } from "../Config.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { isHosted } from "../hub/Definitions.ts";
-import { configDir, readHeader, SH_CONFIG_DIR } from "../Names.ts";
+import { configDir, header, SH_CONFIG_DIR } from "../Names.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({
@@ -217,11 +217,10 @@ export const resolveEndpoint = (
   d: typeof Definition.Type,
   desired: McpDesired,
   home: string,
-  relayTokenEnv: string = RELAY_TOKEN_ENV,
 ):
   | { readonly endpoint: Endpoint; readonly problem: null }
   | { readonly endpoint: null; readonly problem: string } => {
-  const resolved = resolveUnchecked(name, d, desired, home, relayTokenEnv);
+  const resolved = resolveUnchecked(name, d, desired, home);
   // The variable's name goes into fix commands unquoted; only a plain name may.
   if (
     resolved.endpoint?.type === "http" &&
@@ -238,21 +237,14 @@ export const resolveEndpoint = (
 
 export const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
-/**
- * The relay token's variable for clients that name none: T3_FLEET_RELAY_TOKEN,
- * or FLEETX_RELAY_TOKEN where a fleet has that one. A fleet keeps it after the
- * repo's rename: Codex reads the variable from T3's environment, fixed when T3
- * started, so a new name would cut running sessions off. Until 1.0.
- */
+/** The relay token's variable, for clients that name none. */
 export const RELAY_TOKEN_ENV = "T3_FLEET_RELAY_TOKEN";
-export const LEGACY_RELAY_TOKEN_ENV = "FLEETX_RELAY_TOKEN";
 
 const resolveUnchecked = (
   name: string,
   d: typeof Definition.Type,
   desired: McpDesired,
   home: string,
-  relayTokenEnv: string,
 ):
   | { readonly endpoint: Endpoint; readonly problem: null }
   | { readonly endpoint: null; readonly problem: string } => {
@@ -281,7 +273,7 @@ const resolveUnchecked = (
     return ok({
       type: "http",
       url: `${gateway}/mcp/${name}`,
-      tokenEnv: desired.token_env ?? relayTokenEnv,
+      tokenEnv: desired.token_env ?? RELAY_TOKEN_ENV,
     });
   }
   if (gateway !== undefined && port !== undefined) {
@@ -289,7 +281,7 @@ const resolveUnchecked = (
     return ok({
       type: "http",
       url: `${gateway}/mcp/${name}`,
-      tokenEnv: desired?.token_env ?? relayTokenEnv,
+      tokenEnv: desired?.token_env ?? RELAY_TOKEN_ENV,
     });
   }
   if (desired?.origin === undefined || port === undefined)
@@ -328,7 +320,7 @@ export const liveCheck = (url: string, token: string | undefined) =>
               Effect.ignore,
             );
           }
-          if (readHeader(r.headers, "hub-state") === "needs-login") return NEEDS_LOGIN;
+          if (r.headers[header("hub-state")] === NEEDS_LOGIN) return NEEDS_LOGIN;
           if (r.status >= 200 && r.status < 300) return "ok";
           return `HTTP ${r.status}: ${(yield* r.text).trim().slice(0, 80)}`;
         }),
@@ -510,11 +502,6 @@ export const McpArea = defineArea({
         if (m?.[1] !== undefined) secrets[m[1]] = (m[2] ?? "").replace(/^["']|["']$/g, "");
       }
 
-      const relayTokenEnv =
-        secrets[LEGACY_RELAY_TOKEN_ENV] !== undefined ||
-        ctx.env[LEGACY_RELAY_TOKEN_ENV] !== undefined
-          ? LEGACY_RELAY_TOKEN_ENV
-          : RELAY_TOKEN_ENV;
       const servers = yield* Effect.forEach(
         desired?.servers ?? [],
         (name) =>
@@ -527,7 +514,7 @@ export const McpArea = defineArea({
               : Option.none();
             const resolved = Option.isNone(def)
               ? { endpoint: null, problem: `mcp/${name}.json is missing or not valid` }
-              : resolveEndpoint(name, def.value, desired, ctx.home, relayTokenEnv);
+              : resolveEndpoint(name, def.value, desired, ctx.home);
             const { endpoint, problem } = resolved;
             const tokenEnv = endpoint?.type === "http" ? endpoint.tokenEnv : null;
             const token = tokenEnv === null ? undefined : (secrets[tokenEnv] ?? ctx.env[tokenEnv]);
@@ -549,7 +536,7 @@ export const McpArea = defineArea({
         | null
         | undefined;
       if (desired?.hub === true && ctx.roles.includes("relay")) {
-        const token = secrets[relayTokenEnv] ?? ctx.env[relayTokenEnv] ?? "";
+        const token = secrets[RELAY_TOKEN_ENV] ?? ctx.env[RELAY_TOKEN_ENV] ?? "";
         hub = yield* hubStates(ctx.relay?.port ?? 8399, token);
       }
 

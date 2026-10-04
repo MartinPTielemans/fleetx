@@ -20,14 +20,7 @@ import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
-import {
-  installedBundle,
-  launchdReload,
-  legacyUnitInstalled,
-  notInstalledTitle,
-  retireLegacyUnit,
-  stableNode,
-} from "../Runtime.ts";
+import { installedBundle, launchdReload, stableNode } from "../Runtime.ts";
 
 const Observed = Schema.Struct({
   /** "serve", "listen", or null when this node runs neither. */
@@ -40,8 +33,6 @@ const Observed = Schema.Struct({
   /** Relay node: whether the port is published on the tailnet. */
   published: Schema.NullOr(Schema.Boolean),
   port: Schema.Number,
-  /** Still installed under its fleetx name. Until 1.0. */
-  legacy: Schema.optionalKey(Schema.Boolean),
 });
 
 const label = launchdLabel;
@@ -105,7 +96,6 @@ const install = (platform: string, root: boolean, role: "serve" | "listen", text
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${label(role)}.plist"`;
     return [
-      retireLegacyUnit(platform, root, role),
       `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       write(plist),
       launchdReload(label(role), plist),
@@ -114,7 +104,6 @@ const install = (platform: string, root: boolean, role: "serve" | "listen", text
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
   return [
-    retireLegacyUnit(platform, root, role),
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     write(`${dir}/${unitName(role)}.service`),
     ...(root
@@ -210,7 +199,6 @@ export const RelayArea = defineArea({
         running,
         published,
         port,
-        legacy: yield* legacyUnitInstalled(platform, root, ctx.home, role),
       };
     }),
   diagnose: ({ node, observed }) => {
@@ -225,7 +213,7 @@ export const RelayArea = defineArea({
         area: "relay",
         title:
           observed.installed === null
-            ? notInstalledTitle(what, observed.legacy)
+            ? `the ${what} is not installed`
             : observed.installed !== observed.want
               ? `the ${what} is out of date`
               : `the ${what} is not running`,

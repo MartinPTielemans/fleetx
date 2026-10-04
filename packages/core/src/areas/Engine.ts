@@ -6,10 +6,7 @@
  * older controller says so instead of putting its build back.
  *
  *   ~/.local/share/t3-fleet/t3-fleet.mjs   the bundle
- *   ~/.local/bin/t3-fleet                  link to it (and ~/.local/bin/fleetx until 1.0)
- *
- * A machine set up before the rename still has ~/.config/fleetx and the
- * rest (see Names.ts); the migration finding moves them over.
+ *   ~/.local/bin/t3-fleet                  link to it
  *
  * And, when `[engine] timer = true`, the timer that runs `t3-fleet sync` every
  * `[engine] interval` seconds (launchd on macOS, systemd elsewhere; system
@@ -27,31 +24,8 @@ import { BuildId, buildOf, compareBuilds, describeBuild } from "../Build.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { sha256 } from "../Hash.ts";
-import {
-  configDir,
-  CONFIG_DIR,
-  LEGACY_BUNDLE_FILE,
-  LEGACY_CONFIG_DIR,
-  LEGACY_SHARE_DIR,
-  LEGACY_STATE_DIR,
-  repoRenamed,
-  BUNDLE_FILE,
-  CLI,
-  launchdLabel,
-  legacyLaunchdLabel,
-  SH_CONFIG_DIR,
-  SHARE_DIR,
-  STATE_DIR,
-  systemdUnit,
-} from "../Names.ts";
-import {
-  installedBundle,
-  launchdReload,
-  legacyUnitInstalled,
-  notInstalledTitle,
-  retireLegacyUnit,
-  stableNode,
-} from "../Runtime.ts";
+import { configDir, launchdLabel, SH_CONFIG_DIR, STATE_DIR, systemdUnit } from "../Names.ts";
+import { installedBundle, launchdReload, stableNode } from "../Runtime.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({
@@ -84,8 +58,6 @@ const Observed = Schema.Struct({
     installed: Schema.NullOr(Schema.String),
     want: Schema.NullOr(Schema.String),
     loaded: Schema.Boolean,
-    /** Still installed under its fleetx name. Until 1.0. */
-    legacy: Schema.optionalKey(Schema.Boolean),
     /**
      * This probe runs inside the timer's own launchd job (a sync it started),
      * where its fixes run too. Only launchd's main process sees its label in
@@ -95,10 +67,6 @@ const Observed = Schema.Struct({
     /** A reload deferred by an earlier sync (see outsideSyncJob) has not run. */
     reloadPending: Schema.optionalKey(Schema.Boolean),
   }),
-  /** fleetx's directories still to move: config, state, share (Names.ts). Absent from older probes. */
-  legacy: Schema.optionalKey(Schema.Array(Schema.Literals(["config", "state", "share"]))),
-  /** Whether this node's checkout of the config repo has T3 Fleet's names (Names.ts). Absent from older probes. */
-  repoRenamed: Schema.optionalKey(Schema.Boolean),
 });
 
 const LAUNCHD_LABEL = launchdLabel("sync");
@@ -238,7 +206,7 @@ const installTimer = (
         inJob,
         nodePath,
         // The plist sets no ExitTimeOut, so launchd's default applies.
-        `${retireLegacyUnit(platform, root, "sync")}\n${launchdReload(LAUNCHD_LABEL, plist)}`,
+        launchdReload(LAUNCHD_LABEL, plist),
       ),
     ].join("\n");
   }
@@ -246,7 +214,6 @@ const installTimer = (
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
   return [
-    retireLegacyUnit(platform, root, "sync"),
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     heredoc(`${dir}/${UNIT}.service`, service ?? ""),
     heredoc(`${dir}/${UNIT}.timer`, timer ?? ""),
@@ -259,64 +226,14 @@ const installTimer = (
   ].join("\n");
 };
 
-/**
- * Remove the timer, and fleetx's with it; with `ours` false, only fleetx's.
- * On macOS every launchctl step is in one batch, so a fix inside the job
- * starts a single helper.
- */
-const removeTimer = (
-  platform: string,
-  root: boolean,
-  ours: boolean,
-  inJob: boolean,
-  nodePath: string,
-) => {
-  const legacy = retireLegacyUnit(platform, root, "sync");
+/** Remove the timer. On macOS the launchctl steps run as one, so a fix inside the job starts a single helper. */
+const removeTimer = (platform: string, root: boolean, inJob: boolean, nodePath: string) => {
   if (platform === "darwin") {
-    if (!ours) return launchctlSteps(inJob, nodePath, legacy);
-    return `rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"\n${launchctlSteps(inJob, nodePath, `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null\n${legacy}`)}`;
+    return `rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"\n${launchctlSteps(inJob, nodePath, `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null`)}`;
   }
-  if (!ours) return legacy;
-  const remove = root
+  return root
     ? `systemctl disable --now ${UNIT}.timer; rm -f /etc/systemd/system/${UNIT}.service /etc/systemd/system/${UNIT}.timer; systemctl daemon-reload`
     : `systemctl --user disable --now ${UNIT}.timer; rm -f "$HOME/.config/systemd/user/${UNIT}.service" "$HOME/.config/systemd/user/${UNIT}.timer"; systemctl --user daemon-reload`;
-  return `${remove}\n${legacy}`;
-};
-
-/**
- * Move fleetx's directories to T3 Fleet's, leaving links at the old names so
- * anything still using them (an old unit, a launcher, a user's script) keeps
- * working. A directory both names already have is merged, the new copy's
- * files winning, and the old one kept beside it. The bundle directory moves
- * once this build is installed, and its fleetx.mjs then names the new bundle.
- */
-export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">) => {
-  const move = (was: string, now: string) =>
-    [
-      `if [ -d "$HOME/${was}" ] && [ ! -L "$HOME/${was}" ]; then`,
-      // cp -n exits non-zero on macOS whenever it skips a file, so the merge is checked instead:
-      // every file of the old directory must be in the new one before the old one moves aside.
-      `  if [ -e "$HOME/${now}" ]; then`,
-      `    cp -Rpn "$HOME/${was}/." "$HOME/${now}/" 2>/dev/null`,
-      `    missing=$(cd "$HOME/${was}" && find . \\( -type f -o -type l \\) | while IFS= read -r f; do [ -e "$HOME/${now}/$f" ] || [ -L "$HOME/${now}/$f" ] || echo "$f"; done)`,
-      `    if [ -n "$missing" ] || [ ! -d "$HOME/${now}" ]; then echo "could not merge ~/${was} into ~/${now}; nothing was moved. Missing: $missing" >&2; exit 1; fi`,
-      `    mv "$HOME/${was}" "$HOME/${was}.migrated.$(date +%Y%m%d%H%M%S)"`,
-      `  else mkdir -p "$(dirname "$HOME/${now}")" && mv "$HOME/${was}" "$HOME/${now}"; fi`,
-      `  [ -e "$HOME/${was}" ] || { ln -s "$HOME/${now}" "$HOME/${was}" && echo "moved ~/${was} to ~/${now}"; }`,
-      "fi",
-    ].join("\n");
-  const steps: Array<string> = [];
-  if (legacy.includes("config")) steps.push(move(LEGACY_CONFIG_DIR, CONFIG_DIR));
-  if (legacy.includes("state")) steps.push(move(LEGACY_STATE_DIR, STATE_DIR));
-  if (legacy.includes("share")) {
-    steps.push(
-      `if [ -f "$HOME/${SHARE_DIR}/${BUNDLE_FILE}" ]; then`,
-      move(LEGACY_SHARE_DIR, SHARE_DIR),
-      `  ln -sfn ${BUNDLE_FILE} "$HOME/${SHARE_DIR}/${LEGACY_BUNDLE_FILE}"`,
-      "fi",
-    );
-  }
-  return steps.join("\n");
 };
 
 const SERVICE_NAMES: Readonly<Record<"serve" | "listen", string>> = {
@@ -472,16 +389,6 @@ export const EngineArea = defineArea({
               ],
               timeout: Duration.seconds(5),
             });
-      const realDir = (rel: string) =>
-        fs.readLink(`${ctx.home}/${rel}`).pipe(
-          Effect.map(() => false),
-          Effect.catch(() =>
-            fs.stat(`${ctx.home}/${rel}`).pipe(
-              Effect.map((s) => s.type === "Directory"),
-              Effect.orElseSucceed(() => false),
-            ),
-          ),
-        );
       const services: Array<"serve" | "listen"> = [];
       for (const role of ["serve", "listen"] as const) {
         const unit =
@@ -510,13 +417,7 @@ export const EngineArea = defineArea({
             timeout: Duration.seconds(5),
           })).stdout.trim() !== ""
         );
-      const legacy: Array<"config" | "state" | "share"> = [];
-      if (yield* realDir(LEGACY_CONFIG_DIR)) legacy.push("config");
-      if (yield* realDir(LEGACY_STATE_DIR)) legacy.push("state");
-      if (yield* realDir(LEGACY_SHARE_DIR)) legacy.push("share");
       return {
-        legacy,
-        repoRenamed: repoRenamed(ctx.checkout),
         wanted: ctx.engine,
         installed,
         wantedBuild: ctx.engine === null ? null : ctx.engineBuild,
@@ -531,16 +432,12 @@ export const EngineArea = defineArea({
           want,
           loaded:
             check.code === 0 && (platform === "darwin" || systemdTimerScheduled(check.stdout)),
-          legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
           reloadPending,
-          inJob:
-            platform === "darwin" &&
-            (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL ||
-              ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
+          inJob: platform === "darwin" && ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL,
         },
       };
     }),
-  diagnose: ({ node, observed, fleet, authority, nodes }) => {
+  diagnose: ({ node, observed }) => {
     const out: Array<Finding> = [];
     if (observed.local !== null && !observed.local.matches) {
       out.push({
@@ -567,7 +464,7 @@ export const EngineArea = defineArea({
         area: "engine",
         title:
           t.installed === null
-            ? notInstalledTitle("sync timer", t.legacy)
+            ? "the sync timer is not installed"
             : t.installed !== t.want
               ? "the sync timer is out of date"
               : !t.loaded
@@ -579,26 +476,6 @@ export const EngineArea = defineArea({
             observed.platform,
             observed.root,
             t.want,
-            t.inJob === true,
-            observed.nodePath,
-          ),
-          safe: true,
-        },
-      });
-    }
-    if (t.want === null && t.installed === null && t.legacy === true && !stuck) {
-      out.push({
-        node,
-        key: "engine-timer-unwanted",
-        severity: "warn",
-        area: "engine",
-        title:
-          "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
-        fix: {
-          command: removeTimer(
-            observed.platform,
-            observed.root,
-            false,
             t.inJob === true,
             observed.nodePath,
           ),
@@ -620,7 +497,6 @@ export const EngineArea = defineArea({
           command: removeTimer(
             observed.platform,
             observed.root,
-            true,
             t.inJob === true,
             observed.nodePath,
           ),
@@ -630,45 +506,6 @@ export const EngineArea = defineArea({
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {
       out.push(engineFinding(node, observed));
-    }
-    // After the install, so the bundle directory can move in the same run.
-    const legacy = observed.legacy ?? [];
-    if (legacy.length > 0) {
-      out.push({
-        node,
-        key: "engine-legacy-dirs",
-        severity: "warn",
-        area: "engine",
-        title: `fleetx's ${legacy.map((d) => `~/.${d === "config" ? "config" : `local/${d}`}/fleetx`).join(", ")} still to move to T3 Fleet's`,
-        detail: "the old names stay as links to the new ones, so nothing using them breaks",
-        fix: { command: migrateDirs(legacy), safe: true },
-      });
-    }
-    // The config repo's names move once, on the authority, when every machine reads both. Until 1.0.
-    if (node === authority && observed.repoRenamed === false) {
-      // Every configured machine, so one that cannot be reached right now is not taken as ready.
-      const ready =
-        nodes !== undefined &&
-        nodes.every((name) =>
-          fleet.some(
-            (e) =>
-              e.node === name &&
-              e.observed.wanted !== null &&
-              e.observed.installed === e.observed.wanted &&
-              e.observed.repoRenamed !== undefined,
-          ),
-        );
-      out.push({
-        node,
-        key: "engine-repo-names",
-        severity: ready ? "warn" : "info",
-        area: "engine",
-        title: "the config repo still uses fleetx's names",
-        detail: ready
-          ? "fleetx.toml, the fleetx/ branches and FLEETX_ secrets; every machine reads T3 Fleet's names now"
-          : "fleetx.toml, the fleetx/ branches and FLEETX_ secrets move once every machine runs this build",
-        ...(ready ? { fix: { command: `${CLI} repo rename`, safe: false } } : {}),
-      });
     }
     return out;
   },

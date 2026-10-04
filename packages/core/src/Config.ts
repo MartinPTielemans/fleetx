@@ -14,8 +14,7 @@
  *   profiles/<name>.toml settings shared by the nodes that list the profile
  *   nodes/<name>.toml    one machine: ssh, roles, profiles, its own settings
  *
- * T3_FLEET_CONFIG_REPO and T3_FLEET_NODE override the local file (FLEETX_CONFIG_REPO
- * and FLEETX_NODE too, until 1.0).
+ * T3_FLEET_CONFIG_REPO and T3_FLEET_NODE override the local file.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -26,7 +25,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { BuildId } from "./Build.ts";
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
-import { configDir, FLEET_FILE, LEGACY_FLEET_FILE, repoRenamed } from "./Names.ts";
+import { configDir, FLEET_FILE } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -154,8 +153,7 @@ export const loadConfigFrom = (repo: string, self: string) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
-    // t3-fleet.toml in a repo not renamed yet (Names.ts). Until 1.0.
-    const fleetPath = path.join(repo, repoRenamed(repo) ? FLEET_FILE : LEGACY_FLEET_FILE);
+    const fleetPath = path.join(repo, FLEET_FILE);
     const fleetRaw = Option.getOrElse(yield* readTomlTable(fleetPath), (): Table => ({}));
     const settings = yield* decodeAs(FleetFile, fleetRaw, fleetPath);
 
@@ -238,11 +236,9 @@ export const loadConfig = Effect.gen(function* () {
     : Option.none();
   const repoSetting =
     process.env["T3_FLEET_CONFIG_REPO"] ??
-    process.env["FLEETX_CONFIG_REPO"] ??
     Option.getOrUndefined(Option.map(decoded, (l) => l.repo));
   const self =
     process.env["T3_FLEET_NODE"] ??
-    process.env["FLEETX_NODE"] ??
     Option.getOrUndefined(Option.flatMap(decoded, (l) => Option.fromNullishOr(l.node)));
   if (repoSetting === undefined || self === undefined) return yield* NOT_SET_UP;
   return yield* loadConfigFrom(expandHome(repoSetting, home), self);

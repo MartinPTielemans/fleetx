@@ -597,6 +597,33 @@ describe("model proxy against a fake upstream", () => {
     expect(Date.now() - started).toBeLessThan(RELAY_CONNECT_TIMEOUT_MS + 3000);
   }, 15_000);
 
+  it("the relay sends neither its token nor the base upstream, whatever a node names them", async () => {
+    const up = await upstream((_req, res) => res.writeHead(200).end("ok"));
+    const relay = await serve(
+      HttpRouter.serve(
+        egressLayer("relay-secret", { allowInsecure: true, bases: () => [up.url] }),
+        quiet,
+      ),
+    );
+    // As a node on 0.7 does: both again under the names T3 Fleet had before.
+    const response = await fetch(`${relay}/egress/anthropic/v1/messages`, {
+      method: "POST",
+      headers: {
+        "x-t3-fleet-relay-token": "relay-secret",
+        "x-t3-fleet-egress-base": up.url,
+        "x-older-relay-token": "relay-secret",
+        "x-older-egress-base": up.url,
+        authorization: "Bearer client",
+      },
+      body: "{}",
+    });
+    expect(response.status).toBe(200);
+    const seen = up.seen[0]?.headers ?? {};
+    expect(seen["authorization"]).toBe("Bearer client");
+    expect(Object.values(seen)).not.toContain("relay-secret");
+    expect(Object.values(seen)).not.toContain(up.url);
+  });
+
   it("the relay forwards only to upstreams the fleet declares", async () => {
     const up = await upstream((_req, res) => res.writeHead(200).end("ok"));
     const relay = await serve(

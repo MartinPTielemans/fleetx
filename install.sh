@@ -4,14 +4,12 @@
 #   curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- join <config-repo-url> <name>    # install, then run a command
 #
-# T3_FLEET_VERSION=v0.5.0 pins a release (FLEETX_VERSION still works). The
-# download is checked against the release's SHA256SUMS and, with gh installed
-# and logged in, its build attestation; a mismatch or failed verification stops
-# the install. `fleetx` is installed too, as another name for
-# `t3-fleet`, until 1.0.
+# T3_FLEET_VERSION=v0.8.0 pins a release. The download is checked against the
+# release's SHA256SUMS and, with gh installed and logged in, its build
+# attestation; a mismatch or failed verification stops the install.
 set -eu
 repo="MartinPTielemans/fleetx"
-version="${T3_FLEET_VERSION:-${FLEETX_VERSION:-latest}}"
+version="${T3_FLEET_VERSION:-latest}"
 dir="$HOME/.local/share/t3-fleet"
 bin="$HOME/.local/bin"
 
@@ -24,9 +22,8 @@ else base="https://github.com/$repo/releases/download/$version"; fi
 
 mkdir -p "$dir" "$bin"
 tmp="$dir/t3-fleet.mjs.download"
-# Releases before the rename have the bundle only as fleetx.mjs.
 name=t3-fleet.mjs
-curl -fsSL "$base/$name" -o "$tmp" 2>/dev/null || { name=fleetx.mjs; curl -fsSL "$base/$name" -o "$tmp"; }
+curl -fsSL "$base/$name" -o "$tmp"
 fail() { rm -f "$tmp" "$tmp.sums"; echo "$1; not installing" >&2; exit 1; }
 
 # The release's SHA256SUMS lists every file it ships.
@@ -61,7 +58,6 @@ else
 fi
 chmod 755 "$tmp" && mv "$tmp" "$dir/t3-fleet.mjs"
 ln -sfn "$dir/t3-fleet.mjs" "$bin/t3-fleet"
-ln -sfn "$dir/t3-fleet.mjs" "$bin/fleetx"
 echo "installed T3 Fleet $(node "$dir/t3-fleet.mjs" --version 2>/dev/null) at $bin/t3-fleet"
 case ":$PATH:" in *":$bin:"*) ;; *) echo "add $bin to your PATH" ;; esac
 

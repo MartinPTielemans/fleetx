@@ -17,17 +17,15 @@ const finding = (key: string, command = `echo ${key}`): Finding & { readonly fix
 });
 
 describe("inRunOrder", () => {
-  it("installs this build, then moves fleetx's directories, before any unit starts a run", () => {
+  it("installs this build before any unit starts a run", () => {
     const fixes = [
       finding("engine-timer"),
       finding("relay-listen"),
-      finding("engine-legacy-dirs"),
       finding("engine-outdated", ENGINE_INSTALL),
       finding("models-service"),
     ];
     expect(inRunOrder(fixes).map((f) => f.key)).toEqual([
       "engine-outdated",
-      "engine-legacy-dirs",
       "engine-timer",
       "relay-listen",
       "models-service",

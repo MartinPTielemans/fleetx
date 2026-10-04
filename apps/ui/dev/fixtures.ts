@@ -285,7 +285,7 @@ const status: UiStatus = {
 const proposals: ReadonlyArray<UiProposal> = [
   {
     node: "server",
-    branch: "fleetx/staging/server",
+    branch: "t3-fleet/staging/server",
     commit: "5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e",
     change: "c".repeat(64),
     summary: "1 file changed, 4 insertions(+), 1 deletion(-)",

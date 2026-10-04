@@ -290,7 +290,7 @@ const tokenCreate = Command.make("create", {
       const { token } = yield* decodeCreated(text).pipe(
         Effect.mapError(() => "the relay sent an unexpected answer"),
       );
-      const env = clientTokenEnv(config.repo, client);
+      const env = clientTokenEnv(client);
       const self = config.nodes.find((n) => n.name === config.self);
       if (self?.roles.includes("authority")) {
         const secrets = setVar(yield* readSecrets(config.repo), env, token);
@@ -348,7 +348,7 @@ const tokenRevoke = Command.make("revoke", { client: clientArg }).pipe(
         Effect.flatMap(expectOk),
       );
       yield* Console.log(
-        `revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(config.repo, client)}` : ""}`,
+        `revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(client)}` : ""}`,
       );
     }).pipe(reportUserErrors),
   ),

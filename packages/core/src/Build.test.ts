@@ -18,7 +18,7 @@ describe("buildOf", () => {
   });
 
   it("finds nothing in a build from before identities, nor in its own pattern", () => {
-    expect(buildOf("console.log('fleetx 0.6.1')")).toBeNull();
+    expect(buildOf("console.log('t3-fleet 0.6.1')")).toBeNull();
     expect(
       buildOf(
         String.raw`new RegExp("t3-fleet-build:(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?):(\\d+):([0-9a-f]*)")`,

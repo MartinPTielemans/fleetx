@@ -36,9 +36,9 @@ them. The fix adds it in `~/.profile`.
 controller (or none). Each build carries its version, build time and commit;
 `t3-fleet --version` shows them. The fix streams the controller's build over
 ssh to `~/.local/share/t3-fleet/t3-fleet.mjs`, links it as
-`~/.local/bin/t3-fleet` (and `~/.local/bin/fleetx`, until 1.0), and restarts
-the relay and the listener when the machine runs them, which interrupts them:
-the fix says so, and `fix --safe` leaves it out. (The model proxy picks up the
+`~/.local/bin/t3-fleet`, and restarts the relay and the listener when the
+machine runs them, which interrupts them: the fix says so, and `fix --safe`
+leaves it out. (The model proxy picks up the
 new build itself, once its streams finish.) When neither build is known to be
 newer, the fix asks first. A `t3-fleet ui`
 or `t3-fleet mcp` that started before a newer build was installed on its own
@@ -68,30 +68,6 @@ launchd never reloaded the timer, and the fix tries again.
 
 **`engine-timer-unwanted`** — a sync timer is installed but this machine's
 settings do not ask for one. The fix removes it.
-
-**`engine-legacy-dirs`** — this machine was set up when T3 Fleet was called
-fleetx, and `~/.config/fleetx`, `~/.local/state/fleetx` or
-`~/.local/share/fleetx` are still real directories. Until they move, T3 Fleet
-keeps using them. The fix moves each to its `t3-fleet` name and leaves a link
-at the old one, so anything still using it keeps working; if both names
-already exist, the old directory's files are copied over without replacing
-any, and it is kept beside the new one as `<dir>.migrated.<time>`. The share
-directory moves once the new build is installed (`engine-outdated` first).
-
-**`engine-repo-names`** — on the authority: the config repo still uses
-fleetx's names (`fleetx.toml`, `fleetx/state|staging|rejected/<node>`
-branches, `FLEETX_*` secrets). It is a note until every configured machine
-runs the controller's build, then a warning with the fix `t3-fleet repo
-rename`: it moves `fleetx.toml` to `t3-fleet.toml`, renames `FLEETX_RELAY_TOKEN`
-and `FLEETX_MCP_TOKEN_*` in the settings, adds every `FLEETX_*` secret under
-its `T3_FLEET_*` name (keeping the old one until 1.0), commits, pushes, and
-moves the branches. Each step is skipped when done, so it can run again.
-Machines that have not pulled yet keep working: until 1.0 every build reads
-both names.
-
-Installing the sync timer, the relay's services and the model proxy also
-stops and removes the units they had under their fleetx names
-(`dev.fleetx.*`, `fleetx-*`).
 
 ## Provider logins
 
@@ -145,11 +121,6 @@ per-request lines): `~/.local/state/t3-fleet/models.log`.
 **`models-launcher-<instance>`** — that instance's launcher
 (`~/.local/bin/t3-fleet-claude`, `t3-fleet-codex`, `t3-fleet-<instance>`) is missing
 or differs from what its recipe says. The fix rewrites it.
-
-**`models-legacy-launcher-<instance>`** — a `~/.local/bin/fleetx-<instance>`
-launcher from before the rename is still there, and T3 no longer starts the
-instance through it (`models-not-routed-<instance>` re-points T3 to the new
-one). The fix deletes it.
 
 **`models-not-routed-<instance>`** — T3 starts that provider instance
 directly rather than through its launcher. The fix, `t3-fleet models route

@@ -11,15 +11,7 @@ import { shPath } from "./Area.ts";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
 import type { Node } from "./Config.ts";
-import {
-  BUNDLE_FILE,
-  CLI,
-  LEGACY_CLI,
-  launchdLabel,
-  PRODUCT,
-  SHARE_DIR,
-  systemdUnit,
-} from "./Names.ts";
+import { BUNDLE_FILE, CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
 
 export interface FixOutcome {
   readonly finding: Finding & { readonly fix: Fix };
@@ -37,18 +29,13 @@ const lastLine = (text: string) =>
     .pop() ?? "";
 
 /**
- * Every fix runs with T3_FLEET_CHECKOUT (and FLEETX_CHECKOUT, until 1.0) set
- * to that node's clone of the config repo, and ~/.local/bin on PATH, where
- * t3-fleet and the agent CLIs live. ENGINE_INSTALL is replaced by this build,
- * streamed inline as base64, and linked as t3-fleet and, until 1.0, fleetx.
+ * Every fix runs with T3_FLEET_CHECKOUT set to that node's clone of the
+ * config repo, and ~/.local/bin on PATH, where t3-fleet and the agent CLIs
+ * live. ENGINE_INSTALL is replaced by this build, streamed inline as base64,
+ * and linked as t3-fleet.
  */
 const script = (command: string, checkout: string, bundle: string) => {
   const share = `~/${SHARE_DIR}`;
-  // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
-  const link = (name: string) => [
-    `[ -e ~/.local/bin/${name} ] && [ ! -L ~/.local/bin/${name} ] && mv ~/.local/bin/${name} ~/.local/bin/${name}.t3-fleet-backup`,
-    `ln -sfn ${share}/${BUNDLE_FILE} ~/.local/bin/${name}`,
-  ];
   const body =
     command === ENGINE_INSTALL
       ? [
@@ -59,8 +46,9 @@ const script = (command: string, checkout: string, bundle: string) => {
             .replace(/(.{76})/g, "$1\n"),
           "T3_FLEET_BUNDLE",
           `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
-          ...link(CLI),
-          ...link(LEGACY_CLI),
+          // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
+          `[ -e ~/.local/bin/${CLI} ] && [ ! -L ~/.local/bin/${CLI} ] && mv ~/.local/bin/${CLI} ~/.local/bin/${CLI}.t3-fleet-backup`,
+          `ln -sfn ${share}/${BUNDLE_FILE} ~/.local/bin/${CLI}`,
           // Long-running services hold the old build until restarted. The model proxy is not
           // restarted: it notices the new build and exits once its responses are done.
           `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
@@ -69,9 +57,7 @@ const script = (command: string, checkout: string, bundle: string) => {
           `echo installed ${PRODUCT}`,
         ].join("\n")
       : command;
-  // On a machine not upgraded yet only fleetx exists; fixes that call t3-fleet run it instead. Until 1.0.
-  const alias = `command -v ${CLI} >/dev/null 2>&1 || ${CLI}() { ${LEGACY_CLI} "$@"; }`;
-  return `export T3_FLEET_CHECKOUT=${shPath(checkout)} FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${alias}\n${body}\n`;
+  return `export T3_FLEET_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
 };
 
 export const runFix = (
@@ -114,13 +100,11 @@ export const runFix = (
   });
 
 /**
- * Installing this build comes first on a node, then moving fleetx's
- * directories, then the rest in report order: a unit installed earlier starts
- * a run at once, and that run must find the new build. Until 1.0 the move
- * matters too, since an old build would put back what the rename retired.
+ * Installing this build comes first on a node, then the rest in report order:
+ * a unit installed earlier starts a run at once, and that run must find the
+ * new build.
  */
-const rank = (f: Finding & { readonly fix: Fix }) =>
-  f.fix.command === ENGINE_INSTALL ? 0 : f.key === "engine-legacy-dirs" ? 1 : 2;
+const rank = (f: Finding & { readonly fix: Fix }) => (f.fix.command === ENGINE_INSTALL ? 0 : 1);
 
 export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(
   fixes: ReadonlyArray<F>,

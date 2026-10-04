@@ -10,21 +10,17 @@
  *
  * `[fleet] auto_approve = ["skills/"]` approves proposals whose files are all
  * under those prefixes during the authority's own sync.
- *
- * Until 1.0 the fleetx/staging and fleetx/rejected branches are read too
- * (Names.ts): a repo not renamed yet uses them, and so does a machine that has
- * not pulled the rename.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import { changedFiles, git, literal, nulList, ok, out, pullBranch, why } from "./Git.ts";
-import { branchPrefix, branchPrefixes, stateDir } from "./Names.ts";
+import { branchPrefix, stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
 export interface Proposal {
   readonly node: string;
-  /** The branch it waits on: t3-fleet/staging/<node>, or fleetx/staging/<node>. */
+  /** The branch it waits on: t3-fleet/staging/<node>. */
   readonly branch: string;
   readonly commit: string;
   /** What the proposal's own commit changes. */
@@ -41,27 +37,27 @@ const ownChange = (repo: string, commit: string) =>
 /** Every pending proposal, fetched from the remote. */
 export const listProposals = (repo: string, branch: string) =>
   Effect.gen(function* () {
-    const prefixes = branchPrefixes("staging");
+    const prefix = branchPrefix("staging");
     yield* git(repo, [
       "fetch",
       "-q",
       "--prune",
       "origin",
-      ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`),
+      `+refs/heads/${prefix}*:refs/remotes/origin/${prefix}*`,
       branch,
     ]);
     const refs = out(
       yield* git(repo, [
         "for-each-ref",
         "--format=%(refname:strip=3)",
-        ...prefixes.map((p) => `refs/remotes/origin/${p}`),
+        `refs/remotes/origin/${prefix}`,
       ]),
     )
       .split("\n")
       .filter(Boolean);
     const proposals: Array<Proposal> = [];
     for (const ref of refs) {
-      const node = ref.slice((prefixes.find((p) => ref.startsWith(p)) ?? "").length);
+      const node = ref.slice(prefix.length);
       const commit = out(yield* git(repo, ["rev-parse", `origin/${ref}`]));
       const files = yield* ownChange(repo, commit);
       if (files.length === 0) continue;
@@ -253,7 +249,7 @@ export const reject = (repo: string, proposal: Proposal, expected?: string) =>
         "--atomic",
         `--force-with-lease=refs/heads/${proposal.branch}:${tip}`,
         "origin",
-        `+${tip}:refs/heads/${branchPrefix(repo, "rejected")}${proposal.node}`,
+        `+${tip}:refs/heads/${branchPrefix("rejected")}${proposal.node}`,
         `:refs/heads/${proposal.branch}`,
       ]);
       if (!ok(push)) return yield* Effect.fail(`reject failed: ${why(push)}`);
@@ -273,13 +269,8 @@ export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<strin
 export const settleRejection = (repo: string, node: string, branch: string) =>
   underSyncLock(
     Effect.gen(function* () {
-      let ref = "";
-      let commit = "";
-      for (const prefix of branchPrefixes("rejected")) {
-        ref = `refs/heads/${prefix}${node}`;
-        commit = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
-        if (commit !== "") break;
-      }
+      const ref = `refs/heads/${branchPrefix("rejected")}${node}`;
+      const commit = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
       if (commit === "") return [] as Array<string>;
       yield* git(repo, ["fetch", "-q", "origin", ref, branch]);
       const edited = yield* changedFiles(repo, yield* ownChange(repo, commit));
