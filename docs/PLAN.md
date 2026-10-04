@@ -46,13 +46,13 @@ Ticked items are done and in `main`.
 - [x] `review`, `approve`, `reject`; `[fleet] auto_approve`
 - [x] `status --all` from published state, without ssh
 - [x] Alerts on health transitions, delivered to a T3 thread (`fleet_alerts`, scheduled)
-- [x] `init`, `invite`, `join`
+- [x] `setup`, `invite`, `leave` (`setup` replaced `init` and `join` in 0.9.0)
 
 ## Phase 3: remaining areas
 
 - [x] skills: vendored store, client links, strays adopted; `skills add/update/remove` with provenance
 - [x] instructions: CLAUDE.md, AGENTS.md, client config linked from the repo
-- [x] mcp: definitions, Claude and Codex registration, live `initialize` checks; `mcp add`
+- [x] mcp: definitions (env, headers and SSE, credentials as `$NAME` secrets), Claude and Codex registration, live `initialize` checks; `mcp add`
 - [x] secrets: age, one recipient per node, no binary needed; `secrets add-node` automatic through the authority's sync
 - [x] services: reported, never deployed; capture into the repo
 - [x] codex: Codex plugins per node
@@ -68,6 +68,8 @@ Ticked items are done and in `main`.
 
 - [x] Attested releases (`gh attestation verify`); install script, Homebrew, Nix
 - [x] Area plugin API (`[plugins] areas`, a kit instead of imports), with an example
+- [x] Onboarding for any machine: `setup` plans first, resumes, and moves existing skills and MCP servers in with their credentials as secrets; `leave` gives a machine back what it had
+- [x] No secret is ever committed: every commit and push T3 Fleet makes is scanned
 - [x] Integration tests with throwaway container nodes in CI
 - [x] Docs: quickstart, topologies, areas, troubleshooting kept complete by a test
 
