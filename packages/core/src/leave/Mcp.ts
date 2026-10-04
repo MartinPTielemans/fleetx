@@ -20,7 +20,16 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
-import { RELAY_TOKEN_ENV, resolveEndpoint, type Endpoint, type McpDesired } from "../areas/Mcp.ts";
+import {
+  claudeEntry,
+  codexStdio,
+  parseSecrets,
+  RELAY_TOKEN_ENV,
+  resolveEndpoint,
+  secretRef,
+  type Endpoint,
+  type McpDesired,
+} from "../areas/Mcp.ts";
 import { localSecretsPath } from "../Secrets.ts";
 import { CLI } from "../Names.ts";
 import {
@@ -186,17 +195,6 @@ export const editClaudeServers = (
 
 // ---- what is T3 Fleet's ---------------------------------------------------------
 
-const Definition = Schema.Struct({
-  kind: Schema.String,
-  url: Schema.optionalKey(Schema.String),
-  command: Schema.optionalKey(Schema.String),
-  args: Schema.optionalKey(Schema.Array(Schema.String)),
-  auth: Schema.optionalKey(
-    Schema.Struct({ type: Schema.String, token_env: Schema.optionalKey(Schema.String) }),
-  ),
-});
-const decodeDefinition = Schema.decodeUnknownOption(Schema.fromJsonString(Definition));
-
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 /** The entry's fields, without empty ones (an `env = {}` says nothing). */
@@ -223,53 +221,64 @@ export const isSelf = (entry: unknown) =>
   onlyKeys(entry, ["type", "command", "args"]);
 
 /**
- * Whether an entry is still exactly what T3 Fleet registers for an endpoint
- * (Mcp.ts's fixes): the same endpoint, the same credential (Claude stores the
- * token itself, Codex the variable's name), and nothing T3 Fleet does not
- * write. Anything else in it is the user's, and the entry is theirs. A token
- * T3 Fleet cannot read here (no secrets.env) cannot be checked: such an entry
- * is kept.
+ * Whether an entry is still exactly what T3 Fleet registers for an endpoint:
+ * the entry the mcp area's own fixes write here, rendered with its functions
+ * (claudeEntry, codexStdio, and Codex's flags and tables), and nothing more.
+ * Anything else in it (another credential, a header or variable of the
+ * user's, a setting) makes it the user's. A secret T3 Fleet cannot read here
+ * cannot be checked: such an entry is kept.
  */
 export const isFleets = (
   client: Client,
   entry: unknown,
   endpoint: Endpoint | null,
   home: string,
-  secrets: Readonly<Record<string, string>>,
+  value: (name: string) => string | undefined,
 ) => {
   if (!isObject(entry) || endpoint === null) return false;
   const norm = (s: unknown) =>
-    typeof s === "string" ? s.replace(/^(\$HOME|\$\{HOME\}|~)(?=\/)/, home) : s;
-  const e = fields(entry);
+    typeof s === "string" ? s.replace(/^(\$HOME|\$\{HOME\}|~)(?=\/|$)/, home) : s;
+  const paths = (e: Json) => ({
+    ...e,
+    ...(e["command"] === undefined ? {} : { command: norm(e["command"]) }),
+    ...(Array.isArray(e["args"]) ? { args: e["args"].map(norm) } : {}),
+  });
+  const have = fields(entry);
+  // Codex's own default, which says nothing.
+  if (have["enabled"] === true) delete have["enabled"];
+  if (client === "claude") {
+    const want = claudeEntry(endpoint, value);
+    if (want.missing.length > 0) return false;
+    return sameValue(paths(have), paths(fields({ ...want.entry })));
+  }
   if (endpoint.type === "http") {
-    if (e["url"] !== endpoint.url) return false;
-    if (client === "codex")
-      return (
-        onlyKeys(e, ["url", "bearer_token_env_var"]) &&
-        (e["bearer_token_env_var"] ?? null) === endpoint.tokenEnv
-      );
-    if (!onlyKeys(e, ["type", "url", "headers"]) || e["type"] !== "http") return false;
-    if (endpoint.tokenEnv === null) return e["headers"] === undefined;
-    const token = secrets[endpoint.tokenEnv];
-    return token !== undefined && sameValue(e["headers"], { Authorization: `Bearer ${token}` });
+    const literal: Json = {};
+    const passed: Json = {};
+    for (const [header, v] of Object.entries(endpoint.headers ?? {})) {
+      const ref = secretRef(v);
+      if (ref === null) literal[header] = v;
+      else passed[header] = ref;
+    }
+    return sameValue(
+      have,
+      fields({
+        url: endpoint.url,
+        bearer_token_env_var: endpoint.tokenEnv ?? undefined,
+        http_headers: literal,
+        env_http_headers: passed,
+      }),
+    );
   }
-  const args = Array.isArray(e["args"]) ? e["args"].map(norm) : [];
-  return (
-    onlyKeys(e, client === "claude" ? ["type", "command", "args"] : ["command", "args"]) &&
-    (client === "codex" || e["type"] === "stdio") &&
-    norm(e["command"]) === endpoint.command &&
-    sameValue(args, endpoint.args.map(norm))
+  const run = codexStdio(endpoint);
+  const vars = Array.isArray(have["env_vars"])
+    ? (have["env_vars"] as Array<unknown>).map((v) =>
+        isObject(v) && typeof v["name"] === "string" ? v["name"] : v,
+      )
+    : undefined;
+  return sameValue(
+    paths({ ...have, ...(vars === undefined ? {} : { env_vars: vars }) }),
+    paths(fields({ command: run.command, args: [...run.args], env: run.env, env_vars: run.vars })),
   );
-};
-
-/** KEY=value lines of the node's secrets.env. */
-const parseSecrets = (text: string) => {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-    if (m?.[1] !== undefined) out[m[1]] = (m[2] ?? "").replace(/^["']|["']$/g, "");
-  }
-  return out;
 };
 
 export interface McpChange {
@@ -334,9 +343,13 @@ export const planMcp = (
       const text = yield* fs
         .readFileString(path.join(repo, "mcp", `${name}.json`))
         .pipe(Effect.option);
-      const def = Option.isSome(text) ? decodeDefinition(text.value) : Option.none();
+      // The whole definition, as the mcp area reads it: env, headers and transport too.
+      const def = Option.isSome(text)
+        ? Option.filter(decodeJson(text.value), isObject)
+        : Option.none();
       const resolved = Option.isSome(def)
-        ? resolveEndpoint(name, def.value, mcp, home).endpoint
+        ? resolveEndpoint(name, def.value as Parameters<typeof resolveEndpoint>[1], mcp, home)
+            .endpoint
         : null;
       // Without its definition, a server on the hub is still known by the hub's URL for it.
       endpoints.set(
@@ -351,13 +364,19 @@ export const planMcp = (
               }),
       );
     }
-    const secrets = parseSecrets(
+    const secretValues = parseSecrets(
       yield* fs.readFileString(localSecretsPath(home)).pipe(Effect.orElseSucceed(() => "")),
     );
     const owned = (client: Client, name: string, entry: unknown) =>
       isSelf(entry) ||
       (declared.includes(name) &&
-        isFleets(client, entry, endpoints.get(name) ?? null, home, secrets));
+        isFleets(
+          client,
+          entry,
+          endpoints.get(name) ?? null,
+          home,
+          (n) => secretValues[n] ?? process.env[n],
+        ));
     const current = yield* readRegistrations(home);
     const changes: Array<McpChange> = [];
     const notes: Array<string> = [];

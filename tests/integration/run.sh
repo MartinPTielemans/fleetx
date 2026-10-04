@@ -50,6 +50,8 @@ for n in laptop server desktop; do
   docker compose cp seed.sh "$n:/tmp/seed.sh" >/dev/null 2>&1
 done
 for n in laptop server desktop; do on "$n" "bash /tmp/seed.sh $n"; done
+# What desktop has before setup, for leave to give back at the end.
+on desktop 'cp ~/.claude.json /tmp/claude.before-setup.json; cp ~/.codex/config.toml /tmp/codex.before-setup.toml 2>/dev/null || true'
 
 # Before setup: every command says what to do, and doctor is setup's pre-flight.
 expect laptop "t3-fleet setup" 't3-fleet status'
@@ -275,3 +277,101 @@ out=$(on laptop 'node /tmp/old.mjs fix --yes --area engine' 2>&1) || true
 printf '%s' "$out" | grep -q "older build\|install-self\|installed T3 Fleet" && fail "an older controller should offer no install: $out"
 [ "$(on server 'sha256sum ~/.local/share/t3-fleet/t3-fleet.mjs')" = "$before" ] || fail "server's build should be unchanged after an older controller's fix"
 pass "an older controller offers no downgrade"
+
+# ---- Leaving -----------------------------------------------------------------
+
+# setup never starts over a departure halfway done; leave finishes it, or --retire sets it aside.
+on server 'printf "%s\n" "{\"node\":\"server\",\"repo\":\"/home/dev/fleet\",\"branch\":\"main\",\"roles\":[\"member\"],\"settings\":{},\"finished\":false}" > ~/.local/state/t3-fleet/leave.json'
+expect server "partway through leaving the fleet (server)" 't3-fleet setup'
+expect server "t3-fleet leave --retire" 't3-fleet setup'
+expect server "Set the departure's record aside" 't3-fleet leave --retire'
+expect server "Nothing here differs" 't3-fleet setup'
+pass "setup refuses to start while a departure is unfinished, until leave finishes it or --retire sets it aside"
+
+# The only authority cannot leave.
+expect laptop "only authority" 't3-fleet leave --dry-run'
+pass "the fleet's only authority is refused"
+
+# desktop, set up from what it had, leaves. What setup moved aside, as it is now: each goes back.
+tree() { on desktop "p=$1; if [ -d \"\$p\" ]; then (cd \"\$p\" && find . -type f -exec sha256sum {} + | sort); else sha256sum < \"\$p\"; fi"; }
+moved=$(on desktop "node -e 'for (const m of JSON.parse(require(\"fs\").readFileSync(process.env.HOME+\"/.local/state/t3-fleet/setup/before.json\",\"utf8\")).moved ?? []) console.log(m.path+\"\t\"+m.backup)'")
+[ -n "$moved" ] || fail "desktop's setup snapshot should list what setup moved aside"
+# What each held, by its line in $moved (the shell running this may be bash 3, without maps).
+wants=$(mktemp -d)
+i=0
+# Read on fd 3: docker exec in the loop would read the loop's stdin.
+while IFS=$'\t' read -r -u 3 path backup; do i=$((i + 1)); tree "$backup" > "$wants/$i"; done 3<<< "$moved"
+want() { local n; n=$(printf '%s\n' "$moved" | cut -f1 | grep -nxF -- "$1" | cut -d: -f1); cat "$wants/$n"; }
+# One of them the user has made their own since: its backup is not restored, and --purge keeps it.
+own=$(printf '%s\n' "$moved" | cut -f1 | grep -v CLAUDE.md | grep -v '/review$' | head -n 1)
+[ -n "$own" ] || fail "desktop's snapshot should move more than review and CLAUDE.md aside: $moved"
+own_backup=$(printf '%s\n' "$moved" | awk -F'\t' -v p="$own" '$1 == p { print $2 }')
+on desktop "rm -rf '$own' && mkdir -p '$own' && printf 'mine now\n' > '$own/SKILL.md'"
+
+# Claude Code, as far as the mcp area looks for it (these machines have none): the area then registers
+# the fleet's servers in Claude, as it does on a real machine, and leave has those to undo.
+on desktop 'printf "#!/bin/sh\necho 2.1.300 \\(Claude Code\\)\n" > ~/.local/bin/claude && chmod +x ~/.local/bin/claude'
+on desktop 't3-fleet fix --yes --area mcp --node desktop' >/dev/null || true
+expect desktop '"posthog"' 'cat ~/.claude.json'
+# Setup and the area changed Claude's servers (the fleet's registrations): giving them back is something to check.
+[ "$(on desktop 'node -e "console.log(JSON.stringify(JSON.parse(require(\"fs\").readFileSync(process.env.HOME+\"/.claude.json\",\"utf8\")).mcpServers))"')" \
+  != "$(on desktop 'node -e "console.log(JSON.stringify(JSON.parse(require(\"fs\").readFileSync(\"/tmp/claude.before-setup.json\",\"utf8\")).mcpServers))"')" ] \
+  || fail "setup should have changed desktop's Claude servers"
+for step in "Propose removing desktop from the fleet" "Turn .* into real copies" "Put back what setup moved aside" "Put back the MCP servers Claude and Codex had before setup" "is your own now"; do
+  expect desktop "$step" 't3-fleet leave --dry-run'
+done
+expect desktop "proposed" 't3-fleet leave --yes'
+# Skills and instructions: real files again, as they were before setup.
+while IFS=$'\t' read -r -u 3 path _; do
+  [ "$path" = "$own" ] && continue
+  on desktop "[ ! -L '$path' ] && [ -e '$path' ]" || fail "$path should be a real file or directory again"
+  [ "$(tree "$path")" = "$(want "$path")" ] || fail "$path should hold what it had before setup"
+done 3<<< "$moved"
+expect desktop "Desktop rules" 'cat ~/.claude/CLAUDE.md'
+expect desktop "the desktop's newer review" 'cat ~/.claude/skills/review/SKILL.md'
+expect desktop "mine now" "cat '$own/SKILL.md'"
+# Nothing of T3 Fleet's links into the checkout any more.
+[ -z "$(on desktop 'find ~/.agents/skills ~/.claude/skills ~/.claude -maxdepth 1 -type l -lname "/home/dev/fleet/*"')" ] \
+  || fail "no link into the checkout should be left: $(on desktop 'find ~/.agents ~/.claude -maxdepth 2 -type l -lname "/home/dev/fleet/*"')"
+# MCP: Claude's servers exactly as before setup, T3 Fleet's own gone; Codex's as before (none).
+on desktop "node -e '
+  const fs = require(\"fs\"), read = (f) => JSON.parse(fs.readFileSync(f, \"utf8\")).mcpServers ?? {};
+  const sorted = (v) => JSON.stringify(v, (k, x) => x && typeof x === \"object\" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x);
+  const was = read(\"/tmp/claude.before-setup.json\"), now = read(process.env.HOME + \"/.claude.json\");
+  if (sorted(was) !== sorted(now)) { console.error(sorted(now)); process.exit(1); }'" \
+  || fail "Claude's MCP servers should be exactly as before setup: $(on desktop 'cat ~/.claude.json')"
+if on desktop '[ -f /tmp/codex.before-setup.toml ]'; then
+  [ "$(on desktop 'grep "^\[mcp_servers" ~/.codex/config.toml | sort')" = "$(on desktop 'grep "^\[mcp_servers" /tmp/codex.before-setup.toml | sort')" ] \
+    || fail "Codex's MCP servers should be as before setup"
+else
+  [ -z "$(on desktop 'grep "^\[mcp_servers" ~/.codex/config.toml 2>/dev/null')" ] || fail "Codex should have no MCP server of T3 Fleet's: $(on desktop 'cat ~/.codex/config.toml')"
+fi
+# Services and launchers gone.
+[ -z "$(on desktop 'ls ~/.config/systemd/user/t3-fleet-* ~/.local/bin/t3-fleet-* 2>/dev/null')" ] || fail "T3 Fleet's services and launchers should be gone"
+pass "desktop leaves: its skills, instructions and MCP servers are back as before setup, T3 Fleet's links, servers and services gone"
+
+# An authority approves the departure; the others sync without desktop.
+expect laptop "desktop" 't3-fleet review'
+on laptop 't3-fleet approve desktop' >/dev/null || fail "approving desktop's departure failed: $(on laptop 't3-fleet approve desktop' 2>&1)"
+[ -z "$(on laptop 'git -C /srv/remote/fleet.git ls-tree --name-only main nodes/desktop.toml')" ] || fail "nodes/desktop.toml should be gone from main"
+on laptop 'git -C /srv/remote/fleet.git show main:secrets/recipients.toml' | grep -q '^desktop' && fail "desktop's key should be gone from the recipients"
+for n in laptop server laptop; do on "$n" 't3-fleet sync' >/dev/null || fail "$n should sync without desktop: $(on "$n" 't3-fleet sync' 2>&1)"; done
+for n in laptop server; do
+  [ -z "$(on "$n" 'git -C ~/fleet status --porcelain')" ] || fail "$n's checkout should be clean after desktop left"
+  [ "$(on "$n" 'grep -c = ~/.config/t3-fleet/secrets.env')" -gt 0 ] || fail "$n should still read the secrets"
+done
+expect laptop "2 environments" 't3-fleet status'
+pass "an authority approves the departure, and laptop and server sync without desktop"
+
+# --purge later: T3 Fleet's state goes, the backup the user's own file kept stays.
+expect desktop "Remove T3 Fleet's local state" 't3-fleet leave --purge --yes'
+[ -z "$(on desktop 'ls -d ~/.config/t3-fleet ~/.local/share/t3-fleet 2>/dev/null')" ] || fail "--purge should remove T3 Fleet's config and bundle"
+kept=$(on desktop "ls -d ~/.local/state/t3-fleet/setup-backups/* 2>/dev/null")
+[ -n "$kept" ] || fail "--purge should keep setup's unrestored backup"
+found=
+while read -r -u 3 k; do [ -n "$k" ] && [ "$(tree "$k")" = "$(want "$own")" ] && found=$k; done 3<<< "$kept"
+[ -n "$found" ] || fail "--purge should keep the backup of $own, as it was: kept $kept"
+expect desktop "mine now" "cat '$own/SKILL.md'"
+on desktop '[ -d ~/fleet ]' || fail "the checkout is never deleted"
+pass "leave --purge removes T3 Fleet's state and keeps the backup of what the user made their own"
+

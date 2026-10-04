@@ -26,6 +26,7 @@
  *
  * The config repo checkout is never deleted.
  */
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -231,6 +232,26 @@ const localEnrollment = (home: string) =>
       : null;
   });
 
+/** A departure recorded here and not finished: what `setup` will not start over. */
+export const unfinishedDeparture = (home: string) =>
+  readDeparture(home).pipe(Effect.map(Option.filter((d) => !d.finished)));
+
+/**
+ * Sets the record of a departure aside (leave-retired-<time>.json beside
+ * it), for a departure that is over or given up: nothing else changes, and
+ * the next leave or setup starts from this machine as it is. Returns where
+ * it went, or null when there was none.
+ */
+export const retireDeparture = (home: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const file = departurePath(home);
+    if (!(yield* present(file))) return null;
+    const to = `${stateDir(home)}/leave-retired-${yield* Clock.currentTimeMillis}.json`;
+    yield* fs.rename(file, to).pipe(Effect.mapError((e) => `setting ${file} aside: ${e.message}`));
+    return to;
+  });
+
 const readDeparture = (home: string) =>
   FileSystem.FileSystem.pipe(
     Effect.flatMap((fs) => fs.readFileString(departurePath(home))),
@@ -274,7 +295,7 @@ export const currentDeparture = (home: string) =>
       const other = yield* otherEnrollment(home, recorded.value);
       if (other !== null)
         return yield* Effect.fail(
-          `${tilde(departurePath(home), home)} records ${recorded.value.finished ? "" : "an unfinished "}departure of ${recorded.value.node} from another enrollment (${other}), so it is not resumed. If that departure is over, remove the file and run leave again.`,
+          `${tilde(departurePath(home), home)} records ${recorded.value.finished ? "" : "an unfinished "}departure of ${recorded.value.node} from another enrollment (${other}), so it is not resumed. If that departure is over, set it aside with \`t3-fleet leave --retire\` and run leave again.`,
         );
       if (!recorded.value.finished) return { departure: recorded.value, resumed: true };
     }

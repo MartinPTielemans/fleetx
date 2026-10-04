@@ -38,6 +38,8 @@ import {
   departureOf,
   departurePath,
   planLeave,
+  retireDeparture,
+  unfinishedDeparture,
   type Departure,
   type LeavePlan,
 } from "./Leave.ts";
@@ -1487,5 +1489,24 @@ describe("round three", () => {
     } finally {
       await t3.close();
     }
+  });
+});
+
+describe("an unfinished departure, and setup", () => {
+  it("is what setup refuses to start over, until leave finishes it or it is retired", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    expect((await run(unfinishedDeparture(f.home)))._tag).toBe("None");
+    put(
+      f.home,
+      ".local/state/t3-fleet/leave.json",
+      JSON.stringify({ ...departureOf(f.config), finished: false }),
+    );
+    expect(await run(unfinishedDeparture(f.home))).toMatchObject({ value: { node: "laptop" } });
+    const to = await run(retireDeparture(f.home));
+    expect(to).toMatch(/\/leave-retired-\d+\.json$/);
+    expect(JSON.parse(fs.readFileSync(to ?? "", "utf8"))).toMatchObject({ node: "laptop" });
+    expect((await run(unfinishedDeparture(f.home)))._tag).toBe("None");
+    expect((await run(currentDeparture(f.home))).resumed).toBe(false);
+    expect(await run(retireDeparture(f.home))).toBeNull();
   });
 });

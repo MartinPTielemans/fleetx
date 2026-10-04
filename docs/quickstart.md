@@ -208,7 +208,9 @@ no other authority would be left); a member proposes its departure, and an
 authority approves it with `t3-fleet approve`. `--purge` also removes this
 machine's key, the decrypted secrets and the installed `t3-fleet`, keeping
 backups of your own files. If leaving stops partway, run it again: it picks up
-where it stopped. The config repo checkout is never deleted.
+where it stopped; `setup` will not start until it has, or until
+`t3-fleet leave --retire` sets the departure aside. The config repo checkout is
+never deleted.
 
 While T3 runs, its providers are pointed back through T3 itself, without
 stopping it. T3 takes a provider instance whole and has no revision to check,

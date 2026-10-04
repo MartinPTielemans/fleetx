@@ -11,6 +11,7 @@ import {
   applyLeave,
   currentDeparture,
   planLeave,
+  retireDeparture,
   type LeaveOutcome,
   type LeavePlan,
 } from "@t3-fleet/core/Leave";
@@ -60,6 +61,12 @@ export const leaveCommand = Command.make("leave", {
     Flag.withDescription("Show the plan and stop."),
     Flag.withDefault(false),
   ),
+  retire: Flag.Boolean("retire").pipe(
+    Flag.withDescription(
+      "Set aside the record of a departure that is over or given up; changes nothing else.",
+    ),
+    Flag.withDefault(false),
+  ),
   purge: Flag.Boolean("purge").pipe(
     Flag.withDescription(
       "Also remove ~/.config/t3-fleet (key and secrets), ~/.local/state/t3-fleet and the installed bundle.",
@@ -70,9 +77,18 @@ export const leaveCommand = Command.make("leave", {
   Command.withDescription(
     "Take this machine out of the fleet and give back what it had, after showing the plan.",
   ),
-  Command.withHandler(({ yes, dryRun, purge }) =>
+  Command.withHandler(({ yes, dryRun, purge, retire }) =>
     Effect.gen(function* () {
       const home = process.env["HOME"] ?? "";
+      if (retire) {
+        const to = yield* retireDeparture(home);
+        yield* Console.log(
+          to === null
+            ? "No departure is recorded here."
+            : `Set the departure's record aside as ${to.replace(home, "~")}; nothing else changed.`,
+        );
+        return;
+      }
       const { departure, resumed } = yield* currentDeparture(home);
       if (resumed)
         yield* Console.log(

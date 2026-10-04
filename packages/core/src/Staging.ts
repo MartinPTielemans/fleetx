@@ -183,10 +183,14 @@ export const approve = (
           branch,
           proposal.node,
           process.env["HOME"] ?? "",
-          `Approve ${proposal.node}'s departure from the fleet (by ${by})`,
+          // The same trailer as any approval names the proposal approved (Approved.ts).
+          `Approve ${proposal.node}'s departure from the fleet (by ${by})\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
         );
         yield* dropStaging(repo, proposal, tip);
-        return removed.rev ?? out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+        return {
+          rev: removed.rev ?? out(yield* git(repo, ["rev-parse", "--short", "HEAD"])),
+          notes: [...removed.notes],
+        };
       }
       const files = yield* ownChange(repo, tip);
       // A newline in a path could write a line of the approval's message; no such path enters the fleet.
