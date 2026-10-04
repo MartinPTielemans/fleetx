@@ -75,10 +75,13 @@ export const retireLegacyUnit = (platform: string, root: boolean, role: string) 
     const label = legacyLaunchdLabel(role);
     return `launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/${label}.plist"`;
   }
+  // One unit at a time: some systemd versions refuse a whole `disable --now`
+  // when one of its units (a service without a timer) does not exist, and
+  // stop nothing. `stop` also reaches a unit whose file is already gone.
   const unit = legacySystemdUnit(role);
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
-  return `${ctl} disable --now ${unit}.service ${unit}.timer 2>/dev/null; rm -f ${dir}/${unit}.service ${dir}/${unit}.timer`;
+  return `for u in ${unit}.timer ${unit}.service; do ${ctl} stop "$u" 2>/dev/null; ${ctl} disable "$u" 2>/dev/null; done; rm -f ${dir}/${unit}.service ${dir}/${unit}.timer; ${ctl} daemon-reload 2>/dev/null`;
 };
 
 /**
