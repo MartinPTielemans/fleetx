@@ -1,6 +1,8 @@
 // A tiny stdio MCP server for the hub's tests. One JSON-RPC message per line.
 //   tools/call "echo"      answers { text } after `delayMs`, with progress first
-//                          when the request carries a progressToken
+//                          (and every `progressEveryMs`) when the request
+//                          carries a progressToken
+//   tools/call "block"     answers after holding the process busy for `ms`
 //   tools/call "notify"    makes the server send notifications/tools/list_changed
 //   tools/call "crash"     exits the process
 //   tools/call "ping_me"   pings the client, and answers with what came back
@@ -44,14 +46,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       pinging = m.id;
       return send({ jsonrpc: "2.0", id: "srv-ping", method: "ping" });
     }
+    if (name === "block") {
+      const until = Date.now() + (args.ms ?? 0);
+      while (Date.now() < until);
+      return send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: "blocked" }] } });
+    }
     if (name === "cancelled") return send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: JSON.stringify(cancelled) }] } });
     const token = m.params._meta?.progressToken;
-    if (token !== undefined) send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: 1 } });
+    let progress = 0;
+    const report = () => send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: ++progress } });
+    if (token !== undefined) report();
+    const reporting = token !== undefined && args.progressEveryMs !== undefined ? setInterval(report, args.progressEveryMs) : undefined;
     if (args.log) send({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: `working on ${args.text}` } });
-    setTimeout(
-      () => send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${args.text} (init ${initializeCount})` }] } }),
-      args.delayMs ?? 0,
-    );
+    setTimeout(() => {
+      clearInterval(reporting);
+      send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${args.text} (init ${initializeCount})` }] } });
+    }, args.delayMs ?? 0);
     return;
   }
   send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "unknown method" } });

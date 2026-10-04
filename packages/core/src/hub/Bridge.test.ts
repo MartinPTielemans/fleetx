@@ -17,7 +17,7 @@ const server = new URL("./testing/fake-stdio-server.mjs", import.meta.url).pathn
 const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | NodeServices.NodeServices>) =>
   Effect.runPromise(effect.pipe(Effect.scoped, Effect.provide(NodeServices.layer)));
 
-const bridgedWith = (options: { readonly sessionIdle?: Duration.Input } = {}) =>
+const bridgedWith = (options: { readonly sessionIdle?: Duration.Input; readonly requestTimeout?: Duration.Input } = {}) =>
   Effect.gen(function* () {
     const services = yield* Effect.context<NodeServices.NodeServices>();
     return yield* makeBridge({ name: "fake", spawn: spawnStdio({ command: process.execPath, args: [server], env: {} }).pipe(Effect.provide(services)), ...options });
@@ -145,34 +145,55 @@ describe("stdio bridge", () => {
     );
   }, 20_000);
 
-  it("makes room for a new session by evicting the least recently seen one", async () => {
+  it("makes room for a new session by evicting the least recently seen one with nothing in flight", async () => {
     await run(
       Effect.gen(function* () {
         const bridge = yield* bridged;
         const sessions: Array<string> = [];
-        for (let i = 0; i < 1000; i++) sessions.push((yield* initialize(bridge, i)).session);
-        // The first session is used again, so the second is now the least recently seen.
-        expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" }, sessions[0])).status).toBe(200);
+        // The first session is the least recently seen, but its call is still running: the second goes instead.
+        sessions.push((yield* initialize(bridge, 0)).session);
+        const running = yield* call(bridge, sessions[0] ?? "", 1, "still running", 3000).pipe(Effect.forkScoped);
+        yield* Effect.sleep(Duration.millis(50));
+        for (let i = 1; i < 1000; i++) sessions.push((yield* initialize(bridge, i)).session);
         const newest = yield* initialize(bridge, 1001);
         expect(newest.message).toMatchObject({ id: 1001, result: { serverInfo: { name: "fake" } } });
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 2, method: "ping" }, newest.session)).status).toBe(200);
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 3, method: "ping" }, sessions[1])).status).toBe(404);
+        expect((yield* Fiber.join(running)).at(-1)).toMatchObject({ id: 1, result: { content: [{ text: "still running (init 1)" }] } });
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 4, method: "ping" }, sessions[0])).status).toBe(200);
       }),
     );
   }, 30_000);
 
-  it("expires idle sessions without an open stream, and keeps those with one", async () => {
+  it("expires idle sessions without an open stream or a call in flight, and keeps the others", async () => {
     await run(
       Effect.gen(function* () {
         const bridge = yield* bridgedWith({ sessionIdle: Duration.millis(300) });
         const idle = yield* initialize(bridge, 1);
         const watched = yield* initialize(bridge, 2);
+        const busy = yield* initialize(bridge, 3);
+        yield* call(bridge, busy.session, 9, "slow", 1200).pipe(Effect.forkScoped);
         const stream = yield* bridge.forward({ method: "GET", headers: { accept: "text/event-stream", "mcp-session-id": watched.session }, body: "" });
         yield* stream.body.pipe(Stream.runDrain, Effect.forkScoped);
         yield* Effect.sleep(Duration.millis(600));
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 1, method: "ping" }, idle.session)).status).toBe(404);
         expect((yield* post(bridge, { jsonrpc: "2.0", id: 2, method: "ping" }, watched.session)).status).toBe(200);
+        expect((yield* post(bridge, { jsonrpc: "2.0", id: 3, method: "ping" }, busy.session)).status).toBe(200);
+      }),
+    );
+  }, 20_000);
+
+  it("keeps a long request alive while it reports progress", async () => {
+    await run(
+      Effect.gen(function* () {
+        const bridge = yield* bridgedWith({ requestTimeout: Duration.millis(400) });
+        const { session } = yield* initialize(bridge, 1);
+        const answer = yield* post(
+          bridge,
+          { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "echo", arguments: { text: "long", delayMs: 1500, progressEveryMs: 100 }, _meta: { progressToken: "p" } } },
+          session,
+        ).pipe(Effect.flatMap(messages));
+        expect(answer.at(-1)).toMatchObject({ id: 2, result: { content: [{ text: "long (init 1)" }] } });
       }),
     );
   }, 20_000);

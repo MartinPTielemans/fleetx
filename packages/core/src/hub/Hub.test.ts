@@ -362,18 +362,20 @@ describe("hub gateway", () => {
     );
   }, 30_000);
 
-  it("refuses a session it has no owner for, and forgets a session once it is deleted", async () => {
+  it("refuses a session it has no owner for, forgets a deleted one, and keeps owners across a restart", async () => {
     const plain = await fakeProtectedMcp(() => as.url, () => true);
     try {
       const dir = fixture({});
+      const ports = { plain: Number(new URL(plain.url).port) };
+      let token = "";
       await run(
         Effect.gen(function* () {
-          const { hub } = yield* startHub(dir, {}, { ports: { plain: Number(new URL(plain.url).port) } });
+          const { hub } = yield* startHub(dir, {}, { ports });
           yield* waitFor(hub, "plain", "running");
           expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "made-up" })).status).toBe(404);
           const session = (yield* rpc(hub, "plain", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } })).headers["mcp-session-id"] ?? "";
           expect(session).toBe("s-1");
-          const token = yield* hub.createToken("laptop", null);
+          token = yield* hub.createToken("laptop", null);
           expect((yield* rpc(hub, "plain", "tools/list", {}, { token, session })).status).toBe(404);
           expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(200);
           const deleted = yield* hub.gateway("plain", `Bearer ${RELAY_TOKEN}`, { method: "DELETE", headers: { "mcp-session-id": session }, body: "" });
@@ -381,6 +383,18 @@ describe("hub gateway", () => {
           // The proxy fails reading a 204's empty body (Upstream.ts); only the status matters here.
           yield* readBody(deleted).pipe(Effect.ignore);
           expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(404);
+          yield* rpc(hub, "plain", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+        }),
+      );
+      // The relay restarts; the upstream's session lives on, and so does its owner. The file never holds the id itself.
+      expect(readFileSync(join(dir, "state/sessions.json"), "utf8")).not.toContain('"s-1"');
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir, {}, { ports });
+          yield* waitFor(hub, "plain", "running");
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "s-1" })).status).toBe(200);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { token, session: "s-1" })).status).toBe(404);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "made-up" })).status).toBe(404);
         }),
       );
     } finally {
@@ -410,6 +424,22 @@ describe("hub health checks", () => {
         // Three checks without an answer: the process is started again.
         const silent = events.filter((e) => e.server === "silent").map((e) => e.state);
         expect(silent.slice(silent.indexOf("error"))).toContain("starting");
+      }),
+    );
+  }, 30_000);
+
+  it("does not restart a server busy with a client's call", async () => {
+    const dir = fixture({ busy: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer] } });
+    await run(
+      Effect.gen(function* () {
+        const { hub, events } = yield* startHub(dir, {}, { checkEvery: Duration.millis(300) });
+        yield* waitFor(hub, "busy", "running");
+        const session = (yield* rpc(hub, "busy", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } })).headers["mcp-session-id"] ?? "";
+        const before = events.length;
+        // A synchronous tool holds the process for 2s: every check in that time goes unanswered.
+        const blocked = yield* rpc(hub, "busy", "tools/call", { name: "block", arguments: { ms: 2000 } }, { session });
+        expect(blocked.message?.result).toMatchObject({ content: [{ text: "blocked" }] });
+        expect(events.slice(before).filter((e) => e.server === "busy").map((e) => e.state)).not.toContain("starting");
       }),
     );
   }, 30_000);

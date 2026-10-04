@@ -18,11 +18,12 @@
  *                 whose request is in flight (dropped when that is unclear)
  *   sessions      belong to the client that opened them; the gateway
  *                 refuses another client's session id. Clients rarely end
- *                 theirs, so a session without an open GET stream expires
- *                 after 15 idle minutes, and at 1000 sessions a new one
- *                 replaces the least recently seen instead of being refused
- *   giving up     a request whose client went away or waited 10 minutes is
- *                 forgotten, and the server gets notifications/cancelled
+ *                 theirs, so at 1000 sessions a new one replaces the least
+ *                 recently seen idle one instead of being refused; one
+ *                 without an open GET stream also expires after a day unused
+ *   giving up     a request whose client went away, or that heard nothing
+ *                 for 10 minutes (progress counts), gets an error, and the
+ *                 server gets notifications/cancelled
  *
  * The bridge declares no client capabilities, so a server never sends it
  * sampling, elicitation or roots requests; if one does, the bridge answers
@@ -80,7 +81,9 @@ interface Pending {
   readonly clientId: JsonRpcId;
   readonly deliver: (message: JsonRpcMessage) => Effect.Effect<void>;
   readonly progressToken: { readonly bridge: string; readonly client: unknown } | null;
-  readonly since: number;
+  readonly method: string;
+  /** When the request was sent, or last reported progress. */
+  lastHeard: number;
 }
 
 interface Session {
@@ -97,7 +100,7 @@ const decodeInitializeResult = Schema.decodeUnknownOption(Schema.Struct({ protoc
 
 const BACKOFF_MIN = 1_000;
 const BACKOFF_MAX = 5 * 60_000;
-const SESSION_IDLE = Duration.minutes(15);
+const SESSION_IDLE = Duration.hours(24);
 const MAX_SESSIONS = 1000;
 const REQUEST_TIMEOUT = Duration.minutes(10);
 
@@ -105,6 +108,8 @@ export interface Bridge extends Upstream {
   readonly status: Effect.Effect<BridgeStatus>;
   /** Kill the process; the supervisor starts a fresh one. */
   readonly restart: Effect.Effect<void>;
+  /** Client requests the server has not answered yet. */
+  readonly clientRequests: Effect.Effect<number>;
   /** A request from the bridge itself (health checks), outside any session. */
   readonly request: (method: string, params?: unknown) => Effect.Effect<JsonRpcMessage, string>;
 }
@@ -120,9 +125,11 @@ export const makeBridge = (options: {
   /** Called whenever the status changes. */
   readonly onStatus?: (status: BridgeStatus) => Effect.Effect<void>;
   /** Called when a session ends: deleted, expired, evicted, or the bridge stopped. */
-  readonly onSessionEnd?: (id: string) => void;
-  /** How long a session without an open stream lives unused; default 15 minutes. */
+  readonly onSessionEnd?: (id: string) => Effect.Effect<void>;
+  /** How long a session without an open stream lives unused; default a day. */
   readonly sessionIdle?: Duration.Input;
+  /** How long a request may go without a word from the server; default 10 minutes. */
+  readonly requestTimeout?: Duration.Input;
 }): Effect.Effect<Bridge, never, Scope.Scope> =>
   Effect.gen(function* () {
     let status: BridgeStatus = { state: "starting", detail: null };
@@ -141,6 +148,7 @@ export const makeBridge = (options: {
     let kill: Deferred.Deferred<void> = yield* Deferred.make<void>();
     let stopped = false;
     const sessionIdle = Duration.toMillis(Duration.fromInputUnsafe(options.sessionIdle ?? SESSION_IDLE));
+    const requestTimeout = Duration.fromInputUnsafe(options.requestTimeout ?? REQUEST_TIMEOUT);
 
     const forget = (key: string) => {
       const p = pending.get(key);
@@ -159,24 +167,35 @@ export const makeBridge = (options: {
         { discard: true },
       );
 
-    /** Forget requests nobody waits for any more, and tell the server to stop working on them. */
+    /**
+     * Give up on requests: whoever still waits gets an error, and the server is
+     * told to stop working on them (never for initialize, which the spec
+     * forbids cancelling).
+     */
     const abandon = (keys: ReadonlyArray<string>, reason: string) =>
       Effect.forEach(
         keys,
-        (key) => {
-          if (forget(key) === undefined || current === null) return Effect.void;
-          const requestId = Number(key.slice(key.indexOf(":") + 1));
-          return current.write(toJson({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId, reason } }));
-        },
+        (key) =>
+          Effect.gen(function* () {
+            const p = forget(key);
+            if (p === undefined) return;
+            yield* p.deliver(errorMessage(p.clientId, -32603, `${options.name}: ${reason}`));
+            if (current === null || p.method === "initialize") return;
+            const requestId = Number(key.slice(key.indexOf(":") + 1));
+            yield* current.write(toJson({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId, reason } }));
+          }),
         { discard: true },
       );
+
+    /** Sessions with a request in flight. */
+    const busySessions = () => new Set([...pending.values()].map((p) => p.session));
 
     const endSession = (s: Session) =>
       Effect.gen(function* () {
         if (sessions.get(s.id) !== s) return;
         sessions.delete(s.id);
         if (s.stream !== null) yield* Queue.end(s.stream);
-        options.onSessionEnd?.(s.id);
+        if (options.onSessionEnd !== undefined) yield* options.onSessionEnd(s.id);
       });
 
     const broadcast = (message: JsonRpcMessage) =>
@@ -207,6 +226,7 @@ export const makeBridge = (options: {
             if (message.method === "notifications/progress" && params?.progressToken !== undefined) {
               const key = progress.get(String(params.progressToken));
               const p = key === undefined ? undefined : pending.get(key);
+              if (p !== undefined) p.lastHeard = yield* Clock.currentTimeMillis;
               if (p?.progressToken != null) yield* p.deliver({ ...message, params: { ...params, progressToken: p.progressToken.client } });
             } else if (isBroadcast(message.method)) {
               yield* broadcast(message);
@@ -223,7 +243,7 @@ export const makeBridge = (options: {
       });
 
     /** Write a message to the process; a request is remembered under the returned key until answered. */
-    const send = (message: JsonRpcMessage, entry: Omit<Pending, "progressToken" | "since"> | null) =>
+    const send = (message: JsonRpcMessage, entry: Omit<Pending, "progressToken" | "method" | "lastHeard"> | null) =>
       Effect.gen(function* () {
         if (stopped) return yield* Effect.fail("the hub stopped serving it");
         const process = current;
@@ -242,7 +262,7 @@ export const makeBridge = (options: {
           progress.set(progressToken.bridge, idKey(bridgeId));
         }
         const key = idKey(bridgeId);
-        pending.set(key, { ...entry, progressToken, since: yield* Clock.currentTimeMillis });
+        pending.set(key, { ...entry, progressToken, method: message.method ?? "", lastHeard: yield* Clock.currentTimeMillis });
         yield* process.write(toJson({ ...message, id: bridgeId, ...(params === undefined ? {} : { params }) }));
         return key;
       });
@@ -327,34 +347,47 @@ export const makeBridge = (options: {
       }),
     );
 
-    const expired = (s: Session, now: number) => s.stream === null && now - s.lastSeen > sessionIdle;
+    /** Unused for a day, with no open stream and nothing in flight. */
+    const expired = (s: Session, now: number, busy: ReadonlySet<string | null>) => s.stream === null && !busy.has(s.id) && now - s.lastSeen > sessionIdle;
 
-    /** Expire idle sessions; at the cap, end the least recently seen (one without a stream if there is one). */
+    const expire = (now: number) =>
+      Effect.gen(function* () {
+        const busy = busySessions();
+        for (const s of sessions.values()) if (expired(s, now, busy)) yield* endSession(s);
+      });
+
+    /**
+     * At the cap, end the least recently seen session with nothing in flight,
+     * preferring one without a stream. When every session is busy, the cap
+     * gives way: a new session is never refused.
+     */
     const makeRoom = (now: number) =>
       Effect.gen(function* () {
-        for (const s of sessions.values()) if (expired(s, now)) yield* endSession(s);
+        yield* expire(now);
+        const busy = busySessions();
         while (sessions.size >= MAX_SESSIONS) {
-          const all = [...sessions.values()];
-          const streamless = all.filter((s) => s.stream === null);
-          const oldest = (streamless.length > 0 ? streamless : all).reduce((a, b) => (b.lastSeen < a.lastSeen ? b : a));
-          yield* endSession(oldest);
+          const idle = [...sessions.values()].filter((s) => !busy.has(s.id));
+          const streamless = idle.filter((s) => s.stream === null);
+          const candidates = streamless.length > 0 ? streamless : idle;
+          if (candidates.length === 0) break;
+          yield* endSession(candidates.reduce((a, b) => (b.lastSeen < a.lastSeen ? b : a)));
         }
       });
 
-    // Every minute: end idle sessions, and give up on requests whose response nobody read to the end.
+    // Every minute: end idle sessions, and give up on requests that heard nothing for 10 minutes.
     yield* Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      for (const s of sessions.values()) if (expired(s, now)) yield* endSession(s);
-      const stale = [...pending.entries()].filter(([, p]) => now - p.since > Duration.toMillis(REQUEST_TIMEOUT)).map(([key]) => key);
-      yield* abandon(stale, "no answer within 10 minutes");
-    }).pipe(Effect.delay(Duration.minutes(1)), Effect.forever, Effect.forkScoped);
+      yield* expire(now);
+      const stale = [...pending.entries()].filter(([, p]) => now - p.lastHeard > Duration.toMillis(requestTimeout)).map(([key]) => key);
+      yield* abandon(stale, `no answer within ${Duration.format(requestTimeout)}`);
+    }).pipe(Effect.delay(Duration.min(Duration.minutes(1), Duration.divideUnsafe(requestTimeout, 2))), Effect.forever, Effect.forkScoped);
 
     const sessionOf = (request: ForwardRequest) =>
       Effect.gen(function* () {
         const id = request.headers["mcp-session-id"];
         const s = id === undefined ? undefined : sessions.get(id);
         if (s === undefined) return undefined;
-        if (expired(s, yield* Clock.currentTimeMillis)) {
+        if (expired(s, yield* Clock.currentTimeMillis, busySessions())) {
           yield* endSession(s);
           return undefined;
         }
@@ -418,7 +451,7 @@ export const makeBridge = (options: {
           else if (sent.success !== null) keys.push(sent.success);
         }
         // However the response ends (answered, timed out, or its client gone), nothing stays pending.
-        const messages = Stream.fromQueue(out).pipe(Stream.timeout(REQUEST_TIMEOUT), Stream.ensuring(abandon(keys, "the client stopped waiting")));
+        const messages = Stream.fromQueue(out).pipe(Stream.timeout(requestTimeout), Stream.ensuring(abandon(keys, "the client stopped waiting")));
         const wantsSse = (request.headers["accept"] ?? "").includes("text/event-stream");
         if (wantsSse) {
           return {
@@ -475,6 +508,7 @@ export const makeBridge = (options: {
               }),
       status: Effect.sync(() => status),
       restart: Effect.suspend(() => Deferred.succeed(kill, undefined)).pipe(Effect.asVoid),
+      clientRequests: Effect.sync(() => [...pending.values()].filter((p) => p.session !== null).length),
       request: (method, params) =>
         Deferred.await(initialized).pipe(
           Effect.timeoutOption(Duration.seconds(30)),

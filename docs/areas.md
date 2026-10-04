@@ -130,11 +130,12 @@ cut off with `network = "none"` (stdio images). The hub adopts a matching
 running container after a restart and restarts one that dies, with backoff.
 One stdio process serves every client: the bridge gives each its own session,
 and a session belongs to the client token that opened it (one the hub has no
-record of is refused). A session without an open event stream ends after 15
-idle minutes, and at 1000 sessions a new one replaces the least recently used,
-so clients that never close theirs cannot lock others out. The hub checks
+record of is refused; owners of proxied servers' sessions are kept across
+relay restarts). At 1000 sessions a new one replaces the least recently used
+idle one, so clients that never close theirs cannot lock others out; a session
+without an open event stream also ends after a day unused. The hub checks
 every server each minute; a process or container that misses three checks in
-a row is restarted.
+a row, while no client request is in flight, is restarted.
 
 Optional fields in a definition:
 
