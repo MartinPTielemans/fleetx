@@ -9,7 +9,8 @@
  *                       "state" when a node reports, "hub" when a hosted MCP
  *                       server changes state; replays what a client missed
  *                       (Last-Event-ID or ?since=) so a laptop that slept
- *                       catches up
+ *                       catches up, and adds a "pull" when it cannot know
+ *                       what was missed (see eventIds)
  *   *    /mcp/<name>    the MCP hub's gateway: every hosted server behind one
  *                       endpoint and one token (see hub/Hub.ts)
  *        /hub/*, /oauth/callback
@@ -71,6 +72,27 @@ export interface RelayOptions {
 
 const MAX_EVENTS = 500;
 
+/**
+ * Event ids go on rising across restarts: the time this run started, in
+ * milliseconds times 1000, plus a counter. A listener's `since` from an earlier run is
+ * below every id of this one, and one this run did not hand out (a later
+ * one, or one older than the events kept) cannot be trusted either: such a
+ * listener gets every kept event and a "pull" after them, so it syncs rather
+ * than miss a branch move the relay forgot when it restarted. 0 is a listener
+ * connecting for the first time: it gets the kept events.
+ */
+export const eventIds = (startedAt: number) => {
+  const first = startedAt * 1000 + 1;
+  return {
+    first,
+    /** Whether the kept events are exactly what a listener at `since` missed. */
+    knows: (since: number, kept: ReadonlyArray<{ readonly id: number }>, next: number) => {
+      const oldest = kept[0]?.id ?? next;
+      return since === 0 || (since >= first - 1 && since >= oldest - 1 && since < next);
+    },
+  };
+};
+
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(NodeState));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -82,7 +104,8 @@ export const relayLayer = (options: RelayOptions) =>
     Effect.gen(function* () {
       const events = yield* Ref.make<ReadonlyArray<RelayEvent>>([]);
       const states = yield* Ref.make<ReadonlyMap<string, NodeState>>(new Map());
-      const nextId = yield* Ref.make(1);
+      const ids = eventIds(yield* Clock.currentTimeMillis);
+      const nextId = yield* Ref.make(ids.first);
       const hub = yield* PubSub.unbounded<RelayEvent>();
 
       const emit = (event: Omit<RelayEvent, "id" | "at">) =>
@@ -147,11 +170,16 @@ export const relayLayer = (options: RelayOptions) =>
           const request = yield* HttpServerRequest.HttpServerRequest;
           const url = new URL(request.url, "http://relay");
           const since = Number(request.headers["last-event-id"] ?? url.searchParams.get("since") ?? "0") || 0;
-          const missed = (yield* Ref.get(events)).filter((e) => e.id > since);
+          const kept = yield* Ref.get(events);
+          const next = yield* Ref.get(nextId);
+          const known = ids.knows(since, kept, next);
+          const missed = known ? kept.filter((e) => e.id > since) : kept;
+          // With the newest id handed out, so the listener's next `since` is one of this run's.
+          const pull: ReadonlyArray<RelayEvent> = known ? [] : [{ id: next - 1, at: yield* Clock.currentTimeMillis, type: "pull", rev: (yield* Ref.get(lastRev)).slice(0, 7) }];
           const frame = (e: RelayEvent) => `id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
           const live = Stream.fromPubSub(hub);
           const keepalive = Stream.tick(Duration.seconds(25)).pipe(Stream.map(() => ": keepalive\n\n"));
-          const body = Stream.make(...missed.map(frame)).pipe(
+          const body = Stream.make(...[...missed, ...pull].map(frame)).pipe(
             Stream.concat(Stream.merge(live.pipe(Stream.map(frame)), keepalive)),
             Stream.encodeText,
           );

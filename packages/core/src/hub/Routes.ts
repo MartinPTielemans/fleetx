@@ -3,6 +3,7 @@
  *
  *   GET    /hub/servers                    HubServer[]
  *   POST   /hub/servers/<name>/login       HubLoginStart: the URL to open
+ *   GET    /hub/logins/<state>             LoginStatus of the sign-in with that URL's state
  *   POST   /hub/servers/<name>/logout      204
  *   POST   /hub/servers/<name>/restart     204
  *   GET    /hub/calls?server=&limit=       HubCall[], newest first
@@ -26,6 +27,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { HubCall, HubLoginStart, HubServer } from "../Api.ts";
 import type { Hub } from "./Hub.ts";
 import { parseJson } from "./JsonRpc.ts";
+import { LoginStatus } from "./OAuth.ts";
 import { bearerMatches } from "./Policy.ts";
 import type { ForwardRequest, UpstreamResponse } from "./Upstream.ts";
 
@@ -37,6 +39,7 @@ const encodeCalls = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(HubCa
 const encodeLogin = Schema.encodeEffect(Schema.fromJsonString(HubLoginStart));
 const encodeTokens = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(ClientToken)));
 const encodeCreated = Schema.encodeEffect(Schema.fromJsonString(CreatedToken));
+const encodeLoginStatus = Schema.encodeEffect(Schema.fromJsonString(LoginStatus));
 
 const json = (text: string, status = 200) => HttpServerResponse.text(text, { status, contentType: "application/json" });
 const problem = (message: string, status: number) => HttpServerResponse.text(message, { status, contentType: "text/plain" });
@@ -121,6 +124,17 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
   return Layer.mergeAll(
     HttpRouter.add("GET", "/hub/servers", guarded(Effect.flatMap(hub.servers, encodeServers).pipe(Effect.map((t) => json(t))))),
     action("login"),
+    HttpRouter.add(
+      "GET",
+      "/hub/logins/:state",
+      guarded(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const status = yield* hub.loginStatus(segment(request.url, 3));
+          return HttpServerResponse.text(yield* encodeLoginStatus(status), { contentType: "application/json", headers: { "cache-control": "no-store" } });
+        }),
+      ),
+    ),
     action("logout"),
     action("restart"),
     HttpRouter.add(
@@ -206,3 +220,4 @@ export const decodeCalls = Schema.decodeUnknownEffect(Schema.fromJsonString(Sche
 export const decodeLogin = Schema.decodeUnknownEffect(Schema.fromJsonString(HubLoginStart));
 export const decodeTokens = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(ClientToken)));
 export const decodeCreated = Schema.decodeUnknownEffect(Schema.fromJsonString(CreatedToken));
+export const decodeLoginStatus = Schema.decodeUnknownEffect(Schema.fromJsonString(LoginStatus));

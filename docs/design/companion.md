@@ -195,12 +195,22 @@ The hub is an OAuth client per the MCP authorization spec (2025-06-18):
    `remote_auth_scopes`, and `redirect_uri = <relay url>/oauth/callback`, so
    signing in works from any browser on the tailnet with no tunnel.
 5. Tokens are stored encrypted to the relay node's own age key, in
-   `~/.local/state/t3-fleet/hub/tokens.age`. Refresh is serialized per server and
-   done ahead of expiry; a 401 triggers one refresh. When refresh fails the
-   server goes to `needs-login` and an alert is raised.
+   `~/.local/state/t3-fleet/hub/tokens.age`, with the resource they were
+   issued for; they are sent only to that URL. Refresh is done ahead of expiry,
+   and a 401 triggers one. One refresh runs per server at a time, in the hub's
+   own scope, and requests wait for it, so a client hanging up cannot lose a
+   rotated refresh token. When the authorization server refuses the refresh
+   (`invalid_grant`) the server goes to `needs-login` and an alert is raised;
+   `invalid_client` or `unauthorized_client` from the token endpoint also
+   drops the dynamic client registration (a refused authorization callback
+   changes nothing). Other failures (5xx, 429, timeouts) keep the login: the
+   still-valid access token is used, and the refresh is retried with a
+   backoff. Once the access token has expired, three 4xx answers other than
+   429 without a code the hub acts on count as a refusal too.
 
 A login starts with `POST /hub/servers/<name>/login`, which returns the URL to
-open; `t3-fleet mcp login <name>` and the UI both use it.
+open; `t3-fleet mcp login <name>` and the UI both use it. `GET
+/hub/logins/<state>` says how the login with that URL's `state` went.
 
 ### Clients and policy
 
@@ -214,13 +224,15 @@ to some servers. Denied calls get a JSON-RPC error and are logged.
 
 Every JSON-RPC request through the gateway is recorded as a `HubCall`
 (server, client, method, tool name, duration, outcome; never arguments or
-results), in a ring buffer and `~/.local/state/t3-fleet/hub/calls.jsonl`. The
-hub runs an `initialize` and `tools/list` against each server every minute;
-`HubServer.state` is `starting`, `running`, `needs-login`, `error` or
+results), in a ring buffer and `~/.local/state/t3-fleet/hub/calls.jsonl`.
+Servers receive each message rebuilt from its JSON-RPC fields, never the raw
+body. The hub runs an `initialize` and `tools/list` against each server every
+minute; `HubServer.state` is `starting`, `running`, `needs-login`, `error` or
 `stopped`. Each server's check is isolated, so one server answering nonsense
 cannot stop the loop, and a process or container that misses three checks in
 a row is restarted, unless a client request is in flight: a server running a
-long synchronous tool is busy, not hung. State changes are emitted on `/events` as `hub` events.
+long synchronous tool is busy, not hung. State changes are emitted on
+`/events` as `hub` events.
 
 ### Relay endpoints added
 
@@ -229,6 +241,7 @@ All need the relay token; `/oauth/callback` is public (it checks `state`).
 ```
 GET    /hub/servers                    HubServer[]
 POST   /hub/servers/<name>/login       { url }
+GET    /hub/logins/<state>             { status, server, detail }
 POST   /hub/servers/<name>/logout      204
 POST   /hub/servers/<name>/restart     204
 GET    /hub/calls?server=&limit=       HubCall[]

@@ -45,7 +45,10 @@ Every node can read the fleet's secrets and has the current ones.
 ## relay
 
 With `[relay]` in t3-fleet.toml: the relay service on the node with the relay
-role (published to the tailnet), and a listener on every other node.
+role (published to the tailnet), and a listener on every other node. A
+listener that reconnects gets the events it missed; when the relay cannot
+know what that was (it restarted since), the listener gets a "pull" and
+syncs.
 
 ## dotfiles
 
@@ -158,9 +161,15 @@ the resource metadata is for this server. Fields written
 for ToolHive (callback ports, timeouts, registry references) are ignored.
 
 Sign in once, from any machine: `t3-fleet mcp login <name>` prints the URL to
-open in any browser on the tailnet. The hub keeps the tokens encrypted to the
-relay node's key (`~/.local/state/t3-fleet/hub/tokens.age`) and refreshes them
-ahead of expiry; when a login is lost, the server shows as needing a sign-in.
+open in any browser on the tailnet and waits for that sign-in to finish. The
+hub keeps the tokens encrypted to the relay node's key
+(`~/.local/state/t3-fleet/hub/tokens.age`) and refreshes them ahead of
+expiry. A refresh the authorization server refuses loses the login, and the
+server shows as needing a sign-in; when the authorization server is merely
+down or busy, the hub keeps using the token until it expires and tries again
+with a backoff. A login belongs to the server's URL: point the definition at
+another URL and the server needs a new sign-in. `logout` also forgets the
+hub's client registration, so the next login registers afresh.
 
 ```
 t3-fleet mcp servers                 every hosted server and its state
@@ -171,7 +180,9 @@ t3-fleet mcp token list | revoke <client>
 ```
 
 The call log never holds arguments or results. Denied tools are hidden from
-`tools/list` and refused with a JSON-RPC error. Client tokens are stored only
+`tools/list` and refused with a JSON-RPC error. A server receives only the
+JSON-RPC fields of each message, and a message with a key that folds to one
+the policy reads (`Name` beside `name`, `paramſ` beside `params`) is refused. Client tokens are stored only
 as digests on the relay; on an authority, `token create` keeps the token in
 the fleet's secrets as `T3_FLEET_MCP_TOKEN_<CLIENT>`.
 

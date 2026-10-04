@@ -167,9 +167,12 @@ hub, `t3-fleet mcp servers` on any machine shows why; a 401 means its
 credential expired: `t3-fleet mcp login <name>`.
 
 **`mcp-<name>-needs-login`** — the hub has no working login for the server:
-it was never signed in, the refresh token was revoked, or someone signed out.
-A person signs in, so there is no automatic fix: run `t3-fleet mcp login <name>`
-on any machine and open the URL it prints in any browser on the tailnet.
+it was never signed in, the refresh token was revoked, someone signed out, or
+the definition's `url` changed (a login is only sent to the URL it was issued
+for). A person signs in, so there is no automatic fix: run `t3-fleet mcp login <name>`
+on any machine and open the URL it prints in any browser on the tailnet. If
+the provider's page says it does not know the client, run
+`t3-fleet mcp logout <name>` first: the next login registers the hub again.
 
 **`mcp-toolhive-left`** — the hub serves these servers now, but ToolHive
 still runs them on this machine. The fix runs `thv stop` for them (marked as

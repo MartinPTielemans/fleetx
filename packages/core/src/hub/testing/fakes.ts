@@ -3,7 +3,7 @@
  * protected by it, as plain Node HTTP servers on random local ports.
  */
 // Test fakes are plain HTTP servers; nothing here runs inside an Effect.
-// @effect-diagnostics nodeBuiltinImport:off globalRandom:off preferSchemaOverJson:off
+// @effect-diagnostics nodeBuiltinImport:off globalRandom:off preferSchemaOverJson:off globalTimers:off
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
@@ -40,6 +40,12 @@ export interface FakeAuthServer {
   readonly approve: (authorizationUrl: string) => string;
   readonly setExpiresIn: (seconds: number) => void;
   readonly refuseRefresh: (refuse: boolean) => void;
+  /** Answer refreshes with this status and body instead (429, 503, …); null to stop. */
+  readonly failRefresh: (failure: { readonly status: number; readonly body: unknown } | null) => void;
+  /** Rotate the refresh token, then wait this long before answering a refresh. */
+  readonly delayRefresh: (ms: number) => void;
+  /** Forget every registered client, as some providers do: their token requests get invalid_client. */
+  readonly forgetClients: () => void;
   readonly isValid: (token: string) => boolean;
   readonly revokeAccessTokens: () => void;
   readonly close: () => Promise<void>;
@@ -55,6 +61,9 @@ export const fakeAuthServer = async (options: {
   let registrations = 0;
   let expiresIn = 3600;
   let refuse = false;
+  let failure: { readonly status: number; readonly body: unknown } | null = null;
+  let delay = 0;
+  let forgotten = false;
   let counter = 0;
   let last: URLSearchParams | null = null;
   const clients = new Map<string, Array<string>>();
@@ -94,6 +103,7 @@ export const fakeAuthServer = async (options: {
       const form = new URLSearchParams(await body(req));
       last = form;
       if (form.get("resource") !== options.expectedResource()) return send(res, 400, { error: "invalid_target" });
+      if (forgotten && !clients.has(form.get("client_id") ?? "")) return send(res, 401, { error: "invalid_client" });
       if (form.get("grant_type") === "authorization_code") {
         const code = codes.get(form.get("code") ?? "");
         codes.delete(form.get("code") ?? "");
@@ -106,10 +116,13 @@ export const fakeAuthServer = async (options: {
       }
       if (form.get("grant_type") === "refresh_token") {
         refreshes++;
+        if (failure !== null) return send(res, failure.status, failure.body);
         const rt = form.get("refresh_token") ?? "";
         if (refuse || !refresh.has(rt)) return send(res, 400, { error: "invalid_grant", error_description: "refresh token revoked" });
         refresh.delete(rt); // rotation: each refresh token works once
-        return send(res, 200, issue());
+        const tokens = issue();
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        return send(res, 200, tokens);
       }
       return send(res, 400, { error: "unsupported_grant_type" });
     }
@@ -139,6 +152,16 @@ export const fakeAuthServer = async (options: {
     refuseRefresh: (r) => {
       refuse = r;
     },
+    failRefresh: (f) => {
+      failure = f;
+    },
+    delayRefresh: (ms) => {
+      delay = ms;
+    },
+    forgetClients: () => {
+      clients.clear();
+      forgotten = true;
+    },
     isValid: (token) => access.has(token),
     revokeAccessTokens: () => access.clear(),
     close: () => new Promise((resolve) => server.close(() => resolve())),
@@ -151,6 +174,8 @@ export interface FakeMcpServer {
   readonly metadataHits: () => { readonly wellKnown: number; readonly hinted: number };
   /** The last request body the server received, exactly as sent. */
   readonly lastBody: () => string;
+  /** Every bearer token the server was sent, accepted or not. */
+  readonly bearers: () => ReadonlyArray<string>;
   readonly close: () => Promise<void>;
 }
 
@@ -163,6 +188,7 @@ export const fakeProtectedMcp = async (
   let base = "";
   const hits = { wellKnown: 0, hinted: 0 };
   let last = "";
+  const bearers: Array<string> = [];
   const { server, url } = await listen(async (req, res) => {
     const path = new URL(req.url ?? "/", base).pathname;
     if (req.method === "GET" && (path === "/.well-known/oauth-protected-resource/mcp" || path === "/meta/resource")) {
@@ -172,6 +198,7 @@ export const fakeProtectedMcp = async (
     }
     if (path !== "/mcp") return send(res, 404, {});
     const token = /^Bearer (.+)$/.exec(req.headers["authorization"] ?? "")?.[1] ?? "";
+    if (token !== "") bearers.push(token);
     if (!isValid(token)) {
       return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer error="invalid_token", resource_metadata="${options.hint ?? `${base}/meta/resource`}"` });
     }
@@ -198,5 +225,5 @@ export const fakeProtectedMcp = async (
   });
   base = url;
   return { url, metadataHits: () => ({ ...hits }),
-    lastBody: () => last, close: () => new Promise((resolve) => server.close(() => resolve())) };
+    lastBody: () => last, bearers: () => [...bearers], close: () => new Promise((resolve) => server.close(() => resolve())) };
 };
