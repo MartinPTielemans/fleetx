@@ -2,12 +2,16 @@
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Flag } from "effect/unstable/cli";
 
+import { ENGINE_INSTALL } from "@t3-fleet/core/areas/Engine";
 import type { CheckReport } from "@t3-fleet/core/Check";
-import { loadConfig } from "@t3-fleet/core/Config";
+import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
+import { runFixes, type FixOutcome } from "@t3-fleet/core/Fix";
 import { newBuild } from "@t3-fleet/core/Runtime";
 
 /**
@@ -27,6 +31,62 @@ export const ownBundle = Effect.gen(function* () {
 
 export const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
+/**
+ * The config and the build for a command that keeps running (`ui`, `mcp`).
+ * The config is read again for every check, so edits to it show without a
+ * restart. The build is the one this process started with; when another
+ * replaces it on disk (an upgrade from a terminal), `stale` says so, and
+ * this process must not install its build anywhere: it would put the old one
+ * back. See withoutStaleInstalls and refuseStaleInstalls.
+ */
+export const liveController = Effect.gen(function* () {
+  const started = yield* ownBundle.pipe(Effect.option);
+  return Effect.gen(function* () {
+    const config = yield* loadConfig;
+    if (Option.isNone(started)) {
+      const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
+      return { config, bundle, stale: false };
+    }
+    const now = yield* ownBundle.pipe(Effect.option);
+    return { config, bundle: started.value, stale: Option.isSome(now) && now.value !== started.value };
+  });
+});
+
+const staleDetail = (command: string) =>
+  `a newer T3 Fleet build was installed after \`t3-fleet ${command}\` started; restart it to install builds from here`;
+
+/** A stale controller's report: its build installs become notes on restarting it. */
+export const withoutStaleInstalls = (report: CheckReport, stale: boolean, command: string): CheckReport =>
+  !stale
+    ? report
+    : {
+        ...report,
+        findings: report.findings.map((f): Finding => {
+          if (f.area !== "engine" || (f.key !== "engine-outdated" && f.key !== "engine-newer-here")) return f;
+          const { fix: _fix, ...rest } = f;
+          return { ...rest, detail: staleDetail(command) };
+        }),
+      };
+
+/**
+ * Applies fixes from a controller that keeps running, with the config as it
+ * is now. A stale controller's build installs fail with the reason, and so
+ * does every fix when the config cannot be read.
+ */
+export const applyLive = <E, R>(
+  current: Effect.Effect<{ readonly config: Config; readonly bundle: string; readonly stale: boolean }, E, R>,
+  fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
+  command: string,
+) =>
+  current.pipe(
+    Effect.flatMap(({ config, bundle, stale }) => {
+      const refused = stale ? fixes.filter((f) => f.fix.command === ENGINE_INSTALL) : [];
+      return runFixes(config.nodes, fixes.filter((f) => !refused.includes(f)), config.checkout, bundle).pipe(
+        Effect.map((outcomes) => [...refused.map((finding): FixOutcome => ({ finding, ok: false, summary: staleDetail(command) })), ...outcomes]),
+      );
+    }),
+    Effect.catch((e) => Effect.succeed(fixes.map((finding): FixOutcome => ({ finding, ok: false, summary: userMessage(e) })))),
+  );
 
 /**
  * Every machine is always observed, because parity findings need all of

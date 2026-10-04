@@ -22,6 +22,7 @@ import type * as Schema from "effect/Schema";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import type { BuildId } from "./Build.ts";
 import type { Finding } from "./Diagnose.ts";
 
 /** Services an area's observe step may use on the node. */
@@ -35,6 +36,8 @@ export interface ObserveContext {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** SHA-256 of the controller's T3 Fleet build; null when not given. */
   readonly engine: string | null;
+  /** Which build that is (Build.ts); null when not given or built before builds had identities. */
+  readonly engineBuild: BuildId | null;
   /** This node's name in the fleet; null when not given. */
   readonly node: string | null;
   /** This node's roles. */

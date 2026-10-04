@@ -30,7 +30,6 @@ import type { UiAlert, UiProposal } from "@t3-fleet/core/Api";
 import { checkNodes } from "@t3-fleet/core/Check";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
-import { runFixes } from "@t3-fleet/core/Fix";
 import { git } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
@@ -40,7 +39,7 @@ import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
 import { uiLayer, type UiAsset } from "@t3-fleet/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
-import { ownBundle, reportUserErrors } from "./shared.ts";
+import { applyLive, liveController, reportUserErrors, withoutStaleInstalls } from "./shared.ts";
 
 /** The built app, gzipped and base64-encoded per file, put here by `vp pack` (vite.config.ts). */
 declare const __T3_FLEET_UI_ASSETS__: string | undefined;
@@ -161,7 +160,8 @@ export const uiCommand = Command.make("ui", {
   Command.withHandler(({ port, noOpen }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
+      // Checks and fixes read the config again each time, and notice a newer build installed meanwhile.
+      const current = yield* liveController;
       const assets = yield* loadAssets.pipe(Effect.mapError(() => "the UI bundled in this build could not be read"));
       if (assets.size === 0) yield* Console.error("T3 Fleet: this build has no UI; run `pnpm --filter t3-fleet build` (the API still works)");
       const crypto = yield* Crypto.Crypto;
@@ -190,11 +190,12 @@ export const uiCommand = Command.make("ui", {
         actions: {
           check: closed(
             Effect.gen(function* () {
+              const { config, bundle, stale } = yield* current;
               const [report, states] = yield* Effect.all([checkNodes(config, bundle), statesOf(config)], { concurrency: "unbounded" });
-              return { report, states, accepted: config.settings.accept ?? [] };
+              return { report: withoutStaleInstalls(report, stale, "ui"), states, accepted: config.settings.accept ?? [] };
             }),
           ),
-          apply: (fixes) => runFixes(config.nodes, fixes, config.checkout, bundle).pipe(Effect.provide(services)),
+          apply: (fixes) => applyLive(current, fixes, "ui").pipe(Effect.provide(services)),
           proposals: closed(proposalsOf(config)),
           approve: (node) => closed(proposalFrom(config, node).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
           reject: (node) => closed(proposalFrom(config, node).pipe(Effect.flatMap((p) => reject(config.repo, p)))),

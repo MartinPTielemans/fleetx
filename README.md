@@ -150,7 +150,11 @@ reports syncs.
 It listens on 127.0.0.1 only and answers only requests carrying the token in
 the link it opens, from its own address, so no other website can read your
 fleet or apply fixes. `--port` picks another port, `--no-open` prints the link
-instead of opening a browser. The app is built into the single `t3-fleet` file.
+instead of opening a browser. The app is built into the single `t3-fleet` file. It
+reads the config again for every check; when T3 Fleet is upgraded on this
+machine while it runs (as `t3-fleet mcp` does too), it stops installing its
+build on other machines until you restart it, since that would put the old
+build back.
 
 ## Renamed from fleetx
 

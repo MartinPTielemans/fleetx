@@ -104,6 +104,15 @@ describe("diagnose", () => {
     expect(finding?.fix?.disrupts).toContain("server");
   });
 
+  it("says when the newest releases could not be looked up, instead of leaving t3-behind out", () => {
+    const unknown: Latest = { agents: { claude: null, codex: "0.160.0" }, t3: {}, failed: { claude: "no answer from registry.npmjs.org", t3: "GitHub's limit is used up" } };
+    const findings = diagnose([ok("a", machine())], unknown, settings);
+    expect(findings.map((f) => [f.key, f.severity, f.detail])).toEqual([
+      ["claude-latest-unknown", "info", "no answer from registry.npmjs.org"],
+      ["t3-latest-unknown", "info", "GitHub's limit is used up"],
+    ]);
+  });
+
   it("warns when machines speak different T3 client protocols", () => {
     const descriptor = (protocol: number) => ({ environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2632", protocol });
     const findings = diagnose([ok("a", machine({}, { descriptor: descriptor(2) })), ok("b", machine({}, { descriptor: descriptor(1) }))], latest, settings);

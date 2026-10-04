@@ -32,10 +32,21 @@ them. The fix adds it in `~/.profile`.
 
 ## engine
 
-**`engine-outdated`** — this machine runs a different T3 Fleet build than the
-controller. The fix streams the controller's build over ssh to
-`~/.local/share/t3-fleet/t3-fleet.mjs`, links it as `~/.local/bin/t3-fleet`
-(and `~/.local/bin/fleetx`, until 1.0), and restarts T3 Fleet's services.
+**`engine-outdated`** — this machine runs an older T3 Fleet build than the
+controller (or none). Each build carries its version, build time and commit;
+`t3-fleet --version` shows them. The fix streams the controller's build over
+ssh to `~/.local/share/t3-fleet/t3-fleet.mjs`, links it as
+`~/.local/bin/t3-fleet` (and `~/.local/bin/fleetx`, until 1.0), and restarts
+T3 Fleet's services: when the machine runs the relay, the listener or the
+model proxy the fix says it interrupts them, so `fix --safe` leaves it out.
+When neither build is known to be newer the fix asks first. A `t3-fleet ui`
+or `t3-fleet mcp` that started before a newer build was installed on its own
+machine does not install its build anywhere; restart it.
+
+**`engine-newer-here`** — this machine runs a newer T3 Fleet build than the
+controller. Nothing is installed here, since that would downgrade it; upgrade
+T3 Fleet where you run it from (`install.sh`, or `t3-fleet fix` from a
+machine that has the newer build).
 
 **`engine-local-config`** — `~/.config/t3-fleet/config.toml` does not name this
 machine and its config repo. The fix writes it (as `t3-fleet join` would).
@@ -165,6 +176,13 @@ disrupting them until the hub serves them; sign in to OAuth servers first).
 `thv start` brings one back; `thv rm` removes them for good.
 
 ## Other common findings
+
+**`t3-latest-unknown`**, **`claude-latest-unknown`**, **`codex-latest-unknown`**
+— the newest release could not be looked up, so whether this machine is
+behind is unknown; the detail says why. Lookups are kept for 15 minutes in
+`~/.local/state/t3-fleet/latest.json` and then revalidated, which GitHub does
+not count against its limit of 60 anonymous requests an hour; with the UI
+open and no `gh auth login` (or `GITHUB_TOKEN`) that limit can still run out.
 
 **`t3-protocol-behind`** — T3's apps (desktop, web and the phone app) speak
 one client protocol and refuse a server on another, showing "Client not

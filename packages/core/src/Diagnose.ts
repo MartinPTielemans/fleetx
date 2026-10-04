@@ -141,6 +141,17 @@ const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest,
     });
   }
   const newest = latest.agents[agent.name];
+  const failed = latest.failed?.[agent.name];
+  if (policy.kind === "track" && newest === null && failed !== undefined) {
+    out.push({
+      node,
+      severity: "info",
+      area: "agents",
+      key: `${agent.name}-latest-unknown`,
+      title: `could not look up the newest ${agent.name}, so whether ${agent.managedVersion} is current is unknown`,
+      detail: failed,
+    });
+  }
   if (policy.kind === "track" && newest !== null && newest !== agent.managedVersion) {
     out.push({
       node,
@@ -261,6 +272,16 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
   }
   if (version !== null) {
     const { behind, newest } = releasesBehind(latest, version);
+    if (newest === null && latest.failed?.t3 !== undefined) {
+      out.push({
+        node,
+        key: "t3-latest-unknown",
+        severity: "info",
+        area: "t3",
+        title: `could not look up T3's newest ${cliReleaseChannelOf(version)} release, so whether ${shortT3(version)} is current is unknown`,
+        detail: latest.failed.t3,
+      });
+    }
     if (newest !== null && newest !== version) {
       // Nightlies ship several times a day; a build from yesterday is current
       // enough. Lag becomes a warning at two days or five releases.

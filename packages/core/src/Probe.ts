@@ -407,6 +407,7 @@ export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(functio
           checkout,
           env,
           engine: settings.engine ?? null,
+          engineBuild: settings.build ?? null,
           node: settings.node ?? null,
           roles: settings.roles ?? [],
           relay: settings.relay ?? null,

@@ -6,6 +6,7 @@
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 
+import { buildOf } from "./Build.ts";
 import { diagnose, type Finding } from "./Diagnose.ts";
 import { probeSettings, type Config } from "./Config.ts";
 import { sha256 } from "./Hash.ts";
@@ -25,7 +26,8 @@ export const checkNodes = (config: Config, bundle: string) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
     const engine = bundle === "" ? undefined : yield* Effect.promise(() => sha256(bundle));
-    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, probeSettings(config, n, engine)), {
+    const build = bundle === "" ? null : buildOf(bundle);
+    const results = yield* Effect.forEach(config.nodes, (n) => observeNode(n, bundle, probeSettings(config, n, engine, build), engine), {
       concurrency: "unbounded",
     });
     const t3Versions = results
