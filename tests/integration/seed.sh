@@ -3,7 +3,7 @@
 # git-cloned skill repository, a plugin's skill, MCP servers with credentials
 # in headers, env, query strings, args and a connection string, an sse and a
 # localhost server, a project-scoped server, and instruction files.
-# Usage (as the user, in its home): seed.sh laptop|desktop
+# Usage (as the user, in its home): seed.sh laptop|server|desktop
 # Every credential value contains "SEKRIT", so a test can look for any of them.
 set -euo pipefail
 role=$1
@@ -38,7 +38,10 @@ if [ "$role" = laptop ]; then
     "ctx": { "command": "npx", "args": ["-y", "ctx-mcp", "--api-key", "SEKRIT_arg_0003"],
              "env": { "API_TOKEN": "SEKRIT_env_0004", "LOG_LEVEL": "debug" } },
     "events": { "type": "sse", "url": "https://events.example/sse" },
-    "localdb": { "type": "http", "url": "http://localhost:7777/mcp" }
+    "localdb": { "type": "http", "url": "http://localhost:7777/mcp" },
+    "gh": { "type": "http", "url": "https://ghp_SEKRITuser0009abcdefghij@git.example/mcp" },
+    "remote": { "command": "npx", "args": ["mcp-remote", "https://r.example/mcp",
+                "--header", "Authorization: Bearer sk-SEKRIT-remote-0010abcdef"] }
   },
   "projects": {
     "/home/dev/code/app": { "mcpServers": {
@@ -53,11 +56,25 @@ model = "gpt-5"
 url = "https://mcp.linear.example/mcp"
 bearer_token_env_var = "LINEAR_KEY"
 
+[mcp_servers.node_repl]
+command = "/Applications/ChatGPT.app/Contents/Resources/node_repl"
+
+[mcp_servers.old]
+command = "old-mcp"
+enabled = false
+
 [mcp_servers.ctx]
 command = "npx"
 args = ["-y", "ctx-mcp", "--api-key", "SEKRIT_arg_0003"]
 env = { API_TOKEN = "SEKRIT_env_0004", LOG_LEVEL = "debug" }
 TOML
+fi
+
+if [ "$role" = server ]; then
+  # The relay adds a server of its own, as desktop does: both edit t3-fleet.toml.
+  cat > ~/.claude.json <<'JSON'
+{ "mcpServers": { "weather": { "type": "http", "url": "https://weather.example/mcp" } } }
+JSON
 fi
 
 if [ "$role" = desktop ]; then

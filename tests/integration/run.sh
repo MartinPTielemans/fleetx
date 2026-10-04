@@ -49,7 +49,7 @@ for n in laptop server desktop; do
   on "$n" 'git config --global user.name dev && git config --global user.email dev@example.com && git config --global init.defaultBranch main'
   docker compose cp seed.sh "$n:/tmp/seed.sh" >/dev/null 2>&1
 done
-on laptop 'bash /tmp/seed.sh laptop' && on desktop 'bash /tmp/seed.sh desktop'
+for n in laptop server desktop; do on "$n" "bash /tmp/seed.sh $n"; done
 
 # Before setup: every command says what to do, and doctor is setup's pre-flight.
 expect laptop "t3-fleet setup" 't3-fleet status'
@@ -62,7 +62,8 @@ before=$(state laptop)
 plan=$(on laptop 'LINEAR_KEY=lin_SEKRIT_env_0008 t3-fleet setup --plan' 2>&1) || fail "setup --plan failed: $plan"
 for want in "skill   fmt  from ~/.claude/skills (/srv/remote/toolbox.git @" "skill   lint" "server  localdb  this machine only" \
   "server  db  declared, registered nowhere" "skill plug (~/.claude/skills/plug): a Claude plugin's" "2 different copies\|skill   demo" \
-  "POSTHOG_TOKEN" "SEARCH_APIKEY" "CTX_API_KEY" "CTX_API_TOKEN" "DB_PASSWORD" "LINEAR_KEY" "nothing was written"; do
+  "POSTHOG_TOKEN" "SEARCH_API_KEY" "CTX_API_KEY" "CTX_API_TOKEN" "DB_PASSWORD" "LINEAR_KEY" "GH_TOKEN" "REMOTE_TOKEN" \
+  "server node_repl: an app's own server" "server old: disabled in Codex" "nothing was written"; do
   printf '%s' "$plan" | grep -q -- "$want" || fail "setup --plan should show /$want/:
 $plan"
 done
@@ -84,6 +85,9 @@ expect laptop '"commit": "' 'cat ~/fleet/skills/SOURCES.json'
 expect laptop '"fmt": "skills/fmt"' 'cat ~/fleet/skills/SOURCES.json'
 expect laptop '"transport": "sse"' 'cat ~/fleet/mcp/events.json'
 expect laptop '"servers.add" = \["localdb"\]' 'cat ~/fleet/nodes/laptop.toml'
+expect laptop '"ignore.add" = \["node_repl", "old"\]' 'cat ~/fleet/nodes/laptop.toml'
+expect laptop 'Authorization: Bearer $REMOTE_TOKEN' 'cat ~/fleet/mcp/remote.json'
+expect laptop 'https://$GH_TOKEN@git.example/mcp' 'cat ~/fleet/mcp/gh.json'
 expect laptop 'timer = false' 'cat ~/fleet/nodes/laptop.toml'
 on laptop 'grep "^servers" ~/fleet/t3-fleet.toml' | grep -q '"db"\|"localdb"' && fail "a project's server and a localhost one are not every machine's"
 expect laptop 'dest = "~/.claude/CLAUDE.md"' 'grep -A2 "defaults.instructions" ~/fleet/t3-fleet.toml'
@@ -97,6 +101,10 @@ pass "setup on laptop: repo, secrets, links, snapshot, no gitlinks, project and 
 for n in server desktop; do
   expect laptop "sh -s -- setup /srv/remote/fleet.git $n" "t3-fleet invite $n"
 done
+# A joining machine's --plan writes nothing to its home, not even a key.
+before=$(state desktop)
+expect desktop "nothing was written" 't3-fleet setup /srv/remote/fleet.git desktop --plan'
+[ "$(state desktop)" = "$before" ] || fail "setup --plan on a joining machine changed it"
 expect server "server is set up" 't3-fleet setup /srv/remote/fleet.git server --yes --relay'
 expect desktop "skill review differs from the fleet's: keep mine and propose it" 't3-fleet setup /srv/remote/fleet.git desktop --plan'
 expect desktop "CLAUDE.md differs from the fleet's" 't3-fleet setup /srv/remote/fleet.git desktop --plan'
@@ -108,8 +116,10 @@ pass "server joins as the relay, desktop joins keeping its own review and CLAUDE
 # An authority adds their keys, approves, and the approvals merge their secrets.
 on laptop 't3-fleet sync' >/dev/null || true
 expect laptop "desktop" 't3-fleet review'
-expect laptop "merged 1 secret" 't3-fleet approve server'
-expect laptop "merged 1 secret" 't3-fleet approve desktop'
+# Both proposals add to t3-fleet.toml; both approve, merged.
+expect laptop "secrets it proposes: T3_FLEET_RELAY_TOKEN" 't3-fleet review'
+expect laptop "merged T3_FLEET_RELAY_TOKEN" 't3-fleet approve server'
+expect laptop "merged NOTES_X_API_KEY" 't3-fleet approve desktop'
 for n in server desktop laptop server desktop; do on "$n" 't3-fleet sync' >/dev/null || true; done
 expect laptop "url\|port = 8399" 'grep -A2 "^\[relay\]" ~/fleet/t3-fleet.toml'
 expect laptop '"relay"' 'cat ~/fleet/nodes/server.toml'
@@ -128,13 +138,18 @@ for n in laptop server desktop; do
   expect "$n" "the desktop's newer review" 'cat ~/.agents/skills/review/SKILL.md'
   expect "$n" "Desktop rules" 'cat ~/.claude/CLAUDE.md'
   [ "$(on "$n" 'readlink ~/.claude/CLAUDE.md')" = /home/dev/fleet/instructions/claude/CLAUDE.md ] || fail "$n: CLAUDE.md should link into the repo"
-  [ "$(on "$n" 'grep -c = ~/.config/t3-fleet/secrets.env')" = 8 ] || fail "$n should have the fleet's 8 secrets: $(on "$n" 'cut -d= -f1 ~/.config/t3-fleet/secrets.env')"
-  out=$(on "$n" 't3-fleet config show') && printf '%s' "$out" | grep -q 'mcp.servers = \["posthog","search","ctx","events","linear","t3-fleet","notes"' \
-    || fail "$n should register the fleet's servers: $out"
+  [ "$(on "$n" 'grep -c = ~/.config/t3-fleet/secrets.env')" = 10 ] || fail "$n should have the fleet's 10 secrets: $(on "$n" 'cut -d= -f1 ~/.config/t3-fleet/secrets.env')"
+  out=$(on "$n" 't3-fleet config show | grep "mcp.servers ="')
+  for s in posthog search ctx events linear gh remote t3-fleet notes weather; do
+    printf '%s' "$out" | grep -q "\"$s\"" || fail "$n should register $s: $out"
+  done
 done
 [ -z "$(on laptop "t3-fleet status --json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const f of JSON.parse(s).findings) if(["skills","instructions","secrets","dotfiles"].includes(f.area)) console.log(f.node, f.key)})')" ] \
   || fail "no machine should differ in skills, instructions or secrets: $(on laptop 't3-fleet status')"
 pass "laptop, server and desktop are equivalent"
+
+expect laptop "Nothing here differs" 't3-fleet setup'
+expect desktop "Nothing here differs" 't3-fleet setup'
 
 # No credential anywhere in the repository: any branch, any commit, state and proposals included.
 leaks=$(on laptop 'git -C /srv/remote/fleet.git log -p --all | grep -o "[A-Za-z_]*SEKRIT[A-Za-z0-9_]*" | sort -u') || true
