@@ -143,6 +143,15 @@ describe("hub OAuth", () => {
         const sent = yield* hub.gateway("protected", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: rawBody });
         yield* readBody(sent);
         expect(mcp.lastBody()).toBe('{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"search","arguments":{}}}');
+        // Only the JSON-RPC fields go on: a key Go would fold into "params" is refused, any other unknown key dropped.
+        const send = (body: string) =>
+          hub.gateway("protected", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body }).pipe(
+            Effect.flatMap((r) => readBody(r).pipe(Effect.as(r.status))),
+          );
+        expect(yield* send('{"jsonrpc":"2.0","id":78,"method":"tools/call","params":{"name":"search"},"param\u017f":{"name":"drop_table"}}')).toBe(400);
+        expect(mcp.lastBody()).not.toContain("drop_table");
+        yield* send('{"jsonrpc":"2.0","id":79,"method":"tools/call","params":{"name":"search","arguments":{}},"Paramz":{"name":"drop_table"},"result":1}');
+        expect(mcp.lastBody()).toBe('{"jsonrpc":"2.0","id":79,"method":"tools/call","params":{"name":"search","arguments":{}}}');
 
         // Fresh tokens are not refreshed; tokens close to expiry are, once, even under concurrency.
         yield* hub.check("protected");
@@ -192,6 +201,34 @@ describe("hub OAuth", () => {
         expect((yield* server(hub, "protected")).state).toBe("needs-login");
       }),
     );
+  }, 30_000);
+
+  it("never sends a login to a URL the definition moved to; the server needs a new one", async () => {
+    const moved = await fakeProtectedMcp(() => as.url, (t) => as.isValid(t));
+    const definition = (url: string) => ({ kind: "remote", url, remote_auth: true });
+    const dir = fixture({ mover: definition(`${mcp.url}/mcp`) });
+    try {
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir);
+          yield* waitFor(hub, "mover", "needs-login");
+          const url = yield* hub.login("mover");
+          yield* hub.finishLogin({ code: as.approve(url), state: new URL(url).searchParams.get("state") ?? "" });
+          yield* waitFor(hub, "mover", "running");
+
+          writeFileSync(join(dir, "repo/mcp/mover.json"), toJson(definition(`${moved.url}/mcp`)));
+          yield* hub.check();
+          const s = yield* waitFor(hub, "mover", "needs-login");
+          expect(s.detail).toMatch(/sign in again/);
+          expect(moved.bearers()).toEqual([]);
+          const refused = yield* rpc(hub, "mover", "tools/list", {});
+          expect(refused.status).toBe(503);
+          expect(moved.bearers()).toEqual([]);
+        }),
+      );
+    } finally {
+      await moved.close();
+    }
   }, 30_000);
 
   it("detects a login from the server's 401 and follows its resource_metadata", async () => {
@@ -339,6 +376,8 @@ describe("hub gateway", () => {
         expect(variant.status).toBe(400);
         expect(variant.text).toContain("differ only in case");
         expect((yield* raw('{"jsonrpc":"2.0","id":51,"Method":"tools/call","method":"ping"}')).status).toBe(400);
+        // Go's encoding/json reads "paramſ" as "params", the last one winning.
+        expect((yield* raw('{"method":"tools/call","jsonrpc":"2.0","id":54,"params":{"name":"echo"},"param\u017f":{"name":"delete_all"}}')).status).toBe(400);
         const duplicate = yield* raw('{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"echo","name":"delete_all","arguments":{}}}');
         expect(duplicate.text).toContain("-32003");
         expect((yield* raw('{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":7}}')).status).toBe(400);

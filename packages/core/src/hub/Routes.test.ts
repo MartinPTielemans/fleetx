@@ -58,6 +58,8 @@ describe("relay hub routes", () => {
     expect(servers).toMatchObject([{ name: "local", state: "running", kind: "hosted-stdio", auth: "none" }]);
     expect((await relay("/hub/servers/nope/restart", { method: "POST" })).status).toBe(404);
     expect((await relay("/hub/servers/local/login", { method: "POST" })).status).toBe(409);
+    expect(await (await relay("/hub/logins/nothing-started")).json()).toEqual({ status: "unknown", server: null, detail: null });
+    expect((await relay("/hub/logins/nothing-started", { token: null })).status).toBe(401);
   });
 
   it("gateways MCP over HTTP with sessions and streaming", async () => {

@@ -52,10 +52,11 @@ import {
   sseFrame,
   toJson,
   caseVariantKey,
+  rebuildMessage,
   toolOf,
   type JsonRpcMessage,
 } from "./JsonRpc.ts";
-import { makeOAuthManager, type OAuthManager } from "./OAuth.ts";
+import { makeOAuthManager, type LoginStatus, type OAuthManager, type TokenTarget } from "./OAuth.ts";
 import { bearerMatches, bearerOf, compileDeny, constantTimeEqual, hashToken, newClientToken } from "./Policy.ts";
 import { spawnStdio } from "./Process.ts";
 import { makeTokenStore, tokenStorePath, type TokenStore } from "./TokenStore.ts";
@@ -122,6 +123,8 @@ export interface Hub {
   readonly gateway: (name: string, authorization: string | undefined, request: ForwardRequest) => Effect.Effect<UpstreamResponse>;
   readonly login: (name: string) => Effect.Effect<string, string>;
   readonly finishLogin: (query: Readonly<Record<string, string | undefined>>) => Effect.Effect<string, string>;
+  /** How the sign-in with this state (from the login URL) is going. */
+  readonly loginStatus: (state: string) => Effect.Effect<LoginStatus>;
   readonly logout: (name: string) => Effect.Effect<void, string>;
   readonly restart: (name: string) => Effect.Effect<void, string>;
   readonly createToken: (client: string, servers: ReadonlyArray<string> | null) => Effect.Effect<string, string>;
@@ -227,7 +230,8 @@ export const makeHub = (
 
     const usesOAuth = (entry: Entry) => entry.def.auth.type === "oauth" || entry.oauthDetected;
 
-    const credentialFor = (entry: () => Entry): Credential => ({
+    /** `target`: the URL the token goes to, or null for a container on this machine (see TokenTarget). */
+    const credentialFor = (entry: () => Entry, target: TokenTarget): Credential => ({
       token: Effect.gen(function* () {
         const e = entry();
         const auth = e.def.auth;
@@ -236,7 +240,7 @@ export const makeHub = (
           if (value === undefined || value === "") return yield* new UpstreamError({ message: `the secret ${auth.tokenEnv} is not set on the relay node` });
           return value;
         }
-        if (usesOAuth(e) || (yield* oauth.hasTokens(e.def.name))) return yield* oauth.accessToken(e.def.name);
+        if (usesOAuth(e) || (yield* oauth.hasTokens(e.def.name, target))) return yield* oauth.accessToken(e.def.name, target);
         return null;
       }),
       rejected: (token, challenge) =>
@@ -246,9 +250,9 @@ export const makeHub = (
           if (e.def.auth.type === "bearer") return yield* new UpstreamError({ message: `the server rejected the secret ${e.def.auth.tokenEnv}` });
           if (token === null) {
             e.oauthDetected = true;
-            return yield* oauth.accessToken(e.def.name);
+            return yield* oauth.accessToken(e.def.name, target);
           }
-          return yield* oauth.afterRejection(e.def.name, token);
+          return yield* oauth.afterRejection(e.def.name, target, token);
         }),
     });
 
@@ -266,7 +270,8 @@ export const makeHub = (
         let upstream: Upstream;
         let bridge: Bridge | null = null;
         if (r.type === "remote" || r.type === "port") {
-          upstream = yield* provide(makeProxy(def.name, r.type === "remote" ? r.url : `http://127.0.0.1:${r.port}/mcp`, credentialFor(self)));
+          const url = r.type === "remote" ? r.url : `http://127.0.0.1:${r.port}/mcp`;
+          upstream = yield* provide(makeProxy(def.name, url, credentialFor(self, url)));
         } else if (r.type === "docker-http") {
           const proxies = new Map<number, Upstream>();
           upstream = {
@@ -276,7 +281,8 @@ export const makeHub = (
                 if (port === null) return yield* new UpstreamError({ message: `${def.name} is not running yet` });
                 let proxy = proxies.get(port);
                 if (proxy === undefined) {
-                  proxy = yield* provide(makeProxy(def.name, `http://127.0.0.1:${port}${r.path}`, credentialFor(self)));
+                  // The container's port changes with every start; its login goes with the definition.
+                  proxy = yield* provide(makeProxy(def.name, `http://127.0.0.1:${port}${r.path}`, credentialFor(self, null)));
                   proxies.set(port, proxy);
                 }
                 return yield* proxy.forward(request);
@@ -567,7 +573,7 @@ export const makeHub = (
             return textResponse(status, toJson(parsed?.batch === true ? replies : (replies[0] ?? errorMessage(null, code, "refused"))));
           });
 
-        // Keys that differ only in case would let the server see another tool than the policy did.
+        // Keys that fold to one the hub reads would let the server see another tool than the policy did.
         if (messages.some((m) => caseVariantKey(m) !== null)) {
           return yield* refuse(400, -32600, () => "T3 Fleet hub: refused a message with keys that differ only in case", () => "denied");
         }
@@ -586,8 +592,9 @@ export const makeHub = (
           );
         }
 
-        // Forward what the hub checked, re-serialized, never the raw body.
-        const forward: ForwardRequest = parsed === null ? request : { ...request, body: toJson(parsed.batch ? parsed.messages : parsed.messages[0]) };
+        // Forward what the hub checked, rebuilt from the JSON-RPC fields alone, never the raw body.
+        const rebuilt = messages.map(rebuildMessage);
+        const forward: ForwardRequest = parsed === null ? request : { ...request, body: toJson(parsed.batch ? rebuilt : rebuilt[0]) };
         const result = yield* entry.upstream.forward(forward).pipe(Effect.result);
         if (result._tag === "Failure") {
           const e = result.failure;
@@ -670,6 +677,7 @@ export const makeHub = (
           }
           return name;
         }),
+      loginStatus: oauth.loginStatus,
       logout: (name) =>
         Effect.gen(function* () {
           const entry = yield* need(name);

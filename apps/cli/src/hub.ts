@@ -2,7 +2,7 @@
  * t3-fleet mcp …: the MCP hub on the relay, from any node.
  *
  *   servers                       every hosted server and its state
- *   login NAME                    sign in: prints and opens the URL, waits for the login
+ *   login NAME                    sign in: prints and opens the URL, waits for this login to finish
  *   logout NAME                   drop the server's login
  *   restart NAME                  restart its container or process
  *   calls [--server] [--limit]    the tool-call log (never arguments or results)
@@ -25,7 +25,7 @@ import { exec } from "@t3-fleet/core/Exec";
 import { commitAndPush } from "@t3-fleet/core/Git";
 import { clientTokenEnv, expectOk, hubRequest } from "@t3-fleet/core/hub/HubClient";
 import { toJson } from "@t3-fleet/core/hub/JsonRpc";
-import { decodeCalls, decodeCreated, decodeLogin, decodeServers, decodeTokens } from "@t3-fleet/core/hub/Routes";
+import { decodeCalls, decodeCreated, decodeLogin, decodeLoginStatus, decodeServers, decodeTokens } from "@t3-fleet/core/hub/Routes";
 import { encryptedPath, installSecrets, readSecrets, setVar, writeSecrets } from "@t3-fleet/core/Secrets";
 
 import { reportUserErrors } from "./shared.ts";
@@ -75,6 +75,30 @@ const serversCommand = Command.make("servers").pipe(
 const openUrl = (url: string) =>
   exec({ command: process.platform === "darwin" ? "open" : "xdg-open", args: [url], timeout: Duration.seconds(5) }).pipe(Effect.map((r) => r.code === 0));
 
+/** This sign-in is done: report what the hub's check of the server finds, for up to half a minute. */
+const afterSignIn = (config: Config, name: string) =>
+  Effect.gen(function* () {
+    for (let i = 0; i < 15; i++) {
+      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find((x) => x.name === name);
+      if (s?.state === "running") return yield* Console.log(`Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`);
+      if (s?.state === "error" || s?.state === "needs-login") return yield* Effect.fail(`signed in, but ${name} is ${s.state === "error" ? "in error" : "still asking for a sign-in"}: ${s.detail ?? ""}`);
+      yield* Effect.sleep(Duration.seconds(2));
+    }
+    yield* Console.log(`Signed in to ${name}; the hub is still checking it (t3-fleet mcp servers).`);
+  });
+
+/** Before /hub/logins: wait for the server to be running, which an earlier login also satisfies. */
+const waitForRunning = (config: Config, name: string, polls: number) =>
+  Effect.gen(function* () {
+    for (let i = 0; i < polls; i++) {
+      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find((x) => x.name === name);
+      if (s?.state === "running") return yield* Console.log(`Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`);
+      if (s?.state === "error" && s.detail !== null && !s.detail.startsWith("signed in")) return yield* Effect.fail(`signed in, but ${name} is in error: ${s.detail}`);
+      yield* Effect.sleep(Duration.seconds(2));
+    }
+    return yield* Effect.fail("no sign-in arrived within 10 minutes; run the command again");
+  });
+
 const loginCommand = Command.make("login", {
   name: nameArg,
   wait: Flag.Boolean("no-wait").pipe(Flag.withDescription("Print the URL and return without waiting for the sign-in."), Flag.withDefault(false)),
@@ -89,16 +113,22 @@ const loginCommand = Command.make("login", {
       if (process.stdout.isTTY === true) yield* openUrl(url);
       if (noWait) return;
       yield* Console.log("Waiting for the sign-in (Ctrl-C to stop waiting; the link stays valid for 10 minutes)…");
+      const state = new URL(url).searchParams.get("state") ?? "";
       for (let i = 0; i < 300; i++) {
         yield* Effect.sleep(Duration.seconds(2));
-        const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find((x) => x.name === name);
-        if (s?.state === "running") {
-          yield* Console.log(`Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`);
-          return;
-        }
-        if (s?.state === "error" && s.detail !== null && !s.detail.startsWith("signed in")) {
-          return yield* Effect.fail(`signed in, but ${name} is in error: ${s.detail}`);
-        }
+        const reply = yield* hubRequest(config, "GET", `/hub/logins/${encodeURIComponent(state)}`).pipe(Effect.option);
+        if (reply._tag === "None") continue;
+        // A relay from before /hub/logins: all it can say is the server's state.
+        if (reply.value.status === 404) return yield* waitForRunning(config, name, 300 - i);
+        const login = yield* Effect.succeed(reply.value).pipe(
+          Effect.flatMap(expectOk),
+          Effect.flatMap((t) => decodeLoginStatus(t).pipe(Effect.mapError(() => "the relay sent an unexpected answer"))),
+          Effect.option,
+        );
+        if (login._tag === "None" || login.value.status === "pending") continue;
+        if (login.value.status === "failed") return yield* Effect.fail(`the sign-in to ${name} failed: ${login.value.detail ?? "no reason given"}`);
+        if (login.value.status === "unknown") return yield* Effect.fail("the relay no longer knows this sign-in (it restarted, or the link expired); run the command again");
+        return yield* afterSignIn(config, name);
       }
       return yield* Effect.fail("no sign-in arrived within 10 minutes; run the command again");
     }).pipe(reportUserErrors),

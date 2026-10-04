@@ -11,7 +11,7 @@ import { makeCallLog } from "./Calls.ts";
 import { envFile } from "./Docker.ts";
 import { expandSecrets, parseDefinition } from "./Definitions.ts";
 import { makeSseParser } from "./JsonRpc.ts";
-import { caseVariantKey } from "./JsonRpc.ts";
+import { caseVariantKey, rebuildMessage } from "./JsonRpc.ts";
 import { compileDeny, constantTimeEqual, isDenied } from "./Policy.ts";
 
 describe("hub definitions", () => {
@@ -109,6 +109,19 @@ describe("hub policy", () => {
     expect(caseVariantKey({ method: "tools/call", params: { name: "a", NAME: "b" } } as never)).toBe("params.NAME");
     expect(caseVariantKey({ method: "ping", Method: "tools/call" } as never)).toBe("Method");
     expect(caseVariantKey({ method: "ping", PARAMS: {} } as never)).toBe("PARAMS");
+    // Go folds these four non-ASCII letters to ASCII ones: paramſ is params, ıd and İd are id.
+    expect(caseVariantKey({ method: "tools/call", params: { name: "echo" }, "param\u017f": { name: "delete_all" } } as never)).toBe("param\u017f");
+    expect(caseVariantKey({ method: "ping", "\u0131d": 2 } as never)).toBe("\u0131d");
+    expect(caseVariantKey({ method: "ping", "\u0130d": 2 } as never)).toBe("\u0130d");
+    expect(caseVariantKey({ method: "ping", "jsonrpc": "2.0", "j\u017fonrpc": "1.0" } as never)).toBe("j\u017fonrpc");
+  });
+
+  it("rebuilds a message from its JSON-RPC fields alone", () => {
+    const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo" }, "param\u017f": { name: "delete_all" }, result: 1, extra: true };
+    expect(rebuildMessage(request as never)).toEqual({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo" } });
+    expect(rebuildMessage({ method: "notifications/initialized" })).toEqual({ method: "notifications/initialized" });
+    expect(rebuildMessage({ jsonrpc: "2.0", id: 3, result: { ok: true }, method: undefined, extra: 1 } as never)).toEqual({ jsonrpc: "2.0", id: 3, result: { ok: true } });
+    expect(rebuildMessage({ jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } })).toEqual({ jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } });
   });
 
   it("compares tokens in constant time without false positives", () => {

@@ -10,25 +10,35 @@
  *   4. Authorization code with PKCE S256, the RFC 8707 `resource`, and
  *      `redirect_uri = <relay url>/oauth/callback`, so a person signs in from
  *      any browser on the tailnet.
- *   5. Tokens live in the encrypted token store. Refresh is serialized per
- *      server and happens ahead of expiry; a rejected access token gets one
- *      refresh. A refused refresh drops the tokens: the server needs a login.
+ *   5. Tokens live in the encrypted token store, tied to the server URL they
+ *      were issued for (the RFC 8707 resource): a definition pointing at
+ *      another URL needs a new login, its old token is never sent there.
+ *   6. Refresh happens ahead of expiry, and once for a rejected access token.
+ *      One refresh runs per server at a time, in the hub's own scope, and
+ *      every request that needs it waits for that one: a client hanging up
+ *      cannot cut a refresh short after the server rotated the refresh token.
+ *   7. A refresh the authorization server refuses (invalid_grant) drops the
+ *      tokens: the server needs a login. invalid_client or
+ *      unauthorized_client drops the client registration too, so the next
+ *      login registers again. Any other failure (a 5xx, a 429, a timeout)
+ *      keeps everything, backs off, and keeps sending the access token while
+ *      it is still valid.
  *
  * Tokens, codes, verifiers and client secrets are never logged.
  */
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { HubDefinition } from "./Definitions.ts";
 import { parseJson } from "./JsonRpc.ts";
 import { base64url, randomBytes, randomSecret, sha256Base64url } from "./Policy.ts";
-import { withServer, type OAuthClient, type OAuthEndpoints, type OAuthTokens, type TokenStore } from "./TokenStore.ts";
+import { withServer, type OAuthClient, type OAuthEndpoints, type OAuthTokens, type StoredServer, type TokenStore } from "./TokenStore.ts";
 
 /** Something went wrong talking to an authorization server; worth retrying later. */
 export class OAuthError extends Schema.TaggedError<OAuthError>()("OAuthError", { message: Schema.String }) {}
@@ -241,6 +251,15 @@ const oauthErrorText = (text: string) => {
   return parts.join(": ").slice(0, 200);
 };
 
+/** The RFC 6749 error code of an OAuth error body, or null. */
+const oauthErrorCode = (text: string) => {
+  const value = parseJson(text) as { error?: unknown } | undefined;
+  return typeof value?.error === "string" ? value.error : null;
+};
+
+/** Error codes that say the authorization server no longer knows the client: its registration is dead. */
+const CLIENT_GONE: ReadonlyArray<string> = ["invalid_client", "unauthorized_client"];
+
 const mapTransport = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, OAuthError, R> =>
   effect.pipe(
     Effect.mapError((e) => (Schema.is(OAuthError)(e) ? e : new OAuthError({ message: `authorization server unreachable (${e._tag})` }))),
@@ -249,6 +268,8 @@ const mapTransport = <A, E extends { readonly _tag: string }, R>(effect: Effect.
 export interface TokenRequestResult {
   readonly status: number;
   readonly tokens: OAuthTokens | null;
+  /** The RFC 6749 error code, when the server sent one. */
+  readonly code: string | null;
   readonly error: string;
 }
 
@@ -266,9 +287,9 @@ const tokenRequest = (tokenEndpoint: string, client: OAuthClient, params: Record
     const response = yield* http.execute(request);
     const text = yield* response.text;
     const now = yield* Clock.currentTimeMillis;
-    if (response.status !== 200) return { status: response.status, tokens: null, error: oauthErrorText(text) } satisfies TokenRequestResult;
+    if (response.status !== 200) return { status: response.status, tokens: null, code: oauthErrorCode(text), error: oauthErrorText(text) } satisfies TokenRequestResult;
     const decoded = Schema.decodeUnknownOption(TokenResponse)(parseJson(text));
-    if (Option.isNone(decoded)) return { status: 502, tokens: null, error: "the token endpoint returned no access_token" } satisfies TokenRequestResult;
+    if (Option.isNone(decoded)) return { status: 502, tokens: null, code: null, error: "the token endpoint returned no access_token" } satisfies TokenRequestResult;
     const t = decoded.value;
     const tokens: OAuthTokens = {
       accessToken: t.access_token,
@@ -277,22 +298,41 @@ const tokenRequest = (tokenEndpoint: string, client: OAuthClient, params: Record
       issuedAt: now,
       scope: t.scope ?? null,
     };
-    return { status: 200, tokens, error: "" } satisfies TokenRequestResult;
+    return { status: 200, tokens, code: null, error: "" } satisfies TokenRequestResult;
   }).pipe(Effect.timeout(Duration.seconds(15)), Effect.catchTag("TimeoutError", () => Effect.fail(new OAuthError({ message: "the token endpoint timed out" }))), mapTransport);
+
+/** How a sign-in begun with `start` is going, looked up by its state. */
+export const LoginStatus = Schema.Struct({
+  status: Schema.Literals(["pending", "done", "failed", "unknown"]),
+  server: Schema.NullOr(Schema.String),
+  /** Why it failed. */
+  detail: Schema.NullOr(Schema.String),
+});
+export type LoginStatus = typeof LoginStatus.Type;
+
+/**
+ * Where a token will be sent: the server URL, or null for a server on this
+ * machine whose port changes (a container), which takes the server's login
+ * whatever URL it was issued for.
+ */
+export type TokenTarget = string | null;
 
 export interface OAuthManager {
   /** Begin a login: the URL a person opens. */
   readonly start: (definition: HubDefinition, serverUrl: string, challenge: string | null) => Effect.Effect<string, OAuthError>;
   /** Finish a login from the callback's query; returns the server's name. */
   readonly finish: (query: Readonly<Record<string, string | undefined>>) => Effect.Effect<string, OAuthError>;
-  /** A current access token, refreshed first when it is close to expiring. */
-  readonly accessToken: (server: string) => Effect.Effect<string, NeedsLogin | OAuthError>;
+  /** How the sign-in with this state is going. */
+  readonly loginStatus: (state: string) => Effect.Effect<LoginStatus>;
+  /** A current access token for `target`, refreshed first when it is close to expiring. */
+  readonly accessToken: (server: string, target: TokenTarget) => Effect.Effect<string, NeedsLogin | OAuthError>;
   /** The server rejected `rejected`: refresh once (unless another request already did). */
-  readonly afterRejection: (server: string, rejected: string) => Effect.Effect<string, NeedsLogin | OAuthError>;
-  /** Drop the server's tokens (sign out); its client registration is kept. */
+  readonly afterRejection: (server: string, target: TokenTarget, rejected: string) => Effect.Effect<string, NeedsLogin | OAuthError>;
+  /** Sign out: drop the server's tokens and its dynamic client registration, so the next login starts afresh. */
   readonly forget: (server: string) => Effect.Effect<void>;
   readonly expiresAt: (server: string) => Effect.Effect<number | null>;
-  readonly hasTokens: (server: string) => Effect.Effect<boolean>;
+  /** Whether the server has tokens; with a target, tokens that may be sent there. */
+  readonly hasTokens: (server: string, target?: TokenTarget) => Effect.Effect<boolean>;
 }
 
 interface Pending {
@@ -305,6 +345,9 @@ interface Pending {
 
 const PENDING_FOR = 10 * 60_000;
 const MAX_PENDING = 64;
+/** After a refresh fails for a reason worth retrying, wait this long, doubling up to the maximum. */
+export const REFRESH_BACKOFF = 10_000;
+const REFRESH_BACKOFF_MAX = 5 * 60_000;
 /** Refresh this long before the access token expires (or halfway, for tokens that live less than twice this). */
 export const REFRESH_AHEAD = 5 * 60_000;
 
@@ -315,6 +358,9 @@ export const isFresh = (t: OAuthTokens, now: number) => {
   return t.expiresAt - now > Math.min(REFRESH_AHEAD, lifetime / 2);
 };
 
+/** Whether the server would still accept a token, fresh or not. */
+const isValid = (t: OAuthTokens, now: number) => t.expiresAt === null || t.expiresAt > now;
+
 export const makeOAuthManager = (options: {
   readonly store: TokenStore;
   /** Exactly `<relay url>/oauth/callback`. */
@@ -323,22 +369,43 @@ export const makeOAuthManager = (options: {
   readonly clientName?: string;
   /** Tests only: accept plain-HTTP OAuth URLs on loopback. */
   readonly allowLoopbackHttp?: boolean;
+  /** Tests only: the first wait after a failed refresh; default REFRESH_BACKOFF. */
+  readonly refreshBackoff?: number;
 }) =>
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient;
+    // Refreshes run here, not on the request that needed them.
+    const scope = yield* Effect.scope;
     const provide = <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) => Effect.provideService(effect, HttpClient.HttpClient, http);
     const pending = new Map<string, Pending>();
-    const locks = new Map<string, Semaphore.Semaphore>();
-    const lockFor = (server: string) => {
-      let lock = locks.get(server);
-      if (lock === undefined) {
-        lock = Semaphore.makeUnsafe(1);
-        locks.set(server, lock);
-      }
-      return lock;
-    };
+    const finished = new Map<string, LoginStatus & { readonly at: number }>();
+    const refreshing = new Map<string, Deferred.Deferred<string, NeedsLogin | OAuthError>>();
+    const backoff = new Map<string, { readonly failures: number; readonly until: number }>();
+    const firstBackoff = options.refreshBackoff ?? REFRESH_BACKOFF;
 
     const entry = (server: string) => options.store.get.pipe(Effect.map((s) => s.servers[server]));
+
+    /** Whether the stored login may be sent to `target`. */
+    const isFor = (stored: StoredServer, target: TokenTarget) => {
+      if (target === null) return true;
+      const resource = URL.parse(target) === null ? null : canonicalResource(target);
+      return stored.endpoints !== undefined && stored.endpoints.resource === resource;
+    };
+
+    /** The tokens to use for `target`, or why there are none. */
+    const tokensFor = (server: string, stored: StoredServer | undefined, target: TokenTarget) =>
+      Effect.gen(function* () {
+        if (stored?.tokens === undefined) return yield* new NeedsLogin({ server, message: "not signed in" });
+        if (!isFor(stored, target)) {
+          return yield* new NeedsLogin({ server, message: `the login is for ${stored.endpoints?.resource ?? "another address"}, not ${target ?? ""}; sign in again` });
+        }
+        return stored.tokens;
+      });
+
+    /** How long until the next refresh may be tried, in milliseconds; 0 when it may now. */
+    const backingOff = (server: string, now: number) => Math.max(0, (backoff.get(server)?.until ?? 0) - now);
+
+    const retryIn = (ms: number) => new OAuthError({ message: `refreshing the login failed; trying again in ${Math.ceil(ms / 1000)}s` });
 
     const clientFor = (definition: HubDefinition, discovery: Discovery) =>
       Effect.gen(function* () {
@@ -399,16 +466,26 @@ export const makeOAuthManager = (options: {
         return url.toString();
       });
 
-    const finish: OAuthManager["finish"] = (query) =>
+    /** Drop a client registration the authorization server no longer knows, and the tokens issued to it. */
+    const forgetClient = (server: string, client: OAuthClient) =>
+      options.store.update((s) => [undefined, s.servers[server]?.client?.clientId === client.clientId ? withServer(s, server, null) : s]);
+
+    /** Remember how a sign-in ended, for `loginStatus`. */
+    const remember = (state: string, status: LoginStatus) =>
       Effect.gen(function* () {
-        const state = query["state"] ?? "";
-        const p = pending.get(state);
-        if (p === undefined) return yield* new OAuthError({ message: "this sign-in is unknown or was already used; start it again" });
-        pending.delete(state);
+        const now = yield* Clock.currentTimeMillis;
+        for (const [key, f] of finished) if (now - f.at > PENDING_FOR || finished.size >= MAX_PENDING) finished.delete(key);
+        finished.set(state, { ...status, at: now });
+      });
+
+    const complete = (p: Pending, query: Readonly<Record<string, string | undefined>>) =>
+      Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         if (now - p.createdAt > PENDING_FOR) return yield* new OAuthError({ message: "this sign-in expired; start it again" });
-        if (query["error"] !== undefined) {
-          return yield* new OAuthError({ message: `the authorization server refused: ${[query["error"], query["error_description"]].filter(Boolean).join(": ").slice(0, 200)}` });
+        const refused = query["error"];
+        if (refused !== undefined) {
+          if (CLIENT_GONE.includes(refused)) yield* forgetClient(p.server, p.client);
+          return yield* new OAuthError({ message: `the authorization server refused: ${[refused, query["error_description"]].filter(Boolean).join(": ").slice(0, 200)}` });
         }
         const code = query["code"];
         if (code === undefined || code === "") return yield* new OAuthError({ message: "the callback carried no code" });
@@ -420,78 +497,165 @@ export const makeOAuthManager = (options: {
             null,
           ),
         );
-        if (result.tokens === null) return yield* new OAuthError({ message: `the token exchange failed: HTTP ${result.status} ${result.error}` });
+        if (result.tokens === null) {
+          if (result.code !== null && CLIENT_GONE.includes(result.code)) yield* forgetClient(p.server, p.client);
+          return yield* new OAuthError({ message: `the token exchange failed: HTTP ${result.status} ${result.error}` });
+        }
         const tokens = result.tokens;
         yield* options.store.update((s) => [undefined, withServer(s, p.server, { client: p.client, endpoints: p.endpoints, tokens })]);
+        backoff.delete(p.server);
         return p.server;
       });
 
-    /** Under the server's lock: refresh, or drop the tokens when the server refuses. */
-    const refreshLocked = (server: string) =>
+    const finish: OAuthManager["finish"] = (query) =>
+      Effect.gen(function* () {
+        const state = query["state"] ?? "";
+        const p = pending.get(state);
+        if (p === undefined) return yield* new OAuthError({ message: "this sign-in is unknown or was already used; start it again" });
+        pending.delete(state);
+        return yield* complete(p, query).pipe(
+          Effect.tap(() => remember(state, { status: "done", server: p.server, detail: null })),
+          Effect.tapError((e) => remember(state, { status: "failed", server: p.server, detail: e.message })),
+        );
+      });
+
+    const loginStatus: OAuthManager["loginStatus"] = (state) =>
+      Effect.sync((): LoginStatus => {
+        const p = pending.get(state);
+        if (p !== undefined) return { status: "pending", server: p.server, detail: null };
+        const f = finished.get(state);
+        return f === undefined ? { status: "unknown", server: null, detail: null } : { status: f.status, server: f.server, detail: f.detail };
+      });
+
+    /**
+     * One refresh against the authorization server. A refused one drops the
+     * tokens (and, when the client is gone, its registration); any other
+     * failure keeps them and starts a backoff.
+     */
+    const refreshNow = (server: string) =>
       Effect.gen(function* () {
         const e = yield* entry(server);
-        if (e?.tokens === undefined || e.client === undefined || e.endpoints === undefined) {
-          return yield* new NeedsLogin({ server, message: "not signed in" });
+        if (e?.tokens === undefined || e.endpoints === undefined) return yield* new NeedsLogin({ server, message: "not signed in" });
+        const used = e.tokens;
+        // A sign-in or sign-out while this refresh ran wins over its outcome.
+        const ifUnchanged = (next: (current: StoredServer) => StoredServer | null) =>
+          options.store.update((s) => {
+            const current = s.servers[server];
+            return [undefined, current?.tokens === used ? withServer(s, server, next(current)) : s];
+          });
+        const withoutTokens = (current: StoredServer): StoredServer => ({
+          ...(current.client === undefined ? {} : { client: current.client }),
+          ...(current.endpoints === undefined ? {} : { endpoints: current.endpoints }),
+        });
+        if (e.client === undefined) {
+          yield* ifUnchanged(() => null);
+          return yield* new NeedsLogin({ server, message: "the login has no client registration" });
         }
         const { client, endpoints } = e;
-        if (e.tokens.refreshToken === null) {
-          yield* options.store.update((s) => [undefined, withServer(s, server, { client, endpoints })]);
+        if (used.refreshToken === null) {
+          yield* ifUnchanged(withoutTokens);
           return yield* new NeedsLogin({ server, message: "the access token expired and there is no refresh token" });
         }
         const result = yield* provide(
-          tokenRequest(e.endpoints.tokenEndpoint, e.client, { grant_type: "refresh_token", refresh_token: e.tokens.refreshToken, resource: e.endpoints.resource }, e.tokens.refreshToken),
+          tokenRequest(endpoints.tokenEndpoint, client, { grant_type: "refresh_token", refresh_token: used.refreshToken, resource: endpoints.resource }, used.refreshToken),
         );
         if (result.tokens !== null) {
           const tokens = result.tokens;
-          yield* options.store.update((s) => [undefined, withServer(s, server, { ...s.servers[server], tokens })]);
+          yield* ifUnchanged((current) => ({ ...current, tokens }));
+          backoff.delete(server);
           return tokens.accessToken;
         }
-        if (result.status >= 400 && result.status < 500) {
-          yield* options.store.update((s) => [undefined, withServer(s, server, { client, endpoints })]);
-          return yield* new NeedsLogin({ server, message: `refreshing the login was refused (${result.error || `HTTP ${result.status}`})` });
+        const refused = `refreshing the login was refused (${result.error || `HTTP ${result.status}`})`;
+        if (result.code !== null && CLIENT_GONE.includes(result.code)) {
+          yield* ifUnchanged(() => null);
+          return yield* new NeedsLogin({ server, message: refused });
         }
-        return yield* new OAuthError({ message: `refreshing the login failed: HTTP ${result.status}` });
-      });
+        if (result.code === "invalid_grant") {
+          yield* ifUnchanged(withoutTokens);
+          return yield* new NeedsLogin({ server, message: refused });
+        }
+        return yield* new OAuthError({ message: `refreshing the login failed: ${result.error || `HTTP ${result.status}`}` });
+      }).pipe(
+        Effect.tapError((e) =>
+          e._tag === "NeedsLogin"
+            ? Effect.sync(() => backoff.delete(server))
+            : Effect.gen(function* () {
+                const now = yield* Clock.currentTimeMillis;
+                const failures = (backoff.get(server)?.failures ?? 0) + 1;
+                const expiresAt = (yield* entry(server))?.tokens?.expiresAt ?? null;
+                // Try again at expiry at the latest, so a token that could be refreshed then is.
+                const wait = Math.min(firstBackoff * 2 ** (failures - 1), REFRESH_BACKOFF_MAX);
+                backoff.set(server, { failures, until: expiresAt !== null && expiresAt > now ? Math.min(now + wait, expiresAt) : now + wait });
+              }),
+        ),
+      );
 
-    const accessToken: OAuthManager["accessToken"] = (server) =>
+    /**
+     * The server's refresh: the one running, or a new one in the hub's scope.
+     * Waiting can be interrupted; the refresh itself is not.
+     */
+    const refresh = (server: string) =>
+      Effect.sync(() => {
+        const running = refreshing.get(server);
+        if (running !== undefined) return { deferred: running, started: false };
+        const deferred = Deferred.makeUnsafe<string, NeedsLogin | OAuthError>();
+        refreshing.set(server, deferred);
+        return { deferred, started: true };
+      }).pipe(
+        Effect.tap(({ deferred, started }) =>
+          started
+            ? refreshNow(server).pipe(
+                Effect.onExit((exit) => Effect.sync(() => refreshing.delete(server)).pipe(Effect.andThen(Deferred.done(deferred, exit)))),
+                Effect.interruptible,
+                Effect.forkIn(scope),
+              )
+            : Effect.void,
+        ),
+        Effect.uninterruptible,
+        Effect.flatMap(({ deferred }) => Deferred.await(deferred)),
+      );
+
+    const accessToken: OAuthManager["accessToken"] = (server, target) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
-        const before = (yield* entry(server))?.tokens;
-        if (before === undefined) return yield* new NeedsLogin({ server, message: "not signed in" });
+        const before = yield* tokensFor(server, yield* entry(server), target);
         if (isFresh(before, now)) return before.accessToken;
-        return yield* Semaphore.withPermit(
-          lockFor(server),
-          Effect.gen(function* () {
-            const current = (yield* entry(server))?.tokens;
-            // Another request refreshed while this one waited for the lock.
-            if (current !== undefined && (current.accessToken !== before.accessToken || isFresh(current, yield* Clock.currentTimeMillis))) return current.accessToken;
-            return yield* refreshLocked(server);
-          }),
+        // Nothing to refresh with: use the token until it expires.
+        if (before.refreshToken === null && isValid(before, now)) return before.accessToken;
+        const wait = backingOff(server, now);
+        if (wait > 0) return isValid(before, now) ? before.accessToken : yield* retryIn(wait);
+        return yield* refresh(server).pipe(
+          Effect.catchTag("OAuthError", (e) =>
+            Effect.gen(function* () {
+              // The authorization server is having trouble; the token it issued still works.
+              const current = (yield* entry(server))?.tokens;
+              if (current !== undefined && current.accessToken === before.accessToken && isValid(current, yield* Clock.currentTimeMillis)) return current.accessToken;
+              return yield* e;
+            }),
+          ),
         );
       });
 
-    const afterRejection: OAuthManager["afterRejection"] = (server, rejected) =>
-      Semaphore.withPermit(
-        lockFor(server),
-        Effect.gen(function* () {
-          const current = (yield* entry(server))?.tokens;
-          if (current !== undefined && current.accessToken !== rejected) return current.accessToken;
-          return yield* refreshLocked(server);
-        }),
-      );
+    const afterRejection: OAuthManager["afterRejection"] = (server, target, rejected) =>
+      Effect.gen(function* () {
+        const current = yield* tokensFor(server, yield* entry(server), target);
+        // Another request refreshed already.
+        if (current.accessToken !== rejected) return current.accessToken;
+        const wait = backingOff(server, yield* Clock.currentTimeMillis);
+        if (wait > 0) return yield* retryIn(wait);
+        return yield* refresh(server);
+      });
 
     const manager: OAuthManager = {
       start,
       finish,
+      loginStatus,
       accessToken,
       afterRejection,
-      forget: (server) =>
-        options.store.update((s) => {
-          const e = s.servers[server];
-          return [undefined, withServer(s, server, e === undefined ? null : e.client === undefined ? {} : { client: e.client })];
-        }),
+      // A provider may forget a dynamic client without saying so; signing out and in again then registers a new one.
+      forget: (server) => options.store.update((s) => [undefined, withServer(s, server, null)]).pipe(Effect.andThen(Effect.sync(() => backoff.delete(server)))),
       expiresAt: (server) => entry(server).pipe(Effect.map((e) => e?.tokens?.expiresAt ?? null)),
-      hasTokens: (server) => entry(server).pipe(Effect.map((e) => e?.tokens !== undefined)),
+      hasTokens: (server, target) => entry(server).pipe(Effect.map((e) => e?.tokens !== undefined && (target === undefined || isFor(e, target)))),
     };
     return manager;
   });
