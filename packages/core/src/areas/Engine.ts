@@ -446,7 +446,7 @@ export const EngineArea = defineArea({
         severity: "warn",
         area: "engine",
         title: "~/.config/t3-fleet/config.toml does not name this machine and its config repo",
-        // Not safe: which repo this machine uses is a person's choice (join --dir), and a wrong one stops every sync.
+        // Not safe: which repo this machine uses is a person's choice (setup --dir), and a wrong one stops every sync.
         fix: {
           command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`,
           safe: false,

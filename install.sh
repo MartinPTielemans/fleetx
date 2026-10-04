@@ -2,7 +2,7 @@
 # Install T3 Fleet: one file, run by Node 24 or newer.
 #
 #   curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
-#   curl -fsSL …/install.sh | sh -s -- join <config-repo-url> <name>    # install, then run a command
+#   curl -fsSL …/install.sh | sh -s -- setup <config-repo-url> <name>   # install, then run a command
 #
 # T3_FLEET_VERSION=v0.8.0 pins a release. The download is checked against the
 # release's SHA256SUMS and, with gh installed and logged in, its build

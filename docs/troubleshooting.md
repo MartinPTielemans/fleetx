@@ -50,10 +50,10 @@ T3 Fleet where you run it from (`install.sh`, or `t3-fleet fix` from a
 machine that has the newer build).
 
 **`engine-local-config`** — `~/.config/t3-fleet/config.toml` does not name this
-machine and its config repo. The fix writes it (as `t3-fleet join` would). Sync
-never runs it: which repo a machine uses is a person's choice (`join --dir`,
+machine and its config repo. The fix writes it (as `t3-fleet setup` does). Sync
+never runs it: which repo a machine uses is a person's choice (`setup --dir`,
 `T3_FLEET_CONFIG_REPO`), and pointing it at a missing one stops every sync. A
-machine's own sync checks the repo it loaded, so `join --dir` does not raise it.
+machine's own sync checks the repo it loaded, so `setup --dir` does not raise it.
 
 **`engine-timer`** — `[engine] timer = true` but the sync timer is missing,
 out of date, or not running. The fix installs a launchd agent (macOS) or a

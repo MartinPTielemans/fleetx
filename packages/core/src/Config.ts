@@ -306,7 +306,7 @@ export const probeSettings = (
     : {
         relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
       }),
-  // This machine uses the repo it loaded, wherever it is (join --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
+  // This machine uses the repo it loaded, wherever it is (setup --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,
   ...(config.settings.plugins?.areas === undefined
     ? {}

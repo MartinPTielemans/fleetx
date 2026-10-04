@@ -1,6 +1,6 @@
 # Quickstart
 
-Five minutes from one machine to two.
+From one machine to two, with what each already has.
 
 ## 1. Install
 
@@ -12,22 +12,90 @@ Or `brew install martinptielemans/tap/fleetx`, or `nix run github:MartinPTielema
 T3 Fleet is one file run by Node 24 or newer. With `gh` installed, the installer
 checks the download against the release's build attestation.
 
-## 2. Start a fleet from this machine
+`t3-fleet doctor` checks the machine first: Node, git, gh, `~/.local/bin` on
+PATH, and whether a sync timer would run here.
+
+## 2. Start a fleet on this machine
 
 ```sh
-t3-fleet init --github you/fleet
+t3-fleet setup
 ```
 
-`init` looks at what is already here (Claude Code, Codex, T3 Code, skills, MCP
-servers, CLAUDE.md, AGENTS.md) and writes a config repository from it, with this
-machine as the authority. It copies and reads; it changes nothing on the
-machine. Tokens it finds in MCP configuration go into an encrypted secrets file,
-never into plain files. `--github` creates the private repository and pushes.
+Setup looks at what is already here and shows one screen of what it would do,
+before it writes anything:
 
-```sh
-t3-fleet status        # every machine: T3, the providers it launches, agent CLIs
-t3-fleet fix           # apply what status suggests, after showing it
 ```
+T3 Fleet setup  laptop  first machine: starts a fleet (~/fleet)
+
+Pre-flight
+  ✓ Node 24.13.1
+  ✓ git version 2.47.1
+  ✓ gh signed in as you
+  ✓ ~/.local/bin is on PATH
+  ✓ launchd will run the sync timer
+
+Will add to the repo
+  skill   review  from ~/.claude/skills
+  skill   fmt  from ~/.claude/skills (https://github.com/acme/skills @ 24b2f6c)
+  server  posthog
+  server  localdb  this machine only: listens on this machine (localhost)
+  server  t3-fleet  (T3 Fleet's own, for agents in T3)
+  file    ~/.claude/CLAUDE.md → instructions/claude/CLAUDE.md
+
+Will link (what is there now moves to ~/.local/state/t3-fleet/setup/backup)
+  ~/.agents/skills/review → ~/fleet/skills/review
+  ~/.claude/skills/review → ~/.agents/skills/review
+  …
+
+Conflicts (each is asked next; the default is first)
+  skill demo: 2 different copies on this machine: use the copy in ~/.agents/skills
+
+Left alone
+  skill plug (~/.claude/skills/plug): a Claude plugin's; Claude's plugin system keeps it
+  Claude Code 2.1.288: installed by native installer at ~/.local/bin/claude; setup never installs or upgrades agent CLIs
+
+Secrets (encrypted into the repo; never in plain text)
+  POSTHOG_TOKEN  phx…  posthog: header Authorization
+
+Optional extras (each asked next; skippable)
+  relay        an always-on machine gives instant sync and holds your MCP logins
+  model proxy  retries, stats, a login that doesn't expire
+  T3 access    provider logins and health as T3 itself sees them
+
+Repository  gh repo create you/t3-fleet --private
+```
+
+What it finds:
+
+- **Skills** in `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills`.
+  Two copies of one skill that differ are a choice, never first-found-wins. A
+  skill cloned with git is copied without its `.git` and recorded in
+  `skills/SOURCES.json` (its URL, its path there, the commit), and a clone
+  holding several skills gives each of them. Plugin skills stay with Claude's
+  plugin system; Codex's `.system` skills are never touched.
+- **MCP servers** in Claude and Codex, Claude's project servers too. Every
+  credential goes into the encrypted secrets file under its own name, wherever
+  it was: a header, an env value, a URL's query or password, the argument after
+  `--api-key`. A Codex `bearer_token_env_var` is read from the environment, or
+  asked for. A server on localhost, or run from outside your home directory,
+  is this machine's only; a project's server is declared in the repo and
+  registered nowhere until a machine lists it.
+- **Instructions**: `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.agents/AGENTS.md`.
+- **T3 and the agent CLIs**: reported only. Setup never installs or upgrades
+  Claude Code or Codex; later syncs follow `[fleet] apply` as they always have.
+
+Then it creates the repository (`gh repo create <you>/t3-fleet --private` when
+gh is signed in; `--github owner/name` for another name, `--remote <url>` for
+an empty repository elsewhere, or local only, with the next step shown),
+encrypts the secrets, commits and pushes, links skills and instructions into
+place, installs the sync timer when pre-flight says it will run, declares T3
+Fleet's own MCP server, and syncs once.
+
+`--plan` shows the plan and stops. `--yes` takes every default. Before it
+changes anything, setup keeps a snapshot of your clients' MCP servers and
+every path it replaces with a link (`~/.local/state/t3-fleet/setup/before.json`),
+so `t3-fleet leave` can give the machine back what it had. A setup that fails
+part-way says where, and `t3-fleet setup --resume` continues from there.
 
 ## 3. Add a second machine
 
@@ -37,22 +105,39 @@ On the first machine:
 t3-fleet invite desktop
 ```
 
-It prints a command. Run it on the new machine:
+It prints one line. Run it on the new machine:
 
 ```sh
-curl -fsSL …/install.sh | sh -s -- join https://github.com/you/fleet.git desktop
+curl -fsSL …/install.sh | sh -s -- setup https://github.com/you/t3-fleet.git desktop
 ```
 
-The new machine clones the repository, creates its own key, installs its sync
-timer, and converges. The authority's next sync lets it read the secrets.
+The new machine shows its own plan against the fleet: what the fleet already
+has, what this machine would add, and each difference with a diff. The
+defaults:
+
+| difference                        | default                                                     | or                                                 |
+| --------------------------------- | ----------------------------------------------------------- | -------------------------------------------------- |
+| a skill of the same name          | keep mine and propose it (the fleet's stays until approved) | use the fleet's; keep both, mine as `name@desktop` |
+| an MCP server or instruction file | keep mine and propose it                                    | use the fleet's; keep mine on this machine only    |
+
+A member never commits to the branch: what it adds is proposed, its secrets
+encrypted for the authorities. On the first machine:
+
+```sh
+t3-fleet review            # each proposal, with its files
+t3-fleet approve desktop   # applies it, and merges the secrets it proposed
+```
+
+The authority's next sync adds the new machine's key, and from then on it reads
+the fleet's secrets. Its MCP servers are registered once it can.
+
+Running `t3-fleet setup` again on a machine that is set up is safe: it shows what
+still differs from the fleet (a skill installed since, say), and nothing else.
 
 ## 4. Use it from T3 Code
 
-```sh
-claude mcp add T3 Fleet -- t3-fleet mcp
-```
-
-Any thread can now be asked "what's wrong with my environments?". The tools are
+Setup declares T3 Fleet's own MCP server (`t3-fleet mcp`), so any thread on any
+machine can be asked "what's wrong with my environments?". The tools are
 `fleet_status`, `fleet_apply_fixes` and `fleet_alerts`.
 
 Or open it in a browser:
