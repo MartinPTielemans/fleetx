@@ -95,10 +95,14 @@ Ticked items are done and in `main`.
 - [x] Releases carry `t3-fleet.mjs` and `fleetx.mjs`; install script, Nix and
       Homebrew keep working
 - [x] The author's fleet upgraded and migrated (2026-10-04)
-- [ ] Config repo names, once every machine runs T3 Fleet: `fleetx.toml` →
-      `t3-fleet.toml`, `fleetx/state|staging|rejected` → `t3-fleet/…`,
-      `FLEETX_RELAY_TOKEN` and `FLEETX_MCP_TOKEN_*` → `T3_FLEET_…`; an
-      authority fix, offered when every machine's published state is new enough
+- [x] Config repo names: `t3-fleet repo rename` (`engine-repo-names`, offered on
+      the authority once every machine runs the controller's build) moves
+      `fleetx.toml` → `t3-fleet.toml` and `fleetx/state|staging|rejected` →
+      `t3-fleet/…`, and adds every `FLEETX_*` secret as `T3_FLEET_*`
+- [ ] The author's config repo renamed
+- [ ] 1.0: variables agents read from T3's environment (`FLEETX_RELAY_TOKEN`,
+      `token_env = "FLEETX_MCP_TOKEN_*"`) renamed and the `FLEETX_*` secrets
+      dropped, together with a T3 restart on every machine
 - [ ] GitHub repository, npm package and Homebrew formula renamed (owner)
 - [ ] 1.0: drop the old names (alias, both headers, legacy reads, `fleetx.mjs`)
 

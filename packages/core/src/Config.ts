@@ -10,7 +10,7 @@
  *
  * The repository holds the setup itself:
  *
- *   fleetx.toml          the whole fleet: [fleet], [proxy], [defaults], [[accept]]
+ *   t3-fleet.toml          the whole fleet: [fleet], [proxy], [defaults], [[accept]]
  *   profiles/<name>.toml settings shared by the nodes that list the profile
  *   nodes/<name>.toml    one machine: ssh, roles, profiles, its own settings
  *
@@ -25,7 +25,7 @@ import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
-import { configDir } from "./Names.ts";
+import { configDir, FLEET_FILE, LEGACY_FLEET_FILE, repoRenamed } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -149,7 +149,8 @@ export const loadConfigFrom = (repo: string, self: string) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
-    const fleetPath = path.join(repo, "fleetx.toml");
+    // t3-fleet.toml in a repo not renamed yet (Names.ts). Until 1.0.
+    const fleetPath = path.join(repo, repoRenamed(repo) ? FLEET_FILE : LEGACY_FLEET_FILE);
     const fleetRaw = Option.getOrElse(yield* readTomlTable(fleetPath), (): Table => ({}));
     const settings = yield* decodeAs(FleetFile, fleetRaw, fleetPath);
 

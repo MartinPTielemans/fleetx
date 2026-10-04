@@ -3,11 +3,11 @@
  *
  *   1. propose  changes under [fleet] auto_commit paths (skills/, say): an
  *               authority commits them to the branch; any other node
- *               proposes them on fleetx/staging/<node> for approval
+ *               proposes them on t3-fleet/staging/<node> for approval
  *   2. pull     the branch, refusing when local edits overlap incoming files
  *   3. converge observe this node, diagnose it against the whole fleet's
  *               last reported state, and run its safe fixes in [fleet] apply
- *   4. report   this node's observation and findings to fleetx/state/<node>
+ *   4. report   this node's observation and findings to t3-fleet/state/<node>
  *   5. alert    record health transitions there too, for whoever relays them
  *
  * Every branch T3 Fleet writes belongs to one node, so pushes never race.
@@ -29,10 +29,8 @@ import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { reportToRelay } from "./RelayClient.ts";
-import { approve, autoApprovable, listProposals, settleRejection, STAGING } from "./Staging.ts";
-import { stateDir } from "./Names.ts";
-
-export const STATE_PREFIX = "fleetx/state/";
+import { approve, autoApprovable, listProposals, settleRejection } from "./Staging.ts";
+import { branchPrefix, branchPrefixes, repoRenamed, stateDir } from "./Names.ts";
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
@@ -44,19 +42,34 @@ const MAX_ALERTS = 50;
 const settingList = (config: Config, key: "auto_commit" | "apply" | "auto_approve", fallback: ReadonlyArray<string>) =>
   config.settings.fleet?.[key] ?? fallback;
 
-/** All nodes' published state, from their fleetx/state/<node> branches. */
+/**
+ * All nodes' published state, from their t3-fleet/state/<node> branches, and
+ * fleetx/state/<node> until 1.0: a machine that has not pulled the repo's
+ * rename still publishes there. A node on both counts with its newer state.
+ */
 export const readStates = (repo: string) =>
   Effect.gen(function* () {
-    yield* git(repo, ["fetch", "-q", "origin", `+refs/heads/${STATE_PREFIX}*:refs/remotes/origin/${STATE_PREFIX}*`]);
-    const refs = yield* git(repo, ["for-each-ref", "--format=%(refname:strip=3)", `refs/remotes/origin/${STATE_PREFIX}`]);
-    const states: Array<NodeState> = [];
+    const prefixes = branchPrefixes("state");
+    yield* git(repo, ["fetch", "-q", "--prune", "origin", ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`)]);
+    const refs = yield* git(repo, ["for-each-ref", "--format=%(refname:strip=3)", ...prefixes.map((p) => `refs/remotes/origin/${p}`)]);
+    const byNode = new Map<string, NodeState>();
     for (const ref of out(refs).split("\n").filter(Boolean)) {
       const show = yield* git(repo, ["show", `origin/${ref}:state.json`]);
       if (!ok(show)) continue;
       const state = yield* decodeState(show.stdout).pipe(Effect.option);
-      if (Option.isSome(state)) states.push(state.value);
+      if (Option.isNone(state)) continue;
+      const seen = byNode.get(state.value.node);
+      if (seen === undefined || state.value.at > seen.at) byNode.set(state.value.node, state.value);
     }
-    return states;
+    return [...byNode.values()];
+  });
+
+/** In a renamed repo, a branch this node still has under its fleetx name is deleted. Until 1.0. */
+const dropLegacyBranch = (repo: string, kind: "state" | "staging", node: string) =>
+  Effect.gen(function* () {
+    if (!repoRenamed(repo)) return;
+    const ref = `refs/heads/${branchPrefixes(kind)[1]}${node}`;
+    if (ok(yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]))) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
   });
 
 /** Publish this node's state as the single commit on its state branch. */
@@ -67,8 +80,9 @@ const publishState = (repo: string, state: NodeState) =>
     if (!ok(blob)) return yield* Effect.fail(`writing state: ${why(blob)}`);
     const tree = yield* git(repo, ["mktree"], { stdin: `100644 blob ${out(blob)}\tstate.json\n` });
     const commit = yield* git(repo, ["commit-tree", out(tree), "-m", `State of ${state.node}`]);
-    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:refs/heads/${STATE_PREFIX}${state.node}`]);
+    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:refs/heads/${branchPrefix(repo, "state")}${state.node}`]);
     if (!ok(push)) return yield* Effect.fail(`publishing state: ${why(push)}`);
+    yield* dropLegacyBranch(repo, "state", state.node);
   });
 
 /** Changed or new files under `paths`, as git sees them (ignored files excluded). */
@@ -83,13 +97,14 @@ const changedUnder = (repo: string, paths: ReadonlyArray<string>) =>
   });
 
 /**
- * Propose `files` on fleetx/staging/<node>: one commit on top of the branch
+ * Propose `files` on t3-fleet/staging/<node>: one commit on top of the branch
  * tip with exactly these files, built in a scratch index so the working tree
  * and real index are untouched. No files: the proposal is withdrawn.
  */
 const propose = (repo: string, node: string, branch: string, files: ReadonlyArray<string>) =>
   Effect.gen(function* () {
-    const ref = `refs/heads/${STAGING}${node}`;
+    const ref = `refs/heads/${branchPrefix(repo, "staging")}${node}`;
+    yield* dropLegacyBranch(repo, "staging", node);
     if (files.length === 0) {
       const exists = yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]);
       if (ok(exists)) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);

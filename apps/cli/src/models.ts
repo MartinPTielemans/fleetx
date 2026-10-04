@@ -54,7 +54,7 @@ const serve = Command.make("serve", {
       const egress = Option.getOrElse(flag, () => models.egress ?? "direct");
       let relay: { url: string; token: string } | undefined;
       if (egress === "relay") {
-        if (relayUrl === null) return yield* Effect.fail("egress = relay, but fleetx.toml has no [relay] url");
+        if (relayUrl === null) return yield* Effect.fail("egress = relay, but t3-fleet.toml has no [relay] url");
         const token = yield* secretVar(RELAY_TOKEN);
         if (token === "") return yield* Effect.fail(`egress = relay needs ${RELAY_TOKEN} in this node's secrets`);
         relay = { url: relayUrl, token };

@@ -18,6 +18,7 @@ import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
 import { addSkills, land, removeSkills, updateSkills } from "@t3-fleet/core/SkillSources";
+import { renameRepo } from "@t3-fleet/core/RepoRename";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import { readStates, syncRun, type Alert, type NodeState } from "@t3-fleet/core/Sync";
 
@@ -84,7 +85,7 @@ export const renderFleetFromStates = (config: Config, verbose: boolean) =>
 const asAuthority = Effect.gen(function* () {
   const config = yield* loadConfig;
   if (!config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
-    return yield* Effect.fail(`${config.self} is not an authority; review proposals on a node with the authority role`);
+    return yield* Effect.fail(`${config.self} is not an authority; run this on a node with the authority role`);
   }
   return config;
 });
@@ -113,6 +114,22 @@ const proposalOf = (config: Config, node: string) =>
     if (proposal === undefined) return yield* Effect.fail(`no proposal from ${node}`);
     return proposal;
   });
+
+const repoRenameCommand = Command.make("rename").pipe(
+  Command.withDescription("Move the config repo to T3 Fleet's names: t3-fleet.toml, t3-fleet/ branches, T3_FLEET_ secrets (authority)."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* asAuthority;
+      const done = yield* renameRepo(config.repo, config.branch);
+      yield* Console.log(done.length === 0 ? "the config repo already has T3 Fleet's names" : done.join("\n"));
+    }).pipe(reportUserErrors),
+  ),
+);
+
+export const repoCommand = Command.make("repo").pipe(
+  Command.withDescription("The config repo itself."),
+  Command.withSubcommands([repoRenameCommand]),
+);
 
 export const approveCommand = Command.make("approve", { node: Argument.String("node") }).pipe(
   Command.withDescription("Apply a node's proposal to the branch (authority)."),

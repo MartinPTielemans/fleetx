@@ -15,7 +15,7 @@ import { parse as parseToml } from "smol-toml";
 import { exec } from "./Exec.ts";
 import { commitAndPush, ensureGitConfig, git, ok, why } from "./Git.ts";
 import { ensureIdentity, installSecrets, setVar, writeRecipients, writeSecrets } from "./Secrets.ts";
-import { configDir } from "./Names.ts";
+import { configDir, FLEET_FILE, LEGACY_FLEET_FILE } from "./Names.ts";
 
 export interface Discovery {
   readonly node: string;
@@ -107,13 +107,15 @@ export const createRepo = (repo: string, found: Discovery) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = process.env["HOME"] ?? "";
-    if (yield* fs.exists(path.join(repo, "fleetx.toml")).pipe(Effect.orElseSucceed(() => false))) {
-      return yield* Effect.fail(`${repo} already has a fleetx.toml`);
+    for (const file of [FLEET_FILE, LEGACY_FLEET_FILE]) {
+      if (yield* fs.exists(path.join(repo, file)).pipe(Effect.orElseSucceed(() => false))) {
+        return yield* Effect.fail(`${repo} already has a ${file}`);
+      }
     }
     for (const dir of ["nodes", "skills", "mcp", "dotfiles"]) yield* fs.makeDirectory(path.join(repo, dir), { recursive: true });
 
     yield* fs.writeFileString(
-      path.join(repo, "fleetx.toml"),
+      path.join(repo, FLEET_FILE),
       [
         "# This fleet's settings. Machines are in nodes/; https://github.com/MartinPTielemans/fleetx explains every key.",
         "",

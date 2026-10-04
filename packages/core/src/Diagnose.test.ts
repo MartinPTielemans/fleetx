@@ -73,7 +73,7 @@ const ok = (name: string, observation: MachineObservation): NodeResult => ({
   ms: 1,
 });
 
-/** A user's fleetx.toml declaring a proxy with launchers named fleet-*. */
+/** A user's t3-fleet.toml declaring a proxy with launchers named fleet-*. */
 const settings: FleetSettings = {
   proxy: {
     credentials: "~/.config/proxy.json",

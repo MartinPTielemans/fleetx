@@ -41,7 +41,7 @@ a private repository of your own:
 
 ```
 my-fleet/
-├─ fleetx.toml          settings for the whole fleet
+├─ t3-fleet.toml          settings for the whole fleet
 └─ nodes/
    ├─ laptop.toml       one file per machine
    ├─ server.toml       ssh = "server.tailnet.ts.net"
@@ -78,7 +78,7 @@ decision rather than a command are listed, never guessed at.
 
 ## Routing providers through a proxy
 
-If your providers go through a model proxy, describe it in `fleetx.toml`:
+If your providers go through a model proxy, describe it in `t3-fleet.toml`:
 
 ```toml
 [proxy]
@@ -99,7 +99,7 @@ no model call), reports machines whose providers skip the launcher, and offers
 
 ## Intended differences
 
-When a difference is deliberate, accept it in `fleetx.toml` with the id that
+When a difference is deliberate, accept it in `t3-fleet.toml` with the id that
 `status --json` or `fleet_status` shows:
 
 ```toml
@@ -166,9 +166,14 @@ $ t3-fleet fix
 It installs the new build on every machine, moves `~/.config/fleetx` and the
 other directories to their `t3-fleet` names (leaving links behind), replaces
 the timer, relay and model proxy services, and points T3 at the renamed model
-launchers. The config repo's own names (`fleetx.toml`, the `fleetx/state` and
-`fleetx/staging` branches, `FLEETX_*` secrets) stay as they are for now; they
-move in a later step, once every machine runs T3 Fleet.
+launchers.
+
+The config repo's own names move after that, in one step on the authority,
+once every machine runs a build that reads both: `fleetx.toml` becomes
+`t3-fleet.toml`, the `fleetx/state`, `fleetx/staging` and `fleetx/rejected`
+branches become `t3-fleet/…`, and the `FLEETX_*` secrets get `T3_FLEET_*`
+names (the old ones stay until 1.0). `t3-fleet status` offers it as
+`engine-repo-names` when the fleet is ready; it runs `t3-fleet repo rename`.
 
 ## Documentation
 

@@ -2,7 +2,7 @@
  * Merging a node's settings from layers, and remembering where each value
  * came from.
  *
- * Layers, lowest first: fleetx.toml `[defaults]`, each profile the node lists
+ * Layers, lowest first: t3-fleet.toml `[defaults]`, each profile the node lists
  * (profiles/<name>.toml, in order), then the node's own file. Tables merge key
  * by key. A list is replaced by a later layer, unless that layer edits it:
  *

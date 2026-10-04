@@ -151,7 +151,7 @@ const tokenCreate = Command.make("create", {
       const body = toJson(server.length === 0 ? {} : { servers: server });
       const text = yield* hubRequest(config, "POST", `/hub/tokens/${encodeURIComponent(client)}`, body).pipe(Effect.flatMap(expectOk));
       const { token } = yield* decodeCreated(text).pipe(Effect.mapError(() => "the relay sent an unexpected answer"));
-      const env = clientTokenEnv(client);
+      const env = clientTokenEnv(config.repo, client);
       const self = config.nodes.find((n) => n.name === config.self);
       if (self?.roles.includes("authority")) {
         const secrets = setVar(yield* readSecrets(config.repo), env, token);
@@ -189,7 +189,7 @@ const tokenRevoke = Command.make("revoke", { client: clientArg }).pipe(
     Effect.gen(function* () {
       const config = yield* loadConfig;
       yield* hubRequest(config, "DELETE", `/hub/tokens/${encodeURIComponent(client)}`).pipe(Effect.flatMap(expectOk));
-      yield* Console.log(`revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(client)}` : ""}`);
+      yield* Console.log(`revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(config.repo, client)}` : ""}`);
     }).pipe(reportUserErrors),
   ),
 );

@@ -144,8 +144,9 @@ export const resolveEndpoint = (
   d: typeof Definition.Type,
   desired: McpDesired,
   home: string,
+  relayTokenEnv: string = RELAY_TOKEN_ENV,
 ): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
-  const resolved = resolveUnchecked(name, d, desired, home);
+  const resolved = resolveUnchecked(name, d, desired, home, relayTokenEnv);
   // The variable's name goes into fix commands unquoted; only a plain name may.
   if (resolved.endpoint?.type === "http" && resolved.endpoint.tokenEnv !== null && !ENV_NAME.test(resolved.endpoint.tokenEnv)) {
     return { endpoint: null, problem: `token_env ${JSON.stringify(resolved.endpoint.tokenEnv)} is not a variable name (A-Z, 0-9, _)` };
@@ -155,11 +156,21 @@ export const resolveEndpoint = (
 
 export const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
+/**
+ * The relay token's variable for clients that name none: T3_FLEET_RELAY_TOKEN,
+ * or FLEETX_RELAY_TOKEN where a fleet has that one. A fleet keeps it after the
+ * repo's rename: Codex reads the variable from T3's environment, fixed when T3
+ * started, so a new name would cut running sessions off. Until 1.0.
+ */
+export const RELAY_TOKEN_ENV = "T3_FLEET_RELAY_TOKEN";
+export const LEGACY_RELAY_TOKEN_ENV = "FLEETX_RELAY_TOKEN";
+
 const resolveUnchecked = (
   name: string,
   d: typeof Definition.Type,
   desired: McpDesired,
   home: string,
+  relayTokenEnv: string,
 ): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
   const tokenEnv = d.auth?.type === "bearer" ? (d.auth.token_env ?? null) : null;
   const fail = (problem: string) => ({ endpoint: null, problem }) as const;
@@ -178,11 +189,11 @@ const resolveUnchecked = (
     if (!isHosted(d.kind)) return fail(`unknown kind ${d.kind}`);
     // The hub serves every hosted definition; clients authenticate to the gateway, never upstream.
     if (gateway === undefined) return fail("[mcp] hub = true, but no [mcp] gateway (the relay's URL)");
-    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired.token_env ?? "FLEETX_RELAY_TOKEN" });
+    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired.token_env ?? relayTokenEnv });
   }
   if (gateway !== undefined && port !== undefined) {
     // Through the relay: one endpoint, one token, for every hosted server.
-    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired?.token_env ?? "FLEETX_RELAY_TOKEN" });
+    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired?.token_env ?? relayTokenEnv });
   }
   if (desired?.origin === undefined || port === undefined) return fail(`hosted server, but no [mcp] origin and port for ${name} (or [mcp] hub = true)`);
   return ok({ type: "http", url: `http://${desired.origin}:${port}/mcp`, tokenEnv });
@@ -308,6 +319,7 @@ export const McpArea = defineArea({
         if (m?.[1] !== undefined) secrets[m[1]] = (m[2] ?? "").replace(/^["']|["']$/g, "");
       }
 
+      const relayTokenEnv = secrets[LEGACY_RELAY_TOKEN_ENV] !== undefined || ctx.env[LEGACY_RELAY_TOKEN_ENV] !== undefined ? LEGACY_RELAY_TOKEN_ENV : RELAY_TOKEN_ENV;
       const servers = yield* Effect.forEach(
         desired?.servers ?? [],
         (name) =>
@@ -316,7 +328,7 @@ export const McpArea = defineArea({
             const def = Option.isSome(text) ? Schema.decodeOption(Schema.fromJsonString(Definition))(text.value) : Option.none();
             const resolved = Option.isNone(def)
               ? { endpoint: null, problem: `mcp/${name}.json is missing or not valid` }
-              : resolveEndpoint(name, def.value, desired, ctx.home);
+              : resolveEndpoint(name, def.value, desired, ctx.home, relayTokenEnv);
             const { endpoint, problem } = resolved;
             const tokenEnv = endpoint?.type === "http" ? endpoint.tokenEnv : null;
             const token = tokenEnv === null ? undefined : (secrets[tokenEnv] ?? ctx.env[tokenEnv]);
@@ -328,7 +340,7 @@ export const McpArea = defineArea({
       // Relay node with the hub: what the hub itself says about each server.
       let hub: ReadonlyArray<{ name: string; state: string; detail: string | null }> | null | undefined;
       if (desired?.hub === true && ctx.roles.includes("relay")) {
-        const token = secrets["FLEETX_RELAY_TOKEN"] ?? ctx.env["FLEETX_RELAY_TOKEN"] ?? "";
+        const token = secrets[relayTokenEnv] ?? ctx.env[relayTokenEnv] ?? "";
         hub = yield* hubStates(ctx.relay?.port ?? 8399, token);
       }
 

@@ -1,7 +1,7 @@
 /**
  * Example plugin area: Homebrew formulae every macOS node should have.
  *
- *   # fleetx.toml
+ *   # t3-fleet.toml
  *   [plugins]
  *   areas = ["plugins/brew.mjs"]
  *

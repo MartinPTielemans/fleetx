@@ -2,7 +2,7 @@
  * What T3 Fleet remembers between runs, so a scheduled check can say "nothing
  * changed" instead of repeating the same report every day.
  *
- * Also how intended differences apply. A finding listed in fleetx.toml
+ * Also how intended differences apply. A finding listed in t3-fleet.toml
  * under `[[accept]]` is still reported, as a note naming the reason,
  * so it never comes back as a warning and never disappears silently.
  */
@@ -30,7 +30,7 @@ const statePath = () => `${stateDir(process.env["HOME"] ?? "")}/last-check.json`
 /** An [[accept]] id written before the rename: the engine's keys were fleetx-*. Until 1.0. */
 const renamedId = (id: string) => id.replace(/:fleetx-(outdated|local-config|timer|timer-unwanted)$/, ":engine-$1");
 
-/** Findings with accepted differences (fleetx.toml `[[accept]]`) turned into notes. */
+/** Findings with accepted differences (t3-fleet.toml `[[accept]]`) turned into notes. */
 export const applyAccepted = (findings: ReadonlyArray<Finding>, accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }> = []) => {
   const reasons = new Map(accepted.map((a) => [renamedId(a.id), a.reason]));
   return findings.map((f): Finding => {
