@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type { PlatformError } from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
@@ -721,10 +722,28 @@ const checkNodeEdits = (
     Effect.gen(function* () {
       if (edits.length === 0) return;
       const fs = yield* FileSystem.FileSystem;
+      // A node file that is a symlink, or under one, would be written outside the checkout.
+      const root = yield* fs.realPath(config.repo);
+      for (const edit of edits)
+        if ((yield* fs.realPath(`${config.repo}/${edit.rel}`)) !== `${root}/${edit.rel}`)
+          return yield* Effect.fail(
+            `${edit.rel} is a symlink, or in a linked directory; add "${name}" to its [mcp] servers by hand, then run this again. Nothing was changed.`,
+          );
+      // The scratch copy holds the settings' contents, never a link back into the checkout.
+      const copy = (from: string, to: string): Effect.Effect<void, PlatformError> =>
+        Effect.gen(function* () {
+          const info = yield* fs.stat(from);
+          if (info.type === "Directory") {
+            yield* fs.makeDirectory(to);
+            for (const entry of yield* fs.readDirectory(from))
+              yield* copy(`${from}/${entry}`, `${to}/${entry}`);
+          } else if (info.type === "File")
+            yield* fs.writeFileString(to, yield* fs.readFileString(from));
+        });
       const scratch = yield* fs.makeTempDirectoryScoped();
       for (const entry of [FLEET_FILE, "profiles", "nodes"])
         if (yield* fs.exists(`${config.repo}/${entry}`))
-          yield* fs.copy(`${config.repo}/${entry}`, `${scratch}/${entry}`);
+          yield* copy(`${config.repo}/${entry}`, `${scratch}/${entry}`);
       for (const edit of edits) yield* fs.writeFileString(`${scratch}/${edit.rel}`, edit.text);
       const by = (target: string) =>
         `${edits.map((e) => e.rel).join(", ")} cannot be edited safely${target}. Add "${name}" to [mcp] servers there by hand (and take it off [mcp] ignore), then run this again. Nothing was changed.`;

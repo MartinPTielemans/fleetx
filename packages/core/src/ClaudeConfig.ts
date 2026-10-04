@@ -56,15 +56,11 @@ export const claudeConfigPath = (home: string, env: Env) =>
     return path.join(env["CLAUDE_CONFIG_DIR"] || home, `.claude${suffix}.json`);
   });
 
-/**
- * The config at `file`: `{}` when there is none yet. Any other failure to
- * read it, or a file that is not a JSON object, fails: never a reason to
- * start over.
- */
-export const readClaudeConfig = (file: string) =>
+/** The config's text as it is now: none when there is no config yet; any other failure fails. */
+const readConfigText = (file: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const text = yield* fs.readFileString(file).pipe(
+    return yield* fs.readFileString(file).pipe(
       Effect.asSome,
       Effect.catchIf(
         (e) => is(e, "NotFound"),
@@ -72,6 +68,11 @@ export const readClaudeConfig = (file: string) =>
       ),
       Effect.mapError((e) => `cannot read ${file}: ${e.message}`),
     );
+  });
+
+/** A config's text as a JSON object, `{}` for none; anything else fails. */
+const parseConfig = (file: string, text: Option.Option<string>) =>
+  Effect.gen(function* () {
     if (Option.isNone(text)) return {} as ClaudeConfig;
     const parsed = Option.getOrUndefined(
       Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(text.value),
@@ -81,6 +82,14 @@ export const readClaudeConfig = (file: string) =>
     return parsed as ClaudeConfig;
   });
 
+/**
+ * The config at `file`: `{}` when there is none yet. Any other failure to
+ * read it, or a file that is not a JSON object, fails: never a reason to
+ * start over.
+ */
+export const readClaudeConfig = (file: string) =>
+  readConfigText(file).pipe(Effect.flatMap((text) => parseConfig(file, text)));
+
 /** Which lock directory is there: two readings are the same lock only with the same inode and mtime. */
 interface Seen {
   readonly ino: number | undefined;
@@ -88,43 +97,59 @@ interface Seen {
 }
 const sameLock = (a: Seen, b: Seen) => a.ino === b.ino && a.mtime === b.mtime;
 
+export interface LockTiming {
+  readonly staleMs: number;
+  readonly updateMs: number;
+  /** How long to wait for another holder before giving up; LOCK_WAIT_MS by default. */
+  readonly waitMs?: number;
+}
+
 /**
- * Hold Claude's lock on `file` while `use` runs. `use` gets `whileOwned`,
- * which runs an effect (the rename that publishes a write) only after
- * checking the lock is still this one's, and fails without running it when
- * it is not. The lock's mtime is refreshed every `updateMs`; if it changes
- * under us, or a refresh comes too late, the lock is lost and `whileOwned`
- * fails from then on. Release removes the directory only while it is still
- * ours, with a plain rmdir.
+ * Hold Claude's lock on `file` while `use` runs, with proper-lockfile's
+ * guarantees (Claude's writer has no stronger ones).
+ *
+ * `use` gets `whileOwned`, which runs an effect (the rename that publishes a
+ * write) only after checking, under the same permit the heartbeat takes, that
+ * the lock is still ours: the directory this run made (its inode), with the
+ * mtime this run last gave it, given less than `staleMs` ago. The heartbeat
+ * refreshes it every `updateMs`: it checks the lock, sets its mtime, and looks
+ * again. A failed refresh, a refresh that finds another directory or another
+ * mtime, or one that comes too late loses the lock for good, and every write
+ * fails from then on; freshness only ever comes from a refresh that worked.
+ * Release rmdirs the directory only while it is still ours.
+ *
+ * Windows that remain, as in proper-lockfile: a takeover between our check
+ * and our utimes gets its mtime touched once (we then see its inode, and stop);
+ * and between whileOwned's check and the rename another process may take a
+ * lock it believes stale. Neither can be closed with a directory lock.
  */
 export const withClaudeConfigLock = <A, E, R>(
   file: string,
   use: (
     whileOwned: <B, E2, R2>(effect: Effect.Effect<B, E2, R2>) => Effect.Effect<B, E2 | string, R2>,
   ) => Effect.Effect<A, E, R>,
-  timing: { readonly staleMs: number; readonly updateMs: number } = CLAUDE_LOCK,
+  timing: LockTiming = CLAUDE_LOCK,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const lock = `${file}.lock`;
+    const waitMs = timing.waitMs ?? LOCK_WAIT_MS;
     const look = fs.stat(lock).pipe(
       Effect.map((info): Seen => ({
         ino: Option.getOrUndefined(info.ino),
         mtime: Option.getOrUndefined(info.mtime)?.getTime(),
       })),
-      Effect.option,
     );
-    const touch = Effect.gen(function* () {
-      // utimes takes seconds.
-      const now = (yield* Clock.currentTimeMillis) / 1000;
-      yield* fs.utimes(lock, now, now).pipe(Effect.ignore);
-      return yield* look;
-    });
+    /** Remove the lock if it is still `seen`; whether it is gone. */
     const removeIfStill = (seen: Seen) =>
       Effect.gen(function* () {
-        const now = yield* look;
-        if (Option.isSome(now) && sameLock(now.value, seen))
-          yield* Effect.tryPromise(() => rmdir(lock)).pipe(Effect.ignore);
+        const now = yield* look.pipe(Effect.option);
+        if (Option.isNone(now)) return true;
+        if (!sameLock(now.value, seen)) return false;
+        return yield* Effect.tryPromise(() => rmdir(lock)).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
       });
 
     const acquire = Effect.gen(function* () {
@@ -139,64 +164,86 @@ export const withClaudeConfigLock = <A, E, R>(
           Effect.mapError((e) => `cannot lock ${file}: ${e.message}`),
         );
         if (made) {
-          const seen = yield* touch;
-          if (Option.isSome(seen)) return seen.value;
+          // Ours: give it our mtime (utimes takes seconds) and remember its inode.
+          const at = yield* Clock.currentTimeMillis;
+          yield* fs.utimes(lock, at / 1000, at / 1000).pipe(Effect.ignore);
+          const seen = yield* look.pipe(Effect.option);
+          if (Option.isSome(seen)) return { seen: seen.value, at: seen.value.mtime ?? at };
           continue;
         }
         const now = yield* Clock.currentTimeMillis;
-        const held = yield* look;
-        const mtime = Option.isSome(held) ? held.value.mtime : undefined;
-        if (Option.isSome(held) && mtime !== undefined && mtime + timing.staleMs < now) {
-          // Its holder is gone. Like proper-lockfile, remove it and try again; only if it is
-          // still that same stale lock, though between that look and the rmdir another process
-          // could take it over first. proper-lockfile has that race too: this matches its
-          // semantics rather than trying to beat them.
-          yield* removeIfStill(held.value);
-          continue;
+        const held = yield* look.pipe(Effect.option);
+        let why = "held, by Claude most likely; try again";
+        if (Option.isSome(held)) {
+          const mtime = held.value.mtime;
+          if (mtime !== undefined && mtime + timing.staleMs < now) {
+            // Its holder is gone. Like proper-lockfile, remove it and try again; only if it is
+            // still that same stale lock, though between that look and the rmdir another process
+            // could take it over first. proper-lockfile has that race too: this matches its
+            // semantics rather than trying to beat them.
+            if (yield* removeIfStill(held.value)) {
+              if (now - start > waitMs) break;
+              continue;
+            }
+            why =
+              "stale, but cannot be removed (something is in it); remove it by hand while no Claude runs";
+          }
         }
-        if (now - start > LOCK_WAIT_MS)
-          return yield* Effect.fail(`${lock} is held, by Claude most likely; try again`);
+        if (now - start > waitMs) return yield* Effect.fail(`${lock} is ${why}`);
         const jitter = yield* Random.nextBetween(1, 2);
         yield* Effect.sleep(Duration.millis(Math.min(25 * 2 ** attempt, 1000) * jitter));
       }
+      return yield* Effect.fail(`${lock} kept being taken; try again`);
     });
 
     return yield* Effect.scoped(
       Effect.gen(function* () {
-        const first = yield* Effect.acquireRelease(acquire, () => Effect.void);
-        const mine = yield* Ref.make<Option.Option<Seen>>(Option.some(first));
-        const refreshed = yield* Ref.make(yield* Clock.currentTimeMillis);
+        const first = yield* acquire;
+        const inode = first.seen.ino;
+        /** The mtime our last refresh gave it, and when (the time that mtime stands for). */
+        const mine = yield* Ref.make({ mtime: first.seen.mtime, at: first.at });
+        const lost = yield* Ref.make<string | null>(null);
         const permit = yield* Semaphore.make(1);
-        // Released last: removed only if it is still the lock this run holds.
+        const lose = (why: string) => Ref.set(lost, why).pipe(Effect.as(false));
+        // Released last: removed only if it is still the directory this run made, as we left it.
         yield* Effect.addFinalizer(() =>
           Ref.get(mine).pipe(
-            Effect.flatMap((seen) =>
-              Option.isSome(seen) ? removeIfStill(seen.value) : Effect.void,
-            ),
+            Effect.flatMap(({ mtime }) => removeIfStill({ ino: inode, mtime })),
+            Effect.ignore,
           ),
         );
-        /** Ours: the lock is the one we last touched, and touched recently enough to be fresh. */
-        const owned = Effect.gen(function* () {
-          const seen = yield* Ref.get(mine);
-          if (Option.isNone(seen)) return false;
-          const now = yield* look;
-          const fresh =
-            (yield* Clock.currentTimeMillis) - (yield* Ref.get(refreshed)) < timing.staleMs;
-          const ours = Option.isSome(now) && sameLock(now.value, seen.value) && fresh;
-          if (!ours) yield* Ref.set(mine, Option.none());
-          return ours;
+        /** Why the lock is no longer ours, or null while it is. */
+        const check = Effect.gen(function* () {
+          const already = yield* Ref.get(lost);
+          if (already !== null) return already;
+          const now = yield* look.pipe(Effect.option);
+          const { mtime, at } = yield* Ref.get(mine);
+          if (Option.isNone(now)) return "it was removed";
+          if (now.value.ino !== inode) return "another process made it anew";
+          if (now.value.mtime !== mtime) return "another process touched it";
+          if ((yield* Clock.currentTimeMillis) - at >= timing.staleMs)
+            return "it was not refreshed in time";
+          return null;
         });
-        // The heartbeat: while ours, touch it; once it is not, stop, and every write fails.
+        const refresh = Effect.gen(function* () {
+          const why = yield* check;
+          if (why !== null) return yield* lose(why);
+          const at = yield* Clock.currentTimeMillis;
+          const touched = yield* fs.utimes(lock, at / 1000, at / 1000).pipe(
+            Effect.as(null),
+            Effect.catch((e) => Effect.succeed(`refreshing it failed: ${e.message}`)),
+          );
+          if (touched !== null) return yield* lose(touched);
+          const after = yield* look.pipe(Effect.option);
+          if (Option.isNone(after) || after.value.ino !== inode)
+            return yield* lose("another process made it anew");
+          // A late refresh still counts from when it began: that is the mtime it set.
+          yield* Ref.set(mine, { mtime: after.value.mtime, at });
+          return true;
+        });
+        // The heartbeat: while ours, refresh it; once it is not, stop, and every write fails.
         yield* permit
-          .withPermit(
-            Effect.gen(function* () {
-              if (!(yield* owned)) return false;
-              const seen = yield* touch;
-              yield* Ref.set(mine, seen);
-              yield* Ref.set(refreshed, yield* Clock.currentTimeMillis);
-              return Option.isSome(seen);
-            }),
-          )
+          .withPermit(refresh)
           .pipe(
             Effect.delay(Duration.millis(timing.updateMs)),
             Effect.repeat({ while: (still) => still }),
@@ -205,10 +252,11 @@ export const withClaudeConfigLock = <A, E, R>(
         const whileOwned = <B, E2, R2>(effect: Effect.Effect<B, E2, R2>) =>
           permit.withPermit(
             Effect.gen(function* () {
-              if (!(yield* owned))
-                return yield* Effect.fail(
-                  `lost the lock on ${file} to another process; nothing was written`,
-                );
+              const why = yield* check;
+              if (why !== null) {
+                yield* Ref.set(lost, why);
+                return yield* Effect.fail(`lost the lock on ${file} (${why}); nothing was written`);
+              }
               return yield* effect;
             }),
           );
@@ -219,6 +267,9 @@ export const withClaudeConfigLock = <A, E, R>(
 
 /** JSON the way Claude writes its config. */
 const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+
+/** How long an update may keep starting over because the config kept changing. */
+const RETRY_MS = 30_000;
 
 /**
  * Change Claude's global config: under Claude's lock, read it fresh, apply
@@ -235,7 +286,9 @@ export const updateClaudeConfig = (
   update: (config: ClaudeConfig) => ClaudeConfig,
   options: {
     readonly secret?: boolean;
-    readonly timing?: { readonly staleMs: number; readonly updateMs: number };
+    readonly timing?: LockTiming;
+    /** How long to keep starting over; RETRY_MS by default. */
+    readonly retryMs?: number;
     /** Runs after the read, before the write: for tests that slow the writer down. */
     readonly beforeWrite?: Effect.Effect<void>;
   } = {},
@@ -247,29 +300,27 @@ export const updateClaudeConfig = (
     yield* fs
       .makeDirectory(path.dirname(file), { recursive: true })
       .pipe(Effect.mapError((e) => `cannot make ${path.dirname(file)}: ${e.message}`));
-    // Which version of the file a write was made from: inode, size and mtime, or nothing yet.
-    const stamp = (target: string) =>
-      fs.stat(target).pipe(
-        Effect.map((info) =>
-          [
-            Option.getOrUndefined(info.ino),
-            Number(info.size),
-            Option.getOrUndefined(info.mtime)?.getTime(),
-          ].join(":"),
-        ),
-        Effect.orElseSucceed(() => "absent"),
-      );
+    const same = (a: Option.Option<string>, b: Option.Option<string>) =>
+      Option.isNone(a) ? Option.isNone(b) : Option.isSome(b) && a.value === b.value;
     return yield* withClaudeConfigLock(
       file,
       (whileOwned) =>
         Effect.gen(function* () {
-          // Claude writes without the lock when it gives up waiting for it (about ten seconds).
-          // So the rename also checks that the config is still the one this update was made
-          // from; when it changed, the update is made again from the new one.
+          // Claude writes without the lock when it gives up waiting for it (after ten seconds or
+          // so). So just before the rename the config is read again and must be exactly the text
+          // this update was made from; when it changed, the update is made again from the new
+          // one. That narrows the window to the rename itself: it is no atomic compare-and-swap,
+          // and nothing over a lock directory can be.
+          const start = yield* Clock.currentTimeMillis;
           for (let attempt = 0; attempt < 5; attempt++) {
+            if (
+              attempt > 0 &&
+              (yield* Clock.currentTimeMillis) - start > (options.retryMs ?? RETRY_MS)
+            )
+              break;
             const target = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file));
-            const read = yield* stamp(target);
-            const config = yield* readClaudeConfig(file);
+            const read = yield* readConfigText(file);
+            const config = yield* parseConfig(file, read);
             const had = yield* fs.stat(target).pipe(
               Effect.map((info) => info.mode & 0o777),
               Effect.orElseSucceed(() => 0o600),
@@ -286,7 +337,7 @@ export const updateClaudeConfig = (
               yield* fs.chmod(temp, mode).pipe(Effect.mapError((e) => e.message));
               return yield* whileOwned(
                 Effect.gen(function* () {
-                  if ((yield* stamp(target)) !== read) return false;
+                  if (!same(yield* readConfigText(file), read)) return false;
                   yield* fs
                     .rename(temp, target)
                     .pipe(Effect.mapError((e) => `cannot write ${target}: ${e.message}`));
@@ -303,64 +354,72 @@ export const updateClaudeConfig = (
     );
   });
 
-/** At most this many backups are looked at, newest first, each up to this size, in this long. */
-const BACKUPS = { count: 50, bytes: 4 * 1024 * 1024, ms: 5_000 } as const;
+/** The scan's bounds: backups looked at, newest first; the size of one; the time for all. */
+const SCAN = { count: 50, bytes: 4 * 1024 * 1024, ms: 10_000 } as const;
 
 /**
- * The copies Claude keeps of its config, `<name>.backup.<time>`: in `backups`
- * in Claude's directory and, from older versions, beside the config itself.
- * Regular files only (a FIFO is never opened), the newest first, within
- * bounds: `incomplete` says some were left out.
+ * Claude's config and the copies Claude keeps of it (`<name>.backup.<time>`, in
+ * `backups` in Claude's directory and, from older versions, beside the config)
+ * that others can read and that hold any of `values`. Only regular files are
+ * read (a FIFO never is), within SCAN's bounds, under one deadline for the
+ * whole scan, listing and stats included. `incomplete` says something could
+ * not be looked into: too many, too large, not a regular file, unreadable
+ * (absent is not), or out of time.
  */
-export const claudeConfigBackups = (home: string, env: Env) =>
+export const exposedClaudeConfigs = (
+  home: string,
+  env: Env,
+  values: ReadonlyArray<string>,
+  deadlineMs: number = SCAN.ms,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const file = yield* claudeConfigPath(home, env);
-    const prefix = `${path.basename(file)}.backup.`;
-    const named: Array<string> = [];
-    for (const dir of [path.join(claudeDir(home, env), "backups"), path.dirname(file)])
-      for (const name of yield* fs
-        .readDirectory(dir)
-        .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
-        if (name.startsWith(prefix)) named.push(path.join(dir, name));
-    named.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
-    let incomplete = named.length > BACKUPS.count;
-    const files: Array<{ readonly path: string; readonly mode: number }> = [];
-    for (const candidate of named.slice(0, BACKUPS.count)) {
-      const info = yield* fs.stat(candidate).pipe(Effect.option);
-      if (Option.isNone(info)) continue;
-      // Not a regular file (a FIFO would block a read): never opened, and coverage is incomplete.
-      if (info.value.type !== "File") {
-        incomplete = true;
-        continue;
+    const exposed: Array<string> = [];
+    let incomplete = false;
+    const scan = Effect.gen(function* () {
+      const file = yield* claudeConfigPath(home, env);
+      const prefix = `${path.basename(file)}.backup.`;
+      const backups: Array<string> = [];
+      for (const dir of [path.join(claudeDir(home, env), "backups"), path.dirname(file)]) {
+        const names = yield* fs.readDirectory(dir).pipe(
+          Effect.catchIf(
+            (e) => is(e, "NotFound"),
+            () => Effect.succeed([] as Array<string>),
+          ),
+          Effect.catch(() => {
+            incomplete = true;
+            return Effect.succeed([] as Array<string>);
+          }),
+        );
+        for (const name of names) if (name.startsWith(prefix)) backups.push(path.join(dir, name));
       }
-      if (Number(info.value.size) > BACKUPS.bytes) {
-        incomplete = true;
-        continue;
+      backups.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
+      if (backups.length > SCAN.count) incomplete = true;
+      for (const candidate of [file, ...backups.slice(0, SCAN.count)]) {
+        const info = yield* fs.stat(candidate).pipe(
+          Effect.asSome,
+          Effect.catchIf(
+            (e) => is(e, "NotFound"),
+            () => Effect.succeed(Option.none()),
+          ),
+          Effect.catch(() => {
+            incomplete = true;
+            return Effect.succeed(Option.none());
+          }),
+        );
+        if (Option.isNone(info)) continue;
+        if ((info.value.mode & 0o077) === 0) continue;
+        if (info.value.type !== "File" || Number(info.value.size) > SCAN.bytes) {
+          incomplete = true;
+          continue;
+        }
+        const text = yield* fs.readFileString(candidate).pipe(Effect.option);
+        if (Option.isNone(text)) incomplete = true;
+        else if (values.some((v) => text.value.includes(v))) exposed.push(candidate);
       }
-      files.push({ path: candidate, mode: info.value.mode & 0o777 });
-    }
-    return { files, incomplete };
-  });
-
-/**
- * Whether a file holds any of `values`, reading it only if it is a regular
- * file within the size bound and only for so long; null when it could not
- * be told.
- */
-export const holdsAny = (file: string, values: ReadonlyArray<string>) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const info = yield* fs.stat(file).pipe(Effect.option);
-    if (
-      Option.isNone(info) ||
-      info.value.type !== "File" ||
-      Number(info.value.size) > BACKUPS.bytes
-    )
-      return null;
-    const text = yield* fs
-      .readFileString(file)
-      .pipe(Effect.timeout(Duration.millis(BACKUPS.ms)), Effect.option);
-    return Option.isNone(text) ? null : values.some((v) => text.value.includes(v));
+    });
+    if (Option.isNone(yield* scan.pipe(Effect.timeout(Duration.millis(deadlineMs)), Effect.option)))
+      incomplete = true;
+    return { exposed, incomplete };
   });

@@ -65,9 +65,8 @@ import { parse as parseToml } from "smol-toml";
 
 import { defineArea, sh, shPath } from "../Area.ts";
 import {
-  claudeConfigBackups,
   claudeConfigPath,
-  holdsAny,
+  exposedClaudeConfigs,
   readClaudeConfig,
   updateClaudeConfig,
   type ClaudeConfig,
@@ -1002,41 +1001,14 @@ export const McpArea = defineArea({
       ]
         .filter((v) => v.length >= 4)
         .flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]);
-      const exposed: Array<string> = [];
-      let unchecked = false;
-      if (values.length > 0) {
-        const backups = yield* claudeConfigBackups(ctx.home, ctx.env);
-        unchecked = backups.incomplete;
-        const config = yield* claudeConfigPath(ctx.home, ctx.env);
-        const files = [
-          {
-            path: config,
-            mode: yield* fs.stat(config).pipe(
-              Effect.map((info) => info.mode & 0o777),
-              Effect.orElseSucceed(() => 0o600),
-            ),
-          },
-          ...backups.files,
-        ];
-        const scan = Effect.forEach(
-          files.filter((f) => (f.mode & 0o077) !== 0),
-          (f) =>
-            holdsAny(f.path, values).pipe(
-              Effect.map((holds) => {
-                if (holds === null) unchecked = true;
-                else if (holds)
-                  exposed.push(
-                    f.path.startsWith(`${ctx.home}/`)
-                      ? `~/${f.path.slice(ctx.home.length + 1)}`
-                      : f.path,
-                  );
-              }),
-            ),
-          { discard: true },
-        );
-        if (Option.isNone(yield* scan.pipe(Effect.timeout(Duration.seconds(10)), Effect.option)))
-          unchecked = true;
-      }
+      const scanned =
+        values.length === 0
+          ? { exposed: [] as Array<string>, incomplete: false }
+          : yield* exposedClaudeConfigs(ctx.home, ctx.env, values);
+      const exposed = scanned.exposed.map((f) =>
+        f.startsWith(`${ctx.home}/`) ? `~/${f.slice(ctx.home.length + 1)}` : f,
+      );
+      const unchecked = scanned.incomplete;
       // Relay node with the hub: what the hub itself says about each server.
       let hub:
         | ReadonlyArray<{ name: string; state: string; detail: string | null }>

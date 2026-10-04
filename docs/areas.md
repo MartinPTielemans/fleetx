@@ -180,10 +180,11 @@ only that entry of Claude's config where Claude keeps it (`~/.claude.json`, or
 in `$CLAUDE_CONFIG_DIR`). It takes Claude's own lock (`<config>.lock` beside
 the config's path, refreshed every five seconds and stale after ten, as Claude
 has it), reads the config fresh under it, and writes a temporary file renamed
-over it. Just before the rename it checks the lock is still its own (and
-writes nothing when it is not) and that the config has not changed meanwhile
-(Claude writes without the lock when it gives up waiting); when it has, the
-entry is made again from the new config. A failure leaves the old entry, and
+over it. Just before the rename it checks the lock is still its own (the
+directory it made, refreshed by it in time; a failed or late refresh loses it,
+and nothing is written) and that the config's text is still what it read
+(Claude writes without the lock when it gives up waiting); when it changed,
+the entry is made again from the new config. A failure leaves the old entry, and
 a config it cannot read is left alone; a missing `$CLAUDE_CONFIG_DIR` is
 made first, as Claude makes it. A config holding secrets is made
 readable by its owner alone (600), and the fix says so when it tightens one. It waits while the node

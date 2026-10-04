@@ -18,11 +18,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import { describe, expect, it } from "vite-plus/test";
 
-import { claudeConfigPath, updateClaudeConfig, type ClaudeConfig } from "./ClaudeConfig.ts";
+import {
+  claudeConfigPath,
+  exposedClaudeConfigs,
+  updateClaudeConfig,
+  withClaudeConfigLock,
+  type ClaudeConfig,
+} from "./ClaudeConfig.ts";
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, NodeServices.NodeServices>,
@@ -214,4 +222,170 @@ describe("Claude's global config", () => {
     writeFileSync(join(dir, ".claude/.config.json"), "{}");
     expect(await path(dir, {})).toBe(join(dir, ".claude/.config.json"));
   });
+});
+
+/** Run `effect` with the real file system but for what `patch` replaces: faults injected. */
+const patched = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  patch: (fs: FileSystem.FileSystem) => Partial<FileSystem.FileSystem>,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* effect.pipe(
+      Effect.provideService(FileSystem.FileSystem, { ...fs, ...patch(fs) }),
+    );
+  });
+
+describe("Claude's lock, with faults injected", () => {
+  const timing = { staleMs: 600, updateMs: 50 } as const;
+  const locked = (file: string, wait: number, published: { value: boolean }) =>
+    withClaudeConfigLock(
+      file,
+      (whileOwned) =>
+        Effect.sleep(Duration.millis(wait)).pipe(
+          Effect.andThen(whileOwned(Effect.sync(() => void (published.value = true)))),
+        ),
+      timing,
+    );
+
+  it("loses the lock when another process makes it anew between check and refresh", async () => {
+    const dir = home("{}");
+    const lock = join(dir, ".claude.json.lock");
+    const published = { value: false };
+    let touches = 0;
+    const result = await run(
+      patched(locked(join(dir, ".claude.json"), 140, published), (fs) => ({
+        utimes: (path, atime, mtime) =>
+          Effect.suspend(() => {
+            touches++;
+            if (touches === 2) {
+              rmdirSync(lock);
+              mkdirSync(lock);
+            }
+            return fs.utimes(path, atime, mtime);
+          }),
+      })),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(published.value).toBe(false);
+    // The other process's lock stays.
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it("loses the lock when a refresh fails, and never publishes on a stale one", async () => {
+    const dir = home("{}");
+    const published = { value: false };
+    let touches = 0;
+    const result = await run(
+      patched(locked(join(dir, ".claude.json"), 1500, published), (fs) => ({
+        utimes: (path, atime, mtime) =>
+          ++touches === 1 ? fs.utimes(path, atime, mtime) : fs.utimes(`${path}-gone`, atime, mtime),
+      })),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(published.value).toBe(false);
+  });
+
+  it("counts a late refresh from when it began", async () => {
+    const dir = home("{}");
+    const published = { value: false };
+    let touches = 0;
+    const result = await run(
+      patched(locked(join(dir, ".claude.json"), 850, published), (fs) => ({
+        utimes: (path, atime, mtime) =>
+          ++touches === 1
+            ? fs.utimes(path, atime, mtime)
+            : fs.utimes(path, atime, mtime).pipe(Effect.delay("800 millis")),
+      })),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(published.value).toBe(false);
+  });
+
+  it("gives up on a stale lock it cannot remove, in time and saying so", async () => {
+    const dir = home("{}");
+    const lock = join(dir, ".claude.json.lock");
+    mkdirSync(lock);
+    writeFileSync(join(lock, "kept"), "");
+    const old = statSync(lock).mtimeMs / 1000 - 20;
+    utimesSync(lock, old, old);
+    const error = await Effect.runPromise(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        timing: { staleMs: 600, updateMs: 200, waitMs: 500 },
+      }).pipe(Effect.flip, Effect.provide(NodeServices.layer), Effect.timeout("5 seconds")),
+    );
+    expect(String(error)).toContain("cannot be removed");
+    expect(existsSync(join(lock, "kept"))).toBe(true);
+  });
+});
+
+describe("Claude's config, changed while it was being written", () => {
+  it("compares what it read, not the file's size and time", async () => {
+    const dir = home('{"mcpServers":{"old":{}}}');
+    const file = join(dir, ".claude.json");
+    const ms = Math.floor(statSync(file).mtimeMs);
+    utimesSync(file, ms / 1000, (ms + 0.2) / 1000);
+    let once = true;
+    await run(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        beforeWrite: Effect.sync(() => {
+          if (!once) return;
+          once = false;
+          // Rewritten in place: same inode, same size, within the same millisecond.
+          writeFileSync(file, '{"mcpServers":{"new":{}}}');
+          utimesSync(file, ms / 1000, (ms + 0.8) / 1000);
+        }),
+      }),
+    );
+    expect(servers(file)).toEqual(["new", "fleet"]);
+  });
+
+  it("stops starting over once its time is up", async () => {
+    const dir = home('{"mcpServers":{}}');
+    const file = join(dir, ".claude.json");
+    let calls = 0;
+    const result = await run(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        retryMs: 300,
+        beforeWrite: Effect.sleep("200 millis").pipe(
+          Effect.andThen(
+            Effect.sync(() => writeFileSync(file, `{"mcpServers":{"c${++calls}":{}}}`)),
+          ),
+        ),
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(calls).toBe(2);
+  });
+});
+
+describe("Claude's config backups, looked into within bounds", () => {
+  const exposed = (dir: string) =>
+    Effect.runPromise(
+      exposedClaudeConfigs(dir, {}, ["s3cret"], 200).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+  it("counts listing and stat against the one deadline", async () => {
+    const dir = home(null);
+    mkdirSync(join(dir, ".claude/backups"), { recursive: true });
+    const result = await Effect.runPromise(
+      patched(exposedClaudeConfigs(dir, {}, ["s3cret"], 200), (fs) => ({
+        readDirectory: (path, options) =>
+          fs.readDirectory(path, options).pipe(Effect.delay("1 second")),
+      })).pipe(Effect.provide(NodeServices.layer), Effect.timeout("3 seconds")),
+    );
+    expect(result).toEqual({ exposed: [], incomplete: true });
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "reports a backups directory it cannot read, and not one that is absent",
+    async () => {
+      const dir = home(null);
+      expect(await exposed(dir)).toEqual({ exposed: [], incomplete: false });
+      mkdirSync(join(dir, ".claude/backups"), { recursive: true });
+      chmodSync(join(dir, ".claude/backups"), 0o000);
+      expect((await exposed(dir)).incomplete).toBe(true);
+      chmodSync(join(dir, ".claude/backups"), 0o700);
+    },
+  );
 });

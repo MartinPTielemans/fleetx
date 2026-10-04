@@ -2,7 +2,15 @@
 // git repository, a real age key and a temporary home.
 // @effect-diagnostics nodeBuiltinImport:off
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -187,6 +195,23 @@ describe("mcp add: hand-written node files", () => {
     await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
     expect(process.exitCode).toBe(1);
     expect(read("nodes/a.toml")).toBe(text);
+    expect(existsSync(join(repo, "mcp/figma.json"))).toBe(false);
+    expect(git(repo, "rev-parse", "HEAD")).toBe(head);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("refuses a node file that links elsewhere, writing nothing there", async () => {
+    mkdirSync(join(repo, "shared"));
+    writeFileSync(join(repo, "shared/a.toml"), 'roles = ["authority"]\n');
+    rmSync(join(repo, "nodes/a.toml"));
+    symlinkSync("../shared/a.toml", join(repo, "nodes/a.toml"));
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "linked");
+    git(repo, "push", "-q");
+    const head = git(repo, "rev-parse", "HEAD");
+    await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
+    expect(process.exitCode).toBe(1);
+    expect(read("shared/a.toml")).toBe('roles = ["authority"]\n');
     expect(existsSync(join(repo, "mcp/figma.json"))).toBe(false);
     expect(git(repo, "rev-parse", "HEAD")).toBe(head);
     expect(git(repo, "status", "--porcelain")).toBe("");

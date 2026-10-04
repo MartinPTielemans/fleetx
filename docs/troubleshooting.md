@@ -194,7 +194,8 @@ secrets; the detail says when some copies were not looked into.
 
 **`mcp-claude-config-unchecked`** — some of Claude's config backups others
 can read were not looked into for secrets: more than 50 of them, one larger
-than 4 MB or not a regular file, or reading took too long. Nothing is known
+than 4 MB or not a regular file, a directory or file that could not be read,
+or the whole scan took longer than ten seconds. Nothing is known
 to be exposed; `chmod 600` any that may hold credentials, or remove old ones.
 
 **`mcp-undeclared`** — Claude or Codex on this machine has MCP servers (at
