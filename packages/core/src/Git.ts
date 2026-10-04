@@ -136,7 +136,8 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
     const move =
       how === "rebase"
         ? yield* git(repo, ["rebase", "-q", "--autostash", `origin/${branch}`])
-        : yield* git(repo, ["merge", "-q", "--ff-only", "--autostash", `origin/${branch}`]);
+        : // No --autostash (git 2.27+): a fast-forward leaves local edits alone, and none touches an incoming file.
+          yield* git(repo, ["merge", "-q", "--ff-only", `origin/${branch}`]);
     if (!ok(move)) {
       if (how === "rebase") yield* git(repo, ["rebase", "--abort"]);
       return yield* Effect.fail(
