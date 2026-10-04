@@ -29,6 +29,7 @@ import {
 } from "@t3-fleet/core/Secrets";
 
 import { mcpAddCommand, mcpRegisterClaudeCommand } from "./fleet.ts";
+import { secretsCommand } from "./secrets.ts";
 
 const saved = { ...process.env };
 afterEach(() => {
@@ -252,5 +253,73 @@ describe("mcp register-claude", () => {
       url: "https://x/mcp",
       headers: { "X-A": "v" },
     });
+  });
+});
+
+describe("a fleet whose recipients.toml has no encrypted-for line yet", () => {
+  const secrets = (...args: Array<string>) =>
+    run(Command.runWith(secretsCommand, { version: "t" })(args));
+  /** Every fleet made before the line existed: the recipients without it, committed. */
+  beforeEach(() => {
+    writeFileSync(
+      join(repo, "secrets/recipients.toml"),
+      read("secrets/recipients.toml")
+        .split("\n")
+        .filter((l) => !l.startsWith("# encrypted-for:"))
+        .join("\n"),
+    );
+    git(repo, "commit", "-q", "-am", "legacy recipients");
+    git(repo, "push", "-q");
+  });
+  /** Re-encrypting wrote the line, and the change committed it with the secrets, pushed. */
+  const committedBoth = (subject: string) => {
+    expect(process.exitCode).toBeUndefined();
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(git(repo, "log", "-1", "--format=%s")).toBe(`${subject}\n`);
+    expect(git(repo, "show", "--name-only", "--format=", "HEAD")).toContain(
+      "secrets/recipients.toml",
+    );
+    expect(git(repo, "show", "origin/main:secrets/recipients.toml")).toContain("# encrypted-for: ");
+  };
+
+  it("mcp add --env", async () => {
+    await add("rc", "--command", "/usr/bin/env", "--env", "API_KEY=rc-value", "--node", "a");
+    committedBoth("Add MCP server rc");
+  });
+
+  it("mcp add --env refused: the recipients go back as they were too", async () => {
+    const before = read("secrets/recipients.toml");
+    writeFileSync(join(repo, ".git/hooks/pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await add("rc", "--command", "/usr/bin/env", "--env", "API_KEY=rc-value", "--node", "a");
+    expect(process.exitCode).toBe(1);
+    expect(read("secrets/recipients.toml")).toBe(before);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("secrets set", async () => {
+    await secrets("set", "NEW_KEY=v");
+    committedBoth("Set secret NEW_KEY");
+  });
+
+  it("secrets unset", async () => {
+    await secrets("unset", "EXISTING");
+    committedBoth("Remove secret EXISTING");
+  });
+
+  it("secrets import", async () => {
+    writeFileSync(join(home, "import.env"), "IMPORTED=1\n");
+    await secrets("import", join(home, "import.env"));
+    committedBoth("Import 1 secrets");
+  });
+
+  it("secrets add-node", async () => {
+    // b's own key, made in a home of its own.
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3f-b-"));
+    const { recipient } = await Effect.runPromise(
+      ensureIdentity.pipe(Effect.provide(NodeServices.layer)),
+    );
+    process.env["HOME"] = home;
+    await secrets("add-node", "b", recipient);
+    committedBoth("Let b read the fleet's secrets");
   });
 });

@@ -28,12 +28,11 @@ import { allowSecret, readAllowed, refusal } from "@t3-fleet/core/SecretScan";
 import { underSyncLock } from "@t3-fleet/core/Sync";
 import {
   addRecipient,
-  encryptedPath,
   ensureIdentity,
   installSecrets,
   readRecipients,
   readSecrets,
-  recipientsPath,
+  SECRETS_FILES,
   setVar,
   varNames,
   writeRecipients,
@@ -54,12 +53,9 @@ const asAuthority = Effect.gen(function* () {
   return config;
 });
 
+/** Both files re-encrypting writes, in one commit (SECRETS_FILES). */
 const commitSecrets = (repo: string, message: string) =>
-  commitAndPush(
-    repo,
-    [encryptedPath(repo), recipientsPath(repo)].map((p) => p.slice(repo.length + 1)),
-    message,
-  );
+  commitAndPush(repo, SECRETS_FILES, message);
 
 const init = Command.make("init").pipe(
   Command.withDescription("Create this node's key if it has none, and print its public half."),

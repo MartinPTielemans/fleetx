@@ -53,6 +53,7 @@ import {
   readRecipients,
   readSecrets,
   setVar,
+  SECRETS_FILES,
   writeRecipients,
   writeSecrets,
 } from "../Secrets.ts";
@@ -244,8 +245,7 @@ export const writtenPaths = (input: SetupInput) => [
 /** What an authority's run commits: the paths it writes, and the secrets the keys step wrote. */
 export const commitPaths = (input: SetupInput) => [
   ...writtenPaths(input).filter((p) => !p.startsWith(`${PROPOSED_SECRETS}/`)),
-  "secrets/secrets.env.age",
-  "secrets/recipients.toml",
+  ...SECRETS_FILES,
 ];
 
 const rolesOf = (text: string): Array<string> => {

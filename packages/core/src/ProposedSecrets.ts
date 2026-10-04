@@ -140,19 +140,19 @@ export const mergeProposedSecrets = (repo: string, files: ReadonlyArray<string> 
       );
     }
     if (merged.length === 0) return lines;
-    yield* writeSecrets(repo, text);
+    const written = yield* writeSecrets(repo, text);
     yield* installSecrets(repo);
     // The merge is committed first: until it is, every proposal stays, and a retry (the
     // authority's next sync) finds them. Merging again takes nothing twice.
     const rev = yield* commitAndPush(
       repo,
-      ["secrets"],
+      written,
       `Merge proposed secrets\n\n${lines.join("\n")}`,
     );
     for (const file of merged) yield* fs.remove(`${repo}/${file}`);
     const dropped = yield* commitAndPush(
       repo,
-      ["secrets", ...merged],
+      [...written, ...merged],
       `Drop the merged proposed secrets\n\n${merged.join("\n")}`,
     );
     return [...lines, `committed ${rev}`, `removed ${merged.join(", ")} (${dropped})`];
