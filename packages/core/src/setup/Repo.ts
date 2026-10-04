@@ -216,3 +216,42 @@ export const cloneFleet = (url: string, dir: string) =>
         ),
       );
   });
+
+/**
+ * Uncommitted changes in the checkout to what setup compares with and may
+ * write: t3-fleet.toml, this node's file, skills, MCP definitions,
+ * instruction files, the secrets. Planned against, such an edit would look
+ * like the fleet's; committed by setup, it would publish what the plan
+ * never showed. `git status` lines, without `except` (an abandoned setup's
+ * own files, which the next setup finishes). Other files (a bootstrap.sh
+ * of the user's) are not setup's business.
+ */
+export const uncommittedFleetFiles = (
+  repo: string,
+  node: string,
+  fleet: FleetView,
+  except: ReadonlyArray<string> = [],
+) =>
+  Effect.gen(function* () {
+    const paths = [
+      FLEET_FILE,
+      `nodes/${node}.toml`,
+      "skills",
+      "mcp",
+      "instructions",
+      "secrets",
+      `${PROPOSED_SECRETS}/${node}.env.age`,
+      ...fleet.instructions.map((i) => i.src),
+    ];
+    const status = yield* exec({
+      command: "git",
+      args: ["-C", repo, "status", "--porcelain", "-uall", "--", ...new Set(paths)],
+      env: { ...process.env, GIT_LITERAL_PATHSPECS: "1" },
+      timeout: Duration.seconds(30),
+    });
+    const skip = (file: string) =>
+      except.some((e) => file === e || file.startsWith(`${e.replace(/\/$/, "")}/`));
+    return status.stdout
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !skip(line.slice(3).replace(/^"|"$/g, "")));
+  });

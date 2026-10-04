@@ -33,6 +33,7 @@ import type { ProbeServices } from "../Area.ts";
 import { loadConfig } from "../Config.ts";
 import { exec } from "../Exec.ts";
 import {
+  addPaths,
   commitAndPush,
   ensureGitConfig,
   git,
@@ -92,6 +93,8 @@ export interface SetupInput {
   /** First machine: create this GitHub repository with gh, or push to an existing empty remote. */
   readonly remote: { readonly github: string } | { readonly url: string } | null;
   readonly now: number;
+  /** The fleet's branch (config.branch); main when a saved run predates it. */
+  readonly branch?: string;
 }
 
 export interface Step {
@@ -236,6 +239,13 @@ export const writtenPaths = (input: SetupInput) => [
   FLEET_FILE,
   `nodes/${input.node}.toml`,
   `${PROPOSED_SECRETS}/${input.node}.env.age`,
+];
+
+/** What an authority's run commits: the paths it writes, and the secrets the keys step wrote. */
+export const commitPaths = (input: SetupInput) => [
+  ...writtenPaths(input).filter((p) => !p.startsWith(`${PROPOSED_SECRETS}/`)),
+  "secrets/secrets.env.age",
+  "secrets/recipients.toml",
 ];
 
 const rolesOf = (text: string): Array<string> => {
@@ -585,23 +595,16 @@ export const setupSteps = (
       id: "commit",
       title: "commit and push",
       run: Effect.gen(function* () {
-        const paths = [
-          FLEET_FILE,
-          ".gitignore",
-          "nodes",
-          "skills",
-          "mcp",
-          "secrets",
-          ...new Set(input.actions.instructions.map((i) => i.src.split("/")[0] ?? "")),
-        ];
+        // Exactly what this run wrote: nothing else in the checkout is the plan's to publish.
+        const paths = commitPaths(input);
         const origin = out(yield* git(repo, ["remote", "get-url", "origin"]));
         if (origin !== "") {
           const rev = yield* commitAndPush(repo, paths, `Set up ${input.node}`);
           if (rev !== "nothing to commit") return [`committed and pushed ${rev}`];
-          return [yield* pushLeftover(repo)];
+          return [yield* pushLeftover(repo, input.branch ?? "main")];
         }
         // No remote yet: commit here, scanned as commitAndPush would; pushing is the next step shown.
-        yield* git(repo, ["add", "-A", "--", ...paths]);
+        yield* addPaths(repo, paths);
         yield* refuseSecrets(repo);
         const commit = yield* git(repo, ["commit", "-q", "-m", `Set up ${input.node}`]);
         return [ok(commit) ? "committed (no remote yet)" : "nothing new to commit"];
@@ -650,18 +653,18 @@ export const setupSteps = (
  * push): scanned as commitAndPush scans, from the root when the remote has
  * nothing yet, then pushed.
  */
-export const pushLeftover = (repo: string) =>
+export const pushLeftover = (repo: string, branch: string) =>
   Effect.gen(function* () {
     const empty =
-      (yield* git(repo, ["ls-remote", "--exit-code", "origin", "refs/heads/main"])).code === 2;
-    const range = empty ? "HEAD" : "origin/main..HEAD";
+      (yield* git(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`])).code === 2;
+    const range = empty ? "HEAD" : `origin/${branch}..HEAD`;
     if (!empty && out(yield* git(repo, ["rev-list", "--count", range])) === "0")
       return "nothing new to commit";
     const hits = yield* scanCommits(repo, [range]);
     if (hits.length > 0) return yield* Effect.fail(refusal(hits, "push"));
     const push = yield* git(
       repo,
-      empty ? ["push", "-q", "-u", "origin", "HEAD:refs/heads/main"] : ["push", "-q"],
+      empty ? ["push", "-q", "-u", "origin", `HEAD:refs/heads/${branch}`] : ["push", "-q"],
     );
     if (!ok(push)) return yield* Effect.fail(`the push failed: ${why(push)}`);
     return "pushed what an earlier run committed";

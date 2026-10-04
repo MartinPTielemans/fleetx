@@ -41,15 +41,15 @@ afterAll(() => {
 });
 
 /** A fleet's origin and this machine's checkout, at one commit. */
-const checkout = (name: string) => {
+const checkout = (name: string, branch = "main") => {
   const origin = join(home, name, "origin.git");
-  git(home, "init", "-q", "--bare", "-b", "main", origin);
+  git(home, "init", "-q", "--bare", "-b", branch, origin);
   const repo = join(home, name, "fleet");
   git(home, "clone", "-q", origin, repo);
   fs.writeFileSync(join(repo, "t3-fleet.toml"), '[defaults.mcp]\nservers = ["fetch"]\n');
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "start");
-  git(repo, "push", "-q", "-u", "origin", "main");
+  git(repo, "push", "-q", "-u", "origin", `HEAD:${branch}`);
   return { origin, repo };
 };
 const record = (repo: string, over: Partial<Abandoned> = {}): Abandoned => ({
@@ -101,23 +101,23 @@ describe("the next setup", () => {
     halfApplied(f.repo);
     const a = record(f.repo);
     await run(recordAbandoned(home, a));
-    const left = await run(unfinishedWork(home, a, true));
+    const left = await run(unfinishedWork(home, a, true, "main"));
     expect(left).toEqual({
       publish: ["t3-fleet.toml", "mcp/another.json"],
       unpushed: [],
       propose: [],
       sync: true,
     });
-    const lines = await run(finishWork(home, a, left, { sync: false }));
+    const lines = await run(finishWork(home, a, left, { sync: false, branch: "main" }));
     expect(lines[0]).toMatch(/^published t3-fleet\.toml, mcp\/another\.json/);
     expect(git(f.origin, "show", "main:mcp/another.json")).toContain("a.example");
     expect(Option.isNone(await run(readAbandoned(home)))).toBe(true);
     // Synced since, and nothing left in the checkout: nothing is unfinished.
     synced(3_000_000);
-    expect(nothingUnfinished(await run(unfinishedWork(home, a, true)))).toBe(true);
+    expect(nothingUnfinished(await run(unfinishedWork(home, a, true, "main")))).toBe(true);
     // A sync that failed since does not count.
     synced(3_000_000, "error");
-    expect((await run(unfinishedWork(home, a, true))).sync).toBe(true);
+    expect((await run(unfinishedWork(home, a, true, "main"))).sync).toBe(true);
   });
 
   it("pushes what an authority's abandoned run committed when its push failed", async () => {
@@ -127,18 +127,33 @@ describe("the next setup", () => {
     git(f.repo, "commit", "-qm", "Set up laptop");
     const a = record(f.repo);
     synced(3_000_000);
-    const left = await run(unfinishedWork(home, a, true));
+    const left = await run(unfinishedWork(home, a, true, "main"));
     expect(left).toEqual({
       publish: [],
       unpushed: ["mcp/another.json", "t3-fleet.toml"],
       propose: [],
       sync: false,
     });
-    const lines = await run(finishWork(home, a, left, { sync: false }));
+    const lines = await run(finishWork(home, a, left, { sync: false, branch: "main" }));
     expect(lines).toEqual([
       "pushed what an earlier run committed: mcp/another.json, t3-fleet.toml",
     ]);
     expect(git(f.origin, "show", "main:mcp/another.json")).toContain("a.example");
+  });
+
+  it("on a fleet whose branch is not main, pushes to that branch", async () => {
+    const f = checkout("trunk", "trunk");
+    git(f.repo, "branch", "-q", "--set-upstream-to=origin/trunk");
+    halfApplied(f.repo);
+    git(f.repo, "add", "-A");
+    git(f.repo, "commit", "-qm", "Set up laptop");
+    const a = record(f.repo);
+    synced(3_000_000);
+    const left = await run(unfinishedWork(home, a, true, "trunk"));
+    expect(left.unpushed).toEqual(["mcp/another.json", "t3-fleet.toml"]);
+    await run(finishWork(home, a, left, { sync: false, branch: "trunk" }));
+    expect(git(f.origin, "show", "trunk:mcp/another.json")).toContain("a.example");
+    expect(() => git(f.origin, "show", "main:mcp/another.json")).toThrow();
   });
 
   it("marks a member's for proposing, unless it is proposed already as it is", async () => {
@@ -151,9 +166,9 @@ describe("the next setup", () => {
     const proposal = git(f.repo, "commit-tree", git(f.repo, "write-tree"), "-p", "HEAD", "-m", "p");
     git(f.repo, "reset", "-q");
     fs.writeFileSync(lastProposalPath(home), `${proposal}\n`);
-    const left = await run(unfinishedWork(home, a, false));
+    const left = await run(unfinishedWork(home, a, false, "main"));
     expect(left).toEqual({ publish: [], unpushed: [], propose: ["t3-fleet.toml"], sync: false });
-    await run(finishWork(home, a, left, { sync: false }));
+    await run(finishWork(home, a, left, { sync: false, branch: "main" }));
     expect(await run(setupProposed(home))).toEqual(["t3-fleet.toml"]);
   });
 });

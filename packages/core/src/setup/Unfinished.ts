@@ -96,7 +96,7 @@ export const nothingUnfinished = (u: Unfinished) =>
   u.publish.length + u.unpushed.length + u.propose.length === 0 && !u.sync;
 
 /** Read-only: compares the record with the checkout and the last sync. */
-export const unfinishedWork = (home: string, a: Abandoned, authority: boolean) =>
+export const unfinishedWork = (home: string, a: Abandoned, authority: boolean, branch: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const changed = yield* changedFiles(a.checkout, a.written);
@@ -124,10 +124,11 @@ export const unfinishedWork = (home: string, a: Abandoned, authority: boolean) =
     }
     const unpushed =
       authority &&
-      ok(yield* git(a.checkout, ["rev-parse", "-q", "--verify", "origin/main"])) &&
-      out(yield* git(a.checkout, ["rev-list", "--count", "origin/main..HEAD"])) !== "0"
+      ok(yield* git(a.checkout, ["rev-parse", "-q", "--verify", `origin/${branch}`])) &&
+      out(yield* git(a.checkout, ["rev-list", "--count", `origin/${branch}..HEAD`])) !== "0"
         ? nulList(
-            (yield* git(a.checkout, ["diff", "--name-only", "-z", "origin/main...HEAD"])).stdout,
+            (yield* git(a.checkout, ["diff", "--name-only", "-z", `origin/${branch}...HEAD`]))
+              .stdout,
           )
         : [];
     const last = yield* fs.readFileString(lastSyncPath(home)).pipe(Effect.option);
@@ -138,8 +139,10 @@ export const unfinishedWork = (home: string, a: Abandoned, authority: boolean) =
     return { publish, unpushed, propose, sync } satisfies Unfinished;
   });
 
-const aheadOfOrigin = (repo: string) =>
-  git(repo, ["rev-list", "--count", "origin/main..HEAD"]).pipe(Effect.map((r) => out(r) !== "0"));
+const aheadOfOrigin = (repo: string, branch: string) =>
+  git(repo, ["rev-list", "--count", `origin/${branch}..HEAD`]).pipe(
+    Effect.map((r) => out(r) !== "0"),
+  );
 
 export const unfinishedLines = (u: Unfinished, a: Abandoned): ReadonlyArray<string> => [
   ...(u.publish.length > 0 ? [`not published: ${u.publish.join(", ")}`] : []),
@@ -161,7 +164,7 @@ export const finishWork = (
   home: string,
   a: Abandoned,
   u: Unfinished,
-  options: { readonly sync: boolean },
+  options: { readonly sync: boolean; readonly branch: string },
 ) =>
   Effect.gen(function* () {
     const lines: Array<string> = [];
@@ -170,8 +173,11 @@ export const finishWork = (
       lines.push(`published ${u.publish.join(", ")} (${rev})`);
     }
     // commitAndPush pushed them along; with nothing to commit, they go on their own (scanned).
-    if (u.unpushed.length > 0 && (u.publish.length === 0 || (yield* aheadOfOrigin(a.checkout))))
-      lines.push(`${yield* pushLeftover(a.checkout)}: ${u.unpushed.join(", ")}`);
+    if (
+      u.unpushed.length > 0 &&
+      (u.publish.length === 0 || (yield* aheadOfOrigin(a.checkout, options.branch)))
+    )
+      lines.push(`${yield* pushLeftover(a.checkout, options.branch)}: ${u.unpushed.join(", ")}`);
     if (u.propose.length > 0) {
       yield* addSetupProposed(home, u.propose);
       lines.push(`marked ${u.propose.join(", ")} for proposing`);

@@ -66,7 +66,12 @@ import {
 } from "@t3-fleet/core/setup/Plan";
 import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Preflight";
 import { registeredByFleet } from "@t3-fleet/core/setup/RegisteredByFleet";
-import { cloneFleet, readFleet, SELF_SERVER } from "@t3-fleet/core/setup/Repo";
+import {
+  cloneFleet,
+  readFleet,
+  SELF_SERVER,
+  uncommittedFleetFiles,
+} from "@t3-fleet/core/setup/Repo";
 import {
   clearAbandoned,
   dropRun,
@@ -440,6 +445,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
     let fleet: FleetView = EMPTY_FLEET;
     let mcp: Readonly<Record<string, unknown>> = {};
     let timerOff = false;
+    let branch = Option.match(config, { onNone: () => "main", onSome: (c) => c.branch });
     let node = Option.getOrNull(flags.name) ?? "";
     let authority = mode === "first";
     if (mode === "again" && Option.isSome(config)) {
@@ -448,6 +454,26 @@ const planAndApply = (flags: Flags, scratch: string) =>
       authority =
         config.value.nodes.find((n) => n.name === node)?.roles.includes("authority") ?? false;
       ({ view: fleet, mcp, timerOff } = yield* readFleet(checkout, node));
+      // Planned against, or committed, an uncommitted edit would pass for the fleet's.
+      const record = Option.filter(yield* readAbandoned(home), (a) => a.checkout === checkout);
+      const dirty = yield* uncommittedFleetFiles(
+        checkout,
+        node,
+        fleet,
+        Option.match(record, { onNone: () => [], onSome: (a) => a.written }),
+      );
+      if (dirty.length > 0) {
+        const files = dirty.map((l) => l.slice(3)).join(" ");
+        return yield* Effect.fail(
+          [
+            `${checkout} has uncommitted changes to the fleet's files; setup would plan against them as if they were the fleet's:`,
+            ...dirty.map((l) => `  ${l}`),
+            authority
+              ? `Publish them first (\`git -C ${checkout} add -- ${files} && git -C ${checkout} commit -m "…"\`, then \`t3-fleet sync\`), or set them aside (\`git -C ${checkout} stash push -m t3-fleet -- ${files}\`), then run setup again.`
+              : `\`t3-fleet sync\` proposes edits under [fleet] auto_commit; set the rest aside (\`git -C ${checkout} stash push -m t3-fleet -- ${files}\`), or wait for this machine's proposal to be approved; then run setup again.`,
+          ].join("\n"),
+        );
+      }
     }
     if (mode === "join" && url !== null) {
       yield* cloneFleet(url, scratch);
@@ -468,6 +494,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
       authority =
         Option.isSome(probe) &&
         (probe.value.nodes.find((n) => n.name === node)?.roles.includes("authority") ?? false);
+      if (Option.isSome(probe)) branch = probe.value.branch;
     }
 
     // 2. Discover.
@@ -574,7 +601,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
     // What a run dropped with --abandon left undone: the checkout already has its files, so the plan cannot see it.
     const abandoned = mode === "again" ? yield* readAbandoned(home) : Option.none();
     const record = Option.getOrNull(Option.filter(abandoned, (a) => a.checkout === checkout));
-    const left = record === null ? null : yield* unfinishedWork(home, record, authority);
+    const left = record === null ? null : yield* unfinishedWork(home, record, authority, branch);
     const pending = left !== null && !nothingUnfinished(left);
     if (record !== null && left !== null && pending)
       yield* Console.log(
@@ -603,7 +630,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
           return yield* Console.log("Nothing was written.");
       }
       yield* Console.log("");
-      for (const line of yield* finishWork(home, record, left, { sync: true }))
+      for (const line of yield* finishWork(home, record, left, { sync: true, branch }))
         yield* Console.log(`✓ ${line}`);
       return yield* Console.log(`\n${node} is set up.`);
     }
@@ -671,11 +698,12 @@ const planAndApply = (flags: Flags, scratch: string) =>
       timer: pre.timer,
       remote: remoteTarget,
       now,
+      branch,
     };
 
     // What an abandoned run left: published or marked for proposing now; this run's sync does the rest.
     if (record !== null && left !== null && pending)
-      for (const line of yield* finishWork(home, record, left, { sync: false }))
+      for (const line of yield* finishWork(home, record, left, { sync: false, branch }))
         yield* Console.log(`✓ ${line}`);
 
     // 5. Apply: the run is saved first, so a resume does exactly this.

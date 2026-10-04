@@ -16,8 +16,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import type { ProbeServices } from "../Area.ts";
 import { readSecrets, setVar } from "../Secrets.ts";
-import { persistable, restored, secretsToStore, setupSteps, type SetupInput } from "./Apply.ts";
-import type { Actions } from "./Plan.ts";
+import {
+  commitPaths,
+  persistable,
+  restored,
+  secretsToStore,
+  setupSteps,
+  type SetupInput,
+} from "./Apply.ts";
+import { EMPTY_FLEET, type Actions } from "./Plan.ts";
+import { uncommittedFleetFiles } from "./Repo.ts";
 import { loadRunSecrets, saveRunSecrets } from "./State.ts";
 
 const services = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
@@ -123,6 +131,55 @@ describe("a setup that stops part-way", () => {
     expect(node).toContain('"ignore.add" = ["node_repl"]');
     expect(node).toContain("timer = false");
     expect(fs.readlinkSync(join(home, ".agents/skills/demo"))).toBe(join(repo, "skills/demo"));
+  });
+
+  it("commits only what the run wrote; an uncommitted edit stays where it is, unpublished", async () => {
+    // Edits nobody committed, to the fleet's files and outside them.
+    const ctx = join(repo, "mcp/ctx.json");
+    const committed = fs.readFileSync(ctx, "utf8");
+    fs.writeFileSync(ctx, committed.replace('"ctx"', '"ctx", "--draft-flag"'));
+    fs.writeFileSync(join(repo, "nodes/other.toml"), 'roles = ["member"]\n');
+    fs.writeFileSync(join(repo, "bootstrap.sh"), "#!/bin/sh\n");
+    const dirty = await run(uncommittedFleetFiles(repo, "laptop", EMPTY_FLEET));
+    expect(dirty).toEqual([" M mcp/ctx.json"]);
+    expect(await run(uncommittedFleetFiles(repo, "laptop", EMPTY_FLEET, ["mcp/ctx.json"]))).toEqual(
+      [],
+    );
+
+    const again: SetupInput = {
+      ...input(),
+      mode: "again",
+      actions: {
+        ...actions(),
+        skills: [],
+        links: [],
+        ignored: [],
+        servers: [
+          {
+            name: "another",
+            definition: { kind: "remote", url: "https://another.example/mcp" },
+            scope: "fleet",
+          },
+        ],
+        secrets: [],
+      },
+      extras: { relay: null, models: null, t3: false },
+      now: 2,
+    };
+    expect(commitPaths(again)).not.toContain("mcp");
+    expect(await runSteps(again, ["snapshot", "repo"])).toBeNull();
+    const show = (file: string) =>
+      execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
+    expect(show("mcp/another.json")).toContain("another.example");
+    expect(show("mcp/ctx.json")).toBe(committed);
+    expect(() => show("nodes/other.toml")).toThrow();
+    expect(fs.readFileSync(ctx, "utf8")).toContain("--draft-flag");
+    expect(execFileSync("git", ["-C", repo, "status", "--porcelain"], { encoding: "utf8" })).toBe(
+      " M mcp/ctx.json\n?? bootstrap.sh\n?? nodes/other.toml\n",
+    );
+    fs.writeFileSync(ctx, committed);
+    fs.rmSync(join(repo, "nodes/other.toml"));
+    fs.rmSync(join(repo, "bootstrap.sh"));
   });
 
   it("refuses to resume without its values: missing, another run's, or incomplete", async () => {
