@@ -87,7 +87,7 @@ const call = (hub: Hub, name: string) =>
 
 describe.skipIf(!available)("hub Docker runner", () => {
   it("runs HTTP and stdio images hardened on loopback, adopts a running container after a restart, and restarts one that dies", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleetx-hub-docker-"));
+    const dir = mkdtempSync(join(tmpdir(), "t3-fleet-hub-docker-"));
     mkdirSync(join(dir, "repo/mcp"), { recursive: true });
     writeFileSync(join(dir, "repo/mcp", `${names.http}.json`), toJson({ kind: "container", image: IMAGE, transport: "streamable-http", args: ["python", "-c", code, "http"], env: { GREETING: "$GREETING" } }));
     writeFileSync(join(dir, "repo/mcp", `${names.stdio}.json`), toJson({ kind: "registry", image: IMAGE, transport: "stdio", network: "none", args: ["python", "-u", "-c", code, "stdio"] }));

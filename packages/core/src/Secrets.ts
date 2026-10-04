@@ -4,8 +4,8 @@
  *
  *   secrets/secrets.env.age      armored age file (in git)
  *   secrets/recipients.toml      node = "age1…" public keys (in git)
- *   ~/.config/fleetx/age-key.txt this node's private key (never leaves it)
- *   ~/.config/fleetx/secrets.env decrypted, mode 600, what fixes and
+ *   ~/.config/t3-fleet/age-key.txt this node's private key (never leaves it)
+ *   ~/.config/t3-fleet/secrets.env decrypted, mode 600, what fixes and
  *                                templates read
  *
  * Encryption uses age-encryption, so nodes need no age binary.
@@ -17,13 +17,14 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { armor, Decrypter, Encrypter, generateX25519Identity, identityToRecipient } from "age-encryption";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { configDir } from "./Names.ts";
 
 export class SecretsError extends Schema.TaggedError<SecretsError>()("SecretsError", {
   message: Schema.String,
 }) {}
 
-export const keyPath = (home: string) => `${home}/.config/fleetx/age-key.txt`;
-export const localSecretsPath = (home: string) => `${home}/.config/fleetx/secrets.env`;
+export const keyPath = (home: string) => `${configDir(home)}/age-key.txt`;
+export const localSecretsPath = (home: string) => `${configDir(home)}/secrets.env`;
 export const encryptedPath = (repo: string) => `${repo}/secrets/secrets.env.age`;
 export const recipientsPath = (repo: string) => `${repo}/secrets/recipients.toml`;
 
@@ -50,7 +51,7 @@ export const ensureIdentity = Effect.gen(function* () {
   if (identity !== "") return { identity, recipient: yield* promise(() => identityToRecipient(identity), "reading key"), created: false };
   const fresh = yield* promise(() => generateX25519Identity(), "generating key");
   const recipient = yield* promise(() => identityToRecipient(fresh), "deriving recipient");
-  yield* writePrivate(keyPath(home), `# fleetx node key; public: ${recipient}\n${fresh}\n`);
+  yield* writePrivate(keyPath(home), `# T3 Fleet node key; public: ${recipient}\n${fresh}\n`);
   return { identity: fresh, recipient, created: true };
 });
 

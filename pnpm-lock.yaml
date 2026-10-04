@@ -95,7 +95,7 @@ importers:
       '@effect/vitest':
         specifier: 'catalog:'
         version: 4.0.0-rc.115(effect@4.0.0-rc.115)
-      '@fleetx/core':
+      '@t3-fleet/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@types/node':
@@ -113,7 +113,7 @@ importers:
       '@base-ui/react':
         specifier: 'catalog:'
         version: 1.5.0(@types/react@19.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      '@fleetx/core':
+      '@t3-fleet/core':
         specifier: workspace:*
         version: link:../../packages/core
       class-variance-authority:

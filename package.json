@@ -1,5 +1,5 @@
 {
-  "name": "@fleetx/monorepo",
+  "name": "@t3-fleet/monorepo",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.10.0",
@@ -8,8 +8,8 @@
   },
   "scripts": {
     "prepare": "effect-tsgo patch",
-    "fleetx": "node apps/cli/src/bin.ts",
-    "build": "vp run --filter fleetx build",
+    "t3-fleet": "node apps/cli/src/bin.ts",
+    "build": "vp run --filter t3-fleet build",
     "typecheck": "vp run -r typecheck",
     "lint": "vp lint --report-unused-disable-directives",
     "test": "scripts/check-no-personal-data.sh && vp run -r test",

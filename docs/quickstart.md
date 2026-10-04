@@ -9,13 +9,13 @@ curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/i
 ```
 
 Or `brew install martinptielemans/tap/fleetx`, or `nix run github:MartinPTielemans/fleetx`.
-fleetx is one file run by Node 24 or newer. With `gh` installed, the installer
+T3 Fleet is one file run by Node 24 or newer. With `gh` installed, the installer
 checks the download against the release's build attestation.
 
 ## 2. Start a fleet from this machine
 
 ```sh
-fleetx init --github you/fleet
+t3-fleet init --github you/fleet
 ```
 
 `init` looks at what is already here (Claude Code, Codex, T3 Code, skills, MCP
@@ -25,8 +25,8 @@ machine. Tokens it finds in MCP configuration go into an encrypted secrets file,
 never into plain files. `--github` creates the private repository and pushes.
 
 ```sh
-fleetx status        # every machine: T3, the providers it launches, agent CLIs
-fleetx fix           # apply what status suggests, after showing it
+t3-fleet status        # every machine: T3, the providers it launches, agent CLIs
+t3-fleet fix           # apply what status suggests, after showing it
 ```
 
 ## 3. Add a second machine
@@ -34,7 +34,7 @@ fleetx fix           # apply what status suggests, after showing it
 On the first machine:
 
 ```sh
-fleetx invite desktop
+t3-fleet invite desktop
 ```
 
 It prints a command. Run it on the new machine:
@@ -49,7 +49,7 @@ timer, and converges. The authority's next sync lets it read the secrets.
 ## 4. Use it from T3 Code
 
 ```sh
-claude mcp add fleetx -- fleetx mcp
+claude mcp add T3 Fleet -- t3-fleet mcp
 ```
 
 Any thread can now be asked "what's wrong with my environments?". The tools are
@@ -58,18 +58,18 @@ Any thread can now be asked "what's wrong with my environments?". The tools are
 Or open it in a browser:
 
 ```sh
-fleetx ui
+t3-fleet ui
 ```
 
 Every view the CLI has, live: environments, findings and fixes, proposals,
-alerts, the MCP hub, models, and each machine's config.
+alerts, skills, the MCP hub, models, and each machine's config.
 
 ## What happens from here
 
-Every machine runs `fleetx sync` on a timer: it pulls the repository, converges,
+Every machine runs `t3-fleet sync` on a timer: it pulls the repository, converges,
 and publishes its state. Changes a machine makes under `[fleet] auto_commit`
-paths (new skills, say) are proposed for an authority to `fleetx approve`.
-`fleetx status --all` shows every machine from their published state without
+paths (new skills, say) are proposed for an authority to `t3-fleet approve`.
+`t3-fleet status --all` shows every machine from their published state without
 contacting any of them.
 
 Next: [topologies](topologies.md), [areas](areas.md), [troubleshooting](troubleshooting.md).

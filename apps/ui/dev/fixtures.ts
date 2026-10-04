@@ -1,10 +1,10 @@
 /**
- * A made-up fleet for `FLEETX_UI_FIXTURES=1 vp dev`: three machines, a few
- * findings, a proposal, a hub with servers and calls, model proxy traffic.
+ * A made-up fleet for `T3_FLEET_UI_FIXTURES=1 vp dev`: three machines, a few
+ * findings, a proposal, skills, a hub with servers and calls, model proxy traffic.
  * Typed against Api.ts so it stays in step with the real server. Writes
  * succeed and change nothing.
  */
-import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiModels, UiProposal, UiSession, UiStatus } from "@fleetx/core/Api";
+import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@t3-fleet/core/Api";
 
 const now = Date.now();
 const min = 60_000;
@@ -35,7 +35,7 @@ const session: UiSession = { version: "0.4.0", self: "laptop", authority: true, 
 const status: UiStatus = {
   checkedAt: now - 20_000,
   elapsedMs: 3200,
-  summary: "fleetx  3 environments  2 warnings  (3.2s)",
+  summary: "T3 Fleet  3 environments  2 warnings  (3.2s)",
   environments: [
     {
       name: "laptop",
@@ -48,7 +48,7 @@ const status: UiStatus = {
         { name: "codex", version: "0.160.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/fleetx-claude", viaModels: true },
+        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
         { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.160.0", runs: "~/.local/bin/codex", viaModels: false },
       ],
       sync: { at: now - 2 * min, result: "ok", streak: 0, message: "converged" },
@@ -69,7 +69,7 @@ const status: UiStatus = {
         { name: "codex", version: "0.159.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/fleetx-claude", viaModels: true },
+        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
         { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.159.0", runs: "~/.local/bin/codex", viaModels: false },
       ],
       sync: { at: now - 7 * min, result: "ok", streak: 0, message: "converged" },
@@ -105,6 +105,23 @@ const status: UiStatus = {
     },
     { id: "server:codex-behind", node: "server", severity: "warn", area: "agents", title: "codex 0.159.0 is behind 0.160.0", fix: { command: "npm i -g @openai/codex@0.160.0", safe: true } },
     { id: "server:models-failing", node: "server", severity: "warn", area: "models", title: "6.4% of Anthropic requests failed in the last hour (529)" },
+    {
+      id: "server:skills-unlinked",
+      node: "server",
+      severity: "warn",
+      area: "skills",
+      title: "1 skill is not linked into place: tdd",
+      fix: { command: 'mkdir -p ~/.claude/skills && ln -sfn ~/.agents/skills/tdd ~/.claude/skills/tdd', safe: true },
+    },
+    {
+      id: "laptop:skill-stray-scratchpad",
+      node: "laptop",
+      severity: "warn",
+      area: "skills",
+      title: "skill scratchpad was installed in ~/.codex/skills outside T3 Fleet",
+      detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
+      fix: { command: "t3-fleet skills adopt scratchpad --from ~/.codex/skills", safe: true },
+    },
     { id: "laptop:claude-other-copies", node: "laptop", severity: "info", area: "agents", title: "another claude on PATH", accepted: "the distribution ships its own package" },
   ],
 };
@@ -119,6 +136,48 @@ const proposals: ReadonlyArray<UiProposal> = [
     autoApprovable: true,
   },
 ];
+
+const link = (home: string, skill: string, client = true) => [
+  { skill, dir: `${home}/.agents/skills`, state: "ok" as const },
+  ...(client ? [{ skill, dir: `${home}/.claude/skills`, state: "ok" as const }] : []),
+];
+
+const skills: UiSkills = {
+  skills: [
+    { name: "code-review", description: "Review the changes since a fixed point along standards and spec.", source: { name: "skills", url: "https://github.com/acme/skills.git" } },
+    { name: "drafts", description: null, source: null },
+    { name: "review", description: "Review a diff against the repo's standards.", source: null },
+    { name: "tdd", description: "Test-driven development: red, green, refactor.", source: { name: "skills", url: "https://github.com/acme/skills.git" } },
+  ],
+  nodes: [
+    {
+      node: "laptop",
+      at: now - 20_000,
+      store: "/Users/u/.agents/skills",
+      links: ["code-review", "drafts", "review", "tdd"].flatMap((s) => link("/Users/u", s)),
+      strays: [{ skill: "scratchpad", dir: "/Users/u/.codex/skills" }],
+      dangling: [],
+      ignored: [],
+    },
+    {
+      node: "server",
+      at: now - 20_000,
+      store: "/home/u/.agents/skills",
+      links: [...link("/home/u", "code-review"), ...link("/home/u", "review"), ...link("/home/u", "tdd", false), { skill: "tdd", dir: "/home/u/.claude/skills", state: "missing" }],
+      strays: [],
+      dangling: [],
+      ignored: ["drafts"],
+    },
+    { node: "desktop", at: null, store: null, links: [], strays: [], dangling: [], ignored: [] },
+  ],
+};
+
+const skillsPreview: UiSkillsPreview = {
+  files: ["skills/tdd"],
+  stat: " skills/tdd/SKILL.md | 4 +++-\n 1 file changed, 3 insertions(+), 1 deletion(-)",
+  diff: "diff --git a/skills/tdd/SKILL.md b/skills/tdd/SKILL.md\n--- a/skills/tdd/SKILL.md\n+++ b/skills/tdd/SKILL.md\n@@ -1,5 +1,7 @@\n ---\n name: tdd\n-description: Test-driven development.\n+description: Test-driven development: red, green, refactor.\n ---\n+\n+Write the failing test first.\n",
+  digest: "fixture",
+};
 
 const hubServers: ReadonlyArray<HubServer> = [
   { name: "linear", kind: "remote", upstream: "https://mcp.linear.app/mcp", state: "running", detail: null, auth: "oauth", expiresAt: now + 50 * min, tools: 23, lastCheckAt: now - 40_000 },
@@ -149,6 +208,9 @@ export const fixtureResponse = (method: string, path: string): { status: number;
   if (method === "POST") {
     if (path === "/api/fixes") return json({ results: [], notApplied: [{ id: "*", reason: "fixtures change nothing" }], status });
     if (path.endsWith("/login")) return json({ url: "https://example.com/oauth/authorize" });
+    if (path === "/api/skills/lookup") return json({ url: "https://github.com/acme/skills.git", skills: [{ name: "code-review", exists: true }, { name: "grilling", exists: false }, { name: "tdd", exists: true }] });
+    if (path === "/api/skills/preview") return json(skillsPreview);
+    if (path.startsWith("/api/skills/")) return json({ paths: ["skills/tdd"], landed: "fixtures change nothing" });
     return { status: 204, body: "" };
   }
   switch (path) {
@@ -166,6 +228,8 @@ export const fixtureResponse = (method: string, path: string): { status: number;
       ]);
     case "/api/models":
       return json(models);
+    case "/api/skills":
+      return json(skills);
     case "/api/hub/servers":
       return json(hubServers);
     case "/api/hub/calls":

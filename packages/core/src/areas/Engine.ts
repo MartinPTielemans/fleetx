@@ -1,12 +1,15 @@
 /**
- * fleetx itself, installed on each node, so timers and fixes there can run
+ * T3 Fleet itself, installed on each node, so timers and fixes there can run
  * it. The node's copy must be the controller's exact build; the fix streams
  * that build over the same ssh connection, so no release has to exist.
  *
- *   ~/.local/share/fleetx/fleetx.mjs   the bundle
- *   ~/.local/bin/fleetx                link to it
+ *   ~/.local/share/t3-fleet/t3-fleet.mjs   the bundle
+ *   ~/.local/bin/t3-fleet                  link to it (and ~/.local/bin/fleetx until 1.0)
  *
- * and, when `[engine] timer = true`, the timer that runs `fleetx sync` every
+ * A machine set up before the rename still has ~/.config/fleetx and the
+ * rest (see Names.ts); the migration finding moves them over.
+ *
+ * And, when `[engine] timer = true`, the timer that runs `t3-fleet sync` every
  * `[engine] interval` seconds (launchd on macOS, systemd elsewhere; system
  * units for root). The unit runs the absolute node binary and bundle, with a
  * fixed PATH, so it never depends on what a login shell happens to set up.
@@ -21,7 +24,21 @@ import { defineArea, sh } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { sha256 } from "../Hash.ts";
-import { installedBundle, stableNode } from "../Runtime.ts";
+import {
+  configDir,
+  CONFIG_DIR,
+  LEGACY_BUNDLE_FILE,
+  LEGACY_CONFIG_DIR,
+  LEGACY_SHARE_DIR,
+  LEGACY_STATE_DIR,
+  BUNDLE_FILE,
+  launchdLabel,
+  SH_CONFIG_DIR,
+  SHARE_DIR,
+  STATE_DIR,
+  systemdUnit,
+} from "../Names.ts";
+import { installedBundle, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
 
 const Desired = Schema.UndefinedOr(
   Schema.Struct({ timer: Schema.optionalKey(Schema.Boolean), interval: Schema.optionalKey(Schema.Number) }),
@@ -31,29 +48,38 @@ const Observed = Schema.Struct({
   /** SHA-256 of the controller's build; null when not told (a local probe). */
   wanted: Schema.NullOr(Schema.String),
   installed: Schema.NullOr(Schema.String),
-  /** What ~/.config/fleetx/config.toml should say, and whether it does. */
+  /** What ~/.config/t3-fleet/config.toml should say, and whether it does. */
   local: Schema.NullOr(Schema.Struct({ want: Schema.String, matches: Schema.Boolean })),
   platform: Schema.String,
   root: Schema.Boolean,
   /** The node binary running this probe: what the timer will run. */
   nodePath: Schema.String,
   /** The installed unit's content, if any, and what it should be. */
-  timer: Schema.Struct({ installed: Schema.NullOr(Schema.String), want: Schema.NullOr(Schema.String), loaded: Schema.Boolean }),
+  timer: Schema.Struct({
+    installed: Schema.NullOr(Schema.String),
+    want: Schema.NullOr(Schema.String),
+    loaded: Schema.Boolean,
+    /** Still installed under its fleetx name. Until 1.0. */
+    legacy: Schema.optionalKey(Schema.Boolean),
+  }),
+  /** fleetx's directories still to move: config, state, share (Names.ts). Absent from older probes. */
+  legacy: Schema.optionalKey(Schema.Array(Schema.Literals(["config", "state", "share"]))),
 });
 
-const LAUNCHD_LABEL = "dev.fleetx.sync";
+const LAUNCHD_LABEL = launchdLabel("sync");
+const UNIT = systemdUnit("sync");
 
 const timerPaths = (platform: string, root: boolean, home: string) =>
   platform === "darwin"
     ? { unit: `${home}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`, timer: null }
     : root
-      ? { unit: "/etc/systemd/system/fleetx-sync.service", timer: "/etc/systemd/system/fleetx-sync.timer" }
-      : { unit: `${home}/.config/systemd/user/fleetx-sync.service`, timer: `${home}/.config/systemd/user/fleetx-sync.timer` };
+      ? { unit: `/etc/systemd/system/${UNIT}.service`, timer: `/etc/systemd/system/${UNIT}.timer` }
+      : { unit: `${home}/.config/systemd/user/${UNIT}.service`, timer: `${home}/.config/systemd/user/${UNIT}.timer` };
 
 /** The unit (and timer) text; for systemd both files joined with a separator line. */
 const timerUnits = (platform: string, home: string, nodePath: string, bundle: string, interval: number) => {
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
-  const log = `${home}/.local/state/fleetx/sync.log`;
+  const log = `${home}/${STATE_DIR}/sync.log`;
   if (platform === "darwin") {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,7 +95,7 @@ const timerUnits = (platform: string, home: string, nodePath: string, bundle: st
 `;
   }
   return `[Unit]
-Description=fleetx sync
+Description=T3 Fleet sync
 After=network-online.target
 Wants=network-online.target
 
@@ -84,7 +110,7 @@ StandardError=append:${log}
 Nice=10
 --- timer ---
 [Unit]
-Description=Run fleetx sync every ${interval}s
+Description=Run T3 Fleet sync every ${interval}s
 
 [Timer]
 # OnActiveSec starts the chain when the timer is (re)installed after its
@@ -99,15 +125,16 @@ WantedBy=timers.target
 `;
 };
 
-export const ENGINE_INSTALL = "fleetx:install-self";
+export const ENGINE_INSTALL = "t3-fleet:install-self";
 
-const heredoc = (file: string, text: string) => `cat > ${file} <<'FLEETX_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}FLEETX_UNIT`;
+const heredoc = (file: string, text: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
 
 const installTimer = (platform: string, root: boolean, want: string) => {
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"`;
     return [
-      'mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.local/state/fleetx"',
+      retireLegacyUnit(platform, root, "sync"),
+      `mkdir -p "$HOME/Library/LaunchAgents" "$HOME/${STATE_DIR}"`,
       heredoc(plist, want),
       `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; launchctl bootstrap "gui/$(id -u)" ${plist}`,
     ].join("\n");
@@ -116,11 +143,12 @@ const installTimer = (platform: string, root: boolean, want: string) => {
   const dir = root ? "/etc/systemd/system" : '"$HOME/.config/systemd/user"';
   const ctl = root ? "systemctl" : "systemctl --user";
   return [
-    `mkdir -p ${dir} "$HOME/.local/state/fleetx"`,
-    heredoc(`${dir}/fleetx-sync.service`, service ?? ""),
-    heredoc(`${dir}/fleetx-sync.timer`, timer ?? ""),
+    retireLegacyUnit(platform, root, "sync"),
+    `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
+    heredoc(`${dir}/${UNIT}.service`, service ?? ""),
+    heredoc(`${dir}/${UNIT}.timer`, timer ?? ""),
     ...(root ? [] : ['[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"']),
-    `${ctl} daemon-reload && ${ctl} enable --now fleetx-sync.timer && ${ctl} restart fleetx-sync.timer`,
+    `${ctl} daemon-reload && ${ctl} enable --now ${UNIT}.timer && ${ctl} restart ${UNIT}.timer`,
   ].join("\n");
 };
 
@@ -128,25 +156,61 @@ const removeTimer = (platform: string, root: boolean) =>
   platform === "darwin"
     ? `launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null; rm -f "$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"`
     : root
-      ? "systemctl disable --now fleetx-sync.timer; rm -f /etc/systemd/system/fleetx-sync.service /etc/systemd/system/fleetx-sync.timer; systemctl daemon-reload"
-      : 'systemctl --user disable --now fleetx-sync.timer; rm -f "$HOME/.config/systemd/user/fleetx-sync.service" "$HOME/.config/systemd/user/fleetx-sync.timer"; systemctl --user daemon-reload';
+      ? `systemctl disable --now ${UNIT}.timer; rm -f /etc/systemd/system/${UNIT}.service /etc/systemd/system/${UNIT}.timer; systemctl daemon-reload`
+      : `systemctl --user disable --now ${UNIT}.timer; rm -f "$HOME/.config/systemd/user/${UNIT}.service" "$HOME/.config/systemd/user/${UNIT}.timer"; systemctl --user daemon-reload`;
+
+/**
+ * Move fleetx's directories to T3 Fleet's, leaving links at the old names so
+ * anything still using them (an old unit, a launcher, a user's script) keeps
+ * working. A directory both names already have is merged, the new copy's
+ * files winning, and the old one kept beside it. The bundle directory moves
+ * once this build is installed, and its fleetx.mjs then names the new bundle.
+ */
+export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">) => {
+  const move = (was: string, now: string) =>
+    [
+      `if [ -d "$HOME/${was}" ] && [ ! -L "$HOME/${was}" ]; then`,
+      // cp -n exits non-zero on macOS whenever it skips a file, so the merge is checked instead:
+      // every file of the old directory must be in the new one before the old one moves aside.
+      `  if [ -e "$HOME/${now}" ]; then`,
+      `    cp -Rpn "$HOME/${was}/." "$HOME/${now}/" 2>/dev/null`,
+      `    missing=$(cd "$HOME/${was}" && find . \\( -type f -o -type l \\) | while IFS= read -r f; do [ -e "$HOME/${now}/$f" ] || [ -L "$HOME/${now}/$f" ] || echo "$f"; done)`,
+      `    if [ -n "$missing" ] || [ ! -d "$HOME/${now}" ]; then echo "could not merge ~/${was} into ~/${now}; nothing was moved. Missing: $missing" >&2; exit 1; fi`,
+      `    mv "$HOME/${was}" "$HOME/${was}.migrated.$(date +%Y%m%d%H%M%S)"`,
+      `  else mkdir -p "$(dirname "$HOME/${now}")" && mv "$HOME/${was}" "$HOME/${now}"; fi`,
+      `  [ -e "$HOME/${was}" ] || { ln -s "$HOME/${now}" "$HOME/${was}" && echo "moved ~/${was} to ~/${now}"; }`,
+      "fi",
+    ].join("\n");
+  const steps: Array<string> = [];
+  if (legacy.includes("config")) steps.push(move(LEGACY_CONFIG_DIR, CONFIG_DIR));
+  if (legacy.includes("state")) steps.push(move(LEGACY_STATE_DIR, STATE_DIR));
+  if (legacy.includes("share")) {
+    steps.push(
+      `if [ -f "$HOME/${SHARE_DIR}/${BUNDLE_FILE}" ]; then`,
+      move(LEGACY_SHARE_DIR, SHARE_DIR),
+      `  ln -sfn ${BUNDLE_FILE} "$HOME/${SHARE_DIR}/${LEGACY_BUNDLE_FILE}"`,
+      "fi",
+    );
+  }
+  return steps.join("\n");
+};
 
 export const EngineArea = defineArea({
   id: "engine",
-  description: "this build of fleetx installed on every node",
+  description: "this build of T3 Fleet installed on every node",
   desired: Desired,
   observed: Observed,
   observe: (desired, ctx) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const at = yield* fs.realPath(`${ctx.home}/.local/bin/fleetx`).pipe(Effect.option);
+      const at = yield* installedBundle(ctx.home).pipe(Effect.map(Option.some));
       const bytes = Option.isSome(at) ? yield* fs.readFile(at.value).pipe(Effect.option) : Option.none();
       const installed = Option.isSome(bytes) ? yield* Effect.promise(() => sha256(bytes.value)) : null;
       let local: typeof Observed.Type["local"] = null;
       if (ctx.node !== null) {
         const checkout = ctx.checkout.startsWith(`${ctx.home}/`) ? `~${ctx.checkout.slice(ctx.home.length)}` : ctx.checkout;
         const want = `repo = "${checkout}"\nnode = "${ctx.node}"\n`;
-        const have = yield* fs.readFileString(`${ctx.home}/.config/fleetx/config.toml`).pipe(Effect.orElseSucceed(() => ""));
+        const have = yield* fs.readFileString(`${configDir(ctx.home)}/config.toml`).pipe(Effect.orElseSucceed(() => ""));
         const parsed = (key: string, text: string) => new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m").exec(text)?.[1];
         const expand = (p: string | undefined) => (p === undefined ? undefined : p.replace(/^~(?=\/|$)/, ctx.home));
         const matches = expand(parsed("repo", have)) === ctx.checkout && parsed("node", have) === ctx.node;
@@ -171,7 +235,7 @@ export const EngineArea = defineArea({
           ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`], timeout: Duration.seconds(5) })
           : yield* exec({
               command: "systemctl",
-              args: [...(root ? [] : ["--user"]), "show", "fleetx-sync.timer", "-p", "ActiveState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
+              args: [...(root ? [] : ["--user"]), "show", `${UNIT}.timer`, "-p", "ActiveState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
               timeout: Duration.seconds(5),
             });
       // An active timer can still have nothing scheduled (it "elapsed"): that one never runs again.
@@ -180,14 +244,29 @@ export const EngineArea = defineArea({
         const mono = prop("NextElapseUSecMonotonic");
         return prop("ActiveState") === "active" && ((mono !== "" && mono !== "infinity") || prop("NextElapseUSecRealtime") !== "");
       };
+      const realDir = (rel: string) =>
+        fs.readLink(`${ctx.home}/${rel}`).pipe(
+          Effect.map(() => false),
+          Effect.catch(() => fs.stat(`${ctx.home}/${rel}`).pipe(Effect.map((s) => s.type === "Directory"), Effect.orElseSucceed(() => false))),
+        );
+      const legacy: Array<"config" | "state" | "share"> = [];
+      if (yield* realDir(LEGACY_CONFIG_DIR)) legacy.push("config");
+      if (yield* realDir(LEGACY_STATE_DIR)) legacy.push("state");
+      if (yield* realDir(LEGACY_SHARE_DIR)) legacy.push("share");
       return {
+        legacy,
         wanted: ctx.engine,
         installed,
         local,
         platform,
         root,
         nodePath,
-        timer: { installed: installedTimer, want, loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)) },
+        timer: {
+          installed: installedTimer,
+          want,
+          loaded: check.code === 0 && (platform === "darwin" || scheduled(check.stdout)),
+          legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
+        },
       };
     }),
   diagnose: ({ node, observed }) => {
@@ -195,45 +274,69 @@ export const EngineArea = defineArea({
     if (observed.local !== null && !observed.local.matches) {
       out.push({
         node,
-        key: "fleetx-local-config",
+        key: "engine-local-config",
         severity: "warn",
         area: "engine",
-        title: "~/.config/fleetx/config.toml does not name this machine and its config repo",
-        fix: { command: `mkdir -p ~/.config/fleetx && printf '%s' ${sh(observed.local.want)} > ~/.config/fleetx/config.toml`, safe: true },
+        title: "~/.config/t3-fleet/config.toml does not name this machine and its config repo",
+        fix: { command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`, safe: true },
       });
     }
     const t = observed.timer;
     if (t.want !== null && (t.installed !== t.want || !t.loaded)) {
       out.push({
         node,
-        key: "fleetx-timer",
+        key: "engine-timer",
         severity: "warn",
         area: "engine",
-        title: t.installed === null ? "the fleetx sync timer is not installed" : t.installed !== t.want ? "the fleetx sync timer is out of date" : "the fleetx sync timer is not running",
+        title: t.installed === null ? notInstalledTitle("sync timer", t.legacy) : t.installed !== t.want ? "the sync timer is out of date" : "the sync timer is not running",
         detail: `runs ${observed.nodePath} with a fixed PATH`,
         fix: { command: installTimer(observed.platform, observed.root, t.want), safe: true },
+      });
+    }
+    if (t.want === null && t.installed === null && t.legacy === true) {
+      out.push({
+        node,
+        key: "engine-timer-unwanted",
+        severity: "warn",
+        area: "engine",
+        title: "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
+        fix: { command: retireLegacyUnit(observed.platform, observed.root, "sync"), safe: true },
       });
     }
     if (t.want === null && t.installed !== null) {
       out.push({
         node,
-        key: "fleetx-timer-unwanted",
+        key: "engine-timer-unwanted",
         severity: "warn",
         area: "engine",
-        title: "a fleetx sync timer is installed, but [engine] timer is not set for this machine",
-        fix: { command: removeTimer(observed.platform, observed.root), safe: true },
+        title: "a sync timer is installed, but [engine] timer is not set for this machine",
+        fix: { command: `${removeTimer(observed.platform, observed.root)}\n${retireLegacyUnit(observed.platform, observed.root, "sync")}`, safe: true },
       });
     }
-    if (observed.wanted === null || observed.installed === observed.wanted) return out;
-    out.push({
-      node,
-      key: "fleetx-outdated",
-      severity: "warn",
-      area: "engine",
-      title: observed.installed === null ? "fleetx is not installed here" : "fleetx here is a different build than the controller's",
-      detail: "timers and fixes on this machine run its own copy",
-      fix: { command: ENGINE_INSTALL, safe: true },
-    });
+    if (observed.wanted !== null && observed.installed !== observed.wanted) {
+      out.push({
+        node,
+        key: "engine-outdated",
+        severity: "warn",
+        area: "engine",
+        title: observed.installed === null ? "T3 Fleet is not installed here" : "T3 Fleet here is a different build than the controller's",
+        detail: "timers and fixes on this machine run its own copy",
+        fix: { command: ENGINE_INSTALL, safe: true },
+      });
+    }
+    // After the install, so the bundle directory can move in the same run.
+    const legacy = observed.legacy ?? [];
+    if (legacy.length > 0) {
+      out.push({
+        node,
+        key: "engine-legacy-dirs",
+        severity: "warn",
+        area: "engine",
+        title: `fleetx's ${legacy.map((d) => `~/.${d === "config" ? "config" : `local/${d}`}/fleetx`).join(", ")} still to move to T3 Fleet's`,
+        detail: "the old names stay as links to the new ones, so nothing using them breaks",
+        fix: { command: migrateDirs(legacy), safe: true },
+      });
+    }
     return out;
   },
 });

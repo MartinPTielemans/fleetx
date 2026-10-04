@@ -1,5 +1,5 @@
 /**
- * The area interface. An area is one kind of thing fleetx keeps equivalent
+ * The area interface. An area is one kind of thing T3 Fleet keeps equivalent
  * across machines: dotfiles, skills, MCP servers.
  *
  *   desired   what the node's merged settings say (decoded from its section)
@@ -33,7 +33,7 @@ export interface ObserveContext {
   readonly checkout: string;
   /** The login environment the probe runs in. */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** SHA-256 of the controller's fleetx build; null when not given. */
+  /** SHA-256 of the controller's T3 Fleet build; null when not given. */
   readonly engine: string | null;
   /** This node's name in the fleet; null when not given. */
   readonly node: string | null;

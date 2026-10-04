@@ -69,7 +69,7 @@ export const T3Observation = Schema.Struct({
   /** PATH of the running server process; null when unreadable. */
   serverPath: Schema.NullOr(Schema.String),
   providers: Schema.Array(ProviderObservation),
-  /** fleetx's read-only token for T3's API (T3Access.ts); null when no server runs. */
+  /** T3 Fleet's read-only token for T3's API (T3Access.ts); null when no server runs. */
   access: Schema.NullOr(
     Schema.Struct({
       state: Schema.Literals(["ok", "expiring", "none", "rejected", "failed"]),
@@ -99,7 +99,7 @@ export const ProxyObservation = Schema.Struct({
 export type ProxyObservation = typeof ProxyObservation.Type;
 
 /**
- * The node's last sync: fleetx's own record (~/.local/state/fleetx/last-sync),
+ * The node's last sync: T3 Fleet's own record (~/.local/state/t3-fleet/last-sync),
  * or, where only a bash `fleet sync` timer runs, the record that one leaves.
  */
 export const SyncObservation = Schema.Struct({
@@ -121,7 +121,7 @@ export const MachineObservation = Schema.Struct({
   t3: T3Observation,
   /**
    * Each T3 provider instance's login and health: T3's own snapshot, or the
-   * CLIs' status commands when fleetx cannot read it (see t3.access).
+   * CLIs' status commands when T3 Fleet cannot read it (see t3.access).
    */
   providerAuth: Schema.Array(ProviderAuth),
   proxy: Schema.NullOr(ProxyObservation),

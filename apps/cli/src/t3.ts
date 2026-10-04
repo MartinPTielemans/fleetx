@@ -1,5 +1,5 @@
 /**
- * fleetx t3 connect   give fleetx a read-only token for this machine's T3 server,
+ * t3-fleet t3 connect   give T3 Fleet a read-only token for this machine's T3 server,
  *                     so provider logins and health come from T3 itself
  *                     (the fix for t3-access; see T3Access.ts)
  */
@@ -11,15 +11,15 @@ import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { Command } from "effect/unstable/cli";
 
-import { exec } from "@fleetx/core/Exec";
-import { mintAccess, readProviderSnapshot, t3AccessPath, t3CliFromCommandLine } from "@fleetx/core/T3Access";
+import { exec } from "@t3-fleet/core/Exec";
+import { mintAccess, readProviderSnapshot, t3AccessPath, t3CliFromCommandLine } from "@t3-fleet/core/T3Access";
 
 import { reportUserErrors } from "./shared.ts";
 
 const RuntimeFile = Schema.Struct({ pid: Schema.Number, origin: Schema.String });
 
 const connect = Command.make("connect").pipe(
-  Command.withDescription("Give fleetx a read-only (orchestration:read) token for this machine's T3 server."),
+  Command.withDescription("Give T3 Fleet a read-only (orchestration:read) token for this machine's T3 server."),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const home = process.env["HOME"] ?? "";
@@ -39,6 +39,6 @@ const connect = Command.make("connect").pipe(
 );
 
 export const t3Command = Command.make("t3").pipe(
-  Command.withDescription("fleetx's access to T3 Code on this machine."),
+  Command.withDescription("T3 Fleet's access to T3 Code on this machine."),
   Command.withSubcommands([connect]),
 );

@@ -64,7 +64,7 @@ describe("forwarding", () => {
   });
   it("drops hop-by-hop headers only", () => {
     expect(
-      requestHeaders({ authorization: "a", "user-agent": "u", host: "h", connection: "keep-alive", "content-length": "3", "x-fleetx-relay-token": "t", "x-fleetx-egress-base": "b", version: "1" }),
+      requestHeaders({ authorization: "a", "user-agent": "u", host: "h", connection: "keep-alive", "content-length": "3", "x-t3-fleet-relay-token": "t", "x-t3-fleet-egress-base": "b", version: "1" }),
     ).toEqual({ authorization: "a", "user-agent": "u", version: "1" });
   });
   it("knows where an event ends", () => {
@@ -105,8 +105,8 @@ describe("upstreams and recipes", () => {
     const ok = { upstream: "openai", env: { X_BASE_URL: "{proxy}" } };
     for (const providers of [
       { "co\ndex": ok },
-      { codex: { ...ok, command: "codex\nFLEETX_LAUNCHER\nrm -rf ~" } },
-      { codex: { ...ok, env: { X_BASE_URL: "{proxy}\nFLEETX_LAUNCHER" } } },
+      { codex: { ...ok, command: "codex\nT3_FLEET_LAUNCHER\nrm -rf ~" } },
+      { codex: { ...ok, env: { X_BASE_URL: "{proxy}\nT3_FLEET_LAUNCHER" } } },
       { codex: { ...ok, args: ["-c", "a\rb"] } },
       { codex: { ...ok, token_env: "T\u0000" } },
     ]) {
@@ -190,9 +190,9 @@ describe("launchers", () => {
   });
 
   const scratch = () => {
-    const home = mkdtempSync(`${tmpdir()}/fleetx-launcher-`);
+    const home = mkdtempSync(`${tmpdir()}/t3-fleet-launcher-`);
     mkdirSync(`${home}/.local/bin`, { recursive: true });
-    mkdirSync(`${home}/.config/fleetx`, { recursive: true });
+    mkdirSync(`${home}/.config/t3-fleet`, { recursive: true });
     // A fake CLI that prints what it was given.
     const fake = '#!/bin/sh\necho "args=$*"\necho "base=${ANTHROPIC_BASE_URL:-}${XAI_BASE_URL:-}"\necho "token=${CLAUDE_CODE_OAUTH_TOKEN:-}${XAI_API_KEY:-}"\n';
     for (const name of ["claude", "codex", "grok"]) {
@@ -200,15 +200,15 @@ describe("launchers", () => {
       chmodSync(`${home}/.local/bin/${name}`, 0o755);
     }
     const grokSettings = { upstreams: { xai: { url: "https://api.x.ai/v1" } }, providers: { grok: { upstream: "xai", command: "~/.local/bin/grok", env: { XAI_BASE_URL: "{proxy}/v1" }, token_env: "XAI_API_KEY" } } };
-    writeFileSync(`${home}/.local/bin/fleetx-claude`, launcherText("claudeAgent", recipe("claudeAgent", "claudeAgent")));
-    writeFileSync(`${home}/.local/bin/fleetx-codex`, launcherText("codex", recipe("codex", "codex")));
-    writeFileSync(`${home}/.local/bin/fleetx-grok`, launcherText("grok", recipe("grok", "grok", grokSettings)));
-    writeFileSync(`${home}/.config/fleetx/secrets.env`, 'OTHER=1\nCLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-abc"\nexport XAI_API_KEY=xai-1\n');
+    writeFileSync(`${home}/.local/bin/t3-fleet-claude`, launcherText("claudeAgent", recipe("claudeAgent", "claudeAgent")));
+    writeFileSync(`${home}/.local/bin/t3-fleet-codex`, launcherText("codex", recipe("codex", "codex")));
+    writeFileSync(`${home}/.local/bin/t3-fleet-grok`, launcherText("grok", recipe("grok", "grok", grokSettings)));
+    writeFileSync(`${home}/.config/t3-fleet/secrets.env`, 'OTHER=1\nCLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-abc"\nexport XAI_API_KEY=xai-1\n');
     return home;
   };
   // Nothing listens on 8398 in CI; the launcher must fall back and say so.
   const run = (home: string, name: string, args: ReadonlyArray<string>) =>
-    execFileSync("/bin/sh", [`${home}/.local/bin/fleetx-${name}`, ...args], {
+    execFileSync("/bin/sh", [`${home}/.local/bin/t3-fleet-${name}`, ...args], {
       env: { HOME: home, PATH: "/usr/bin:/bin" },
       encoding: "utf8",
     });
@@ -220,7 +220,7 @@ describe("launchers", () => {
     expect(out).toContain("token=sk-ant-oat01-abc");
     if (!out.includes("base=http://127.0.0.1:8398/anthropic")) {
       expect(out).toContain("base=\n");
-      expect(readFileSync(`${home}/.local/state/fleetx/models-fallback.log`, "utf8")).toMatch(/^\d+\tanthropic\tproxy not listening\n$/);
+      expect(readFileSync(`${home}/.local/state/t3-fleet/models-fallback.log`, "utf8")).toMatch(/^\d+\tanthropic\tproxy not listening\n$/);
     }
     expect(run(home, "grok", ["chat"])).toContain("token=xai-1");
   });
@@ -229,7 +229,7 @@ describe("launchers", () => {
     const home = scratch();
     expect(run(home, "claude", ["auth", "status"])).toContain("token=sk-ant-oat01-abc");
     expect(run(home, "codex", ["--version"])).toContain("args=--version");
-    expect(() => readFileSync(`${home}/.local/state/fleetx/models-fallback.log`, "utf8")).toThrow();
+    expect(() => readFileSync(`${home}/.local/state/t3-fleet/models-fallback.log`, "utf8")).toThrow();
   });
 
   it("start the proxy with its egress", () => {
@@ -243,12 +243,12 @@ describe("routing T3's provider", () => {
 
   it("changes only the explicit instance's binaryPath", () => {
     const before = { theme: "dark", providerInstances: { claudeAgent: { driver: "claudeAgent", enabled: true, config: { binaryPath: "claude", homePath: "~/.c" } } } };
-    const after = JSON.parse(edit(JSON.stringify(before), "claudeAgent", "/h/.local/bin/fleetx-claude").text);
-    expect(after).toEqual({ ...before, providerInstances: { claudeAgent: { ...before.providerInstances.claudeAgent, config: { binaryPath: "/h/.local/bin/fleetx-claude", homePath: "~/.c" } } } });
+    const after = JSON.parse(edit(JSON.stringify(before), "claudeAgent", "/h/.local/bin/t3-fleet-claude").text);
+    expect(after).toEqual({ ...before, providerInstances: { claudeAgent: { ...before.providerInstances.claudeAgent, config: { binaryPath: "/h/.local/bin/t3-fleet-claude", homePath: "~/.c" } } } });
   });
   it("uses the legacy block for a built-in instance T3 builds from it", () => {
-    const after = edit('{"providers":{"codex":{"enabled":true}}}', "codex", "/h/.local/bin/fleetx-codex");
-    expect(JSON.parse(after.text)).toEqual({ providers: { codex: { enabled: true, binaryPath: "/h/.local/bin/fleetx-codex" } } });
+    const after = edit('{"providers":{"codex":{"enabled":true}}}', "codex", "/h/.local/bin/t3-fleet-codex");
+    expect(JSON.parse(after.text)).toEqual({ providers: { codex: { enabled: true, binaryPath: "/h/.local/bin/t3-fleet-codex" } } });
     expect(after.previous).toBeNull();
     expect(JSON.parse(edit("{}", "claudeAgent", "/x").text)).toEqual({ providers: { claudeAgent: { binaryPath: "/x" } } });
   });
@@ -280,7 +280,7 @@ describe("CLI login fallbacks", () => {
 });
 
 describe("T3's provider snapshot", () => {
-  it("keeps what fleetx reports, and never the email", () => {
+  it("keeps what T3 Fleet reports, and never the email", () => {
     const auth = fromSnapshot({
       instanceId: "codex" as never,
       driver: "codex" as never,
@@ -322,12 +322,12 @@ describe("T3's provider snapshot", () => {
 
 // ---- diagnose ----------------------------------------------------------------
 
-const LAUNCHER = { path: "/h/.local/bin/fleetx-claude", installed: "x", want: "x" };
+const LAUNCHER = { path: "/h/.local/bin/t3-fleet-claude", installed: "x", want: "x" };
 type Observed = Parameters<typeof ModelsArea.diagnose>[0]["observed"];
 const claudeProvider = {
   instanceId: "claudeAgent",
   driver: "claudeAgent",
-  binaryPath: "/h/.local/bin/fleetx-claude",
+  binaryPath: "/h/.local/bin/t3-fleet-claude",
   upstream: "anthropic",
   launcher: LAUNCHER,
   unroutable: null,
@@ -382,7 +382,7 @@ describe("models area", () => {
     expect(keys(observed({ stats: null }))).toEqual(["models-service"]);
   });
   it("reports each launcher that is missing or out of date", () => {
-    const codex = { ...claudeProvider, instanceId: "codex", driver: "codex", binaryPath: "/h/.local/bin/fleetx-codex", launcher: { path: "/h/.local/bin/fleetx-codex", installed: null, want: "y" }, token: null };
+    const codex = { ...claudeProvider, instanceId: "codex", driver: "codex", binaryPath: "/h/.local/bin/t3-fleet-codex", launcher: { path: "/h/.local/bin/t3-fleet-codex", installed: null, want: "y" }, token: null };
     expect(keys(observed({ stats: healthy, providers: [{ ...claudeProvider, launcher: { ...LAUNCHER, installed: null } }, codex] }))).toEqual([
       "models-launcher-claudeAgent",
       "models-launcher-codex",
@@ -392,7 +392,7 @@ describe("models area", () => {
     const direct = { ...claudeProvider, binaryPath: "claude" };
     const ready = findings(observed({ stats: healthy, providers: [direct] }));
     expect(ready.map((f) => f.key)).toEqual(["models-not-routed-claudeAgent"]);
-    expect(ready[0]?.fix).toEqual({ command: "fleetx models route claudeAgent", safe: false });
+    expect(ready[0]?.fix).toEqual({ command: "t3-fleet models route claudeAgent", safe: false });
     const missing = findings(observed({ stats: healthy, providers: [{ ...direct, launcher: { ...LAUNCHER, installed: null } }] }));
     expect(missing.find((f) => f.key === "models-not-routed-claudeAgent")?.fix).toBeUndefined();
   });
@@ -404,7 +404,7 @@ describe("models area", () => {
     const [missing] = findings(observed({ stats: healthy, providers: [{ ...claudeProvider, token: { ...claudeProvider.token, set: false } }] }));
     expect(missing?.key).toBe("provider-token-missing-claudeAgent");
     expect(missing?.detail).toContain("claude setup-token");
-    expect(missing?.detail).toContain("fleetx secrets set CLAUDE_CODE_OAUTH_TOKEN=<token>");
+    expect(missing?.detail).toContain("t3-fleet secrets set CLAUDE_CODE_OAUTH_TOKEN=<token>");
   });
   it("warns above 5% failures in the last hour, naming the class, or on fallbacks", () => {
     const bad: ModelProxyStats = { ...healthy, upstreams: [{ ...healthy.upstreams[0]!, h1: window(100, 6, { "529": 5, connect: 1 }) }] };
@@ -471,10 +471,10 @@ describe("provider logins and health", () => {
   it("is silent when logged in or unknown", () => {
     expect(found(obs([login({}), login({ auth: "unknown" })]))).toEqual([]);
   });
-  it("offers to connect fleetx to T3 when it has no token", () => {
-    const [f] = found(obs([], { state: "none", expiresAt: null, detail: "fleetx has no T3 token here", cli: true }));
-    expect(f).toMatchObject({ key: "t3-access", severity: "warn", fix: { command: "fleetx t3 connect", safe: false } });
-    const [noCli] = found(obs([], { state: "rejected", expiresAt: 1, detail: "T3 refused fleetx's token", cli: false }));
+  it("offers to connect T3 Fleet to T3 when it has no token", () => {
+    const [f] = found(obs([], { state: "none", expiresAt: null, detail: "T3 Fleet has no T3 token here", cli: true }));
+    expect(f).toMatchObject({ key: "t3-access", severity: "warn", fix: { command: "t3-fleet t3 connect", safe: false } });
+    const [noCli] = found(obs([], { state: "rejected", expiresAt: 1, detail: "T3 refused T3 Fleet's token", cli: false }));
     expect(noCli?.fix).toBeUndefined();
     expect(found(obs([], { state: "ok", expiresAt: 1, detail: "", cli: true }))).toEqual([]);
   });

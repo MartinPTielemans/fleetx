@@ -6,7 +6,7 @@
  *   [models.upstreams.<name>]            # beyond the built-in anthropic and openai
  *   [models.providers.<instanceId>]      # per T3 instance: upstream, env, args, token_env, route
  *
- * (Recipes.ts has the full settings.) With [models] on, the node runs `fleetx
+ * (Recipes.ts has the full settings.) With [models] on, the node runs `T3 Fleet
  * models serve` as a service, has a launcher per routable T3 provider
  * instance, and T3 starts each one through its launcher. Claude and Codex
  * route out of the box; another driver routes once its recipe is declared;
@@ -29,15 +29,15 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { ModelProxyStats } from "../Api.ts";
-import { defineArea, sh } from "../Area.ts";
+import { defineArea, sh, shPath } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
-import { installedBundle, stableNode } from "../Runtime.ts";
+import { installedBundle, legacyUnitInstalled, notInstalledTitle, stableNode } from "../Runtime.ts";
 import { localSecretsPath } from "../Secrets.ts";
 import { providerPlans, readT3Settings } from "../T3Settings.ts";
 import { launcherInstall, launcherText, SERVICE_LABEL, SERVICE_UNIT, serviceInstall, serviceUnitPath, serviceUnitText } from "../models/Launchers.ts";
 import { fetchStats } from "../models/Proxy.ts";
-import { launcherPath, ModelsSettings, providerName, resolveRecipe, upstreamsOf } from "../models/Recipes.ts";
+import { launcherPath, legacyLauncherPath, ModelsSettings, providerName, resolveRecipe, upstreamsOf } from "../models/Recipes.ts";
 import { loadFallbacks, WINDOWS } from "../models/Stats.ts";
 
 const Desired = Schema.UndefinedOr(ModelsSettings);
@@ -52,6 +52,8 @@ const Observed = Schema.Struct({
     want: Schema.NullOr(Schema.String),
     /** The service manager has it running. */
     running: Schema.Boolean,
+    /** Still installed under its fleetx name. Until 1.0. */
+    legacy: Schema.optionalKey(Schema.Boolean),
   }),
   /** Each enabled T3 instance [models] does not exclude. */
   providers: Schema.Array(
@@ -63,6 +65,8 @@ const Observed = Schema.Struct({
       upstream: Schema.NullOr(Schema.String),
       /** Its launcher, when it has a recipe. */
       launcher: Schema.NullOr(Schema.Struct({ path: Schema.String, installed: Schema.NullOr(Schema.String), want: Schema.String })),
+      /** Its fleetx-<name> launcher from before the rename, when one is still there. Until 1.0. */
+      legacyLauncher: Schema.optionalKey(Schema.NullOr(Schema.String)),
       /** Why it cannot be routed; null when it can. */
       unroutable: Schema.NullOr(Schema.String),
       /** Its long-lived credential, when the recipe has one. */
@@ -111,7 +115,7 @@ export const ModelsArea = defineArea({
           ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${SERVICE_LABEL}`], timeout: Duration.seconds(5) })
           : yield* exec({ command: "systemctl", args: [...(root ? [] : ["--user"]), "is-active", "--quiet", `${SERVICE_UNIT}.service`], timeout: Duration.seconds(5) });
       const running = platform === "darwin" ? check.code === 0 && /state = running/.test(check.stdout) : check.code === 0;
-      const service = { installed: yield* read(serviceUnitPath(platform, root, ctx.home)), want, running };
+      const service = { installed: yield* read(serviceUnitPath(platform, root, ctx.home)), want, running, legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "models") };
 
       const settings = yield* readT3Settings(ctx.home);
       const plans = Option.isSome(settings) && settings.value !== "invalid" ? providerPlans(settings.value) : [];
@@ -128,11 +132,13 @@ export const ModelsArea = defineArea({
         }
         const { recipe } = resolved;
         const path = launcherPath(ctx.home, plan.instanceId);
+        const legacy = legacyLauncherPath(ctx.home, plan.instanceId);
         const tokenEnv = recipe.tokenEnv;
         providers.push({
           ...common,
           upstream: recipe.upstream,
           launcher: { path, installed: yield* read(path), want: launcherText(plan.instanceId, recipe) },
+          legacyLauncher: (yield* read(legacy)) === null ? null : legacy,
           unroutable: null,
           token: tokenEnv === null ? null : { env: tokenEnv, set: hasVar(secrets, tokenEnv) || (ctx.env[tokenEnv] ?? "") !== "", help: recipe.tokenHelp },
         });
@@ -152,7 +158,7 @@ export const ModelsArea = defineArea({
         severity: "warn",
         title:
           service.installed === null
-            ? "the model proxy is not installed"
+            ? notInstalledTitle("model proxy", service.legacy)
             : service.installed !== service.want
               ? "the model proxy's service is out of date"
               : !service.running
@@ -171,6 +177,17 @@ export const ModelsArea = defineArea({
       }
       const launcher = p.launcher;
       if (launcher === null) continue;
+      const legacy = p.legacyLauncher ?? null;
+      if (legacy !== null && !isRouted(p.binaryPath, legacy)) {
+        out.push({
+          ...base,
+          key: `models-legacy-launcher-${p.instanceId}`,
+          severity: "info",
+          title: `${tilde(legacy)} is left over from before the rename`,
+          detail: `T3 no longer starts ${name} through it`,
+          fix: { command: `rm -f ${shPath(tilde(legacy))}`, safe: true },
+        });
+      }
       const ready = launcher.installed === launcher.want;
       if (!ready) {
         out.push({
@@ -190,7 +207,7 @@ export const ModelsArea = defineArea({
           ...(ready
             ? {
                 detail: `points T3's ${name} at ${basename(launcher.path)}; sessions already running keep their binary`,
-                fix: { command: `fleetx models route ${sh(p.instanceId)}`, safe: false },
+                fix: { command: `t3-fleet models route ${sh(p.instanceId)}`, safe: false },
               }
             : { detail: `install ${basename(launcher.path)} first` }),
         });
@@ -201,7 +218,7 @@ export const ModelsArea = defineArea({
           key: `provider-token-missing-${p.instanceId}`,
           severity: "warn",
           title: `no ${p.token.env} in this machine's secrets, so ${name} keeps a login that can expire`,
-          detail: `${p.token.help}; then on an authority \`fleetx secrets set ${p.token.env}=<token>\``,
+          detail: `${p.token.help}; then on an authority \`t3-fleet secrets set ${p.token.env}=<token>\``,
         });
       }
     }
@@ -226,7 +243,7 @@ export const modelsFailing = (observed: Pick<Observed, "stats" | "fallbacksH1">)
   const fallbacks = Math.max(observed.fallbacksH1, ...(observed.stats?.upstreams ?? []).map((u) => u.h1.fallbacks));
   if (fallbacks > 0) {
     parts.push(`${fallbacks} launch${fallbacks === 1 ? "" : "es"} skipped the proxy in the last hour`);
-    details.push("the proxy was not listening (~/.local/state/fleetx/models-fallback.log)");
+    details.push("the proxy was not listening (~/.local/state/t3-fleet/models-fallback.log)");
   }
   return parts.length === 0 ? null : { title: parts.join("; "), detail: details.join("; ") };
 };

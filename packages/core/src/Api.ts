@@ -1,5 +1,5 @@
 /**
- * Shapes shared between fleetx's long-running parts and the UI (see
+ * Shapes shared between T3 Fleet's long-running parts and the UI (see
  * docs/design/companion.md). The model proxy and the hub produce these; the
  * UI server serves them; the UI reads them. One schema per shape, decoded on
  * both ends, so they agree by construction.
@@ -8,7 +8,7 @@
  *   relay (hub)  GET /hub/servers              HubServer[]
  *                POST /hub/servers/<n>/login   HubLoginStart
  *                GET /hub/calls                HubCall[]
- *   fleetx ui    GET  /api/status              UiStatus
+ *   t3-fleet ui    GET  /api/status              UiStatus
  *                POST /api/fixes               UiApplyRequest → UiApplyResult
  *                GET  /api/proposals           UiProposal[]
  *                POST /api/proposals/<node>/approve | /reject
@@ -18,6 +18,12 @@
  *                POST /api/hub/servers/<n>/login | /logout | /restart
  *                GET  /api/hub/calls           HubCall[] (from the relay)
  *                GET  /api/config/<node>       UiConfigRow[]
+ *                GET  /api/skills              UiSkills
+ *                POST /api/skills/lookup       UiSkillsLookupRequest → UiSkillsLookup
+ *                POST /api/skills/add          UiSkillsAddRequest → UiSkillsLanded
+ *                POST /api/skills/preview      UiSkillsNames → UiSkillsPreview
+ *                POST /api/skills/update       UiSkillsKeepRequest → UiSkillsLanded
+ *                POST /api/skills/remove       UiSkillsNames → UiSkillsLanded
  *                GET  /api/session             UiSession
  *                GET  /api/events              server-sent events: relay events, plus "check"
  */
@@ -154,7 +160,7 @@ export const UiProvider = Schema.Struct({
   startsInT3: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
   runs: Schema.NullOr(Schema.String),
-  /** Whether T3 launches it through the fleetx model proxy. */
+  /** Whether T3 launches it through the T3 Fleet model proxy. */
   viaModels: Schema.Boolean,
 });
 
@@ -176,7 +182,7 @@ export type UiEnvironment = typeof UiEnvironment.Type;
 export const UiStatus = Schema.Struct({
   checkedAt: Schema.Number,
   elapsedMs: Schema.Number,
-  /** The same text `fleetx status` prints. */
+  /** The same text `t3-fleet status` prints. */
   summary: Schema.String,
   environments: Schema.Array(UiEnvironment),
   findings: Schema.Array(UiFinding),
@@ -215,6 +221,54 @@ export const UiModels = Schema.Struct({
 export type UiModels = typeof UiModels.Type;
 
 export const UiConfigRow = Schema.Struct({ path: Schema.String, value: Schema.String, source: Schema.String });
+
+export const UiSkillLinkState = Schema.Literals(["ok", "missing", "wrong", "real-dir"]);
+
+/** A skill in the config repo. */
+export const UiSkill = Schema.Struct({
+  name: Schema.String,
+  /** From its SKILL.md front matter; null when there is none on one line. */
+  description: Schema.NullOr(Schema.String),
+  /** The git repository it was vendored from (skills/SOURCES.json); null for the repo's own. */
+  source: Schema.NullOr(Schema.Struct({ name: Schema.String, url: Schema.String })),
+});
+export type UiSkill = typeof UiSkill.Type;
+
+/** One machine's skills, as its last check observed them; null fields when it was not reached or runs no skills area. */
+export const UiSkillsNode = Schema.Struct({
+  node: Schema.String,
+  at: Schema.NullOr(Schema.Number),
+  store: Schema.NullOr(Schema.String),
+  links: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String, state: UiSkillLinkState })),
+  /** Skills installed outside T3 Fleet: name and directory. */
+  strays: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
+  dangling: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
+  /** [skills] ignore on this machine. */
+  ignored: Schema.Array(Schema.String),
+});
+export type UiSkillsNode = typeof UiSkillsNode.Type;
+
+export const UiSkills = Schema.Struct({ skills: Schema.Array(UiSkill), nodes: Schema.Array(UiSkillsNode) });
+export type UiSkills = typeof UiSkills.Type;
+
+export const UiSkillsLookupRequest = Schema.Struct({ source: Schema.String });
+export const UiSkillsLookup = Schema.Struct({ url: Schema.String, skills: Schema.Array(Schema.Struct({ name: Schema.String, exists: Schema.Boolean })) });
+export type UiSkillsLookup = typeof UiSkillsLookup.Type;
+
+export const UiSkillsAddRequest = Schema.Struct({ source: Schema.String, skills: Schema.Array(Schema.String), as: Schema.optionalKey(Schema.String) });
+
+/** Skill names; empty means every skill with a source, for update. */
+export const UiSkillsNames = Schema.Struct({ skills: Schema.Array(Schema.String) });
+
+/** What an update would change, already put back; `digest` is "" when nothing would. */
+export const UiSkillsPreview = Schema.Struct({ files: Schema.Array(Schema.String), stat: Schema.String, diff: Schema.String, digest: Schema.String });
+export type UiSkillsPreview = typeof UiSkillsPreview.Type;
+
+export const UiSkillsKeepRequest = Schema.Struct({ skills: Schema.Array(Schema.String), digest: Schema.String });
+
+/** What changed in the repo, and whether it was committed or waits for the next sync to propose it. */
+export const UiSkillsLanded = Schema.Struct({ paths: Schema.Array(Schema.String), landed: Schema.String });
+export type UiSkillsLanded = typeof UiSkillsLanded.Type;
 
 /** Who is asking, so the UI can label this machine and offer only what it may do. */
 export const UiSession = Schema.Struct({

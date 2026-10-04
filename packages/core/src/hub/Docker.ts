@@ -1,7 +1,8 @@
 /**
  * Hosted servers in Docker, through the `docker` CLI.
  *
- * Every container is named fleetx-mcp-<name>, runs with `--cap-drop ALL
+ * Every container is named t3-fleet-mcp-<name> (one still named
+ * fleetx-mcp-<name> from before the rename is renamed and adopted), runs with `--cap-drop ALL
  * --security-opt no-new-privileges`, and publishes only on 127.0.0.1. Its
  * environment reaches it through `--env-file`, a mode-600 file in a private
  * temporary directory removed as soon as the docker CLI has read it: values
@@ -24,6 +25,7 @@ import * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { sha256 } from "../Hash.ts";
+import { CONTAINER_LABEL, CONTAINER_PREFIX, LEGACY_CONTAINER_LABEL, LEGACY_CONTAINER_PREFIX } from "../Names.ts";
 import type { StdioProcess } from "./Bridge.ts";
 import { exec } from "../Exec.ts";
 import { IMAGE_PATTERN } from "./Definitions.ts";
@@ -32,7 +34,8 @@ import { spawnStdio } from "./Process.ts";
 
 export const PORT_RANGE = { first: 18200, last: 18299 } as const;
 
-export const containerName = (server: string) => `fleetx-mcp-${server}`;
+export const containerName = (server: string) => `${CONTAINER_PREFIX}${server}`;
+const legacyContainerName = (server: string) => `${LEGACY_CONTAINER_PREFIX}${server}`;
 
 export const HARDENING: ReadonlyArray<string> = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"];
 
@@ -69,7 +72,7 @@ export const envFile = (env: Readonly<Record<string, string>>) =>
       if (/[\r\n\0]/.test(env[key] ?? "")) return yield* Effect.fail(`env ${key} has a line break, which an env file cannot carry`);
     }
     const fs = yield* FileSystem.FileSystem;
-    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "fleetx-hub-" }).pipe(Effect.mapError(() => "cannot create a private temporary directory"));
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-hub-" }).pipe(Effect.mapError(() => "cannot create a private temporary directory"));
     yield* fs.chmod(dir, 0o700).pipe(Effect.ignore);
     const file = `${dir}/env`;
     yield* fs
@@ -105,16 +108,20 @@ export const inspect = (name: string) =>
     return {
       running: c.State?.Running === true,
       status: c.State?.Status ?? "unknown",
-      digest: c.Config?.Labels?.["dev.fleetx.digest"] ?? null,
+      digest: c.Config?.Labels?.[`${CONTAINER_LABEL}.digest`] ?? c.Config?.Labels?.[`${LEGACY_CONTAINER_LABEL}.digest`] ?? null,
       port: binding?.HostPort === undefined ? null : Number(binding.HostPort),
     } satisfies Inspected;
   });
 
 export const removeContainer = (name: string) => docker(["rm", "-f", name], {}, Duration.seconds(30)).pipe(Effect.asVoid);
 
-/** Ports held by every fleetx-mcp-* container, running or not. */
+/** Ports held by every t3-fleet-mcp-* (or fleetx-mcp-*) container, running or not. */
 const portsInUse = Effect.gen(function* () {
-  const r = yield* docker(["ps", "-a", "--filter", "name=^fleetx-mcp-", "--format", "{{.Names}}"], {}, Duration.seconds(15));
+  const r = yield* docker(
+    ["ps", "-a", "--filter", `name=^${CONTAINER_PREFIX}`, "--filter", `name=^${LEGACY_CONTAINER_PREFIX}`, "--format", "{{.Names}}"],
+    {},
+    Duration.seconds(15),
+  );
   const used = new Set<number>();
   if (r.code !== 0) return used;
   for (const name of r.stdout.split("\n").filter((n) => n !== "")) {
@@ -132,6 +139,10 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
   Effect.gen(function* () {
     const name = containerName(spec.server);
     const digest = yield* specDigest(spec);
+    // A container from before the rename takes the new name, keeping whatever it runs. Until 1.0.
+    if ((yield* inspect(name)) === null && (yield* inspect(legacyContainerName(spec.server))) !== null) {
+      yield* docker(["rename", legacyContainerName(spec.server), name], {}, Duration.seconds(15));
+    }
     const existing = yield* inspect(name);
     if (existing !== null && existing.digest === digest && existing.port !== null) {
       if (existing.running) return { port: existing.port, adopted: true };
@@ -154,9 +165,9 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
           "--name",
           name,
           "--label",
-          `dev.fleetx.hub=${spec.server}`,
+          `${CONTAINER_LABEL}.hub=${spec.server}`,
           "--label",
-          `dev.fleetx.digest=${digest}`,
+          `${CONTAINER_LABEL}.digest=${digest}`,
           ...HARDENING,
           "-p",
           `127.0.0.1:${port}:${spec.targetPort}`,
@@ -185,6 +196,7 @@ export const spawnStdioContainer = (
     const name = containerName(spec.server);
     yield* checkImage(spec.image);
     yield* removeContainer(name);
+    yield* removeContainer(legacyContainerName(spec.server));
     // The env file lives in its own scope: removed seconds after docker has read it, or when the process stops.
     const fileScope = yield* Scope.fork(yield* Effect.scope);
     const envArgs = yield* envFile(spec.env).pipe(Effect.provideService(Scope.Scope, fileScope));
@@ -198,7 +210,7 @@ export const spawnStdioContainer = (
         "--name",
         name,
         "--label",
-        `dev.fleetx.hub=${spec.server}`,
+        `${CONTAINER_LABEL}.hub=${spec.server}`,
         ...HARDENING,
         ...(spec.network === "none" ? ["--network", "none"] : []),
         ...envArgs,

@@ -1,10 +1,10 @@
 /**
- * Findings by machine and area, and applying their fixes the way `fleetx fix`
+ * Findings by machine and area, and applying their fixes the way `t3-fleet fix`
  * does: the exact commands first, what each interrupts marked, an explicit
  * confirmation, then results and a fresh check. The server checks again before
  * running anything and skips fixes that no longer apply.
  */
-import type { UiFinding } from "@fleetx/core/Api";
+import type { UiFinding } from "@t3-fleet/core/Api";
 import { CheckCircle2Icon, ChevronRightIcon, CircleXIcon, PlayIcon, WrenchIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -29,8 +29,8 @@ import { useStore } from "../lib/store";
 import { cn, plural } from "../lib/utils";
 import { CheckButton, CheckedLine } from "./Environments";
 
-type Fixable = UiFinding & { readonly fix: NonNullable<UiFinding["fix"]> };
-const fixable = (f: UiFinding): f is Fixable => f.fix !== undefined;
+export type Fixable = UiFinding & { readonly fix: NonNullable<UiFinding["fix"]> };
+export const fixable = (f: UiFinding): f is Fixable => f.fix !== undefined;
 
 const byNode = <T extends { readonly node: string }>(items: ReadonlyArray<T>) => {
   const groups = new Map<string, Array<T>>();
@@ -230,7 +230,8 @@ function Notes({ notes }: { notes: ReadonlyArray<UiFinding> }) {
   );
 }
 
-function ApplyDialog({
+/** Shows the fixes' commands, asks, applies them, and shows the outcome; also used by the Skills view. */
+export function ApplyDialog({
   open,
   fixes,
   onClose,
@@ -288,7 +289,7 @@ function ApplyDialog({
                 Apply {plural(fixes.length, "fix", "fixes")} on {plural(new Set(fixes.map((f) => f.fix.on ?? f.node)).size, "machine")}?
               </AlertDialogTitle>
               <AlertDialogDescription>
-                fleetx checks every machine again first and runs only fixes that still apply, in order per machine, machines in parallel.
+                T3 Fleet checks every machine again first and runs only fixes that still apply, in order per machine, machines in parallel.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogBody className="flex flex-col gap-4">

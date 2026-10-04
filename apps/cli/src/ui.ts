@@ -1,5 +1,5 @@
 /**
- * fleetx ui   the local web app: every view the CLI has, live, on 127.0.0.1
+ * t3-fleet ui   the local web app: every view the CLI has, live, on 127.0.0.1
  *
  * The app is built into this bundle (see vite.config.ts); run from source it
  * is read from apps/ui/dist instead. The server itself is UiServer.ts; this
@@ -26,23 +26,24 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-import type { UiAlert, UiProposal } from "@fleetx/core/Api";
-import { checkNodes } from "@fleetx/core/Check";
-import { loadConfig, type Config } from "@fleetx/core/Config";
-import { exec } from "@fleetx/core/Exec";
-import { runFixes } from "@fleetx/core/Fix";
-import { git } from "@fleetx/core/Git";
-import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
-import { describeMerged } from "@fleetx/core/Settings";
-import { approve, autoApprovable, listProposals, reject, STAGING } from "@fleetx/core/Staging";
-import { readStates } from "@fleetx/core/Sync";
-import { uiLayer, type UiAsset } from "@fleetx/core/UiServer";
+import type { UiAlert, UiProposal } from "@t3-fleet/core/Api";
+import { checkNodes } from "@t3-fleet/core/Check";
+import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import { exec } from "@t3-fleet/core/Exec";
+import { runFixes } from "@t3-fleet/core/Fix";
+import { git } from "@t3-fleet/core/Git";
+import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
+import { describeMerged } from "@t3-fleet/core/Settings";
+import { addSkills, keepUpdate, land, listSkills, lookupSource, previewUpdate, removeSkills } from "@t3-fleet/core/SkillSources";
+import { approve, autoApprovable, listProposals, reject, STAGING } from "@t3-fleet/core/Staging";
+import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
+import { uiLayer, type UiAsset } from "@t3-fleet/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
 import { ownBundle, reportUserErrors } from "./shared.ts";
 
 /** The built app, gzipped and base64-encoded per file, put here by `vp pack` (vite.config.ts). */
-declare const __FLEETX_UI_ASSETS__: string | undefined;
+declare const __T3_FLEET_UI_ASSETS__: string | undefined;
 
 const EmbeddedAssets = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Struct({ type: Schema.String, gz: Schema.String })));
 
@@ -68,8 +69,8 @@ export const mimeOf = (file: string) => MIME[file.slice(file.lastIndexOf(".") + 
 /** The app this build carries, or the last `vp build` of apps/ui when running from source. */
 const loadAssets = Effect.gen(function* () {
   const assets = new Map<string, UiAsset>();
-  if (typeof __FLEETX_UI_ASSETS__ === "string") {
-    const files = yield* Schema.decodeEffect(EmbeddedAssets)(__FLEETX_UI_ASSETS__);
+  if (typeof __T3_FLEET_UI_ASSETS__ === "string") {
+    const files = yield* Schema.decodeEffect(EmbeddedAssets)(__T3_FLEET_UI_ASSETS__);
     for (const [path, file] of Object.entries(files)) {
       const gz = yield* Effect.fromResult(Encoding.decodeBase64(file.gz));
       assets.set(path, { type: file.type, body: yield* gunzip(gz) });
@@ -156,13 +157,13 @@ export const uiCommand = Command.make("ui", {
   port: Flag.Int("port").pipe(Flag.withDescription("Port on 127.0.0.1."), Flag.withDefault(8397)),
   noOpen: Flag.Boolean("no-open").pipe(Flag.withDescription("Print the address instead of opening a browser."), Flag.withDefault(false)),
 }).pipe(
-  Command.withDescription("Open fleetx in the browser: environments, findings and fixes, proposals, alerts, MCP, models, config."),
+  Command.withDescription("Open T3 Fleet in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config."),
   Command.withHandler(({ port, noOpen }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
       const assets = yield* loadAssets.pipe(Effect.mapError(() => "the UI bundled in this build could not be read"));
-      if (assets.size === 0) yield* Console.error("fleetx: this build has no UI; run `pnpm --filter fleetx build` (the API still works)");
+      if (assets.size === 0) yield* Console.error("T3 Fleet: this build has no UI; run `pnpm --filter t3-fleet build` (the API still works)");
       const crypto = yield* Crypto.Crypto;
       const token = Encoding.encodeHex(yield* crypto.randomBytes(24));
       const relayUrl = config.settings.relay?.url?.replace(/\/+$/, "") ?? null;
@@ -202,6 +203,39 @@ export const uiCommand = Command.make("ui", {
             const found = config.nodes.find((n) => n.name === node);
             return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
           },
+          skills: {
+            list: closed(listSkills(config.repo)),
+            lookup: (source) => closed(lookupSource(config.repo, source)),
+            add: (source, names, as) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* addSkills(config.repo, source, names, as);
+                    const added = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
+                    return { paths, landed: yield* land(config, paths, `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`) };
+                  }),
+                ),
+              ),
+            preview: (names) => closed(underSyncLock(previewUpdate(config.repo, names))),
+            update: (names, digest) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* keepUpdate(config.repo, names, digest);
+                    return { paths, landed: yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`) };
+                  }),
+                ),
+              ),
+            remove: (names) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* removeSkills(config.repo, names);
+                    return { paths, landed: yield* land(config, paths, `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`) };
+                  }),
+                ),
+              ),
+          },
         },
       });
 
@@ -210,11 +244,11 @@ export const uiCommand = Command.make("ui", {
           Layer.provide(FetchHttpClient.layer),
           Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
         ),
-      ).pipe(Effect.mapError(() => `could not listen on 127.0.0.1:${port}; is another fleetx ui running? (--port picks another)`));
+      ).pipe(Effect.mapError(() => `could not listen on 127.0.0.1:${port}; is another t3-fleet ui running? (--port picks another)`));
 
       // The token travels in the fragment, which browsers never send to a server.
       const url = `http://127.0.0.1:${port}/#token=${token}`;
-      yield* Console.log(`fleetx ui on ${url}\nchecks every minute while a browser is open; Ctrl-C stops it`);
+      yield* Console.log(`t3-fleet ui on ${url}\nchecks every minute while a browser is open; Ctrl-C stops it`);
       if (!noOpen) {
         const opened = yield* openBrowser(url);
         if (opened.code !== 0) yield* Console.log("could not open a browser; open the address above");

@@ -5,8 +5,8 @@
  * Copyright (c) T3 Tools Inc., at commit a21702d0e58ad20263dc965d84472bb6d7eb38c8
  * (https://github.com/pingdotgg/t3code). Kept to the default theme: its light
  * and dark palettes, type stacks, dense text sizes, radii, status colours and
- * surface treatments, so fleetx reads as a sibling of T3. The appearance
- * contrast machinery is reduced to aliases, since fleetx has no contrast setting.
+ * surface treatments, so T3 Fleet reads as a sibling of T3. The appearance
+ * contrast machinery is reduced to aliases, since T3 Fleet has no contrast setting.
  */
 
 @custom-variant dark (&:is(.dark, .dark *));

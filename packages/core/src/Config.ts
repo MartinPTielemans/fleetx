@@ -2,7 +2,7 @@
  * Where a user's setup lives, and what it says.
  *
  * The engine knows nothing about anyone's machines. Each machine has one
- * small local file, ~/.config/fleetx/config.toml, naming the user's private
+ * small local file, ~/.config/t3-fleet/config.toml, naming the user's private
  * config repository and which node this machine is:
  *
  *   repo = "~/my-fleet"
@@ -14,7 +14,8 @@
  *   profiles/<name>.toml settings shared by the nodes that list the profile
  *   nodes/<name>.toml    one machine: ssh, roles, profiles, its own settings
  *
- * FLEETX_CONFIG_REPO and FLEETX_NODE override the local file.
+ * T3_FLEET_CONFIG_REPO and T3_FLEET_NODE override the local file (FLEETX_CONFIG_REPO
+ * and FLEETX_NODE too, until 1.0).
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -24,6 +25,7 @@ import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
+import { configDir } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -91,7 +93,7 @@ export type FleetSettings = typeof FleetFile.Type;
 
 export interface Node {
   readonly name: string;
-  /** ssh destination; null for the machine fleetx is running on. */
+  /** ssh destination; null for the machine T3 Fleet is running on. */
   readonly ssh: string | null;
   readonly roles: ReadonlyArray<Role>;
   readonly profiles: ReadonlyArray<string>;
@@ -136,12 +138,12 @@ const decodeAs = <S extends Schema.Top>(schema: S, value: unknown, file: string)
 
 const NOT_SET_UP = new ConfigError({
   message:
-    'this machine is not set up: run `fleetx join`, or write ~/.config/fleetx/config.toml with repo = "<your config repo>" and node = "<this machine>"',
+    'this machine is not set up: run `t3-fleet join`, or write ~/.config/t3-fleet/config.toml with repo = "<your config repo>" and node = "<this machine>"',
 });
 
 const StringList = Schema.Array(Schema.String);
 
-/** Load a config repository; `self` names the machine fleetx runs on. */
+/** Load a config repository; `self` names the machine T3 Fleet runs on. */
 export const loadConfigFrom = (repo: string, self: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -199,14 +201,14 @@ export const loadConfigFrom = (repo: string, self: string) =>
     } satisfies Config;
   });
 
-export const localConfigPath = (home: string) => `${home}/.config/fleetx/config.toml`;
+export const localConfigPath = (home: string) => `${configDir(home)}/config.toml`;
 
 export const loadConfig = Effect.gen(function* () {
   const home = process.env["HOME"] ?? "";
   const local = yield* readTomlTable(localConfigPath(home));
   const decoded = Option.isSome(local) ? Option.some(yield* decodeAs(LocalFile, local.value, localConfigPath(home))) : Option.none();
-  const repoSetting = process.env["FLEETX_CONFIG_REPO"] ?? Option.getOrUndefined(Option.map(decoded, (l) => l.repo));
-  const self = process.env["FLEETX_NODE"] ?? Option.getOrUndefined(Option.flatMap(decoded, (l) => Option.fromNullishOr(l.node)));
+  const repoSetting = process.env["T3_FLEET_CONFIG_REPO"] ?? process.env["FLEETX_CONFIG_REPO"] ?? Option.getOrUndefined(Option.map(decoded, (l) => l.repo));
+  const self = process.env["T3_FLEET_NODE"] ?? process.env["FLEETX_NODE"] ?? Option.getOrUndefined(Option.flatMap(decoded, (l) => Option.fromNullishOr(l.node)));
   if (repoSetting === undefined || self === undefined) return yield* NOT_SET_UP;
   return yield* loadConfigFrom(expandHome(repoSetting, home), self);
 });
@@ -218,7 +220,7 @@ export const ProbeSettings = Schema.Struct({
   areas: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   /** Where this node keeps the config repo. */
   checkout: Schema.optionalKey(Schema.String),
-  /** SHA-256 of the controller's fleetx build. */
+  /** SHA-256 of the controller's T3 Fleet build. */
   engine: Schema.optionalKey(Schema.String),
   /** The node's name. */
   node: Schema.optionalKey(Schema.String),

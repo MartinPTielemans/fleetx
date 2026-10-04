@@ -1,5 +1,5 @@
 /**
- * fleetx mcp …: the MCP hub on the relay, from any node.
+ * t3-fleet mcp …: the MCP hub on the relay, from any node.
  *
  *   servers                       every hosted server and its state
  *   login NAME                    sign in: prints and opens the URL, waits for the login
@@ -19,14 +19,14 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
-import type { HubServer } from "@fleetx/core/Api";
-import { loadConfig, type Config } from "@fleetx/core/Config";
-import { exec } from "@fleetx/core/Exec";
-import { commitAndPush } from "@fleetx/core/Git";
-import { clientTokenEnv, expectOk, hubRequest } from "@fleetx/core/hub/HubClient";
-import { toJson } from "@fleetx/core/hub/JsonRpc";
-import { decodeCalls, decodeCreated, decodeLogin, decodeServers, decodeTokens } from "@fleetx/core/hub/Routes";
-import { encryptedPath, installSecrets, readSecrets, setVar, writeSecrets } from "@fleetx/core/Secrets";
+import type { HubServer } from "@t3-fleet/core/Api";
+import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import { exec } from "@t3-fleet/core/Exec";
+import { commitAndPush } from "@t3-fleet/core/Git";
+import { clientTokenEnv, expectOk, hubRequest } from "@t3-fleet/core/hub/HubClient";
+import { toJson } from "@t3-fleet/core/hub/JsonRpc";
+import { decodeCalls, decodeCreated, decodeLogin, decodeServers, decodeTokens } from "@t3-fleet/core/hub/Routes";
+import { encryptedPath, installSecrets, readSecrets, setVar, writeSecrets } from "@t3-fleet/core/Secrets";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -55,7 +55,7 @@ export const renderServers = (list: ReadonlyArray<HubServer>, now: number) => {
       const auth = s.auth === "oauth" ? `oauth${s.expiresAt === null ? "" : ` ${until(now, s.expiresAt)}`}` : s.auth;
       const tools = s.tools === null ? "" : `${s.tools} tools`;
       const line = `${s.name.padEnd(width)}  ${s.state.padEnd(11)}  ${s.kind.padEnd(12)}  ${auth.padEnd(10)}  ${tools.padEnd(9)}  checked ${ago(now, s.lastCheckAt)}`;
-      const hint = s.state === "needs-login" ? `\n${" ".repeat(width)}  sign in: fleetx mcp login ${s.name}` : "";
+      const hint = s.state === "needs-login" ? `\n${" ".repeat(width)}  sign in: t3-fleet mcp login ${s.name}` : "";
       return `${line}${s.detail === null ? "" : `\n${" ".repeat(width)}  ${s.detail}`}${hint}`;
     })
     .join("\n");
@@ -162,7 +162,7 @@ const tokenCreate = Command.make("create", {
         yield* Console.log(`Use it with [mcp] token_env = "${env}" on the nodes that should connect as ${client}.`);
       } else {
         yield* Console.log(`created a token for ${client}; it is shown only now:\n\n  ${token}\n`);
-        yield* Console.log(`Keep it in the fleet's secrets from an authority: fleetx secrets set ${env}=…`);
+        yield* Console.log(`Keep it in the fleet's secrets from an authority: t3-fleet secrets set ${env}=…`);
       }
     }).pipe(reportUserErrors),
   ),
@@ -189,7 +189,7 @@ const tokenRevoke = Command.make("revoke", { client: clientArg }).pipe(
     Effect.gen(function* () {
       const config = yield* loadConfig;
       yield* hubRequest(config, "DELETE", `/hub/tokens/${encodeURIComponent(client)}`).pipe(Effect.flatMap(expectOk));
-      yield* Console.log(`revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with fleetx secrets unset ${clientTokenEnv(client)}` : ""}`);
+      yield* Console.log(`revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(client)}` : ""}`);
     }).pipe(reportUserErrors),
   ),
 );
@@ -199,7 +199,7 @@ const tokenCommand = Command.make("token").pipe(
   Command.withSubcommands([tokenCreate, tokenList, tokenRevoke]),
 );
 
-/** The hub's commands, registered under `fleetx mcp`. */
+/** The hub's commands, registered under `t3-fleet mcp`. */
 export const hubCommands = [
   serversCommand,
   loginCommand,

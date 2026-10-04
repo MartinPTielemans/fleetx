@@ -16,8 +16,11 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import type { Config } from "./Config.ts";
 import { exec } from "./Exec.ts";
-import { git, ok, why } from "./Git.ts";
+import { commitAndPush, git, ok, why } from "./Git.ts";
+import { sha256 } from "./Hash.ts";
+import { stateDir } from "./Names.ts";
 
 const Source = Schema.Struct({
   type: Schema.String,
@@ -62,7 +65,8 @@ export const parseSource = (spec: string) => {
 const fetchSource = (url: string, scratch: string) =>
   Effect.gen(function* () {
     yield* exec({ command: "rm", args: ["-rf", scratch], timeout: Duration.seconds(30) });
-    const clone = yield* git(process.env["HOME"] ?? "/", ["clone", "-q", "--depth", "1", url, scratch], { timeout: Duration.minutes(3) });
+    if (url.startsWith("-")) return yield* Effect.fail(`not a git URL: ${url}`);
+    const clone = yield* git(process.env["HOME"] ?? "/", ["clone", "-q", "--depth", "1", "--", url, scratch], { timeout: Duration.minutes(3) });
     if (!ok(clone)) return yield* Effect.fail(`cloning ${url}: ${why(clone)}`);
     const found = yield* exec({ command: "find", args: [scratch, "-name", "SKILL.md", "-not", "-path", "*/.git/*", "-not", "-path", "*/node_modules/*"], timeout: Duration.seconds(30) });
     const path = yield* Path.Path;
@@ -94,7 +98,7 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const { url, name: sourceName } = parseSource(spec);
-    const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
     const available = yield* fetchSource(url, scratch);
     if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
     const wanted = names.length > 0 ? names : available.size === 1 ? [...available.keys()] : [];
@@ -132,11 +136,21 @@ export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
     const sources = yield* readSources(repo);
+    // Updating replaces a skill's whole directory, and git can only put back what it tracks.
+    const paths = Object.values(sources.sources ?? {})
+      .flatMap((s) => s.skills)
+      .filter((s) => only.length === 0 || only.includes(s))
+      .map((s) => `skills/${s}`);
+    if (paths.length > 0) {
+      const ignored = yield* git(repo, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...paths]);
+      const lost = ignored.stdout.split("\n").filter((l) => l.startsWith("!! ")).map((l) => l.slice(3));
+      if (lost.length > 0) return yield* Effect.fail(`updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`);
+    }
     const touched: Array<string> = [];
     for (const [, source] of Object.entries(sources.sources ?? {})) {
       const mine = source.skills.filter((s) => only.length === 0 || only.includes(s));
       if (mine.length === 0) continue;
-      const scratch = path.join(process.env["HOME"] ?? "/tmp", ".local/state/fleetx/skill-source");
+      const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
       const available = yield* fetchSource(source.url, scratch);
       for (const local of mine) {
         const upstream = source.renamed?.[local] ?? local;
@@ -164,4 +178,123 @@ export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
       if (!ok(rm)) return yield* Effect.fail(`removing skills/${name}: ${why(rm)}`);
     }
     return [...names.map((n) => `skills/${n}`), "skills/SOURCES.json"];
+  });
+
+/** An authority commits and pushes; any other node leaves the change for its next sync to propose. */
+export const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
+  Effect.gen(function* () {
+    if (config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
+      const rev = yield* commitAndPush(config.repo, paths, message);
+      return `committed and pushed (${rev})`;
+    }
+    return "the next sync proposes it for an authority's approval";
+  });
+
+/** The one-line `description:` in a SKILL.md's front matter, or null. */
+export const skillDescription = (text: string) => {
+  const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+  const line = front === undefined ? undefined : /^description:[ \t]*(.*)$/m.exec(front)?.[1]?.trim();
+  if (line === undefined || line === "" || line === "|" || line === ">" || line.startsWith("|") || line.startsWith(">")) return null;
+  return line.replace(/^(["'])(.*)\1$/, "$2");
+};
+
+/** Every skill in the repo's skills/, with its description and where it came from. */
+export const listSkills = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sources = yield* readSources(repo).pipe(Effect.orElseSucceed((): SourcesFile => ({ sources: {} })));
+    const dir = path.join(repo, "skills");
+    const names = (yield* fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>))).filter((n) => !n.startsWith(".")).sort();
+    const out: Array<{ name: string; description: string | null; source: { name: string; url: string } | null }> = [];
+    for (const name of names) {
+      const text = yield* fs.readFileString(path.join(dir, name, "SKILL.md")).pipe(Effect.option);
+      if (Option.isNone(text)) continue;
+      const source = Object.entries(sources.sources ?? {}).find(([, s]) => s.skills.includes(name));
+      out.push({ name, description: skillDescription(text.value), source: source === undefined ? null : { name: source[0], url: source[1].url } });
+    }
+    return out;
+  });
+
+/** The skills `spec` offers, and which of them the repo already has under that name. */
+export const lookupSource = (repo: string, spec: string) =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const { url } = parseSource(spec);
+    const scratch = path.join(stateDir(process.env["HOME"] ?? "/tmp"), "skill-source");
+    const available = yield* fetchSource(url, scratch);
+    if (available.size === 0) return yield* Effect.fail(`${url} has no SKILL.md`);
+    const skills: Array<{ name: string; exists: boolean }> = [];
+    for (const name of [...available.keys()].sort()) {
+      skills.push({ name, exists: yield* fs.exists(path.join(repo, "skills", name)).pipe(Effect.orElseSucceed(() => false)) });
+    }
+    return { url, skills };
+  });
+
+/** The vendored skills `only` names (all of them when empty) that have a source to update from. */
+const sourced = (repo: string, only: ReadonlyArray<string>) =>
+  readSources(repo).pipe(
+    Effect.map((sources) => Object.values(sources.sources ?? {}).flatMap((s) => s.skills).filter((s) => only.length === 0 || only.includes(s))),
+  );
+
+/**
+ * Pull `only` from upstream, read what changed, and put the repo back as it
+ * was. Refuses when those skills have edits of their own, which putting back
+ * would lose. The digest names exactly this change, for keepUpdate.
+ */
+export const previewUpdate = (repo: string, only: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const names = yield* sourced(repo, only);
+    if (names.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+    const paths = names.map((n) => `skills/${n}`);
+    const dirty = yield* git(repo, ["status", "--porcelain", "--", ...paths]);
+    if (dirty.stdout.trim() !== "") return yield* Effect.fail(`these skills have changes not yet committed or proposed; the next sync takes care of them, then try again:\n${dirty.stdout.trim()}`);
+    return yield* updateSkills(repo, only).pipe(
+      Effect.flatMap((touched) => readStaged(repo, touched)),
+      Effect.ensuring(restore(repo, paths)),
+    );
+  });
+
+/** Pull `only` again and keep it, if it is still the change `digest` names. Returns the paths to land. */
+export const keepUpdate = (repo: string, only: ReadonlyArray<string>, digest: string) =>
+  Effect.gen(function* () {
+    const names = yield* sourced(repo, only);
+    const paths = names.map((n) => `skills/${n}`);
+    const dirty = yield* git(repo, ["status", "--porcelain", "--", ...paths]);
+    if (paths.length === 0 || dirty.stdout.trim() !== "") return yield* Effect.fail("these skills changed since the preview; preview again");
+    const now = yield* updateSkills(repo, only).pipe(
+      Effect.flatMap((touched) => readStaged(repo, touched)),
+      Effect.tapError(() => restore(repo, paths)),
+    );
+    if (now.digest === "" || now.digest !== digest) {
+      yield* restore(repo, paths);
+      return yield* Effect.fail(now.digest === "" ? "nothing to update any more" : "upstream changed since the preview; preview again");
+    }
+    yield* git(repo, ["reset", "-q", "--", ...paths]);
+    return now.files;
+  });
+
+/** Stage `touched` to see new files too; return what changed. */
+const readStaged = (repo: string, touched: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (touched.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+    const add = yield* git(repo, ["add", "-A", "--", ...touched]);
+    if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
+    const names = yield* git(repo, ["diff", "--cached", "--name-only", "--", ...touched]);
+    const files = names.stdout.split("\n").filter(Boolean);
+    if (files.length === 0) return { files: [], stat: "", diff: "", digest: "" };
+    const stat = yield* git(repo, ["diff", "--cached", "--stat", "--", ...touched]);
+    const diff = yield* git(repo, ["diff", "--cached", "--", ...touched]);
+    const digest = yield* Effect.promise(() => sha256(diff.stdout));
+    return { files: [...new Set(files.map((f) => f.split("/").slice(0, 2).join("/")))], stat: stat.stdout.trimEnd(), diff: diff.stdout, digest };
+  });
+
+/** Put `paths` back to the last commit: index, tracked files, and new files. */
+const restore = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (paths.length === 0) return;
+    yield* git(repo, ["reset", "-q", "--", ...paths]);
+    yield* git(repo, ["checkout", "-q", "--", ...paths]);
+    yield* git(repo, ["clean", "-qfd", "--", ...paths]);
   });

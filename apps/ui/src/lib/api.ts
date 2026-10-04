@@ -1,9 +1,9 @@
 /**
- * Talking to `fleetx ui`. Every answer is decoded with the same Api.ts schema
+ * Talking to `t3-fleet ui`. Every answer is decoded with the same Api.ts schema
  * the server encoded it with, so a shape the two disagree on fails here,
  * loudly, instead of rendering half a page.
  *
- * The server wants this run's token on every request. `fleetx ui` opens the
+ * The server wants this run's token on every request. `t3-fleet ui` opens the
  * app with it in the URL fragment; it is kept in localStorage (readable only
  * by this origin) so reloads and new tabs keep working until the next run.
  */
@@ -17,13 +17,17 @@ import {
   UiModels,
   UiProposal,
   UiSession,
+  UiSkills,
+  UiSkillsLanded,
+  UiSkillsLookup,
+  UiSkillsPreview,
   UiStatus,
-} from "@fleetx/core/Api";
+} from "@t3-fleet/core/Api";
 import * as Schema from "effect/Schema";
 
-const TOKEN_KEY = "fleetx:token";
+const TOKEN_KEY = "t3-fleet:token";
 
-/** Take the token from the fragment `fleetx ui` opened, and drop it from the address bar. */
+/** Take the token from the fragment `t3-fleet ui` opened, and drop it from the address bar. */
 export function adoptToken(): void {
   const match = /(?:^#|&)token=([0-9a-f]+)/.exec(window.location.hash);
   if (match?.[1] === undefined) return;
@@ -50,11 +54,11 @@ async function request(method: "GET" | "POST", path: string, body?: unknown): Pr
   try {
     response = await fetch(path, {
       method,
-      headers: { "x-fleetx-token": token(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      headers: { "x-t3-fleet-token": token(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
-    throw new ApiError(0, "fleetx ui is not answering; is it still running?");
+    throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
   }
   const text = await response.text();
   if (!response.ok) throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
@@ -85,8 +89,17 @@ const getModels = get(UiModels);
 const getHubServers = get(Schema.Array(HubServer));
 const getHubCalls = get(Schema.Array(HubCall));
 const getConfig = get(Schema.Array(UiConfigRow));
+const getSkills = get(UiSkills);
 const decodeApply = decoder(UiApplyResult);
 const decodeLogin = decoder(HubLoginStart);
+
+const post = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) => {
+  const decode = decoder(schema);
+  return async (path: string, body: unknown): Promise<S["Type"]> => decode(path, await request("POST", path, body));
+};
+const postLookup = post(UiSkillsLookup);
+const postPreview = post(UiSkillsPreview);
+const postLanded = post(UiSkillsLanded);
 
 export const decodeStatusEvent = decoder(UiStatus);
 
@@ -109,6 +122,14 @@ export const api = {
   hubLogout: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/logout`).then(() => undefined),
   hubRestart: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/restart`).then(() => undefined),
   config: (node: string) => getConfig(`/api/config/${encodeURIComponent(node)}`),
+  skills: () => getSkills("/api/skills"),
+  skillsLookup: (source: string) => postLookup("/api/skills/lookup", { source }),
+  skillsAdd: (source: string, skills: ReadonlyArray<string>, as?: string) =>
+    postLanded("/api/skills/add", { source, skills, ...(as === undefined ? {} : { as }) }),
+  /** Every skill with a source when `skills` is empty. */
+  skillsPreview: (skills: ReadonlyArray<string>) => postPreview("/api/skills/preview", { skills }),
+  skillsUpdate: (skills: ReadonlyArray<string>, digest: string) => postLanded("/api/skills/update", { skills, digest }),
+  skillsRemove: (skills: ReadonlyArray<string>) => postLanded("/api/skills/remove", { skills }),
   /** EventSource cannot send headers; the token goes in the query instead. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,
 };
@@ -120,6 +141,10 @@ export type {
   UiModels as UiModelsT,
   UiProposal as UiProposalT,
   UiSession,
+  UiSkills as UiSkillsT,
+  UiSkillsLanded as UiSkillsLandedT,
+  UiSkillsLookup as UiSkillsLookupT,
+  UiSkillsPreview as UiSkillsPreviewT,
   UiStatus,
-} from "@fleetx/core/Api";
+} from "@t3-fleet/core/Api";
 export type UiAlertT = typeof UiAlert.Type;

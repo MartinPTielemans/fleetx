@@ -75,7 +75,7 @@ export const mergeLayers = (layers: ReadonlyArray<Layer>): Merged => {
   return { table, provenance };
 };
 
-/** Flattened `path = value  # source` lines, for `fleetx config show`. */
+/** Flattened `path = value  # source` lines, for `t3-fleet config show`. */
 export const describeMerged = (merged: Merged): Array<{ path: string; value: string; source: string }> => {
   const out: Array<{ path: string; value: string; source: string }> = [];
   const walk = (value: Value, path: string) => {

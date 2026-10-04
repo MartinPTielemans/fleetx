@@ -8,7 +8,7 @@
  *   # nodes/laptop.toml (or a profile)
  *   brew = ["gh", "jq"]
  *
- * A plugin imports nothing: fleetx passes in everything it needs.
+ * A plugin imports nothing: T3 Fleet passes in everything it needs.
  */
 export default ({ defineArea, Effect, Schema, Duration, exec, sh }) =>
   defineArea({

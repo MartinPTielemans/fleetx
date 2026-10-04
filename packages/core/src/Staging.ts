@@ -93,7 +93,7 @@ export const settleRejection = (repo: string, node: string, branch: string) =>
     const files = out(yield* git(repo, ["diff", "--name-only", `origin/${branch}`, commit])).split("\n").filter(Boolean);
     for (const file of files) {
       const tracked = ok(yield* git(repo, ["cat-file", "-e", `origin/${branch}:${file}`]));
-      yield* git(repo, ["stash", "push", "-q", "--include-untracked", "-m", `fleetx: rejected ${file}`, "--", file]);
+      yield* git(repo, ["stash", "push", "-q", "--include-untracked", "-m", `T3 Fleet: rejected ${file}`, "--", file]);
       if (!tracked) continue;
       yield* git(repo, ["checkout", `origin/${branch}`, "--", file]);
     }

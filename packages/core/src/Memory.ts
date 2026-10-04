@@ -1,5 +1,5 @@
 /**
- * What fleetx remembers between runs, so a scheduled check can say "nothing
+ * What T3 Fleet remembers between runs, so a scheduled check can say "nothing
  * changed" instead of repeating the same report every day.
  *
  * Also how intended differences apply. A finding listed in fleetx.toml
@@ -14,6 +14,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type { Finding } from "./Diagnose.ts";
+import { stateDir } from "./Names.ts";
 
 /** "laptop:t3-behind": the machine and what is wrong there, stable across checks. */
 export const findingId = (f: Finding) => `${f.node}:${f.key}`;
@@ -24,11 +25,14 @@ const Remembered = Schema.Struct({
 });
 type Remembered = typeof Remembered.Type;
 
-const statePath = () => `${process.env["HOME"] ?? ""}/.local/state/fleetx/last-check.json`;
+const statePath = () => `${stateDir(process.env["HOME"] ?? "")}/last-check.json`;
+
+/** An [[accept]] id written before the rename: the engine's keys were fleetx-*. Until 1.0. */
+const renamedId = (id: string) => id.replace(/:fleetx-(outdated|local-config|timer|timer-unwanted)$/, ":engine-$1");
 
 /** Findings with accepted differences (fleetx.toml `[[accept]]`) turned into notes. */
 export const applyAccepted = (findings: ReadonlyArray<Finding>, accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }> = []) => {
-  const reasons = new Map(accepted.map((a) => [a.id, a.reason]));
+  const reasons = new Map(accepted.map((a) => [renamedId(a.id), a.reason]));
   return findings.map((f): Finding => {
     const reason = reasons.get(findingId(f));
     if (reason === undefined) return f;

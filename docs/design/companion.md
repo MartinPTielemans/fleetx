@@ -1,16 +1,16 @@
-# Design: fleetx as T3 Code's companion
+# Design: T3 Fleet as T3 Code's companion
 
-fleetx grows from "keeps machines equivalent" into the companion for every
+T3 Fleet grows from "keeps machines equivalent" into the companion for every
 machine someone runs T3 Code on. Three new parts join the engine:
 
 1. **models**: a model proxy on every node, between T3's providers and
    Anthropic and OpenAI. It makes provider traffic stable and visible, and it
    detects and prevents Claude logouts.
-2. **hub**: fleetx's own MCP hub on the relay node, replacing ToolHive. It runs
+2. **hub**: T3 Fleet's own MCP hub on the relay node, replacing ToolHive. It runs
    hosted servers, holds their OAuth logins, serves every client through one
    gateway, and logs tool calls.
-3. **ui**: `fleetx ui`, a local web app in T3 Code's look, showing everything
-   fleetx knows and doing everything the CLI does.
+3. **ui**: `t3-fleet ui`, a local web app in T3 Code's look, showing everything
+   T3 Fleet knows and doing everything the CLI does.
 
 The existing principles still hold (docs/PLAN.md): observe, plan, apply;
 probes are read-only; every change is a fix shown before it runs; git is
@@ -26,7 +26,7 @@ consumes those schemas; nobody invents a second shape for the same data.
 |---|---|---|
 | 8399 | relay node, 127.0.0.1, published to the tailnet | relay: sync events, state, MCP gateway, hub management, OAuth callback |
 | 8398 | every node, 127.0.0.1 only | model proxy |
-| 8397 | the machine running `fleetx ui`, 127.0.0.1 only | UI and its `/api` |
+| 8397 | the machine running `t3-fleet ui`, 127.0.0.1 only | UI and its `/api` |
 | 18200–18299 | relay node, 127.0.0.1 only | hub-run MCP servers (allocated by the hub) |
 
 ## 1. models: the model proxy
@@ -55,7 +55,7 @@ existing `[proxy]` settings; that path stays as it is.
 
 ### Shape
 
-- `fleetx models serve`: long-running, on 127.0.0.1:8398, installed as a
+- `t3-fleet models serve`: long-running, on 127.0.0.1:8398, installed as a
   service by the `models` area (launchd / systemd, like the relay listener).
 - Routes: `/<upstream>/*` forwards to that upstream: `anthropic`
   (`https://api.anthropic.com`), `openai` (the ChatGPT backend for a ChatGPT
@@ -69,21 +69,21 @@ existing `[proxy]` settings; that path stays as it is.
   (`/egress/<upstream>/*`, relay token) instead of directly,
   for a node on a bad network.
 - Launchers: the area writes one small shell script per routed T3 provider
-  instance (`~/.local/bin/fleetx-claude`, `fleetx-codex`,
-  `fleetx-<instance>`). Each follows its instance's recipe: the variables or
+  instance (`~/.local/bin/t3-fleet-claude`, `t3-fleet-codex`,
+  `t3-fleet-<instance>`). Each follows its instance's recipe: the variables or
   leading arguments that point the CLI at the proxy (`ANTHROPIC_BASE_URL` for
   Claude, `-c openai_base_url=…` for Codex, declared ones for other drivers),
-  and a long-lived credential loaded from `~/.config/fleetx/secrets.env`
+  and a long-lived credential loaded from `~/.config/t3-fleet/secrets.env`
   (`CLAUDE_CODE_OAUTH_TOKEN` for Claude). It falls back to running the CLI
   directly when the proxy is not listening (logged to
-  `~/.local/state/fleetx/models-fallback.log`, which the area reports).
+  `~/.local/state/t3-fleet/models-fallback.log`, which the area reports).
 - Provider logins: every node reports each T3 provider instance's login and
-  health from T3 itself (`server.getConfig`, read with fleetx's own
-  `orchestration:read` token, `fleetx t3 connect`), for every driver T3 has.
+  health from T3 itself (`server.getConfig`, read with T3 Fleet's own
+  `orchestration:read` token, `t3-fleet t3 connect`), for every driver T3 has.
   Without the token, Claude and Codex are checked through their CLIs.
 - Stats: rolling windows (5 minutes, 1 hour, 24 hours) per upstream:
   requests, retried, failed by class, fallbacks, time to first byte p50/p95,
-  last error. Metadata only, to `~/.local/state/fleetx/models.jsonl`, bounded.
+  last error. Metadata only, to `~/.local/state/t3-fleet/models.jsonl`, bounded.
 
 ### Settings
 
@@ -108,8 +108,8 @@ route = false                          # leave an instance alone
   status` say so). Every node, with or without `[models]`.
 - `provider-unhealthy-<instance>` (warn): T3 reports the instance as warning
   or error; the detail is T3's message.
-- `t3-access` (warn, fix): fleetx has no working read-only T3 token; the fix
-  is `fleetx t3 connect`.
+- `t3-access` (warn, fix): T3 Fleet has no working read-only T3 token; the fix
+  is `t3-fleet t3 connect`.
 - `provider-token-missing-<instance>` (warn): `[models]` routes the instance,
   its recipe names a long-lived credential, and the secret is not set.
 - `models-service` (warn, fix): the proxy service is missing, stale or down.
@@ -123,11 +123,11 @@ route = false                          # leave an instance alone
 - `models-failing` (warn): more than 5% of requests failed in the last hour,
   or fallbacks happened; the detail names the error class.
 
-## 2. hub: fleetx's MCP hub
+## 2. hub: T3 Fleet's MCP hub
 
 ### Shape
 
-The hub runs inside `fleetx relay serve` on the relay node. Every definition
+The hub runs inside `t3-fleet relay serve` on the relay node. Every definition
 in the repo's `mcp/` with a hosted kind is served; there is nothing else to
 list. Clients reach every hosted server at `<relay url>/mcp/<name>`.
 
@@ -140,7 +140,7 @@ list. Clients reach every hosted server at `<relay url>/mcp/<name>`.
 
 Containers run `--cap-drop ALL --security-opt no-new-privileges`, bound to
 127.0.0.1, with `env` from the fleet's secrets and an optional
-`network = "none"`. The hub names them `fleetx-mcp-<name>`, adopts a matching
+`network = "none"`. The hub names them `t3-fleet-mcp-<name>`, adopts a matching
 running container after a restart instead of starting a second, and restarts
 a server that dies, with backoff.
 
@@ -164,17 +164,17 @@ The hub is an OAuth client per the MCP authorization spec (2025-06-18):
    `remote_auth_scopes`, and `redirect_uri = <relay url>/oauth/callback`, so
    signing in works from any browser on the tailnet with no tunnel.
 5. Tokens are stored encrypted to the relay node's own age key, in
-   `~/.local/state/fleetx/hub/tokens.age`. Refresh is serialized per server and
+   `~/.local/state/t3-fleet/hub/tokens.age`. Refresh is serialized per server and
    done ahead of expiry; a 401 triggers one refresh. When refresh fails the
    server goes to `needs-login` and an alert is raised.
 
 A login starts with `POST /hub/servers/<name>/login`, which returns the URL to
-open; `fleetx mcp login <name>` and the UI both use it.
+open; `t3-fleet mcp login <name>` and the UI both use it.
 
 ### Clients and policy
 
 The gateway accepts the relay token (as today) and per-client tokens created
-with `fleetx mcp token create <client>` (stored hashed on the relay node; the
+with `t3-fleet mcp token create <client>` (stored hashed on the relay node; the
 plaintext is shown once and kept in the fleet's secrets). A definition may
 deny tools (`tools = { deny = ["delete_*"] }`); a client token may be limited
 to some servers. Denied calls get a JSON-RPC error and are logged.
@@ -183,7 +183,7 @@ to some servers. Denied calls get a JSON-RPC error and are logged.
 
 Every JSON-RPC request through the gateway is recorded as a `HubCall`
 (server, client, method, tool name, duration, outcome; never arguments or
-results), in a ring buffer and `~/.local/state/fleetx/hub/calls.jsonl`. The
+results), in a ring buffer and `~/.local/state/t3-fleet/hub/calls.jsonl`. The
 hub runs an `initialize` against each server every minute; `HubServer.state`
 is `starting`, `running`, `needs-login`, `error` or `stopped`. State changes
 are emitted on `/events` as `hub` events.
@@ -211,15 +211,15 @@ longer needed when the hub is on; hosted servers resolve to the gateway.
 `needs-login` becomes the finding `mcp-<name>-needs-login` with the sign-in
 command; there is no automatic fix, because a person signs in.
 
-## 3. ui: `fleetx ui`
+## 3. ui: `t3-fleet ui`
 
 A local web app, `apps/ui` (React, Vite, Tailwind), in T3 Code's visual
-language: its colours, type, density, dark and light modes. `fleetx ui` serves
+language: its colours, type, density, dark and light modes. `t3-fleet ui` serves
 the built app and `/api` on 127.0.0.1:8397 and opens the browser. It runs
 where the user is (usually the authority), so it can ssh to nodes for checks
 and fixes, and it reads the relay for live state and the hub.
 
-The built app is embedded in the `fleetx` bundle, so the single-file release
+The built app is embedded in the `t3-fleet` bundle, so the single-file release
 still works.
 
 ### Views
@@ -227,10 +227,16 @@ still works.
 - **Environments**: the status table, live; each machine opens to its
   providers, agent CLIs, sync, model proxy and areas.
 - **Findings**: grouped by machine and area; apply fixes with the same plan,
-  disruption marks and confirmation as `fleetx fix`; accepted notes shown with
+  disruption marks and confirmation as `t3-fleet fix`; accepted notes shown with
   their reasons.
 - **Proposals**: review, approve and reject staged changes, with diffs.
 - **Alerts**: the alert history.
+- **Skills**: the repo's skills against every machine, each link's state;
+  add from a git repository (looked up first, then chosen), update (a diff
+  first, kept only if upstream still gives the same change), remove; link,
+  clean-up and adopt fixes through the Findings dialog. Repo edits hold
+  sync's lock and land as `t3-fleet skills` does: committed on an authority,
+  proposed elsewhere.
 - **MCP**: every server with its state; sign in, sign out, restart; the
   tool-call log, filterable.
 - **Models**: per machine and upstream, traffic health from `ModelProxyStats`,
@@ -249,7 +255,7 @@ while a browser is connected.
 | Part | Owns |
 |---|---|
 | models | `packages/core/src/models/`, `areas/Models.ts`, Claude auth in Probe/Observation/Diagnose, `apps/cli/src/models.ts`, relay `/egress` |
-| hub | `packages/core/src/hub/`, `Relay.ts` changes, `areas/Mcp.ts` changes, `apps/cli/src/hub.ts` (`fleetx mcp login`, `token`) |
+| hub | `packages/core/src/hub/`, `Relay.ts` changes, `areas/Mcp.ts` changes, `apps/cli/src/hub.ts` (`t3-fleet mcp login`, `token`) |
 | ui | `apps/ui/`, `packages/core/src/UiServer.ts`, `apps/cli/src/ui.ts`, build embedding |
 
 Shared files (`Areas.ts`, `bin.ts`, `Api.ts`, `PROBE_PROTOCOL`) take small

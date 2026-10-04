@@ -1,5 +1,5 @@
 /** The hub's servers, their logins, and the tool-call log, through the relay. */
-import type { HubServerState } from "@fleetx/core/Api";
+import type { HubServerState } from "@t3-fleet/core/Api";
 import { ExternalLinkIcon, LogInIcon, LogOutIcon, PlugIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -58,8 +58,8 @@ export function McpView() {
         <Group>
           <UnavailableState error={servers.error} title="The MCP hub is not available">
             {session?.relay === null
-              ? "The hub runs inside the relay. Add [relay] url to fleetx.toml and run `fleetx relay serve` on the relay node."
-              : "The relay did not answer for the hub. It may be running a fleetx without the hub, or not running at all."}
+              ? "The hub runs inside the relay. Add [relay] url to fleetx.toml and run `t3-fleet relay serve` on the relay node."
+              : "The relay did not answer for the hub. It may be running a T3 Fleet without the hub, or not running at all."}
           </UnavailableState>
         </Group>
       ) : (

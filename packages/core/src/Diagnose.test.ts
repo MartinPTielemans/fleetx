@@ -202,11 +202,11 @@ describe("diagnose", () => {
     expect(diagnose([ok("laptop", shimmed)], latest, settings)).toEqual([]);
   });
 
-  it("counts a fleetx models launcher as the managed CLI", () => {
+  it("counts a t3-fleet models launcher as the managed CLI", () => {
     const routed = machine({}, {
       providers: [
-        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/fleetx-claude", resolved: "/home/u/.local/bin/fleetx-claude" }),
-        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/fleetx-codex", resolved: "/home/u/.local/bin/fleetx-codex" }),
+        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/t3-fleet-claude", resolved: "/home/u/.local/bin/t3-fleet-claude" }),
+        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/t3-fleet-codex", resolved: "/home/u/.local/bin/t3-fleet-codex" }),
       ],
     });
     expect(diagnose([ok("laptop", routed)], latest, {}).filter((f) => f.area === "providers")).toEqual([]);

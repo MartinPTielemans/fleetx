@@ -6,7 +6,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import { afterAll, describe, expect, it } from "vite-plus/test";
 
-import { HubServer, UiApplyResult, UiModels, UiStatus } from "./Api.ts";
+import { HubServer, UiApplyResult, UiModels, UiSkills, UiSkillsLanded, UiSkillsPreview, UiStatus } from "./Api.ts";
 import type { Node } from "./Config.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
 import type { MachineObservation } from "./Observation.ts";
@@ -17,7 +17,14 @@ const PORT = 8397;
 const TOKEN = "a".repeat(48);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
-const node = (name: string): Node => ({ name, ssh: name === "laptop" ? null : name, roles: ["member"], profiles: [], tailnet: null, settings: mergeLayers([]) });
+const node = (name: string): Node => ({
+  name,
+  ssh: name === "laptop" ? null : name,
+  roles: ["member"],
+  profiles: [],
+  tailnet: null,
+  settings: mergeLayers(name === "server" ? [{ source: "node server", table: { skills: { ignore: ["drafts"] } } }] : []),
+});
 
 const observation: MachineObservation = {
   protocol: 5,
@@ -39,15 +46,26 @@ const observation: MachineObservation = {
         instanceId: "claudeAgent",
         driver: "claudeAgent",
         enabled: true,
-        binaryPath: "~/.local/bin/fleetx-claude",
-        resolved: "~/.local/bin/fleetx-claude",
+        binaryPath: "~/.local/bin/t3-fleet-claude",
+        resolved: "~/.local/bin/t3-fleet-claude",
         launch: { ok: true, version: "2.1.0", detail: "" },
       },
     ],
     problems: [],
   },
   proxy: null,
-  areas: {},
+  areas: {
+    skills: {
+      store: "/Users/u/.agents/skills",
+      vendored: ["review"],
+      links: [
+        { skill: "review", dir: "/Users/u/.agents/skills", state: "ok" },
+        { skill: "review", dir: "/Users/u/.claude/skills", state: "missing" },
+      ],
+      strays: [{ skill: "scratch", dir: "/Users/u/.codex/skills" }],
+      dangling: [],
+    },
+  },
   providerAuth: [{ instanceId: "claudeAgent", driver: "claudeAgent", enabled: true, auth: "authenticated", method: "setup-token", label: null, status: "ready", detail: "", checkedAt: 1, source: "t3" }],
   lastSync: null,
 };
@@ -78,6 +96,7 @@ const fakeCheck = (findings: ReadonlyArray<Finding>): UiCheck => ({
 /** A fleet whose one finding goes away once its fix has run; records every fix it is asked to run. */
 const fakeFleet = () => {
   const applied: Array<string> = [];
+  const edits: Array<string> = [];
   let fixed = false;
   const accepted: Finding = { node: "server", key: "noted", severity: "info", area: "parity", title: "a deliberate difference", detail: "accepted: on purpose" };
   const actions: UiActions = {
@@ -93,8 +112,26 @@ const fakeFleet = () => {
     reject: (node) => Effect.fail(`no proposal from ${node}`),
     alerts: Effect.succeed([{ at: 5, node: "server", kind: "failing", message: "sync failed" }]),
     config: (name) => (name === "laptop" ? Effect.succeed([{ path: "a.b", value: "1", source: "defaults" }]) : Effect.fail(`unknown machine: ${name}`)),
+    skills: {
+      list: Effect.succeed([{ name: "review", description: "Reviews a diff", source: { name: "skills", url: "https://github.com/acme/skills.git" } }]),
+      lookup: (source) => Effect.succeed({ url: source, skills: [{ name: "review", exists: true }] }),
+      add: (source, names, as) =>
+        Effect.sync(() => {
+          edits.push(`add ${source} ${names.join(",")}${as === undefined ? "" : ` as ${as}`}`);
+          return { paths: names.map((n) => `skills/${as ?? n}`), landed: "committed and pushed (abc123)" };
+        }),
+      preview: () => Effect.succeed({ files: ["skills/review"], stat: " 1 file changed", diff: "+new line", digest: "d1" }),
+      update: (names, digest) =>
+        digest === "d1"
+          ? Effect.sync(() => {
+              edits.push(`update ${names.join(",")}`);
+              return { paths: ["skills/review"], landed: "committed and pushed (abc124)" };
+            })
+          : Effect.fail("upstream changed since the preview; preview again"),
+      remove: (names) => Effect.sync(() => (edits.push(`remove ${names.join(",")}`), { paths: names.map((n) => `skills/${n}`), landed: "committed and pushed (abc125)" })),
+    },
   };
-  return { actions, applied };
+  return { actions, applied, edits };
 };
 
 /** The relay, as far as the hub endpoints go. */
@@ -118,7 +155,7 @@ const relayClient = (hub: boolean) =>
 const serve = (options: { readonly hub?: boolean; readonly relay?: boolean } = {}) => {
   const fleet = fakeFleet();
   const assets = new Map([
-    ["/index.html", { type: "text/html; charset=utf-8", body: new TextEncoder().encode("<!doctype html><title>fleetx</title>") }],
+    ["/index.html", { type: "text/html; charset=utf-8", body: new TextEncoder().encode("<!doctype html><title>T3 Fleet</title>") }],
     ["/assets/app-1.js", { type: "text/javascript; charset=utf-8", body: new TextEncoder().encode("console.log(1)") }],
   ]);
   const { handler, dispose } = HttpRouter.toWebHandler(
@@ -135,10 +172,10 @@ const serve = (options: { readonly hub?: boolean; readonly relay?: boolean } = {
   const call = (path: string, init: RequestInit & { readonly token?: string | null } = {}) => {
     const headers = new Headers(init.headers);
     if (!headers.has("host")) headers.set("host", `127.0.0.1:${PORT}`);
-    if (init.token !== null) headers.set("x-fleetx-token", init.token ?? TOKEN);
+    if (init.token !== null) headers.set("x-t3-fleet-token", init.token ?? TOKEN);
     return handler(new Request(`${ORIGIN}${path}`, { ...init, headers }));
   };
-  return { call, dispose, applied: fleet.applied };
+  return { call, dispose, applied: fleet.applied, edits: fleet.edits };
 };
 
 const decode = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S, text: string) => Schema.decodeSync(Schema.fromJsonString(schema))(text);
@@ -146,7 +183,7 @@ const decode = <S extends Schema.Top & { readonly DecodingServices: never }>(sch
 describe("refusal", () => {
   const options = { port: PORT, token: TOKEN };
   const none = new URLSearchParams();
-  const ok = { "host": `127.0.0.1:${PORT}`, "x-fleetx-token": TOKEN };
+  const ok = { "host": `127.0.0.1:${PORT}`, "x-t3-fleet-token": TOKEN };
 
   it("lets this run's own page through", () => {
     expect(refusal({ method: "POST", headers: { ...ok, origin: ORIGIN } }, options, none)).toBeNull();
@@ -161,12 +198,12 @@ describe("refusal", () => {
 
   it("refuses a rebound host name, even with the token", () => {
     expect(refusal({ method: "GET", headers: { ...ok, host: `evil.example:${PORT}` } }, options, none)?.status).toBe(421);
-    expect(refusal({ method: "GET", headers: { "x-fleetx-token": TOKEN } }, options, none)?.status).toBe(421);
+    expect(refusal({ method: "GET", headers: { "x-t3-fleet-token": TOKEN } }, options, none)?.status).toBe(421);
   });
 
   it("needs the token, as a header or in the query", () => {
     expect(refusal({ method: "GET", headers: { host: ok.host } }, options, none)?.status).toBe(401);
-    expect(refusal({ method: "GET", headers: { host: ok.host, "x-fleetx-token": "b".repeat(48) } }, options, none)?.status).toBe(401);
+    expect(refusal({ method: "GET", headers: { host: ok.host, "x-t3-fleet-token": "b".repeat(48) } }, options, none)?.status).toBe(401);
     expect(refusal({ method: "GET", headers: { host: ok.host } }, options, new URLSearchParams({ token: TOKEN }))).toBeNull();
   });
 
@@ -250,6 +287,53 @@ describe("the UI server", () => {
     expect((await server.call("/api/fixes", { method: "POST", body: "not json" })).status).toBe(400);
   });
 
+  it("serves the repo's skills with each machine's links", async () => {
+    const skills = decode(UiSkills, await (await server.call("/api/skills")).text());
+    expect(skills.skills.map((s) => s.name)).toEqual(["review"]);
+    expect(skills.nodes).toEqual([
+      {
+        node: "laptop",
+        at: 1_000,
+        store: "/Users/u/.agents/skills",
+        links: [
+          { skill: "review", dir: "/Users/u/.agents/skills", state: "ok" },
+          { skill: "review", dir: "/Users/u/.claude/skills", state: "missing" },
+        ],
+        strays: [{ skill: "scratch", dir: "/Users/u/.codex/skills" }],
+        dangling: [],
+        ignored: [],
+      },
+      { node: "server", at: null, store: null, links: [], strays: [], dangling: [], ignored: ["drafts"] },
+    ]);
+  });
+
+  it("changes skills only from well-formed requests", async () => {
+    const post = (path: string, body: unknown) => server.call(path, { method: "POST", body: JSON.stringify(body) });
+    expect((await post("/api/skills/add", { source: "--upload-pack=touch /tmp/x", skills: [] })).status).toBe(400);
+    expect((await post("/api/skills/add", { source: "acme/skills", skills: ["../etc"] })).status).toBe(400);
+    expect((await post("/api/skills/add", { source: "acme/skills", skills: ["review"], as: "-x" })).status).toBe(400);
+    expect((await post("/api/skills/remove", { skills: [] })).status).toBe(400);
+    expect((await post("/api/skills/lookup", { nope: 1 })).status).toBe(400);
+    expect(server.edits).toEqual([]);
+
+    expect(await (await post("/api/skills/lookup", { source: "acme/skills" })).json()).toEqual({ url: "acme/skills", skills: [{ name: "review", exists: true }] });
+    const added = decode(UiSkillsLanded, await (await post("/api/skills/add", { source: "https://github.com/acme/skills.git", skills: ["review"], as: "review2" })).text());
+    expect(added).toEqual({ paths: ["skills/review2"], landed: "committed and pushed (abc123)" });
+    expect(server.edits).toEqual(["add https://github.com/acme/skills.git review as review2"]);
+  });
+
+  it("keeps an update only with the preview's digest", async () => {
+    const post = (path: string, body: unknown) => server.call(path, { method: "POST", body: JSON.stringify(body) });
+    const preview = decode(UiSkillsPreview, await (await post("/api/skills/preview", { skills: ["review"] })).text());
+    expect(preview.digest).toBe("d1");
+    const stale = await post("/api/skills/update", { skills: ["review"], digest: "other" });
+    expect(stale.status).toBe(409);
+    expect(await stale.text()).toBe("upstream changed since the preview; preview again");
+    expect((await post("/api/skills/update", { skills: ["review"], digest: preview.digest })).status).toBe(200);
+    expect((await post("/api/skills/remove", { skills: ["review"] })).status).toBe(200);
+    expect(server.edits.slice(-2)).toEqual(["update review", "remove review"]);
+  });
+
   it("passes the hub through with the relay token, and checks its answers", async () => {
     const servers = await server.call("/api/hub/servers");
     expect(servers.status).toBe(200);
@@ -266,8 +350,8 @@ describe("the UI server", () => {
     expect(index.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(index.headers.get("x-frame-options")).toBe("DENY");
     expect(index.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
-    expect(await index.text()).toContain("<title>fleetx</title>");
-    expect(await (await server.call("/findings", { token: null })).text()).toContain("<title>fleetx</title>");
+    expect(await index.text()).toContain("<title>T3 Fleet</title>");
+    expect(await (await server.call("/findings", { token: null })).text()).toContain("<title>T3 Fleet</title>");
     const asset = await server.call("/assets/app-1.js", { token: null });
     expect(asset.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     expect(asset.headers.get("cache-control")).toContain("immutable");

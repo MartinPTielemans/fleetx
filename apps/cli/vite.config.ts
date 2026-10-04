@@ -21,7 +21,7 @@ const MIME: Readonly<Record<string, string>> = {
 
 /**
  * The built app (apps/ui/dist), one gzipped base64 string per file, as a
- * JSON string literal that `define` puts in place of __FLEETX_UI_ASSETS__ in
+ * JSON string literal that `define` puts in place of __T3_FLEET_UI_ASSETS__ in
  * src/ui.ts. Absent when the app has not been built; `build` builds it first.
  */
 const uiAssets = (): string | undefined => {
@@ -57,7 +57,7 @@ export default mergeConfig(
       clean: true,
       platform: "node",
       deps: { alwaysBundle: () => true, onlyBundle: false },
-      ...(assets === undefined ? {} : { define: { __FLEETX_UI_ASSETS__: assets } }),
+      ...(assets === undefined ? {} : { define: { __T3_FLEET_UI_ASSETS__: assets } }),
     },
   }),
 );

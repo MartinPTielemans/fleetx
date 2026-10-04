@@ -14,7 +14,7 @@ import { newBuild } from "./Runtime.ts";
 
 describe("newBuild", () => {
   it("completes once the bundle holds a different build, and not before", async () => {
-    const bundle = join(mkdtempSync(join(tmpdir(), "fleetx-build-")), "fleetx.mjs");
+    const bundle = join(mkdtempSync(join(tmpdir(), "t3-fleet-build-")), "t3-fleet.mjs");
     writeFileSync(bundle, "old build");
     const watch = newBuild(bundle, Duration.millis(20)).pipe(Effect.provide(NodeServices.layer));
     const unchanged = await Effect.runPromise(watch.pipe(Effect.timeout(Duration.millis(200)), Effect.option));

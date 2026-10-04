@@ -1,6 +1,6 @@
 /**
  * Plugin areas: modules in the user's config repo that add areas without
- * changing fleetx.
+ * changing T3 Fleet.
  *
  *   [plugins]
  *   areas = ["plugins/brew.mjs"]       # relative to the config repo
@@ -11,7 +11,7 @@
  *   export default ({ defineArea, Effect, Schema, exec }) => defineArea({ id: "brew", … })
  *
  * The kit carries everything an area needs, so a plugin imports nothing and
- * runs wherever fleetx runs, including on nodes over ssh, where the plugin
+ * runs wherever T3 Fleet runs, including on nodes over ssh, where the plugin
  * file comes from that node's clone of the config repo.
  */
 import * as Duration from "effect/Duration";
