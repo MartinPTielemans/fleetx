@@ -170,9 +170,12 @@ The hub is an OAuth client per the MCP authorization spec (2025-06-18):
    own scope, and requests wait for it, so a client hanging up cannot lose a
    rotated refresh token. When the authorization server refuses the refresh
    (`invalid_grant`) the server goes to `needs-login` and an alert is raised;
-   `invalid_client` or `unauthorized_client` also drops the dynamic client
-   registration. Other failures (5xx, 429, timeouts) keep the login: the
-   still-valid access token is used, and the refresh is retried with a backoff.
+   `invalid_client` or `unauthorized_client` from the token endpoint also
+   drops the dynamic client registration (a refused authorization callback
+   changes nothing). Other failures (5xx, 429, timeouts) keep the login: the
+   still-valid access token is used, and the refresh is retried with a
+   backoff. Once the access token has expired, three 4xx answers other than
+   429 without a code the hub acts on count as a refusal too.
 
 A login starts with `POST /hub/servers/<name>/login`, which returns the URL to
 open; `t3-fleet mcp login <name>` and the UI both use it. `GET

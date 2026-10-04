@@ -111,19 +111,75 @@ describe("hub OAuth refresh", () => {
       }),
     ));
 
-  it("forgets the registration when a sign-in is refused for the client, and on sign-out", () =>
+  it("keeps a working login when a new sign-in is refused, and forgets only the registration when the token endpoint does", () =>
     withWorld(({ as, target, store, manager, definition, signIn }) =>
       Effect.gen(function* () {
-        const url = yield* manager.start(definition, target, null);
-        yield* manager.finish({ state: new URL(url).searchParams.get("state") ?? "", error: "unauthorized_client" }).pipe(Effect.flip);
-        expect((yield* store.get).servers["svc"]).toBeUndefined();
-        yield* signIn;
-        expect(as.registrations()).toBe(2);
+        const token = yield* signIn;
+        const stateOf = (url: string) => new URL(url).searchParams.get("state") ?? "";
 
+        // Refused at the authorization endpoint (a policy, a scope): nothing changes.
+        const refused = yield* manager.start(definition, target, null);
+        yield* manager.finish({ state: stateOf(refused), error: "unauthorized_client" }).pipe(Effect.flip);
+        expect((yield* store.get).servers["svc"]?.client?.clientId).toBe("client-1");
+        expect(yield* manager.accessToken("svc", target)).toBe(token);
+
+        // The token endpoint no longer knows the client: the registration goes, the working token stays.
+        const forgotten = yield* manager.start(definition, target, null);
+        const code = as.approve(forgotten);
+        as.forgetClients();
+        yield* manager.finish({ code, state: stateOf(forgotten) }).pipe(Effect.flip);
+        expect((yield* store.get).servers["svc"]?.client).toBeUndefined();
+        expect(yield* manager.accessToken("svc", target)).toBe(token);
+        yield* manager.start(definition, target, null);
+        expect(as.registrations()).toBe(2);
+      }),
+    ));
+
+  it("forgets the registration on sign-out", () =>
+    withWorld(({ as, store, manager, signIn }) =>
+      Effect.gen(function* () {
+        yield* signIn;
         yield* manager.forget("svc");
         expect((yield* store.get).servers["svc"]).toBeUndefined();
         yield* signIn;
-        expect(as.registrations()).toBe(3);
+        expect(as.registrations()).toBe(2);
+      }),
+    ));
+
+  it("takes repeated 4xx answers without an error code, once the token expired, as a lost login", () =>
+    withWorld(({ as, target, store, manager, signIn }) =>
+      Effect.gen(function* () {
+        as.setExpiresIn(1);
+        yield* signIn;
+        as.setExpiresIn(3600);
+        yield* Effect.sleep(Duration.millis(1100));
+        as.failRefresh({ status: 400, body: "<html>Bad Request</html>" });
+        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+        yield* Effect.sleep(Duration.millis(BACKOFF + 50));
+        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+        yield* Effect.sleep(Duration.millis(2 * BACKOFF + 50));
+        const lost = yield* manager.accessToken("svc", target).pipe(Effect.flip);
+        expect(lost).toMatchObject({ _tag: "NeedsLogin" });
+        expect(lost.message).toMatch(/3 times/);
+        expect(yield* manager.hasTokens("svc")).toBe(false);
+        expect((yield* store.get).servers["svc"]?.client?.clientId).toBe("client-1");
+      }),
+    ));
+
+  it("never gives up a login over 429s, however long they go on", () =>
+    withWorld(({ as, target, manager, signIn }) =>
+      Effect.gen(function* () {
+        as.setExpiresIn(1);
+        yield* signIn;
+        as.setExpiresIn(3600);
+        yield* Effect.sleep(Duration.millis(1100));
+        as.failRefresh({ status: 429, body: "" });
+        for (let i = 0; i < 3; i++) {
+          expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+          yield* Effect.sleep(Duration.millis(BACKOFF * 2 ** i + 50));
+        }
+        expect(yield* manager.hasTokens("svc")).toBe(true);
+        expect(as.refreshes()).toBe(3);
       }),
     ));
 
@@ -175,7 +231,7 @@ describe("hub OAuth refresh", () => {
     ));
 
   it("sends a login only to the server URL it was issued for", () =>
-    withWorld(({ target, manager, signIn }) =>
+    withWorld(({ target, store, manager, signIn }) =>
       Effect.gen(function* () {
         yield* signIn;
         expect(yield* manager.hasTokens("svc", target)).toBe(true);
@@ -183,8 +239,15 @@ describe("hub OAuth refresh", () => {
         const moved = yield* manager.accessToken("svc", "https://elsewhere.example/mcp").pipe(Effect.flip);
         expect(moved).toMatchObject({ _tag: "NeedsLogin" });
         expect(moved.message).toMatch(/sign in again/);
-        // A container on this machine takes the server's login whatever its port.
+        // A container on this machine takes the server's login whatever its port…
         expect(yield* manager.accessToken("svc", null)).toMatch(/^at-/);
+        // …but never a login for another machine, as when a remote definition became a container.
+        yield* store.update((s) => {
+          const e = s.servers["svc"];
+          return [undefined, e?.endpoints === undefined ? s : { ...s, servers: { ...s.servers, svc: { ...e, endpoints: { ...e.endpoints, resource: "https://remote.example/mcp" } } } }];
+        });
+        expect(yield* manager.hasTokens("svc", null)).toBe(false);
+        expect((yield* manager.accessToken("svc", null).pipe(Effect.flip))._tag).toBe("NeedsLogin");
       }),
     ));
 

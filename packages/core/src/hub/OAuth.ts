@@ -19,10 +19,13 @@
  *      cannot cut a refresh short after the server rotated the refresh token.
  *   7. A refresh the authorization server refuses (invalid_grant) drops the
  *      tokens: the server needs a login. invalid_client or
- *      unauthorized_client drops the client registration too, so the next
- *      login registers again. Any other failure (a 5xx, a 429, a timeout)
- *      keeps everything, backs off, and keeps sending the access token while
- *      it is still valid.
+ *      unauthorized_client from the token endpoint drops the client
+ *      registration too, so the next login registers again; an authorization
+ *      callback never does. Any other failure (a 5xx, a 429, a timeout) keeps
+ *      everything, backs off, and keeps sending the access token while it is
+ *      still valid. A provider that refuses a dead refresh token without
+ *      saying so (another 4xx) is taken at its word after the access token
+ *      has expired and REFUSALS_BEFORE_LOGIN such answers.
  *
  * Tokens, codes, verifiers and client secrets are never logged.
  */
@@ -313,7 +316,7 @@ export type LoginStatus = typeof LoginStatus.Type;
 /**
  * Where a token will be sent: the server URL, or null for a server on this
  * machine whose port changes (a container), which takes the server's login
- * whatever URL it was issued for.
+ * whatever port it was issued for, but never one issued for another machine.
  */
 export type TokenTarget = string | null;
 
@@ -348,6 +351,8 @@ const MAX_PENDING = 64;
 /** After a refresh fails for a reason worth retrying, wait this long, doubling up to the maximum. */
 export const REFRESH_BACKOFF = 10_000;
 const REFRESH_BACKOFF_MAX = 5 * 60_000;
+/** Answers like a 400 with no RFC 6749 code, after the access token expired, before the login counts as lost. */
+export const REFUSALS_BEFORE_LOGIN = 3;
 /** Refresh this long before the access token expires (or halfway, for tokens that live less than twice this). */
 export const REFRESH_AHEAD = 5 * 60_000;
 
@@ -381,13 +386,19 @@ export const makeOAuthManager = (options: {
     const finished = new Map<string, LoginStatus & { readonly at: number }>();
     const refreshing = new Map<string, Deferred.Deferred<string, NeedsLogin | OAuthError>>();
     const backoff = new Map<string, { readonly failures: number; readonly until: number }>();
+    /** Refresh answers that looked like a refusal without saying so, since the access token expired. */
+    const refusals = new Map<string, number>();
+    const clearBackoff = (server: string) => {
+      backoff.delete(server);
+      refusals.delete(server);
+    };
     const firstBackoff = options.refreshBackoff ?? REFRESH_BACKOFF;
 
     const entry = (server: string) => options.store.get.pipe(Effect.map((s) => s.servers[server]));
 
     /** Whether the stored login may be sent to `target`. */
     const isFor = (stored: StoredServer, target: TokenTarget) => {
-      if (target === null) return true;
+      if (target === null) return stored.endpoints !== undefined && isLoopback(stored.endpoints.resource);
       const resource = URL.parse(target) === null ? null : canonicalResource(target);
       return stored.endpoints !== undefined && stored.endpoints.resource === resource;
     };
@@ -466,9 +477,18 @@ export const makeOAuthManager = (options: {
         return url.toString();
       });
 
-    /** Drop a client registration the authorization server no longer knows, and the tokens issued to it. */
+    /**
+     * Drop a client registration the token endpoint no longer knows. Tokens
+     * issued to it stay until they expire; refreshing them then asks for a
+     * login, and that login registers again.
+     */
     const forgetClient = (server: string, client: OAuthClient) =>
-      options.store.update((s) => [undefined, s.servers[server]?.client?.clientId === client.clientId ? withServer(s, server, null) : s]);
+      options.store.update((s) => {
+        const current = s.servers[server];
+        if (current?.client?.clientId !== client.clientId) return [undefined, s];
+        const { endpoints, tokens } = current;
+        return [undefined, withServer(s, server, endpoints === undefined || tokens === undefined ? null : { endpoints, tokens })];
+      });
 
     /** Remember how a sign-in ended, for `loginStatus`. */
     const remember = (state: string, status: LoginStatus) =>
@@ -483,8 +503,8 @@ export const makeOAuthManager = (options: {
         const now = yield* Clock.currentTimeMillis;
         if (now - p.createdAt > PENDING_FOR) return yield* new OAuthError({ message: "this sign-in expired; start it again" });
         const refused = query["error"];
+        // Refused here (a policy, a scope) says nothing about the client: a working login stays as it is.
         if (refused !== undefined) {
-          if (CLIENT_GONE.includes(refused)) yield* forgetClient(p.server, p.client);
           return yield* new OAuthError({ message: `the authorization server refused: ${[refused, query["error_description"]].filter(Boolean).join(": ").slice(0, 200)}` });
         }
         const code = query["code"];
@@ -503,7 +523,7 @@ export const makeOAuthManager = (options: {
         }
         const tokens = result.tokens;
         yield* options.store.update((s) => [undefined, withServer(s, p.server, { client: p.client, endpoints: p.endpoints, tokens })]);
-        backoff.delete(p.server);
+        clearBackoff(p.server);
         return p.server;
       });
 
@@ -562,7 +582,7 @@ export const makeOAuthManager = (options: {
         if (result.tokens !== null) {
           const tokens = result.tokens;
           yield* ifUnchanged((current) => ({ ...current, tokens }));
-          backoff.delete(server);
+          clearBackoff(server);
           return tokens.accessToken;
         }
         const refused = `refreshing the login was refused (${result.error || `HTTP ${result.status}`})`;
@@ -574,11 +594,20 @@ export const makeOAuthManager = (options: {
           yield* ifUnchanged(withoutTokens);
           return yield* new NeedsLogin({ server, message: refused });
         }
+        // A 4xx without a code we act on (an HTML page, invalid_request) may be a dead refresh token after all.
+        if (result.status >= 400 && result.status < 500 && result.status !== 429 && !isValid(used, yield* Clock.currentTimeMillis)) {
+          const count = (refusals.get(server) ?? 0) + 1;
+          refusals.set(server, count);
+          if (count >= REFUSALS_BEFORE_LOGIN) {
+            yield* ifUnchanged(withoutTokens);
+            return yield* new NeedsLogin({ server, message: `${refused}, ${count} times since the access token expired` });
+          }
+        }
         return yield* new OAuthError({ message: `refreshing the login failed: ${result.error || `HTTP ${result.status}`}` });
       }).pipe(
         Effect.tapError((e) =>
           e._tag === "NeedsLogin"
-            ? Effect.sync(() => backoff.delete(server))
+            ? Effect.sync(() => clearBackoff(server))
             : Effect.gen(function* () {
                 const now = yield* Clock.currentTimeMillis;
                 const failures = (backoff.get(server)?.failures ?? 0) + 1;
@@ -653,7 +682,7 @@ export const makeOAuthManager = (options: {
       accessToken,
       afterRejection,
       // A provider may forget a dynamic client without saying so; signing out and in again then registers a new one.
-      forget: (server) => options.store.update((s) => [undefined, withServer(s, server, null)]).pipe(Effect.andThen(Effect.sync(() => backoff.delete(server)))),
+      forget: (server) => options.store.update((s) => [undefined, withServer(s, server, null)]).pipe(Effect.andThen(Effect.sync(() => clearBackoff(server)))),
       expiresAt: (server) => entry(server).pipe(Effect.map((e) => e?.tokens?.expiresAt ?? null)),
       hasTokens: (server, target) => entry(server).pipe(Effect.map((e) => e?.tokens !== undefined && (target === undefined || isFor(e, target)))),
     };
