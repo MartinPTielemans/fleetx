@@ -58,3 +58,22 @@ export const inviteCommand = Command.make("invite", {
     }).pipe(reportUserErrors),
   ),
 );
+
+/** `init` and `join` became `setup`: these only say so, with the command to run. */
+const moved = (name: string, to: (args: ReadonlyArray<string>) => string) =>
+  Command.make(name, {
+    args: Argument.String("args").pipe(Argument.variadic()),
+  }).pipe(
+    Command.withDescription(`Replaced by setup: prints the setup command to run instead.`),
+    Command.withHandler(({ args }) =>
+      Effect.gen(function* () {
+        yield* Console.error(`t3-fleet ${name} is now part of setup. Run:\n\n  ${to(args)}\n`);
+        process.exitCode = 1;
+      }),
+    ),
+  );
+
+export const initCommand = moved("init", () => "t3-fleet setup");
+export const joinCommand = moved("join", (args) =>
+  ["t3-fleet setup", ...args.filter((a) => !a.startsWith("-")).slice(0, 2)].join(" "),
+);

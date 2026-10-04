@@ -79,7 +79,10 @@ What it finds:
   `--api-key`. A Codex `bearer_token_env_var` is read from the environment, or
   asked for. A server on localhost, or run from outside your home directory,
   is this machine's only; a project's server is declared in the repo and
-  registered nowhere until a machine lists it.
+  registered nowhere until a machine lists it. An app's own server (a
+  command inside a `.app`), a server Codex has disabled, one still waiting
+  for a value, and one whose credential cannot be separated are left alone:
+  listed in this machine's `[mcp] "ignore.add"`, never written to the repo.
 - **Instructions**: `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.agents/AGENTS.md`.
 - **T3 and the agent CLIs**: reported only. Setup never installs or upgrades
   Claude Code or Codex; later syncs follow `[fleet] apply` as they always have.
@@ -91,11 +94,17 @@ encrypts the secrets, commits and pushes, links skills and instructions into
 place, installs the sync timer when pre-flight says it will run, declares T3
 Fleet's own MCP server, and syncs once.
 
-`--plan` shows the plan and stops. `--yes` takes every default. Before it
-changes anything, setup keeps a snapshot of your clients' MCP servers and
-every path it replaces with a link (`~/.local/state/t3-fleet/setup/before.json`),
-so `t3-fleet leave` can give the machine back what it had. A setup that fails
-part-way says where, and `t3-fleet setup --resume` continues from there.
+`--plan` shows the plan and stops; it never writes anything. `--yes` takes
+every default. Without gh or `--remote`, the fleet stays local and setup
+finishes there, saying how to add a remote later. Before it changes
+anything, setup keeps a snapshot of your clients' MCP servers and every
+path it replaces with a link (`~/.local/state/t3-fleet/setup/before.json`),
+so `t3-fleet leave` can give the machine back what it had.
+
+Once you confirm, the whole run is decided and saved (its secret values
+encrypted to this machine's key), so a setup that fails part-way says where,
+and `t3-fleet setup --resume` does exactly what was decided from there
+(`--resume --plan` shows what is left; `--abandon` drops it).
 
 ## 3. Add a second machine
 
@@ -121,7 +130,11 @@ defaults:
 | an MCP server or instruction file | keep mine and propose it                                    | use the fleet's; keep mine on this machine only    |
 
 A member never commits to the branch: what it adds is proposed, its secrets
-encrypted for the authorities. On the first machine:
+encrypted for the authorities. Approving merges only the secrets the fleet's
+definitions use, never a name like `PATH` or `NODE_OPTIONS`, and never a
+different value for a name the fleet has. Two machines joining at once can
+both add servers: their additions to `t3-fleet.toml` are merged. On the
+first machine:
 
 ```sh
 t3-fleet review            # each proposal, with its files
