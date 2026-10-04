@@ -276,6 +276,33 @@ describe("Claude's lock, with faults injected", () => {
     expect(existsSync(lock)).toBe(true);
   });
 
+  it("loses the lock when another process sets its mtime between refresh and look", async () => {
+    const dir = home("{}");
+    const lock = join(dir, ".claude.json.lock");
+    const published = { value: false };
+    let touches = 0;
+    const result = await run(
+      patched(locked(join(dir, ".claude.json"), 140, published), (fs) => ({
+        utimes: (path, atime, mtime) =>
+          fs.utimes(path, atime, mtime).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                // Acquiring touches it twice (the precision probe, then our mtime); the third is
+                // the first heartbeat's. Right after it, someone else sets another mtime.
+                if (++touches !== 3) return;
+                const now = statSync(lock);
+                utimesSync(lock, now.atime, (now.mtimeMs + 300) / 1000);
+              }),
+            ),
+          ),
+      })),
+    );
+    expect(touches).toBeGreaterThanOrEqual(3);
+    expect(result._tag).toBe("Failure");
+    expect(published.value).toBe(false);
+    expect(existsSync(lock)).toBe(true);
+  });
+
   it("loses the lock when a refresh fails, and never publishes on a stale one", async () => {
     const dir = home("{}");
     const published = { value: false };

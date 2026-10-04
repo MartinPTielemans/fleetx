@@ -99,9 +99,29 @@ export const readClaudeConfig = (file: string) =>
  */
 interface Seen {
   readonly id: string;
+  readonly ino: number | undefined;
   readonly mtime: number | undefined;
 }
 const sameLock = (a: Seen, b: Seen) => a.id === b.id && a.mtime === b.mtime;
+
+/** How finely the lock's filesystem keeps mtimes: whole seconds, or milliseconds. */
+type Precision = "s" | "ms";
+
+/** The mtime to give the lock, as proper-lockfile's getMtime: seconds rounded up, or milliseconds. */
+const mtimeFor = (now: number, precision: Precision) =>
+  precision === "s" ? Math.ceil(now / 1000) * 1000 : Math.floor(now);
+
+/**
+ * The seconds to hand utimes for an mtime. A millisecond one is written at the
+ * middle of its millisecond: seconds as a float can land a hair before it, and
+ * a stat that truncates to a Date would then read the millisecond before.
+ */
+const utimesSeconds = (mtime: number, precision: Precision) =>
+  (precision === "s" ? mtime : mtime + 0.5) / 1000;
+
+/** An mtime as read back, at the precision it was written with. */
+const atPrecision = (mtime: number, precision: Precision) =>
+  precision === "s" ? Math.floor(mtime / 1000) * 1000 : Math.floor(mtime);
 
 export interface LockTiming {
   readonly staleMs: number;
@@ -118,11 +138,16 @@ export interface LockTiming {
  * write) only after checking, under the same permit the heartbeat takes, that
  * the lock is still ours: the directory this run made (its identity), with the
  * mtime this run last gave it, given less than `staleMs` ago. The heartbeat
- * refreshes it every `updateMs`: it checks the lock, sets its mtime, and looks
- * again. A failed refresh, a refresh that finds another directory or another
- * mtime, or one that comes too late loses the lock for good, and every write
- * fails from then on; freshness only ever comes from a refresh that worked.
- * Release rmdirs the directory only while it is still ours.
+ * refreshes it every `updateMs`: it checks the lock, sets an explicit mtime,
+ * and looks again. As in proper-lockfile, the filesystem's mtime precision
+ * (seconds or milliseconds) is probed once, the mtime written is truncated to
+ * it and kept as the one expected, and every later look (after the refresh, on
+ * the next heartbeat, before publishing, before release) must find exactly
+ * that: a mtime set by anyone else means the lock is compromised. A failed
+ * refresh, a refresh that finds another directory or another mtime, or one
+ * that comes too late loses the lock for good, and every write fails from then
+ * on; freshness only ever comes from a refresh that worked. Release rmdirs the
+ * directory only while it is still ours.
  *
  * Windows that remain, as in proper-lockfile: a takeover between our check
  * and our utimes gets its mtime touched once. We see it, and stop, when the
@@ -150,15 +175,16 @@ export const withClaudeConfigLock = <A, E, R>(
           // No birthtime, or none worth having (0): the inode alone.
           Option.getOrUndefined(Option.filter(info.birthtime, (b) => b.getTime() > 0))?.getTime(),
         ].join(":"),
+        ino: Option.getOrUndefined(info.ino),
         mtime: Option.getOrUndefined(info.mtime)?.getTime(),
       })),
     );
-    /** Remove the lock if it is still `seen`; whether it is gone. */
-    const removeIfStill = (seen: Seen) =>
+    /** Remove the lock if it is still the one `still` accepts; whether it is gone. */
+    const removeIfStill = (still: (now: Seen) => boolean) =>
       Effect.gen(function* () {
         const now = yield* look.pipe(Effect.option);
         if (Option.isNone(now)) return true;
-        if (!sameLock(now.value, seen)) return false;
+        if (!still(now.value)) return false;
         return yield* Effect.tryPromise(() => rmdir(lock)).pipe(
           Effect.as(true),
           Effect.orElseSucceed(() => false),
@@ -177,12 +203,34 @@ export const withClaudeConfigLock = <A, E, R>(
           Effect.mapError((e) => `cannot lock ${file}: ${e.message}`),
         );
         if (made) {
-          // Ours: give it our mtime (utimes takes seconds) and remember its identity.
-          const at = yield* Clock.currentTimeMillis;
-          yield* fs.utimes(lock, at / 1000, at / 1000).pipe(Effect.ignore);
-          const seen = yield* look.pipe(Effect.option);
-          if (Option.isSome(seen)) return { seen: seen.value, at: seen.value.mtime ?? at };
-          continue;
+          // Ours. Probe the mtime precision as proper-lockfile does: an mtime 5 ms past a whole
+          // second reads back whole only where seconds are all the filesystem keeps (utimes takes
+          // seconds). Then give it our mtime, remember it, and its identity.
+          const touch = (seconds: number) =>
+            fs.utimes(lock, seconds, seconds).pipe(Effect.mapError((e) => e.message));
+          const probed = yield* Effect.gen(function* () {
+            yield* touch(
+              utimesSeconds(Math.ceil((yield* Clock.currentTimeMillis) / 1000) * 1000 + 5, "ms"),
+            );
+            const seen = yield* look.pipe(Effect.mapError((e) => e.message));
+            const precision: Precision = (seen.mtime ?? 0) % 1000 === 0 ? "s" : "ms";
+            const at = yield* Clock.currentTimeMillis;
+            const mtime = mtimeFor(at, precision);
+            yield* touch(utimesSeconds(mtime, precision));
+            // Its identity is taken after this first mtime: APFS moves a directory's birthtime back
+            // to an mtime set before it, and the clock can read just before the moment it was made.
+            // Later refreshes are later, so it stays.
+            const after = yield* look.pipe(Effect.mapError((e) => e.message));
+            return after.ino === seen.ino &&
+              after.mtime !== undefined &&
+              atPrecision(after.mtime, precision) === mtime
+              ? Option.some({ id: after.id, mtime, at, precision })
+              : Option.none();
+          }).pipe(Effect.orElseSucceed(() => Option.none()));
+          if (Option.isSome(probed)) return probed.value;
+          return yield* Effect.fail(
+            `${lock} was changed by another process as it was made; try again`,
+          );
         }
         const now = yield* Clock.currentTimeMillis;
         const held = yield* look.pipe(Effect.option);
@@ -194,7 +242,8 @@ export const withClaudeConfigLock = <A, E, R>(
             // still that same stale lock, though between that look and the rmdir another process
             // could take it over first. proper-lockfile has that race too: this matches its
             // semantics rather than trying to beat them.
-            if (yield* removeIfStill(held.value)) {
+            const stale = held.value;
+            if (yield* removeIfStill((now) => sameLock(now, stale))) {
               if (now - start > waitMs) break;
               continue;
             }
@@ -212,16 +261,20 @@ export const withClaudeConfigLock = <A, E, R>(
     return yield* Effect.scoped(
       Effect.gen(function* () {
         const first = yield* acquire;
-        const identity = first.seen.id;
-        /** The mtime our last refresh gave it, and when (the time that mtime stands for). */
-        const mine = yield* Ref.make({ mtime: first.seen.mtime, at: first.at });
+        const { id: identity, precision } = first;
+        /** The mtime our last refresh wrote (the one expected), and when it was written. */
+        const mine = yield* Ref.make({ mtime: first.mtime, at: first.at });
+        const ours = (now: Seen, mtime: number) =>
+          now.id === identity &&
+          now.mtime !== undefined &&
+          atPrecision(now.mtime, precision) === mtime;
         const lost = yield* Ref.make<string | null>(null);
         const permit = yield* Semaphore.make(1);
         const lose = (why: string) => Ref.set(lost, why).pipe(Effect.as(false));
         // Released last: removed only if it is still the directory this run made, as we left it.
         yield* Effect.addFinalizer(() =>
           Ref.get(mine).pipe(
-            Effect.flatMap(({ mtime }) => removeIfStill({ id: identity, mtime })),
+            Effect.flatMap(({ mtime }) => removeIfStill((now) => ours(now, mtime))),
             Effect.ignore,
           ),
         );
@@ -233,7 +286,7 @@ export const withClaudeConfigLock = <A, E, R>(
           const { mtime, at } = yield* Ref.get(mine);
           if (Option.isNone(now)) return "it was removed";
           if (now.value.id !== identity) return "another process made it anew";
-          if (now.value.mtime !== mtime) return "another process touched it";
+          if (!ours(now.value, mtime)) return "another process touched it";
           if ((yield* Clock.currentTimeMillis) - at >= timing.staleMs)
             return "it was not refreshed in time";
           return null;
@@ -242,7 +295,9 @@ export const withClaudeConfigLock = <A, E, R>(
           const why = yield* check;
           if (why !== null) return yield* lose(why);
           const at = yield* Clock.currentTimeMillis;
-          const touched = yield* fs.utimes(lock, at / 1000, at / 1000).pipe(
+          const mtime = mtimeFor(at, precision);
+          const seconds = utimesSeconds(mtime, precision);
+          const touched = yield* fs.utimes(lock, seconds, seconds).pipe(
             Effect.as(null),
             Effect.catch((e) => Effect.succeed(`refreshing it failed: ${e.message}`)),
           );
@@ -250,8 +305,10 @@ export const withClaudeConfigLock = <A, E, R>(
           const after = yield* look.pipe(Effect.option);
           if (Option.isNone(after) || after.value.id !== identity)
             return yield* lose("another process made it anew");
+          // What it finds must be the mtime it wrote: never adopt one someone else set.
+          if (!ours(after.value, mtime)) return yield* lose("another process touched it");
           // A late refresh still counts from when it began: that is the mtime it set.
-          yield* Ref.set(mine, { mtime: after.value.mtime, at });
+          yield* Ref.set(mine, { mtime, at });
           return true;
         });
         // The heartbeat: while ours, refresh it; once it is not, stop, and every write fails.
