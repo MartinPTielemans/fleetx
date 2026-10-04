@@ -181,6 +181,33 @@ still runs them on this machine. The fix runs `thv stop` for them (marked as
 disrupting them until the hub serves them; sign in to OAuth servers first).
 `thv start` brings one back; `thv rm` removes them for good.
 
+## relay
+
+**`relay-token-missing`** — the relay (or a machine's relay listener) reads
+`T3_FLEET_RELAY_TOKEN` from the machine's secrets and exits without it, so
+T3 Fleet offers no service until it is there. If the fleet has no relay token
+yet, on an authority run
+`t3-fleet secrets set T3_FLEET_RELAY_TOKEN="$(openssl rand -hex 32)"`, then
+`t3-fleet sync` on the machine. If the fleet has one, the machine cannot read
+the fleet's secrets yet: see the secrets findings for it.
+
+**`relay-tailscale-missing`** — the relay is reached at a tailnet name (a
+MagicDNS name such as `server.tailnet.ts.net`, or a 100.x address) and its
+port is published with `tailscale serve`, but the `tailscale` command is not
+on this machine, on PATH or inside the macOS app.
+Install Tailscale and run `tailscale up`.
+
+**`relay-docker-missing`** — the hub runs `container` or `registry` servers
+from `mcp/` with Docker, and `docker` is not on the relay machine. Install
+Docker for the user T3 Fleet runs as; until then those servers do not answer.
+
+**`relay-<role>`** — the relay service (`relay-serve`, on the relay machine)
+or the listener (`relay-listen`, everywhere else) is missing, out of date or
+not running. The fix installs and restarts it.
+
+**`relay-unpublished`** — the relay's port is not published to the tailnet.
+The fix runs `tailscale serve` for it.
+
 ## T3
 
 Each problem observing T3 has a key of its own, so an `[[accept]]` for one
@@ -248,6 +275,64 @@ Nobody can do this unattended.
 are proposed, and only by `t3-fleet sync`. `t3-fleet review` on an authority lists
 what is waiting. A machine whose pull failed (its own edits overlap incoming
 changes, say) proposes nothing until a sync there pulls again.
+
+**`sync-secret-<unit>`** — sync would not commit (an authority), propose
+(any other machine) or push something, because a line it adds looks like a
+secret: a token, a password in a URL, a bearer header, a private key; or a
+merge conflict marker, or a file git still has as conflicted. A unit is a
+whole skill (`skills/<name>`), or `skills/SOURCES.json` together with every
+skill whose entry it changes, or a single file elsewhere: half a skill, or a
+skill without its entry, never reaches the other machines. A SOURCES.json
+that does not read as JSON (mid-edit, say) is held on its own. For a conflict
+the finding says how to resolve it: take the markers out, then
+`git -C <repo> add <file>`.
+
+What counts as a secret: tokens known by their shape (`ghp_…`, `sk-…`,
+JWTs, private keys, and the like), and values named like one. A value named
+like a key or token (`api_key`, `--token`, `Bearer`) must be one run of 20 or
+more letters, digits and `_-+/=.`; one named like a password (`DB_PASSWORD`,
+`passwd`), any run of 12 or more without brackets. Shorter keys (16 to 19
+characters) are knowingly let through: below 20, ordinary code and names
+looked like keys far too often. The finding names the line and the kind, never the value
+or its hash. Move the value into the fleet's secrets
+(`t3-fleet secrets set NAME=VALUE` on an authority) and refer to it as
+`${NAME}`.
+
+If the line is not a secret (an example in a vendored skill's docs, say),
+`t3-fleet secrets scan` on that machine prints each line's
+`t3-fleet secrets allow <file> <hash>` command; an authority runs it, which
+adds to `t3-fleet.toml`:
+
+```toml
+[[allow_secret]]
+file = "skills/mapbox/README.md"
+line = "<the line's SHA-256, from the refusal>"
+```
+
+The hash is of that line's text, so the entry stops matching when the line
+changes. A machine without the authority role trusts only the entries
+committed on the branch. Only the lines a commit adds are checked: what is
+already committed never blocks a later change to the same file.
+
+A held-back unit stays in the checkout as an edit. When a change from the
+branch (or a proposal the authority's sync approves) touches it, sync sets it aside
+in `git stash` as `T3 Fleet: held back <unit>`, so pulling keeps working, and
+the finding says so until the stash entry is dropped. To bring the edits
+back: `git -C <repo> stash apply <entry>` (it can conflict with what changed
+on the branch since; resolve by hand), take the secret out, then
+`git -C <repo> stash drop <entry>`. Approving a proposal by hand sets aside
+the held edits it would overwrite the same way. Every commit not yet pushed is checked
+one by one, so a commit made by hand that adds a secret is not pushed even
+when a later one takes it out again; the finding names the commit, and
+`git -C <repo> reset --soft origin/main` turns them back into edits for sync
+to sort. A bare `t3-fleet skills update` skips a skill sync holds back, and
+says so.
+
+Commands refuse the same way, naming file, line and kind with the allow
+command. A refused `skills add`, `skills update` or `mcp add` puts back the
+files it wrote as they were before it ran, edits waiting to be proposed
+included, so no later sync commits part of them; run it again once the line
+is allowed.
 
 **`sync-local-commits`** — a machine without the authority role has commits
 of its own in the config repo. Only an authority's commits reach the other

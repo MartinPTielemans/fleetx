@@ -376,6 +376,8 @@ export const UiSkillsPreview = Schema.Struct({
   stat: Schema.String,
   diff: Schema.String,
   digest: Schema.String,
+  /** Skills a whole-fleet update leaves out: sync holds back an edit there. */
+  skipped: Schema.Array(Schema.String),
 });
 export type UiSkillsPreview = typeof UiSkillsPreview.Type;
 

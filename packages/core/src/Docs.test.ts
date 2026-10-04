@@ -4,17 +4,23 @@ import { readFileSync, readdirSync } from "node:fs";
 
 import { describe, expect, it } from "vite-plus/test";
 
-/** Every finding key the runtime, engine, mcp and models areas can produce must be documented. */
+/** Every finding key the runtime, engine, mcp, relay and models areas can produce must be documented. */
 describe("docs/troubleshooting.md", () => {
   const doc = readFileSync(new URL("../../../docs/troubleshooting.md", import.meta.url), "utf8");
   const areas = new URL("./areas/", import.meta.url);
   for (const file of readdirSync(areas).filter(
-    (f) => f === "Runtime.ts" || f === "Engine.ts" || f === "Mcp.ts" || f === "Models.ts",
+    (f) =>
+      f === "Runtime.ts" ||
+      f === "Engine.ts" ||
+      f === "Mcp.ts" ||
+      f === "Models.ts" ||
+      f === "RelayArea.ts",
   )) {
     const source = readFileSync(new URL(file, areas), "utf8");
     // Keys per server or instance are templates: `mcp-${s.name}-down` is documented as
-    // `mcp-<name>-down`, `models-not-routed-${id}` as `models-not-routed-<instance>`.
-    const slot = file === "Mcp.ts" ? "<name>" : "<instance>";
+    // `mcp-<name>-down`, `models-not-routed-${id}` as `models-not-routed-<instance>`,
+    // `relay-${observed.role}` as `relay-<role>`.
+    const slot = file === "Mcp.ts" ? "<name>" : file === "RelayArea.ts" ? "<role>" : "<instance>";
     const keys = [
       ...source.matchAll(/key: "([a-z0-9-]+)"/g),
       ...source.matchAll(/key: `([a-z0-9-]+)\$\{[^}]+\}([a-z0-9-]*)`/g),

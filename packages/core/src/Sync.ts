@@ -26,15 +26,31 @@ import { diagnose, type Finding, type Fix } from "./Diagnose.ts";
 import { runFixes } from "./Fix.ts";
 import {
   addPaths,
+  allowedAt,
   changedFiles,
   ensureGitConfig,
   git,
   literal,
+  nulList,
   ok,
   out,
   pullBranch,
+  scanCommits,
+  scanEdits,
+  unmergedHits,
   why,
 } from "./Git.ts";
+import {
+  heldBack,
+  SET_ASIDE,
+  setAside,
+  setAsideUnits,
+  SOURCES,
+  unitLabel,
+  unitOf,
+} from "./Held.ts";
+import { sourcesEntriesChanged } from "./SkillSources.ts";
+import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
@@ -155,6 +171,90 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
     return out(commit).slice(0, 7);
   });
 
+/** What sync says when SOURCES.json does not read: mid-edit, or conflicted. */
+const UNREADABLE_SOURCES: SecretHit = {
+  file: SOURCES,
+  line: 0,
+  kind: "content that is not valid JSON",
+  hash: "",
+};
+
+/** The way forward for what a unit holds: a secret to move, a conflict to resolve, an edit to finish. */
+const whatToDo = (repo: string, hits: ReadonlyArray<SecretHit>) => {
+  const conflicted = [...new Set(hits.filter((h) => CONFLICTS.has(h.kind)).map((h) => h.file))];
+  const unreadable = hits.some((h) => h.kind === UNREADABLE_SOURCES.kind);
+  const secret = hits.some((h) => !CONFLICTS.has(h.kind) && h.kind !== UNREADABLE_SOURCES.kind);
+  return [
+    ...(secret
+      ? [
+          "Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as ${NAME}. If it is not a secret, `t3-fleet secrets scan` on this machine prints the command that lets the line through, for an authority to run.",
+        ]
+      : []),
+    ...(conflicted.length > 0
+      ? [
+          `Resolve the merge conflict: keep the lines you want, remove the <<<<<<< and >>>>>>> markers, then \`git -C ${repo} add ${conflicted.join(" ")}\`.`,
+        ]
+      : []),
+    ...(unreadable && conflicted.length === 0
+      ? [`${SOURCES} does not read as JSON: finish the edit, or undo it.`]
+      : []),
+  ].join(" ");
+};
+
+/** How to get set-aside edits back, in the order that works. */
+const bringBack = (repo: string, unit: string) =>
+  `Your edits are in git stash as "${SET_ASIDE}${unit}" (\`git -C ${repo} stash list\`). To bring them back: \`git -C ${repo} stash apply <that entry>\` (it can conflict with what changed on the branch since; resolve by hand), take the secret out (\`t3-fleet secrets scan\` shows where), then \`git -C ${repo} stash drop <that entry>\`.`;
+
+/**
+ * What sync holds back: one finding per unit, naming lines and kinds, never
+ * values or their hashes. `aside`: the unit was set aside in git stash.
+ */
+const secretFindings = (
+  node: string,
+  repo: string,
+  held: ReadonlyMap<string, ReadonlyArray<string>>,
+  hits: ReadonlyArray<SecretHit>,
+  verb: string,
+  aside: ReadonlySet<string> = new Set(),
+): Array<Finding> =>
+  [...held.keys()].map((unit) => {
+    const files = held.get(unit) ?? [];
+    const inUnit = hits.filter((h) => files.includes(h.file));
+    const label = unitLabel(unit, files);
+    const what =
+      inUnit.length === 0
+        ? "it changed with a skill held back"
+        : inUnit.map((h) => describeHit(h)).join("; ");
+    return {
+      node,
+      key: `sync-secret-${unit}`,
+      severity: "error",
+      area: "sync",
+      title: aside.has(unit)
+        ? `sync set ${label} aside in git stash, since a change from the branch touches it: ${what}`
+        : `sync will not ${verb} ${label}: ${what}`,
+      detail: aside.has(unit) ? bringBack(repo, unit) : whatToDo(repo, inUnit),
+    };
+  });
+
+/** Units set aside by an earlier run, until the stash entry is dropped. */
+const asideFindings = (node: string, repo: string, units: ReadonlySet<string>): Array<Finding> =>
+  [...units].map((unit) => ({
+    node,
+    key: `sync-secret-${unit}`,
+    severity: "warn",
+    area: "sync",
+    title: `${unit} is set aside in git stash: it held what looked like a secret`,
+    detail: bringBack(repo, unit),
+  }));
+
+/** A refusal, for publishing: without the lines' hashes, which only the machine itself shows. */
+const withoutHashes = (message: string) =>
+  message
+    .split("\n")
+    .filter((l) => !/[0-9a-f]{64}/.test(l) && !l.startsWith("If it is not a secret"))
+    .join("\n");
+
 /**
  * A node's errors by finding key, with their titles. Keyed by the key alone:
  * a title that counts something ("failed 4 times") changes every run, and is
@@ -188,49 +288,127 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
 
     // 1. Propose or commit changes under the auto-commit paths. A node
     //    whose last proposal was rejected first sets those edits aside.
+    const authority = self.roles.includes("authority");
     const autoCommit = settingList(config, "auto_commit", DEFAULT_AUTO_COMMIT);
-    if (!self.roles.includes("authority")) {
+    // An authority trusts its own checkout's allow-list; any other node only the committed one.
+    const allowedNow = () =>
+      authority ? readAllowed(repo) : allowedAt(repo, `origin/${config.branch}`);
+    const reported = new Set<string>();
+    if (!authority) {
       const settled = yield* settleRejection(repo, self.name, config.branch);
       if (settled.length > 0)
         lines.push(
           `set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`,
         );
     }
-    if (self.roles.includes("authority") && autoCommit.length > 0) {
-      // Exactly the changed files: an auto_commit path that does not exist would fail the whole add.
-      const changed = yield* changedFiles(repo, autoCommit);
-      if (changed.length > 0) {
-        const committed = yield* addPaths(repo, changed).pipe(
-          Effect.andThen(
-            git(
-              repo,
-              [
-                "commit",
-                "-q",
-                "-m",
-                `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`,
-                "--",
-                ...changed,
-              ],
-              { env: literal },
-            ),
-          ),
-          Effect.flatMap((commit) => (ok(commit) ? Effect.void : Effect.fail(why(commit)))),
-          Effect.result,
+    // What would add a secret is held back, whole skill by whole skill.
+    const edited = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
+    const scanned = yield* scanEdits(repo, edited, { allowed: yield* allowedNow() }).pipe(
+      Effect.result,
+    );
+    // Unscanned is uncommitted.
+    if (scanned._tag === "Failure") {
+      failed = true;
+      message = scanned.failure;
+    }
+    // A file still conflicted is never committed or proposed either, nor a SOURCES.json that does not read.
+    const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
+    const hits = [
+      ...(scanned._tag === "Success" ? scanned.success : []),
+      ...(yield* unmergedHits(repo, edited)),
+      ...(entries === null ? [UNREADABLE_SOURCES] : []),
+    ];
+    const held = heldBack(
+      edited,
+      scanned._tag === "Success"
+        ? hits
+        : edited.map((file) => ({ file, line: 0, kind: "", hash: "" })),
+      entries,
+    );
+
+    // A held-back unit that an incoming change (or a proposal this run
+    // approves) touches would fail every pull: set it aside in git stash, as
+    // a rejection is, where the edits stay. Not after a failed scan, which
+    // held everything, nor an unreadable SOURCES.json, likely mid-edit.
+    const movable = new Map(
+      [...held].filter(
+        ([unit]) => scanned._tag === "Success" && !(unit === SOURCES && entries === null),
+      ),
+    );
+    if (movable.size > 0 && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+      const incoming = new Set(
+        nulList(
+          (yield* git(repo, [
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            `HEAD...origin/${config.branch}`,
+          ])).stdout,
+        ),
+      );
+      if (authority) {
+        const prefixes = settingList(config, "auto_approve", []);
+        for (const p of yield* listProposals(repo, config.branch))
+          if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
+      }
+      const aside = yield* setAsideUnits(
+        repo,
+        new Map([...movable].filter(([, files]) => files.some((f) => incoming.has(f)))),
+      );
+      if (aside.size > 0) {
+        const moved = new Map([...held].filter(([u]) => aside.has(u)));
+        findings.push(
+          ...secretFindings(self.name, repo, moved, hits, authority ? "commit" : "propose", aside),
         );
-        if (committed._tag === "Success")
-          lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
-        else {
-          failed = true;
-          message = `committing ${changed.length} changed file${changed.length === 1 ? "" : "s"}: ${committed.failure}`;
+        for (const unit of aside) {
+          held.delete(unit);
+          reported.add(unit);
         }
+        lines.push(`set aside ${[...aside].join(", ")} (git stash list)`);
+      }
+    }
+
+    if (authority && held.size > 0 && scanned._tag === "Success") {
+      findings.push(...secretFindings(self.name, repo, held, hits, "commit"));
+      for (const unit of held.keys()) reported.add(unit);
+    }
+    // Held back, or set aside above: either way not this commit's.
+    const heldFiles = new Set([...held.values()].flat());
+    const changed = (authority ? yield* changedFiles(repo, autoCommit) : []).filter(
+      (f) => edited.includes(f) && !heldFiles.has(f),
+    );
+    if (changed.length > 0) {
+      const committed = yield* addPaths(repo, changed).pipe(
+        Effect.andThen(
+          git(
+            repo,
+            [
+              "commit",
+              "-q",
+              "-m",
+              `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`,
+              "--",
+              ...changed,
+            ],
+            { env: literal },
+          ),
+        ),
+        Effect.flatMap((commit) => (ok(commit) ? Effect.void : Effect.fail(why(commit)))),
+        Effect.result,
+      );
+      if (committed._tag === "Success")
+        lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
+      else {
+        failed = true;
+        message = `committing ${changed.length} changed file${changed.length === 1 ? "" : "s"}: ${committed.failure}`;
       }
     }
 
     // 2. Pull, then push what an authority committed. Any other node only
     //    fast-forwards: it never commits. Commits made there by hand are
     //    rebased along, as before, and named, since they reach no one.
-    let how: "rebase" | "ff-only" = self.roles.includes("authority") ? "rebase" : "ff-only";
+    let how: "rebase" | "ff-only" = authority ? "rebase" : "ff-only";
     if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
       const local = out(
         yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`]),
@@ -260,11 +438,35 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
-    if (self.roles.includes("authority") && !failed) {
+    if (authority && !failed) {
       const ahead = Number(
         out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])),
       );
-      if (ahead > 0) {
+      // A commit made here by hand rides along with the push: it is checked too.
+      const unpushed =
+        ahead === 0
+          ? []
+          : yield* scanCommits(repo, [`origin/${config.branch}..HEAD`], {
+              allowed: yield* allowedNow(),
+            });
+      if (unpushed.length > 0) {
+        failed = true;
+        message = `not pushed: a commit here that ${config.branch} lacks adds what looks like a secret`;
+        for (const unit of new Set(unpushed.map((h) => unitOf(h.file)))) {
+          reported.add(unit);
+          findings.push({
+            node: self.name,
+            key: `sync-secret-${unit}`,
+            severity: "error",
+            area: "sync",
+            title: `sync will not push a commit adding ${unit}: ${unpushed
+              .filter((h) => unitOf(h.file) === unit)
+              .map((h) => describeHit(h))
+              .join("; ")}`,
+            detail: `git -C ${repo} reset --soft origin/${config.branch} turns the commits here back into edits; the next sync holds back what looks like a secret and commits the rest.`,
+          });
+        }
+      } else if (ahead > 0) {
         const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${config.branch}`]);
         if (ok(push)) lines.push(`pushed ${ahead} commit${ahead === 1 ? "" : "s"}`);
         else {
@@ -277,9 +479,25 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     // A non-authority proposes what still differs once it has pulled. Not
     // after a failed pull: its files would be based on an old branch, and
     // approving them would undo what it failed to pull.
-    if (!self.roles.includes("authority") && !failed) {
+    if (!authority && !failed) {
       const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
-      const proposal = yield* propose(repo, self.name, config.branch, changed).pipe(
+      const outcome = yield* Effect.gen(function* () {
+        const hits = [
+          ...(yield* scanEdits(repo, changed, {
+            base: `origin/${config.branch}`,
+            allowed: yield* allowedNow(),
+          })),
+          ...(yield* unmergedHits(repo, changed)),
+        ];
+        const entries = changed.includes(SOURCES)
+          ? yield* sourcesEntriesChanged(repo, `origin/${config.branch}`)
+          : [];
+        if (entries === null) hits.push(UNREADABLE_SOURCES);
+        const held = heldBack(changed, hits, entries);
+        const heldFiles = new Set([...held.values()].flat());
+        const kept = changed.filter((f) => !heldFiles.has(f));
+        return { hits, held, kept, commit: yield* propose(repo, self.name, config.branch, kept) };
+      }).pipe(
         Effect.catch((e: string) =>
           Effect.sync(() => {
             failed = true;
@@ -288,11 +506,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           }),
         ),
       );
-      if (proposal !== null)
-        lines.push(
-          `proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`,
-        );
+      if (outcome !== null) {
+        findings.push(...secretFindings(self.name, repo, outcome.held, outcome.hits, "propose"));
+        for (const unit of outcome.held.keys()) reported.add(unit);
+        if (outcome.commit !== null)
+          lines.push(
+            `proposed ${outcome.kept.length} file${outcome.kept.length === 1 ? "" : "s"} for approval (${outcome.commit})`,
+          );
+      }
     }
+
+    // What an earlier run set aside stays named until its stash entry is dropped.
+    const stillAside = new Set([...(yield* setAside(repo))].filter((u) => !reported.has(u)));
+    findings.push(...asideFindings(self.name, repo, stillAside));
 
     // The pull may have changed the config; reload it.
     const reloaded = yield* loadConfigFrom(repo, config.self).pipe(Effect.option);
@@ -315,7 +541,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         ).pipe(
           Effect.catch((e: string) =>
             Effect.sync(() => {
-              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
+              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${withoutHashes(e)}`);
               return null;
             }),
           ),

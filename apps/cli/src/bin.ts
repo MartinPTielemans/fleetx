@@ -12,7 +12,6 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { describeBuild, runningBuild } from "@t3-fleet/core/Build";
 import { checkNodes } from "@t3-fleet/core/Check";
-import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
 import { runFixes } from "@t3-fleet/core/Fix";
 import { loadConfig, ProbeSettings } from "@t3-fleet/core/Config";
 import { FleetToolkit, fleetHandlers } from "@t3-fleet/core/Mcp";
@@ -50,6 +49,7 @@ import { uiCommand } from "./ui.ts";
 import {
   applyLive,
   encodeJson,
+  fixPlan,
   isUserError,
   liveController,
   narrow,
@@ -162,14 +162,9 @@ const fixCommand = Command.make("fix", {
     Effect.gen(function* () {
       const { config, nodes, bundle, shown } = yield* prepare(node);
       const report = narrow(yield* checkNodes(config, bundle), shown);
-      const fixes = report.findings.filter(
-        (f): f is Finding & { readonly fix: Fix } =>
-          f.fix !== undefined &&
-          (!safe || f.fix.safe) &&
-          (area.length === 0 || area.includes(f.area)),
-      );
-      const skipped = report.findings.filter((f) => f.fix !== undefined && safe && !f.fix.safe);
-      yield* Console.log(renderFixPlan(fixes, report.findings, skipped));
+      // --area narrows everything shown, the findings that need a decision too.
+      const { fixes, findings, skipped } = fixPlan(report.findings, { safe, areas: area });
+      yield* Console.log(renderFixPlan(fixes, findings, skipped));
       if (fixes.length === 0 || dryRun) return;
       if (!yes) {
         if (process.stdin.isTTY !== true) {

@@ -15,18 +15,45 @@ import { runFixes, type FixOutcome } from "@t3-fleet/core/Fix";
 import { newBuild, untilReplaced } from "@t3-fleet/core/Runtime";
 
 /**
- * The bundle that gets streamed to other machines. Running from dist/bin.mjs
- * it is this file; running from source it is the last build.
+ * Where the bundle is, given the file this code runs from: that file, when it
+ * is the bundle, under whatever name it was installed (dist/bin.mjs, or
+ * ~/.local/bin/t3-fleet); the last build, when it is TypeScript source.
  */
+export const bundleFor = (self: string, join: (...parts: Array<string>) => string) =>
+  /\.[cm]?tsx?$/.test(self) ? join(self, "../../dist/bin.mjs") : self;
+
+/** The bundle that gets streamed to other machines: this one, or the last build of this source. */
 export const ownBundle = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const self = yield* path.fromFileUrl(new URL(import.meta.url));
-  const bundle = self.endsWith(".mjs") ? self : path.join(path.dirname(self), "../dist/bin.mjs");
+  const bundle = bundleFor(self, path.join);
   return yield* fs
     .readFileString(bundle)
     .pipe(Effect.mapError(() => `no bundle at ${bundle}; run \`pnpm build\` first`));
 });
+
+/**
+ * What `t3-fleet fix` shows: the fixes to apply, the findings that need a
+ * person, and the fixes `--safe` leaves out, each limited to `areas` (all
+ * when empty).
+ */
+export const fixPlan = (
+  findings: ReadonlyArray<Finding>,
+  options: { readonly safe: boolean; readonly areas: ReadonlyArray<string> },
+) => {
+  const shown = findings.filter(
+    (f) => options.areas.length === 0 || options.areas.includes(f.area),
+  );
+  return {
+    fixes: shown.filter(
+      (f): f is Finding & { readonly fix: Fix } =>
+        f.fix !== undefined && (!options.safe || f.fix.safe),
+    ),
+    findings: shown,
+    skipped: shown.filter((f) => f.fix !== undefined && options.safe && !f.fix.safe),
+  };
+};
 
 export const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 

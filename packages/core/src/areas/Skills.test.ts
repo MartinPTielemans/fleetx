@@ -62,9 +62,11 @@ describe("skills", () => {
     expect(await round()).toEqual([]);
     const backups = join(home, ".local/state/t3-fleet/skill-backups");
     const [stamp] = readdirSync(backups);
-    // Named after the client directory (.claude-skills for ~/.claude/skills; this home is not under /Users or /home).
+    // Named after the client directory, and not hidden from ls: claude-skills for
+    // ~/.claude/skills (this home is not under /Users or /home, so its path leads).
     const [client] = readdirSync(join(backups, stamp ?? ""));
-    expect(client).toMatch(/\.claude-skills$/);
+    expect(client).toMatch(/(^|-)claude-skills$/);
+    expect(client).not.toMatch(/(^|-)\./);
     expect(readdirSync(join(backups, stamp ?? "", client ?? ""))).toEqual(["foo"]);
   });
 });

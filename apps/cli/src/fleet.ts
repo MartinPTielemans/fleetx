@@ -14,6 +14,7 @@ import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 import { expandHome, loadConfig, type Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { exec } from "@t3-fleet/core/Exec";
+import { snapshot } from "@t3-fleet/core/Git";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
@@ -317,6 +318,8 @@ const add = Command.make("add", {
       const config = yield* loadConfig;
       const { names, landed } = yield* underSyncLock(
         Effect.gen(function* () {
+          // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+          const before = yield* snapshot(config.repo, ["skills"]);
           const paths = yield* addSkills(
             config.repo,
             source,
@@ -332,6 +335,7 @@ const add = Command.make("add", {
               config,
               paths,
               `Add skill${names.length === 1 ? "" : "s"} ${names.join(", ")} from ${source}`,
+              before,
             ),
           };
         }),
@@ -357,6 +361,10 @@ const update = Command.make("update", {
       const config = yield* loadConfig;
       // The update waits in a scratch directory while you decide; the checkout only changes once you keep it.
       const preview = yield* previewUpdate(config.repo, skills);
+      if (preview.skipped.length > 0)
+        yield* Console.log(
+          `skipping ${preview.skipped.join(", ")}: sync holds back an edit there that looks like a secret (t3-fleet secrets scan)`,
+        );
       if (preview.files.length === 0) {
         yield* Console.log("every skill is current");
         return;
@@ -376,11 +384,14 @@ const update = Command.make("update", {
       }
       const landed = yield* underSyncLock(
         Effect.gen(function* () {
+          // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+          const before = yield* snapshot(config.repo, ["skills"]);
           const paths = yield* keepUpdate(config.repo, skills, preview.digest);
           return yield* land(
             config,
             paths,
             `Update skill${paths.length === 1 ? "" : "s"} from upstream`,
+            before,
           );
         }),
       );
@@ -397,15 +408,16 @@ const remove = Command.make("remove", {
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const landed = yield* underSyncLock(
-        removeSkills(config.repo, skills).pipe(
-          Effect.flatMap((paths) =>
-            land(
-              config,
-              paths,
-              `Remove skill${skills.length === 1 ? "" : "s"} ${skills.join(", ")}`,
-            ),
-          ),
-        ),
+        Effect.gen(function* () {
+          const before = yield* snapshot(config.repo, ["skills"]);
+          const paths = yield* removeSkills(config.repo, skills);
+          return yield* land(
+            config,
+            paths,
+            `Remove skill${skills.length === 1 ? "" : "s"} ${skills.join(", ")}`,
+            before,
+          );
+        }),
       );
       yield* Console.log(`removed ${skills.join(", ")}: ${landed}`);
     }).pipe(reportUserErrors),
@@ -488,6 +500,7 @@ export const mcpAddCommand = Command.make("add", {
       const targets = node.length > 0 ? node : config.nodes.map((n) => n.name);
       const landed = yield* underSyncLock(
         Effect.gen(function* () {
+          const before = yield* snapshot(config.repo, ["mcp", "nodes"]);
           yield* fs.writeFileString(`${config.repo}/mcp/${name}.json`, prettyJson(definition));
           const changed = [`mcp/${name}.json`];
           for (const target of targets) {
@@ -499,7 +512,7 @@ export const mcpAddCommand = Command.make("add", {
             yield* fs.writeFileString(file, withMcpServer(text, name));
             changed.push(`nodes/${target}.toml`);
           }
-          return yield* land(config, changed, `Add MCP server ${name}`);
+          return yield* land(config, changed, `Add MCP server ${name}`, before);
         }),
       );
       yield* Console.log(`declared ${name} for ${targets.join(", ")}: ${landed}`);

@@ -11,6 +11,17 @@ import * as FileSystem from "effect/FileSystem";
 
 import { exec, type ExecResult } from "./Exec.ts";
 import { configDir } from "./Names.ts";
+import {
+  addedLines,
+  parseAllowed,
+  readAllowed,
+  refusal,
+  settle,
+  suspectLines,
+  type Allowed,
+  type SecretHit,
+  type Suspect,
+} from "./SecretScan.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
 export const gitConfigPath = (home: string) => `${configDir(home)}/gitconfig`;
@@ -229,6 +240,209 @@ export const addPaths = (repo: string, paths: ReadonlyArray<string>) =>
     if (!ok(add)) return yield* Effect.fail(`git add failed: ${why(add)}`);
   });
 
+/**
+ * What a diff adds that looks like a secret. `range` is git diff's own
+ * (["--cached", "HEAD"], ["origin/main", "HEAD"]); `side` is where the new
+ * version of a file is read, to know an age file by its first line.
+ */
+const scanDiff = (
+  repo: string,
+  range: ReadonlyArray<string>,
+  side: string,
+  options: {
+    readonly paths?: ReadonlyArray<string>;
+    readonly env?: Readonly<Record<string, string>>;
+    readonly allowed?: ReadonlyArray<Allowed>;
+  },
+) =>
+  Effect.gen(function* () {
+    const env = { ...literal, ...options.env };
+    const diff = yield* git(
+      repo,
+      [
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "-U0",
+        ...range,
+        "--",
+        ...(options.paths ?? []),
+      ],
+      { env },
+    );
+    if (!ok(diff)) return yield* Effect.fail(`scanning for secrets: ${why(diff)}`);
+    const suspects: Array<Suspect> = [];
+    for (const [file, lines] of addedLines(diff.stdout)) {
+      let found = suspectLines(file, lines);
+      // Only the first line says whether the file is an age file; read it when the diff lacks it.
+      if (found.length > 0 && !lines.some((l) => l.line === 1)) {
+        const first = out(yield* git(repo, ["show", `${side}${file}`], { env })).split("\n")[0];
+        found = suspectLines(file, lines, first ?? null);
+      }
+      suspects.push(...found);
+    }
+    if (suspects.length === 0) return [] as Array<SecretHit>;
+    return yield* settle(suspects, options.allowed ?? (yield* readAllowed(repo)));
+  });
+
+/**
+ * What the index (or the one `env` names) adds against `base`, HEAD by
+ * default (every staged line, in a repo without commits), that looks like a
+ * secret. The allow-list is the checkout's own t3-fleet.toml unless given.
+ */
+export const scanStaged = (
+  repo: string,
+  options: {
+    readonly base?: string;
+    readonly paths?: ReadonlyArray<string>;
+    readonly env?: Readonly<Record<string, string>>;
+    readonly allowed?: ReadonlyArray<Allowed>;
+  } = {},
+) =>
+  scanDiff(repo, ["--cached", ...(options.base === undefined ? [] : [options.base])], ":", options);
+
+/** git's empty tree: what a root commit is compared with. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * What each commit in `range` (rev-list's: `origin/main..HEAD`, or `HEAD`
+ * for a branch nothing has seen) adds that looks like a secret, commits made
+ * by hand too, each named. Commit by commit: one that adds a token and a
+ * later one that takes it out still put it in history. A root commit is
+ * compared with nothing; a merge only for what it adds itself, which no
+ * parent had.
+ */
+export const scanCommits = (
+  repo: string,
+  range: ReadonlyArray<string>,
+  options: { readonly allowed?: ReadonlyArray<Allowed> } = {},
+) =>
+  Effect.gen(function* () {
+    const list = yield* git(repo, ["rev-list", "--reverse", "--parents", ...range]);
+    if (!ok(list)) return yield* Effect.fail(`scanning for secrets: ${why(list)}`);
+    const allowed = options.allowed ?? (yield* readAllowed(repo));
+    const hits: Array<SecretHit> = [];
+    for (const line of out(list).split("\n").filter(Boolean)) {
+      const [commit = "", ...parents] = line.split(" ");
+      const against = parents.length === 0 ? [EMPTY_TREE] : parents;
+      let found: ReadonlyArray<SecretHit> | null = null;
+      for (const parent of against) {
+        const next = yield* scanDiff(repo, [parent, commit], `${commit}:`, { allowed });
+        const same = (h: SecretHit) => `${h.file}\0${h.hash}`;
+        found = found === null ? next : found.filter((h) => next.some((n) => same(n) === same(h)));
+      }
+      hits.push(...(found ?? []).map((h) => ({ ...h, commit: commit.slice(0, 7) })));
+    }
+    return hits;
+  });
+
+/**
+ * What the checkout's edits to `paths` (new files too) would add against
+ * `base`, built in a scratch index so neither the real index nor the
+ * working tree is touched.
+ */
+export const scanEdits = (
+  repo: string,
+  paths: ReadonlyArray<string>,
+  options: { readonly base?: string; readonly allowed?: ReadonlyArray<Allowed> } = {},
+) =>
+  Effect.gen(function* () {
+    if (paths.length === 0) return [] as Array<SecretHit>;
+    const base = options.base ?? "HEAD";
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-scan-index`, ...literal };
+    const read = yield* git(repo, ["read-tree", base], { env });
+    if (!ok(read)) return yield* Effect.fail(`scanning for secrets: ${why(read)}`);
+    yield* git(repo, ["add", "-A", "--", ...paths], { env });
+    return yield* scanStaged(repo, { ...options, base, paths, env });
+  });
+
+/** t3-fleet.toml's allow_secret entries as committed at `ref`: what a member trusts. */
+export const allowedAt = (repo: string, ref: string) =>
+  git(repo, ["show", `${ref}:t3-fleet.toml`]).pipe(
+    Effect.flatMap((r) => parseAllowed(ok(r) ? r.stdout : "")),
+  );
+
+/**
+ * The checkout's files under `paths` as they are now, edits and new files
+ * included, as a git tree: what a command that is about to write there can
+ * put back with restorePaths. Nothing in the checkout or its index changes.
+ */
+export const snapshot = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const env = { GIT_INDEX_FILE: `${repo}/.git/t3-fleet-snapshot-index`, ...literal };
+    const read = yield* git(repo, ["read-tree", "HEAD"], { env });
+    if (!ok(read)) return yield* Effect.fail(`taking a snapshot: ${why(read)}`);
+    const add = yield* git(repo, ["add", "-A", "--", ...paths], { env });
+    if (!ok(add)) return yield* Effect.fail(`taking a snapshot: ${why(add)}`);
+    return out(yield* git(repo, ["write-tree"], { env }));
+  });
+
+/**
+ * Put `paths` back as `tree` (a snapshot) has them, HEAD by default, new
+ * files removed: for undoing what a refused command wrote. Edits made before
+ * the snapshot stay; without one, `paths` must be files the command wrote.
+ */
+export const restorePaths = (repo: string, paths: ReadonlyArray<string>, tree = "HEAD") =>
+  Effect.gen(function* () {
+    if (paths.length === 0) return;
+    const fs = yield* FileSystem.FileSystem;
+    yield* git(repo, ["reset", "-q", "--", ...paths], { env: literal });
+    // What git sees goes; what it ignores (a skill's .env) stays, as git clean without -x leaves it.
+    const tracked = nulList(
+      (yield* git(repo, ["ls-files", "-z", "--", ...paths], { env: literal })).stdout,
+    );
+    for (const file of tracked) yield* fs.remove(`${repo}/${file}`, { force: true });
+    yield* git(repo, ["clean", "-q", "-f", "-d", "--", ...paths], { env: literal });
+    const kept = nulList(
+      (yield* git(repo, ["ls-tree", "-r", "-z", "--name-only", tree, "--", ...paths], {
+        env: literal,
+      })).stdout,
+    );
+    if (kept.length > 0) {
+      const back = yield* git(repo, ["checkout", "-q", tree, "--", ...kept], { env: literal });
+      if (!ok(back)) return yield* Effect.fail(`putting ${paths.join(", ")} back: ${why(back)}`);
+      // checkout stages what it writes: the index goes back to HEAD's.
+      yield* git(repo, ["reset", "-q", "--", ...kept], { env: literal });
+    }
+  });
+
+/** Files under `paths` (all when empty) git still has as conflicted, as hits naming each. */
+export const unmergedHits = (repo: string, paths: ReadonlyArray<string> = []) =>
+  unmergedFiles(repo).pipe(
+    Effect.map((files) =>
+      files
+        .filter((f) => paths.length === 0 || paths.some((p) => f === p || f.startsWith(`${p}/`)))
+        .map((file): SecretHit => ({
+          file,
+          line: 0,
+          kind: "an unresolved merge conflict",
+          hash: "",
+        })),
+    ),
+  );
+
+/**
+ * Fail, naming them, when the staged `paths` add a secret; they are unstaged
+ * again (the edits stay in the checkout) so nothing commits them by accident.
+ */
+export const refuseSecrets = (repo: string, paths: ReadonlyArray<string> = []) =>
+  Effect.gen(function* () {
+    const hits = yield* scanStaged(repo, { paths });
+    if (hits.length === 0) return;
+    const head = ok(yield* git(repo, ["rev-parse", "-q", "--verify", "HEAD"]));
+    yield* git(
+      repo,
+      head
+        ? ["reset", "-q", "--", ...paths]
+        : ["rm", "-rq", "--cached", "--", ...(paths.length > 0 ? paths : ["."])],
+      { env: literal },
+    );
+    return yield* Effect.fail(refusal(hits));
+  });
+
 /** The branch the checkout tracks on origin: main, usually. */
 const upstreamBranch = (repo: string) =>
   Effect.gen(function* () {
@@ -243,11 +457,19 @@ const upstreamBranch = (repo: string) =>
  * Commit `paths` in the repo and push, as an authority changing the config.
  * Pulls first (rebase) so the push lands on what other nodes see. Takes the
  * sync lock, so callers that write files before this should hold it too.
+ * Refuses, committing nothing, when what it adds looks like a secret, and
+ * pushing nothing when an unpushed commit made by hand does.
  */
 export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, message: string) =>
   underSyncLock(
     Effect.gen(function* () {
       yield* ensureGitConfig;
+      // Adding a conflicted file would mark it resolved, markers and all.
+      const conflicted = yield* unmergedHits(repo, paths);
+      if (conflicted.length > 0)
+        return yield* Effect.fail(
+          `refusing to commit: ${conflicted.map((h) => h.file).join(", ")} still conflicted; resolve by hand first`,
+        );
       yield* addPaths(repo, paths);
       const staged = nulList(
         (yield* git(
@@ -257,14 +479,30 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
         )).stdout,
       );
       if (staged.length === 0) return "nothing to commit";
+      yield* refuseSecrets(repo, staged);
       const commit = yield* git(repo, ["commit", "-q", "-m", message, "--", ...staged], {
         env: literal,
       });
       if (!ok(commit)) return yield* Effect.fail(`git commit failed: ${why(commit)}`);
-      yield* pullBranch(repo, yield* upstreamBranch(repo), "rebase").pipe(
-        Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),
+      const branch = yield* upstreamBranch(repo);
+      // A remote nothing was pushed to yet (a fleet's first commit): nothing to pull.
+      const empty =
+        (yield* git(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`])).code ===
+        2;
+      if (!empty)
+        yield* pullBranch(repo, branch, "rebase").pipe(
+          Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),
+        );
+      // A commit made here by hand rides along with the push: it is checked too.
+      const unpushed = yield* scanCommits(repo, empty ? ["HEAD"] : [`origin/${branch}..HEAD`]);
+      if (unpushed.length > 0)
+        return yield* Effect.fail(
+          `committed, but not pushed: a commit here that ${branch} lacks adds what looks like a secret\n${refusal(unpushed, "push")}`,
+        );
+      const push = yield* git(
+        repo,
+        empty ? ["push", "-q", "-u", "origin", `HEAD:refs/heads/${branch}`] : ["push", "-q"],
       );
-      const push = yield* git(repo, ["push", "-q"]);
       if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
       return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
     }),

@@ -8,6 +8,8 @@
  *   unset KEY…
  *   import FILE              replace every secret from a dotenv file
  *   add-node NODE RECIPIENT  let a node read the secrets (authority)
+ *   scan                     what in this checkout's edits looks like a secret, and how to allow it
+ *   allow FILE HASH          a line T3 Fleet refused to commit is not a secret (authority)
  */
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -15,9 +17,17 @@ import * as FileSystem from "effect/FileSystem";
 import { Argument, Command } from "effect/unstable/cli";
 
 import { loadConfig } from "@t3-fleet/core/Config";
-import { commitAndPush } from "@t3-fleet/core/Git";
+import {
+  allowedAt,
+  changedFiles,
+  commitAndPush,
+  scanEdits,
+  unmergedHits,
+} from "@t3-fleet/core/Git";
+import { allowSecret, readAllowed, refusal } from "@t3-fleet/core/SecretScan";
 import { underSyncLock } from "@t3-fleet/core/Sync";
 import {
+  addRecipient,
   encryptedPath,
   ensureIdentity,
   installSecrets,
@@ -190,19 +200,77 @@ const addNode = Command.make("add-node", {
         return yield* Effect.fail("not an age public key (age1…)");
       const rev = yield* underSyncLock(
         Effect.gen(function* () {
-          const text = yield* readSecrets(config.repo);
-          const recipients = yield* readRecipients(config.repo);
-          yield* writeRecipients(config.repo, { ...recipients, [node]: recipient });
-          yield* writeSecrets(config.repo, text);
+          // Already readable by that key (an invited node that has not pulled yet): nothing
+          // re-encrypted, so nothing new to commit, unless an earlier run's commit failed.
+          yield* addRecipient(config.repo, node, recipient);
           return yield* commitSecrets(config.repo, `Let ${node} read the fleet's secrets`);
         }),
       );
-      yield* Console.log(`${node} can read the secrets after its next pull (${rev})`);
+      yield* Console.log(
+        rev === "nothing to commit"
+          ? `${node} can already read the secrets; it has them after its next pull`
+          : `${node} can read the secrets after its next pull (${rev})`,
+      );
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const scan = Command.make("scan").pipe(
+  Command.withDescription(
+    "Show what in this checkout's uncommitted edits looks like a secret, with the command that allows each line.",
+  ),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const authority =
+        config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
+      const hits = [
+        ...(yield* scanEdits(config.repo, yield* changedFiles(config.repo), {
+          allowed: authority
+            ? yield* readAllowed(config.repo)
+            : yield* allowedAt(config.repo, `origin/${config.branch}`),
+        })),
+        ...(yield* unmergedHits(config.repo)),
+      ];
+      yield* Console.log(
+        hits.length === 0 ? "nothing here looks like a secret" : refusal(hits, "commit or propose"),
+      );
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const allow = Command.make("allow", {
+  file: Argument.String("FILE").pipe(Argument.withDescription("The file, relative to the repo.")),
+  hash: Argument.String("HASH").pipe(
+    Argument.withDescription("The line's hash, as the refusal names it."),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Let a line T3 Fleet refused to commit through, when it is not a secret (authority).",
+  ),
+  Command.withHandler(({ file, hash }) =>
+    Effect.gen(function* () {
+      const config = yield* asAuthority;
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          if (!(yield* allowSecret(config.repo, file, hash))) return null;
+          return yield* commitAndPush(
+            config.repo,
+            ["t3-fleet.toml"],
+            `Allow a line of ${file} that is not a secret`,
+          );
+        }),
+      );
+      yield* Console.log(
+        rev === null
+          ? `already allowed; try again`
+          : `allowed that line of ${file} (${rev}); try again`,
+      );
     }).pipe(reportUserErrors),
   ),
 );
 
 export const secretsCommand = Command.make("secrets").pipe(
   Command.withDescription("The fleet's encrypted secrets."),
-  Command.withSubcommands([init, install, list, set, unset, importFile, addNode]),
+  Command.withSubcommands([init, install, list, set, unset, importFile, addNode, scan, allow]),
 );

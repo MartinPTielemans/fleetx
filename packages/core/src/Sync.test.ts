@@ -17,11 +17,21 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom, type Config } from "./Config.ts";
-import { commitAndPush, pullBranch, putBackConflicted, statusEntries } from "./Git.ts";
+import {
+  commitAndPush,
+  pullBranch,
+  putBackConflicted,
+  restorePaths,
+  scanCommits,
+  snapshot,
+  statusEntries,
+  unmergedHits,
+} from "./Git.ts";
 import { lastSyncPath } from "./Probe.ts";
-import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
+import { addSkills, keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
+import { allowSecret, lineHash, refusal } from "./SecretScan.ts";
 import { stateDir } from "./Names.ts";
 import {
   processIdentity,
@@ -490,6 +500,521 @@ describe("writes outside sync", () => {
     );
     if (token !== null) await run(releaseSyncLock(token));
     expect(await run(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(/^[0-9a-f]{7,}$/);
+  });
+});
+
+// Built at run time so this file holds nothing a scanner would flag.
+const fakeToken = () => "ghp_" + "aZ3kQ9mX7pL2vB8nR4tY6wC1eF5gH0jK9sD2";
+
+describe("secrets never reach git", () => {
+  it("commitAndPush refuses a token in an MCP URL, naming file and line, never the value", async () => {
+    const f = makeFleet();
+    const key = "3f9a1c2e-7b4d-4e8a-9c1f-2d6b8e0a4c7f";
+    put(f.box, "mcp/exa.json", `{\n  "url": "https://mcp.exa.ai/mcp?exaApiKey=${key}"\n}\n`);
+    const refused = await fails(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"));
+    expect(refused).toContain("mcp/exa.json:2 looks like a token in a URL query (exaApiKey)");
+    expect(refused).not.toContain(key);
+    expect(onMain(f.origin, "mcp/exa.json")).toBeNull();
+    // Left as an edit, not staged for the next commit to take along.
+    expect(git(f.box, "status", "--porcelain", "--", "mcp")).toBe("?? mcp/\n");
+
+    // Not a secret after all: allowed by its line's SHA-256, and through.
+    const hash = /secrets allow mcp\/exa\.json ([0-9a-f]{64})/.exec(String(refused))?.[1] ?? "";
+    expect(await run(allowSecret(f.box, "mcp/exa.json", hash))).toBe(true);
+    expect(await run(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"))).toMatch(/^[0-9a-f]{7,}$/);
+  });
+
+  it("refuses a token in args", async () => {
+    const f = makeFleet();
+    put(
+      f.box,
+      "mcp/x.json",
+      `{"args": ["server", "--api-key", "${"Kq8".repeat(4)}Zr72mPw9xLt3"]}\n`,
+    );
+    expect(await fails(commitAndPush(f.box, ["mcp/x.json"], "x"))).toContain(
+      "mcp/x.json:1 looks like a secret in a command-line flag (--api-key)",
+    );
+  });
+
+  it("commits what `mcp add --token-env` writes: a variable's name is not a secret", async () => {
+    const f = makeFleet();
+    put(
+      f.box,
+      "mcp/linear.json",
+      `{\n  "kind": "direct",\n  "url": "https://mcp.linear.app/mcp",\n  "auth": {\n    "type": "bearer",\n    "token_env": "T3_FLEET_MCP_TOKEN_LAPTOP"\n  }\n}\n`,
+    );
+    expect(await run(commitAndPush(f.box, ["mcp/linear.json"], "Add linear"))).toMatch(
+      /^[0-9a-f]{7,}$/,
+    );
+  });
+
+  it("scans only what a commit adds: a skill already holding an example token still updates", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", `a v1\nEXAMPLE=${fakeToken()}\n`);
+    commitAll(f.box, "vendored with an example");
+    put(f.box, "skills/a/SKILL.md", `a v2\nEXAMPLE=${fakeToken()}\nAPI_KEY = "your-api-key"\n`);
+    expect(await run(commitAndPush(f.box, ["skills/a/SKILL.md"], "update a"))).toMatch(
+      /^[0-9a-f]{7,}$/,
+    );
+  });
+
+  it("an authority's sync holds back the skill with a secret and says why, without its hash", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", "a v2\n");
+    put(f.box, "skills/c/SKILL.md", `token: ${fakeToken()}\n`);
+    const result = await f.sync(f.box, "box");
+    expect(result.lines.join("\n")).toContain("committed 1 file");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+    expect(onMain(f.origin, "skills/c/SKILL.md")).toBeNull();
+    const [finding] = result.findings;
+    expect(finding?.key).toBe("sync-secret-skills/c");
+    expect(finding?.title).toBe(
+      "sync will not commit skills/c: skills/c/SKILL.md:1 looks like a GitHub token",
+    );
+    expect(finding?.detail).toContain("t3-fleet secrets scan");
+    expect(JSON.stringify(result.findings)).not.toContain(fakeToken());
+    expect(JSON.stringify(result.findings)).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  it("never commits half a skill: a new skill whose script holds a secret stays out whole", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/new/SKILL.md", "Run scripts/go.sh.\n");
+    put(
+      f.box,
+      "skills/new/scripts/go.sh",
+      `curl -H "Authorization: Bearer ${fakeToken().slice(4)}"\n`,
+    );
+    put(f.box, "skills/SOURCES.json", '{"local": ["new"]}\n');
+    put(f.box, "skills/a/SKILL.md", "a v2\n");
+    const result = await f.sync(f.box, "box");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
+    expect(onMain(f.origin, "skills/new/SKILL.md")).toBeNull();
+    expect(onMain(f.origin, "skills/new/scripts/go.sh")).toBeNull();
+    // Its SOURCES.json entry changed with it, and waits with it.
+    expect(onMain(f.origin, "skills/SOURCES.json")).toBeNull();
+    // One unit: SOURCES.json with the skill its new entry names.
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/SOURCES.json"]);
+    expect(result.findings[0]?.title).toContain("skills/SOURCES.json with skills/new");
+  });
+
+  it("a held-back skill an incoming change touches is set aside, and the authority's sync still works", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    // Main moves on under the same file, from elsewhere.
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
+    commitAll(f.laptop, "a v2");
+    const result = await f.sync(f.box, "box");
+    expect([result.failed, result.message, result.lines]).toEqual([false, "", expect.anything()]);
+    expect(result.lines.join("\n")).toContain("pulled 1 commit");
+    expect(read(f.box, "skills/a/SKILL.md")).toBe("a v2 from main\n");
+    const [finding] = result.findings;
+    expect(finding?.key).toBe("sync-secret-skills/a");
+    expect(finding?.title).toContain("sync set skills/a aside in git stash");
+    // The edit is kept, where the finding says.
+    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    expect(git(f.box, "stash", "show", "-p", "stash@{0}")).toContain("a, edited");
+    // Later runs keep naming it until the entry is dropped.
+    const later = await f.sync(f.box, "box");
+    expect(later.failed).toBe(false);
+    expect(later.findings.map((x) => [x.key, x.severity])).toEqual([
+      ["sync-secret-skills/a", "warn"],
+    ]);
+  });
+
+  it("a refused skills update leaves nothing behind, so the next sync commits nothing", async () => {
+    const f = makeFleet();
+    const upstream = join(f.root, "upstream");
+    put(upstream, "a/SKILL.md", `a upstream v2\napi_key = "${fakeToken().slice(4)}"\n`);
+    git(f.root, "init", "-q", "upstream");
+    git(upstream, "add", "-A");
+    git(upstream, "commit", "-qm", "v2");
+    put(
+      f.box,
+      "skills/SOURCES.json",
+      `${JSON.stringify({ sources: { upstream: { type: "github", url: upstream, skills: ["a"], paths: { a: "a" } } } })}\n`,
+    );
+    commitAll(f.box, "sources");
+    const sources = read(f.box, "skills/SOURCES.json");
+    const config = await f.config(f.box, "box");
+
+    const preview = await run(previewUpdate(f.box, ["a"]));
+    const refused = await run(
+      keepUpdate(f.box, ["a"], preview.digest).pipe(
+        Effect.flatMap((paths) => land(config, paths, "Update a")),
+        Effect.flip,
+      ),
+    );
+    expect(String(refused)).toContain(
+      "skills/a/SKILL.md:2 looks like a secret assigned to api_key",
+    );
+    // Put back as it was: no fetched files, no advanced pin.
+    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(read(f.box, "skills/a/SKILL.md")).toBe("a v1\n");
+    expect(read(f.box, "skills/SOURCES.json")).toBe(sources);
+
+    const result = await f.sync(f.box, "box");
+    expect(result.lines.join("\n")).not.toContain("committed");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
+  });
+
+  it("an authority does not push a commit made by hand that adds a secret", async () => {
+    const f = makeFleet();
+    put(f.box, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
+    git(f.box, "add", "-A");
+    git(f.box, "commit", "-qm", "notes, by hand");
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(true);
+    expect(onMain(f.origin, "notes/setup.md")).toBeNull();
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-notes/setup.md"]);
+    expect(result.findings[0]?.title).toContain(
+      "sync will not push a commit adding notes/setup.md",
+    );
+
+    // commitAndPush checks what rides along too.
+    put(f.box, "README.md", "x\n");
+    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(
+      /notes\/setup\.md:1 \(in commit [0-9a-f]{7}\) looks like a GitHub token/,
+    );
+    expect(onMain(f.origin, "README.md")).toBe("fleet\n");
+  });
+
+  it("a member proposes everything but the skill with a secret, and says why", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    put(f.laptop, "skills/d/SKILL.md", `x\nkey = "${fakeToken()}"\n`);
+    const result = await f.sync(f.laptop, "laptop");
+    expect(result.lines.join("\n")).toContain("proposed 1 file");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/d"]);
+
+    // Only that skill: withdrawn, not proposed empty.
+    put(f.laptop, "skills/a/SKILL.md", "a v1\n");
+    const again = await f.sync(f.laptop, "laptop");
+    expect(again.lines.join("\n")).not.toContain("proposed");
+    expect(await run(listProposals(f.box, "main"))).toEqual([]);
+  });
+
+  it("a member trusts only the committed allow-list, not its own checkout's", async () => {
+    const f = makeFleet();
+    const line = `key = "${fakeToken()}"`;
+    put(f.laptop, "skills/d/SKILL.md", `${line}\n`);
+    const hash = await run(lineHash(line));
+    await run(allowSecret(f.laptop, "skills/d/SKILL.md", hash));
+    const held = await f.sync(f.laptop, "laptop");
+    expect(held.findings.map((x) => x.key)).toEqual(["sync-secret-skills/d"]);
+
+    // An authority allows it on the branch: now it is proposed.
+    await run(allowSecret(f.box, "skills/d/SKILL.md", hash));
+    commitAll(f.box, "allow");
+    git(f.laptop, "checkout", "-q", "--", "t3-fleet.toml");
+    const proposed = await f.sync(f.laptop, "laptop");
+    expect(proposed.findings).toEqual([]);
+    expect(proposed.lines.join("\n")).toContain("proposed 1 file");
+  });
+
+  it("an approval refuses a proposal that adds a secret", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", `token: ${fakeToken()}\n`);
+    git(f.laptop, "add", "-A");
+    git(f.laptop, "commit", "-qm", "by hand");
+    git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    const refused = await fails(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(refused).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
+  });
+});
+
+describe("secrets never reach git: round two", () => {
+  /** A git repository of skills to vendor from, as a file:// URL. */
+  const upstreamOf = (root: string, files: Record<string, string>) => {
+    const dir = join(root, `upstream-${Object.keys(files).join("-").replace(/\W/g, "")}`);
+    for (const [rel, text] of Object.entries(files)) put(dir, rel, text);
+    git(root, "init", "-q", dir);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "upstream");
+    return `file://${dir}`;
+  };
+
+  it("scans every unpushed commit, not just where they end up, and names the commit", async () => {
+    const f = makeFleet();
+    put(f.box, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
+    git(f.box, "add", "-A");
+    git(f.box, "commit", "-qm", "token, by hand");
+    const added = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
+    put(f.box, "notes/setup.md", "export GITHUB_TOKEN=$GITHUB_TOKEN\n");
+    git(f.box, "commit", "-qam", "token out again");
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(true);
+    expect(onMain(f.origin, "notes/setup.md")).toBeNull();
+    expect(result.findings[0]?.title).toContain(
+      `notes/setup.md:1 (in commit ${added}) looks like a GitHub token`,
+    );
+    put(f.box, "README.md", "x\n");
+    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
+      `(in commit ${added})`,
+    );
+    expect(git(f.origin, "log", "--all", "-p")).not.toContain(fakeToken());
+  });
+
+  it("sets SOURCES.json aside with the skills its entries name, in one stash entry", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.box, "sources");
+    // A new skill with a secret, and its entry.
+    put(f.box, "skills/new/SKILL.md", `token: ${fakeToken()}\n`);
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "new"] })}\n`);
+    // Main changes SOURCES.json meanwhile.
+    git(f.laptop, "pull", "-q", "origin", "main");
+    put(f.laptop, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "b"] })}\n`);
+    commitAll(f.laptop, "b is local too");
+
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(false);
+    expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/SOURCES.json"]);
+    expect(result.findings[0]?.title).toContain("skills/SOURCES.json with skills/new");
+    // One entry holding both; the checkout has main's SOURCES.json and no half skill.
+    const entries = git(f.box, "stash", "list").trim().split("\n");
+    expect(entries).toEqual([expect.stringContaining("T3 Fleet: held back skills/SOURCES.json")]);
+    const stashed = git(f.box, "stash", "show", "--include-untracked", "--name-only", "stash@{0}");
+    expect(stashed.split("\n").filter(Boolean).sort()).toEqual([
+      "skills/SOURCES.json",
+      "skills/new/SKILL.md",
+    ]);
+    expect(read(f.box, "skills/SOURCES.json")).toContain('"b"');
+    expect(existsSync(join(f.box, "skills/new"))).toBe(false);
+
+    // The edits come back, conflicting; nothing with conflict markers is ever committed.
+    spawnSync("git", ["stash", "apply", "stash@{0}"], { cwd: f.box });
+    expect(read(f.box, "skills/SOURCES.json")).toContain("<<<<<<<");
+    put(f.box, "skills/new/SKILL.md", "token: $GITHUB_TOKEN\n");
+    const after = await f.sync(f.box, "box");
+    expect(onMain(f.origin, "skills/SOURCES.json")).not.toContain("<<<<<<<");
+    // A SOURCES.json that does not read is held alone (it names no skill), so the fixed skill goes ahead.
+    expect(onMain(f.origin, "skills/new/SKILL.md")).toBe("token: $GITHUB_TOKEN\n");
+    expect(after.findings.map((x) => x.title).join("\n")).toContain("skills/SOURCES.json");
+    expect(await fails(commitAndPush(f.box, ["skills/SOURCES.json"], "sources"))).toContain(
+      "still conflicted",
+    );
+  });
+
+  it("a refused skills add on a member keeps the entries already waiting in SOURCES.json", async () => {
+    const f = makeFleet();
+    const clean = upstreamOf(f.root, { "x/SKILL.md": "x v1\n" });
+    const leaky = upstreamOf(f.root, { "y/SKILL.md": `token: ${fakeToken()}\n` });
+    const config = await f.config(f.laptop, "laptop");
+    const add = (spec: string) =>
+      run(
+        Effect.gen(function* () {
+          const before = yield* snapshot(f.laptop, ["skills"]);
+          const paths = yield* addSkills(f.laptop, spec, []);
+          return yield* land(config, paths, "add", before);
+        }),
+      );
+    // x waits to be proposed; y is refused.
+    expect(await add(clean)).toContain("proposes it");
+    const waiting = read(f.laptop, "skills/SOURCES.json");
+    expect(waiting).toContain('"x"');
+    await add(leaky).then(
+      () => expect.unreachable(),
+      (e: unknown) => expect(String(e)).toContain("skills/y/SKILL.md:1 looks like a GitHub token"),
+    );
+    expect(read(f.laptop, "skills/SOURCES.json")).toBe(waiting);
+    expect(read(f.laptop, "skills/x/SKILL.md")).toBe("x v1\n");
+    expect(existsSync(join(f.laptop, "skills/y"))).toBe(false);
+  });
+
+  it("a bare skills update skips a held skill; a named one says why it cannot", async () => {
+    const f = makeFleet();
+    const url = upstreamOf(f.root, {
+      "a/SKILL.md": "a upstream v2\n",
+      "b/SKILL.md": "b upstream v2\n",
+    });
+    put(
+      f.box,
+      "skills/SOURCES.json",
+      `${JSON.stringify({ sources: { up: { type: "github", url, skills: ["a", "b"], paths: { a: "a", b: "b" } } } })}\n`,
+    );
+    commitAll(f.box, "sources");
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    const preview = await run(previewUpdate(f.box, []));
+    expect(preview.skipped).toEqual(["skills/a"]);
+    expect(preview.files).toEqual(["skills/b"]);
+    const named = await fails(previewUpdate(f.box, ["a"]));
+    expect(named).toContain("sync holds back skills/a");
+    expect(named).not.toContain("the next sync takes care of them");
+  });
+
+  it("publishes no line hash when an auto-approval is refused", async () => {
+    const f = makeFleet();
+    put(f.laptop, "skills/a/SKILL.md", `token: ${fakeToken()}\n`);
+    git(f.laptop, "add", "-A");
+    git(f.laptop, "commit", "-qm", "by hand");
+    git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const result = await f.sync(f.box, "box");
+    const text = result.lines.join("\n");
+    expect(text).toContain("could not auto-approve laptop's proposal");
+    expect(text).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
+    expect(text).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  it("tells how to bring set-aside edits back in the order that works", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
+    commitAll(f.laptop, "a v2");
+    const result = await f.sync(f.box, "box");
+    const detail = result.findings[0]?.detail ?? "";
+    const order = ["stash apply", "can conflict", "take the secret out", "stash drop"].map((s) =>
+      detail.indexOf(s),
+    );
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
+  });
+});
+
+describe("secrets never reach git: round three", () => {
+  const upstreamOf = (root: string, name: string, files: Record<string, string>) => {
+    const dir = join(root, `upstream-${name}`);
+    for (const [rel, text] of Object.entries(files)) put(dir, rel, text);
+    git(root, "init", "-q", dir);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "upstream");
+    return `file://${dir}`;
+  };
+
+  it("an approval sets aside the held edits it would overwrite; sync leaves them for a pending proposal", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    // Pending, not about to be approved: sync does not stash the edit.
+    const synced = await f.sync(f.box, "box");
+    expect(synced.failed).toBe(false);
+    expect(git(f.box, "stash", "list")).toBe("");
+    // Approving it does, and goes ahead.
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
+    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    // An edit that is not held still stops it.
+    put(f.laptop, "skills/b/SKILL.md", "b v2 from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/b/SKILL.md", "b, edited here\n");
+    const [next] = await run(listProposals(f.box, "main"));
+    if (next === undefined) return expect.unreachable();
+    expect(await fails(approve(f.box, "main", next, "box", next.commit))).toContain(
+      "commit or stash them first",
+    );
+  });
+
+  it("a failed scan holds everything but stashes nothing", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", "a, edited\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
+    commitAll(f.laptop, "a v2");
+    // The scan's scratch index cannot be written.
+    mkdirSync(join(f.box, ".git/t3-fleet-scan-index"));
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(true);
+    expect(git(f.box, "stash", "list")).toBe("");
+    expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited\n");
+  });
+
+  it("a SOURCES.json mid-edit is held alone and never stashed", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.box, "sources");
+    put(f.box, "skills/SOURCES.json", '{"local": ["a", \n');
+    put(f.box, "skills/x/SKILL.md", "x v1\n");
+    const result = await f.sync(f.box, "box");
+    expect(git(f.box, "stash", "list")).toBe("");
+    expect(onMain(f.origin, "skills/x/SKILL.md")).toBe("x v1\n");
+    expect(onMain(f.origin, "skills/SOURCES.json")).toBe(`${JSON.stringify({ local: ["a"] })}\n`);
+    const [finding] = result.findings;
+    expect(finding?.key).toBe("sync-secret-skills/SOURCES.json");
+    expect(finding?.detail).toContain("does not read as JSON");
+    expect(finding?.detail).not.toContain("secrets set");
+  });
+
+  it("an unresolved conflict says how to resolve it, not how to move a secret", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/b/SKILL.md", "b, mine\n");
+    git(f.box, "stash", "push", "-q", "-m", "mine");
+    put(f.box, "skills/b/SKILL.md", "b, theirs\n");
+    commitAll(f.box, "b theirs");
+    spawnSync("git", ["stash", "apply"], { cwd: f.box });
+    // Markers taken out by hand, but not marked resolved.
+    put(f.box, "skills/b/SKILL.md", "b, both\n");
+    const result = await f.sync(f.box, "box");
+    const [finding] = result.findings;
+    expect(finding?.title).toContain("skills/b/SKILL.md has an unresolved merge conflict");
+    expect(finding?.detail).toContain("add skills/b/SKILL.md");
+    expect(finding?.detail).not.toContain("secrets set");
+    const scanned = refusal(await run(unmergedHits(f.box)), "commit or propose");
+    expect(scanned).toContain("git add skills/b/SKILL.md");
+    expect(scanned).not.toContain("secrets allow");
+  });
+
+  it("putting files back keeps what git ignores, and so does re-adding a skill", async () => {
+    const f = makeFleet();
+    put(f.box, ".gitignore", ".env\n");
+    commitAll(f.box, "ignore .env");
+    const url = upstreamOf(f.root, "z", { "z/SKILL.md": "z v1\n" });
+    const config = await f.config(f.box, "box");
+    await run(addSkills(f.box, url, []).pipe(Effect.flatMap((p) => land(config, p, "add z"))));
+    put(f.box, "skills/z/.env", "LOCAL=1\n");
+    // Added again: replaced, but its .env stays.
+    await run(addSkills(f.box, url, []));
+    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+    // A refused write is put back, and its .env stays.
+    const before = await run(snapshot(f.box, ["skills"]));
+    put(f.box, "skills/z/SKILL.md", `token: ${fakeToken()}\n`);
+    await run(restorePaths(f.box, ["skills/z"], before));
+    expect(read(f.box, "skills/z/SKILL.md")).toBe("z v1\n");
+    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+  });
+
+  it("pushes a fleet's first commit to an empty remote, scanned from its root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-fleet-first-"));
+    process.env["HOME"] = root;
+    put(
+      root,
+      ".config/t3-fleet/gitconfig",
+      "[user]\n\tname = T3 Fleet\n\temail = t3-fleet@localhost\n",
+    );
+    git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
+    git(root, "init", "-q", "-b", "main", "fleet");
+    const repo = join(root, "fleet");
+    git(repo, "remote", "add", "origin", join(root, "origin.git"));
+    put(repo, "t3-fleet.toml", "[fleet]\n");
+    put(repo, "notes.md", `token: ${fakeToken()}\n`);
+    expect(await fails(commitAndPush(repo, ["t3-fleet.toml", "notes.md"], "init"))).toContain(
+      "notes.md:1 looks like a GitHub token",
+    );
+    expect(await run(commitAndPush(repo, ["t3-fleet.toml"], "init"))).toMatch(/^[0-9a-f]{7,}$/);
+    expect(onMain(join(root, "origin.git"), "t3-fleet.toml")).toBe("[fleet]\n");
+  });
+
+  it("scans a merge for what it adds itself, and a root commit against nothing", async () => {
+    const f = makeFleet();
+    git(f.box, "checkout", "-q", "-b", "side");
+    put(f.box, "notes/side.md", `token: ${fakeToken()}\n`);
+    git(f.box, "add", "-A");
+    git(f.box, "commit", "-qm", "side adds a token");
+    const side = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
+    git(f.box, "checkout", "-q", "main");
+    put(f.box, "README.md", "fleet, edited\n");
+    git(f.box, "commit", "-qam", "main moves");
+    git(f.box, "merge", "-q", "--no-edit", "side");
+    const hits = await run(scanCommits(f.box, ["origin/main..HEAD"]));
+    expect(hits.map((h) => h.commit)).toEqual([side]);
+    // The whole history, root commit included.
+    const all = await run(scanCommits(f.box, ["HEAD"]));
+    expect(all.map((h) => h.commit)).toEqual([side]);
   });
 });
 

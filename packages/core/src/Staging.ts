@@ -14,7 +14,22 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
-import { changedFiles, git, literal, nulList, ok, out, pullBranch, why } from "./Git.ts";
+import {
+  changedFiles,
+  git,
+  literal,
+  nulList,
+  ok,
+  out,
+  pullBranch,
+  scanEdits,
+  scanStaged,
+  unmergedHits,
+  why,
+} from "./Git.ts";
+import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
+import { readAllowed, refusal } from "./SecretScan.ts";
+import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -156,11 +171,32 @@ export const approve = (
       const tip = yield* reviewedTip(repo, proposal, expected);
       const files = yield* ownChange(repo, tip);
       const dirty = yield* changedFiles(repo, files);
-      if (dirty.length > 0)
-        return yield* Effect.fail(
-          `local edits to ${dirty.join(", ")} would be overwritten; commit or stash them first`,
+      if (dirty.length > 0) {
+        // Edits sync holds back never get committed: approving sets those aside in git stash.
+        const edited = yield* changedFiles(repo, [...new Set([...dirty.map(unitOf), SOURCES])]);
+        const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
+        const hits = [
+          ...(yield* scanEdits(repo, edited, { allowed: yield* readAllowed(repo) })),
+          ...(yield* unmergedHits(repo, edited)),
+        ];
+        const held = heldBack(edited, hits, entries);
+        const heldFiles = new Set([...held.values()].flat());
+        const other = dirty.filter((f) => !heldFiles.has(f));
+        if (other.length > 0 || (held.has(SOURCES) && entries === null))
+          return yield* Effect.fail(
+            `local edits to ${(other.length > 0 ? other : [SOURCES]).join(", ")} would be overwritten; commit or stash them first`,
+          );
+        const inTheWay = new Map(
+          [...held].filter(([, unitFiles]) => unitFiles.some((f) => dirty.includes(f))),
         );
+        const aside = yield* setAsideUnits(repo, inTheWay);
+        if (aside.size < inTheWay.size)
+          return yield* Effect.fail(
+            `could not set ${[...inTheWay.keys()].filter((u) => !aside.has(u)).join(", ")} aside in git stash`,
+          );
+      }
       yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
+      const allowed = yield* readAllowed(repo);
       const approved = yield* inScratchWorktree(
         repo,
         Effect.fnUntraced(function* (scratch: string) {
@@ -188,6 +224,12 @@ export const approve = (
           }
           // Already on the branch: nothing to commit.
           if (changed.length === 0) return null;
+          // Allowed by the branch's t3-fleet.toml, not one the proposal brings along.
+          const secrets = yield* scanStaged(scratch, { base: "HEAD", allowed });
+          if (secrets.length > 0)
+            return yield* Effect.fail(
+              `${proposal.node}'s proposal adds what looks like a secret; reject it.\n${refusal(secrets)}`,
+            );
           const commit = yield* git(scratch, [
             "commit",
             "-q",
