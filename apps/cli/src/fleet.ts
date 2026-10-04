@@ -44,6 +44,7 @@ import {
   setVar,
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
+import { describeProposed } from "@t3-fleet/core/ProposedSecrets";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -175,9 +176,12 @@ export const reviewCommand = Command.make("review").pipe(
         return;
       }
       for (const p of proposals) {
+        // Secrets are encrypted; their names and what approving does with them are worth seeing.
+        const secrets = yield* describeProposed(config.repo, p.commit, p.node).pipe(
+          Effect.orElseSucceed(() => [] as Array<string>),
+        );
         yield* Console.log(
-          `${p.node}  (${p.commit.slice(0, 7)})\n${p.stat
-            .split("\n")
+          `${p.node}  (${p.commit.slice(0, 7)})\n${[...p.stat.split("\n"), ...secrets]
             .map((l) => `  ${l}`)
             .join("\n")}\n`,
         );
@@ -210,14 +214,18 @@ export const approveCommand = Command.make("approve", {
   Command.withHandler(({ node, commit }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      const rev = yield* approve(
+      const proposal = yield* proposalOf(config, node);
+      for (const line of yield* describeProposed(config.repo, proposal.commit, node))
+        yield* Console.log(line);
+      const { rev, notes } = yield* approve(
         config.repo,
         config.branch,
-        yield* proposalOf(config, node),
+        proposal,
         config.self,
         Option.getOrUndefined(commit),
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
+      for (const line of notes) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );

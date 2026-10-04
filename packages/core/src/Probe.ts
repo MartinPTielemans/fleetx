@@ -126,7 +126,7 @@ const RuntimeFile = Schema.Struct({
 const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
   Schema.decodeEffect(Schema.fromJsonString(schema))(text).pipe(Effect.option);
 
-const isAlive = (pid: number) =>
+export const isAlive = (pid: number) =>
   exec({
     command: "ps",
     args: ["-p", String(pid), "-o", "pid="],
@@ -168,7 +168,7 @@ const serverEnvironment = (pid: number) =>
  * A service-managed server runs from ~/.t3/runtime/versions/<version>/t3; the
  * desktop app runs its own copy and has neither.
  */
-const runtimeFromCommandLine = (pid: number) =>
+export const runtimeFromCommandLine = (pid: number) =>
   Effect.gen(function* () {
     const ps = yield* exec({
       command: "ps",
@@ -183,7 +183,7 @@ const runtimeFromCommandLine = (pid: number) =>
     };
   });
 
-const fetchDescriptor = (origin: string) =>
+export const fetchDescriptor = (origin: string) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const text = yield* client

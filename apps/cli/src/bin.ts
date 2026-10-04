@@ -13,7 +13,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import { describeBuild, runningBuild } from "@t3-fleet/core/Build";
 import { checkNodes } from "@t3-fleet/core/Check";
 import { runFixes } from "@t3-fleet/core/Fix";
-import { loadConfig, ProbeSettings } from "@t3-fleet/core/Config";
+import { loadConfig, NOT_SET_UP, ProbeSettings } from "@t3-fleet/core/Config";
 import { FleetToolkit, fleetHandlers } from "@t3-fleet/core/Mcp";
 import { compareWithLast } from "@t3-fleet/core/Memory";
 import { MachineObservation } from "@t3-fleet/core/Observation";
@@ -26,6 +26,7 @@ import {
   renderStatus,
 } from "@t3-fleet/core/Render";
 import { describeMerged } from "@t3-fleet/core/Settings";
+import { preflight } from "@t3-fleet/core/setup/Preflight";
 
 import packageJson from "../package.json" with { type: "json" };
 import {
@@ -42,6 +43,7 @@ import {
 } from "./fleet.ts";
 import { hubCommands } from "./hub.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
+import { setupCommand } from "./setup.ts";
 import { modelsCommand } from "./models.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
@@ -198,12 +200,28 @@ const fixCommand = Command.make("fix", {
   ),
 );
 
+/** Before setup, doctor is setup's pre-flight: what this machine needs for T3 Fleet. */
+const doctorBeforeSetup = Effect.gen(function* () {
+  const { checks } = yield* preflight;
+  const mark = { ok: "✓", info: "·", warn: "!", error: "✗" } as const;
+  yield* Console.log("t3-fleet doctor  this machine is not set up yet\n");
+  for (const c of checks)
+    yield* Console.log(`  ${mark[c.severity]} ${c.title}${c.detail ? `\n      ${c.detail}` : ""}`);
+  yield* Console.log(
+    "\nNext: t3-fleet setup (starts a fleet here), or t3-fleet setup <repo-url> (joins one). Both show their plan first.",
+  );
+  if (checks.some((c) => c.severity === "error")) process.exitCode = 1;
+});
+
 const doctorCommand = Command.make("doctor", { node: nodeFlag }).pipe(
   Command.withDescription(
-    "Check what T3 Fleet and T3 run on: Node, git transport, PATH, T3 Fleet's own git config.",
+    "Check what T3 Fleet and T3 run on: Node, git transport, PATH, T3 Fleet's own git config. Works before setup.",
   ),
   Command.withHandler(({ node }) =>
     Effect.gen(function* () {
+      const setUp = yield* loadConfig.pipe(Effect.result);
+      if (setUp._tag === "Failure" && setUp.failure.message === NOT_SET_UP.message)
+        return yield* doctorBeforeSetup;
       const { config, bundle, shown } = yield* prepare(node);
       const report = narrow(yield* checkNodes(config, bundle), shown);
       const findings = report.findings.filter((f) => f.area === "runtime" || f.area === "reach");
@@ -300,8 +318,9 @@ const mcpServeCommand = Command.make("mcp").pipe(
 const cli = Command.make("t3-fleet").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
   Command.withSubcommands([
-    initCommand,
+    setupCommand,
     inviteCommand,
+    initCommand,
     joinCommand,
     statusCommand,
     fixCommand,

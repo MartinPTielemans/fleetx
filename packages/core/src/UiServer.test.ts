@@ -162,7 +162,10 @@ const fakeFleet = () => {
     proposals: Effect.succeed([]),
     approve: (node, change) =>
       change === REVIEWED
-        ? Effect.sync(() => void decided.push(`approve ${node}`))
+        ? Effect.sync(() => {
+            decided.push(`approve ${node}`);
+            return [] as ReadonlyArray<string>;
+          })
         : Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`),
     reject: (node) => Effect.fail(`no proposal from ${node}`),
     alerts: Effect.succeed([{ at: 5, node: "server", kind: "failing", message: "sync failed" }]),

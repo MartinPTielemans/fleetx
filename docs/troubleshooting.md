@@ -50,10 +50,10 @@ T3 Fleet where you run it from (`install.sh`, or `t3-fleet fix` from a
 machine that has the newer build).
 
 **`engine-local-config`** — `~/.config/t3-fleet/config.toml` does not name this
-machine and its config repo. The fix writes it (as `t3-fleet join` would). Sync
-never runs it: which repo a machine uses is a person's choice (`join --dir`,
+machine and its config repo. The fix writes it (as `t3-fleet setup` does). Sync
+never runs it: which repo a machine uses is a person's choice (`setup --dir`,
 `T3_FLEET_CONFIG_REPO`), and pointing it at a missing one stops every sync. A
-machine's own sync checks the repo it loaded, so `join --dir` does not raise it.
+machine's own sync checks the repo it loaded, so `setup --dir` does not raise it.
 
 **`engine-timer`** — `[engine] timer = true` but the sync timer is missing,
 out of date, or not running. The fix installs a launchd agent (macOS) or a
@@ -382,6 +382,19 @@ of its own in the config repo. Only an authority's commits reach the other
 machines, so these go nowhere; sync rebases them along and keeps working.
 `git -C <repo> reset --soft origin/main` there turns them back into edits,
 which its next sync proposes for approval.
+
+**`sync-edit-unmerged`** — a member has an edit to a file the fleet's branch
+has changed since, so its sync does not pull (and proposes nothing that would
+undo the branch's change). Sync never merges or moves the edit. The finding
+gives the step: `git -C <repo> stash push -m t3-fleet -- <files>`, then
+`t3-fleet sync`, then make the edit again on top (`git -C <repo> stash show -p`
+shows it). The one copy sync does replace is a file exactly as the machine's
+own proposal had it, once that proposal is approved: the branch then has it,
+merged with what was approved alongside it.
+
+**`sync-edit-proposed`** — the overlapping file is this machine's proposal,
+still waiting. Sync pulls once an authority approves it (`t3-fleet review`,
+`t3-fleet approve <node>`) or rejects it.
 
 **"…'s proposal is … now, not the … reviewed"** — the proposal changed after
 `t3-fleet review` showed it, and is not the same change made again on a newer

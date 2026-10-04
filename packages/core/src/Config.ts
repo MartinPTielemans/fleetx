@@ -148,9 +148,9 @@ const decodeAs = <S extends Schema.Top>(schema: S, value: unknown, file: string)
     ),
   );
 
-const NOT_SET_UP = new ConfigError({
+export const NOT_SET_UP = new ConfigError({
   message:
-    'this machine is not set up: run `t3-fleet join`, or write ~/.config/t3-fleet/config.toml with repo = "<your config repo>" and node = "<this machine>"',
+    "this machine is not set up yet: run `t3-fleet setup` to start a fleet here, or `t3-fleet setup <repo-url>` to join one (it shows its plan before changing anything); `t3-fleet doctor` checks this machine first",
 });
 
 const StringList = Schema.Array(Schema.String);
@@ -306,7 +306,7 @@ export const probeSettings = (
     : {
         relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
       }),
-  // This machine uses the repo it loaded, wherever it is (join --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
+  // This machine uses the repo it loaded, wherever it is (setup --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,
   ...(config.settings.plugins?.areas === undefined
     ? {}

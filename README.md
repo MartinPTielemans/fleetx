@@ -34,6 +34,24 @@ Nothing needs to be installed on the other machines: T3 Fleet streams itself ove
 ssh into `node -` (Node 24 or newer) and reads what it needs. It only reads;
 changes happen through `t3-fleet fix`, after you have seen them.
 
+## Getting started
+
+```sh
+curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
+t3-fleet setup                                  # the first machine starts a fleet
+t3-fleet invite desktop                         # prints the line to run on desktop:
+#   … | sh -s -- setup <your repo> desktop      # it joins, with what it already has
+```
+
+`setup` looks at the skills, MCP servers and instruction files a machine already
+has, and shows one screen of what it would do before writing anything:
+what goes into the repository, what gets linked, each conflict with the
+fleet (with a diff and a choice), and every credential it found, which goes
+into the encrypted secrets file and never into a plain file. `--plan` only
+shows, `--yes` takes the defaults, `--resume` continues a setup that stopped.
+Run it again on a machine any time to see what still differs. See the
+[quickstart](docs/quickstart.md).
+
 ## Your setup lives in your own repository
 
 T3 Fleet is the engine and knows nothing about your machines. Your setup lives in
@@ -127,8 +145,9 @@ nothing changed. Scheduled checks use this to stay quiet.
 - `fleet_apply_fixes`: runs fixes by id, only ones T3 Fleet proposed, after
   checking again that each still applies.
 
-Register it with Claude Code (`claude mcp add T3 Fleet -- t3-fleet mcp`) or Codex,
-and any thread can be asked "what's wrong with my environments?".
+`t3-fleet setup` declares it as the MCP server `t3-fleet` in every machine's
+Claude Code and Codex, so any thread can be asked "what's wrong with my
+environments?".
 
 ## In the browser
 
@@ -164,7 +183,7 @@ it, since that would put the old build back.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md): one machine to two in five minutes
+- [Quickstart](docs/quickstart.md): `t3-fleet setup`, from one machine to two
 - [Topologies](docs/topologies.md): roles, relays, profiles
 - [Areas](docs/areas.md): everything T3 Fleet manages, and its settings
 - [Troubleshooting](docs/troubleshooting.md): every `doctor` finding explained

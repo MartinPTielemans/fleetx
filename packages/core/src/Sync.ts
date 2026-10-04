@@ -38,6 +38,7 @@ import {
   scanCommits,
   scanEdits,
   unmergedHits,
+  unsafePath,
   why,
 } from "./Git.ts";
 import {
@@ -52,7 +53,19 @@ import {
 import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
+import {
+  approvedCopies,
+  lastProposalPath,
+  permissionProblems,
+  PROPOSAL_REF,
+  restoreDropped,
+  settleApproval,
+  unmergedStep,
+  type Settled,
+} from "./Approved.ts";
+import { clearSetupProposed, setupProposed } from "./setup/State.ts";
 import { applyAccepted } from "./Memory.ts";
+import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, type Alert } from "./State.ts";
@@ -237,6 +250,16 @@ const secretFindings = (
     };
   });
 
+/** A scan for secrets that could not run: nothing it would have looked at is committed or proposed. */
+const scanFailed = (node: string, why: string): Finding => ({
+  node,
+  key: "sync-scan-failed",
+  severity: "error",
+  area: "sync",
+  title: `sync could not scan this machine's edits for secrets, so it committed and proposed none of them: ${why}`,
+  detail: "t3-fleet secrets scan shows what the scan sees; the next sync tries again.",
+});
+
 /** Units set aside by an earlier run, until the stash entry is dropped. */
 const asideFindings = (node: string, repo: string, units: ReadonlySet<string>): Array<Finding> =>
   [...units].map((unit) => ({
@@ -284,6 +307,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     let self = startSelf;
     let message = "";
     let failed = false;
+    let settled: Settled | null = null;
     const findings: Array<Finding> = [];
 
     // 1. Propose or commit changes under the auto-commit paths. A node
@@ -303,19 +327,38 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     }
     // What would add a secret is held back, whole skill by whole skill.
     const edited = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
-    const scanned = yield* scanEdits(repo, edited, { allowed: yield* allowedNow() }).pipe(
-      Effect.result,
-    );
+    // A path with a newline or other control character is never committed or proposed.
+    const unsafe = edited.filter(unsafePath);
+    if (unsafe.length > 0)
+      findings.push({
+        node: self.name,
+        key: "sync-path-unsafe",
+        severity: "warn",
+        area: "sync",
+        title: `sync will not commit or propose ${unsafe.map((f) => JSON.stringify(f)).join(", ")}: a newline or other control character in a path`,
+        detail: "Rename it to a name without control characters; sync then takes it as usual.",
+      });
+    const scanned = yield* scanEdits(
+      repo,
+      edited.filter((f) => !unsafePath(f)),
+      {
+        allowed: yield* allowedNow(),
+      },
+    ).pipe(Effect.result);
     // Unscanned is uncommitted.
     if (scanned._tag === "Failure") {
       failed = true;
       message = scanned.failure;
+      findings.push(scanFailed(self.name, scanned.failure));
     }
     // A file still conflicted is never committed or proposed either, nor a SOURCES.json that does not read.
     const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
     const hits = [
       ...(scanned._tag === "Success" ? scanned.success : []),
-      ...(yield* unmergedHits(repo, edited)),
+      ...(yield* unmergedHits(
+        repo,
+        edited.filter((f) => !unsafePath(f)),
+      )),
       ...(entries === null ? [UNREADABLE_SOURCES] : []),
     ];
     const held = heldBack(
@@ -352,9 +395,24 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         for (const p of yield* listProposals(repo, config.branch))
           if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
       }
+      const moving = [...movable].filter(([, files]) => files.some((f) => incoming.has(f)));
+      // A member's file exactly as its approved proposal had it stays: the pull takes it as it
+      // would anyway, and the unit's stash then holds only edits, which come back cleanly.
+      const approved = authority
+        ? new Set<string>()
+        : yield* approvedCopies(
+            repo,
+            self.name,
+            config.branch,
+            moving.flatMap(([, files]) => files),
+          );
       const aside = yield* setAsideUnits(
         repo,
-        new Map([...movable].filter(([, files]) => files.some((f) => incoming.has(f)))),
+        new Map(
+          moving
+            .map(([unit, files]) => [unit, files.filter((f) => !approved.has(f))] as const)
+            .filter(([, files]) => files.length > 0),
+        ),
       );
       if (aside.size > 0) {
         const moved = new Map([...held].filter(([u]) => aside.has(u)));
@@ -376,7 +434,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     // Held back, or set aside above: either way not this commit's.
     const heldFiles = new Set([...held.values()].flat());
     const changed = (authority ? yield* changedFiles(repo, autoCommit) : []).filter(
-      (f) => edited.includes(f) && !heldFiles.has(f),
+      (f) => edited.includes(f) && !heldFiles.has(f) && !unsafePath(f),
     );
     if (changed.length > 0) {
       const committed = yield* addPaths(repo, changed).pipe(
@@ -409,7 +467,10 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     //    fast-forwards: it never commits. Commits made there by hand are
     //    rebased along, as before, and named, since they reach no one.
     let how: "rebase" | "ff-only" = authority ? "rebase" : "ff-only";
-    if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+    // One fetch for a member's whole exchange: settling and the pull use it.
+    const fetched =
+      how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]));
+    if (fetched) {
       const local = out(
         yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`]),
       )
@@ -428,7 +489,30 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         });
       }
     }
-    const pulled = yield* pullBranch(repo, config.branch, how).pipe(
+    // A member's copies exactly as its approved proposal had them (Approved.ts); nothing else is touched.
+    if (fetched && !failed) {
+      settled = yield* settleApproval(repo, self.name, config.branch, {
+        exclude: heldFiles,
+        how,
+      }).pipe(
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            failed = true;
+            message = e;
+            return null;
+          }),
+        ),
+      );
+      if (settled !== null && settled.failure !== null) {
+        failed = true;
+        message = settled.failure;
+      }
+      if (settled !== null && settled.dropped.length > 0)
+        lines.push(
+          `took the branch's version of ${settled.dropped.length} approved file${settled.dropped.length === 1 ? "" : "s"}`,
+        );
+    }
+    const pulled = yield* pullBranch(repo, config.branch, how, { fetched }).pipe(
       Effect.catch((e: string) =>
         Effect.sync(() => {
           failed = true;
@@ -438,6 +522,36 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
+    if (failed && settled !== null) {
+      // Not pulled: what was dropped comes back from the proposal commit, exactly.
+      yield* restoreDropped(repo, settled).pipe(
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            message = `${message}; ${e}`;
+          }),
+        ),
+      );
+      const waiting = settled.pending;
+      const edits = settled.overlapping.filter((f) => !waiting.includes(f));
+      if (waiting.length > 0)
+        findings.push({
+          node: self.name,
+          key: "sync-edit-proposed",
+          severity: "info",
+          area: "sync",
+          title: `${waiting.join(", ")}: this machine's proposal, waiting for approval; sync pulls once an authority approves or rejects it`,
+          detail: `t3-fleet review on an authority shows it. Until then this machine does not take the branch's change to ${waiting.length === 1 ? "it" : "them"}.`,
+        });
+      if (edits.length > 0)
+        findings.push({
+          node: self.name,
+          key: "sync-edit-unmerged",
+          severity: "warn",
+          area: "sync",
+          title: `this machine's edit to ${edits.join(", ")} overlaps the branch's change, so sync does not pull`,
+          detail: unmergedStep(repo, edits, yield* permissionProblems(repo, edits)),
+        });
+    }
     if (authority && !failed) {
       const ahead = Number(
         out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])),
@@ -480,7 +594,17 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     // after a failed pull: its files would be based on an old branch, and
     // approving them would undo what it failed to pull.
     if (!authority && !failed) {
-      const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
+      // What setup wrote is proposed whatever [fleet] auto_commit says, until it is approved.
+      const home = process.env["HOME"] ?? "";
+      const fromSetup = yield* setupProposed(home);
+      const setupChanged = fromSetup.length === 0 ? [] : yield* changedFiles(repo, fromSetup);
+      if (fromSetup.length > 0 && setupChanged.length === 0) yield* clearSetupProposed(home);
+      const changed = [
+        ...new Set([
+          ...(autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit)),
+          ...setupChanged,
+        ]),
+      ].filter((f) => !unsafePath(f));
       const outcome = yield* Effect.gen(function* () {
         const hits = [
           ...(yield* scanEdits(repo, changed, {
@@ -502,6 +626,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           Effect.sync(() => {
             failed = true;
             message = message || e;
+            if (e.startsWith("scanning for secrets")) findings.push(scanFailed(self.name, e));
             return null;
           }),
         ),
@@ -509,10 +634,23 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       if (outcome !== null) {
         findings.push(...secretFindings(self.name, repo, outcome.held, outcome.hits, "propose"));
         for (const unit of outcome.held.keys()) reported.add(unit);
-        if (outcome.commit !== null)
+        if (outcome.commit !== null) {
           lines.push(
             `proposed ${outcome.kept.length} file${outcome.kept.length === 1 ? "" : "s"} for approval (${outcome.commit})`,
           );
+          // What it proposed, for telling an approved copy from a later edit (Approved.ts).
+          const full = out(
+            yield* git(repo, ["rev-parse", "--verify", `${outcome.commit}^{commit}`]),
+          );
+          if (full !== "") {
+            // A ref keeps the commit here (git gc), for putting dropped files back (Approved.ts).
+            yield* git(repo, ["update-ref", PROPOSAL_REF, full]);
+            yield* FileSystem.FileSystem.pipe(
+              Effect.flatMap((fs) => fs.writeFileString(lastProposalPath(home), `${full}\n`)),
+              Effect.ignore,
+            );
+          }
+        }
       }
     }
 
@@ -546,8 +684,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
             }),
           ),
         );
-        if (rev !== null) lines.push(`approved ${proposal.node}'s proposal (${rev})`);
+        if (rev !== null)
+          lines.push(`approved ${proposal.node}'s proposal (${rev.rev})`, ...rev.notes);
       }
+      // Proposed secrets whose merge failed or was left for an authority that can read them.
+      lines.push(
+        ...(yield* mergeProposedSecrets(repo).pipe(
+          Effect.catch((e) =>
+            Effect.succeed([
+              `merging proposed secrets failed: ${typeof e === "string" ? e : e.message}`,
+            ]),
+          ),
+        )),
+      );
     }
 
     return { failed, message, config, self, findings };
@@ -680,7 +829,8 @@ export interface SyncResult {
 
 export const syncRun = (
   startConfig: Config,
-  options: { readonly apply: boolean } = { apply: true },
+  /** `areas` narrows [fleet] apply further (setup's first sync). */
+  options: { readonly apply: boolean; readonly areas?: ReadonlyArray<string> } = { apply: true },
 ) =>
   Effect.gen(function* () {
     const repo = startConfig.repo;
@@ -744,7 +894,9 @@ export const syncRun = (
 
       let selfResult = yield* observeSelf;
       let findings = yield* findingsFor(fleetResults(selfResult));
-      const applyAreas = settingList(config, "apply", DEFAULT_APPLY);
+      const applyAreas = settingList(config, "apply", DEFAULT_APPLY).filter(
+        (a) => options.areas === undefined || options.areas.includes(a),
+      );
       const applicable = findings.filter(
         (f): f is Finding & { readonly fix: Fix } =>
           f.fix !== undefined &&

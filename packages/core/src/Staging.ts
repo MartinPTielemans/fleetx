@@ -21,16 +21,22 @@ import {
   nulList,
   ok,
   out,
+  pathLine,
   pullBranch,
   scanEdits,
   scanStaged,
   unmergedHits,
+  unsafePath,
   why,
 } from "./Git.ts";
+import { proposalTrailer } from "./Approved.ts";
 import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
 import { readAllowed, refusal } from "./SecretScan.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
+import { mergeProposedSecrets } from "./ProposedSecrets.ts";
+import { PROPOSED_SECRETS } from "./setup/Plan.ts";
+import { mergeAdditions } from "./setup/TomlMerge.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
 export interface Proposal {
@@ -170,6 +176,22 @@ export const approve = (
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
       const files = yield* ownChange(repo, tip);
+      // A newline in a path could write a line of the approval's message; no such path enters the fleet.
+      const unsafe = files.filter(unsafePath);
+      if (unsafe.length > 0)
+        return yield* Effect.fail(
+          `${proposal.node}'s proposal has a path with a newline or other control character (${unsafe.map((f) => JSON.stringify(f)).join(", ")}); reject it`,
+        );
+      // A proposal carries its own machine's secrets, and no one else's.
+      const foreign = files.filter(
+        (f) =>
+          f.startsWith(`${PROPOSED_SECRETS}/`) &&
+          f !== `${PROPOSED_SECRETS}/${proposal.node}.env.age`,
+      );
+      if (foreign.length > 0)
+        return yield* Effect.fail(
+          `${proposal.node}'s proposal changes ${foreign.join(", ")}, secrets that are not its own; reject it`,
+        );
       const dirty = yield* changedFiles(repo, files);
       if (dirty.length > 0) {
         // Edits sync holds back never get committed: approving sets those aside in git stash.
@@ -205,9 +227,16 @@ export const approve = (
             const conflicted = nulList(
               (yield* git(scratch, ["diff", "--name-only", "-z", "--diff-filter=U"])).stdout,
             );
-            return yield* Effect.fail(
-              `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made${conflicted.length > 0 ? ` (${conflicted.join(", ")})` : ""}; reject it, or have ${proposal.node} sync and propose again`,
-            );
+            if (conflicted.length === 0)
+              return yield* Effect.fail(
+                `applying ${proposal.node}'s proposal failed: ${why(pick)}`,
+              );
+            // Only what two machines joining at once both add (TomlMerge.ts) merges; the rest refuses.
+            const unresolved = yield* mergeTomlAdditions(scratch);
+            if (unresolved.length > 0)
+              return yield* Effect.fail(
+                `${proposal.node}'s proposal conflicts with what reached ${branch} since it was made (${unresolved.join(", ")}). Reject it (t3-fleet reject ${proposal.node}): ${proposal.node}'s next sync sets those edits aside, and \`t3-fleet setup\` there offers what setup added again, on top of ${branch}`,
+              );
           }
           // Only the files the proposal names, which is what was reviewed and
           // what auto_approve trusts: a cherry-pick follows renames, so an
@@ -234,7 +263,8 @@ export const approve = (
             "commit",
             "-q",
             "-m",
-            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}`,
+            // The trailer names the commit approved: that member drops its copies of it (Approved.ts).
+            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.map(pathLine).join("\n")}\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
           ]);
           if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
           return out(yield* git(scratch, ["rev-parse", "HEAD"]));
@@ -249,10 +279,51 @@ export const approve = (
         const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
         if (!ok(push)) return yield* Effect.fail(`push failed: ${why(push)}`);
       }
+      // Secrets the proposal brought (setup on a joining machine), now that what uses them is in;
+      // also when it was on the branch already, so approving again retries a merge that failed.
+      const secrets = files.filter((f) => f.startsWith(`${PROPOSED_SECRETS}/`));
+      const notes =
+        secrets.length === 0
+          ? []
+          : yield* mergeProposedSecrets(repo, secrets).pipe(
+              Effect.mapError(
+                (e) =>
+                  `approved, but merging its secrets failed (the next sync here tries again): ${typeof e === "string" ? e : e.message}`,
+              ),
+            );
       yield* dropStaging(repo, proposal, tip);
-      return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+      return { rev: out(yield* git(repo, ["rev-parse", "--short", "HEAD"])), notes };
     }),
   );
+
+/**
+ * After a conflicted cherry-pick: each conflicted TOML file merged by
+ * additions (TomlMerge.ts) and staged. The files that remain conflicted.
+ */
+const mergeTomlAdditions = (scratch: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const conflicted = nulList(
+      (yield* git(scratch, ["diff", "--name-only", "-z", "--diff-filter=U"])).stdout,
+    );
+    const left: Array<string> = [];
+    for (const file of conflicted) {
+      const stage = (n: number) =>
+        git(scratch, ["show", `:${n}:${file}`]).pipe(Effect.map((r) => (ok(r) ? r.stdout : null)));
+      const [base, ours, theirs] = [yield* stage(1), yield* stage(2), yield* stage(3)];
+      const merged =
+        file.endsWith(".toml") && base !== null && ours !== null && theirs !== null
+          ? mergeAdditions(base, ours, theirs)
+          : null;
+      if (merged === null) {
+        left.push(file);
+        continue;
+      }
+      yield* fs.writeFileString(`${scratch}/${file}`, merged);
+      yield* git(scratch, ["add", "--", file], { env: literal });
+    }
+    return left;
+  }).pipe(Effect.mapError((e) => `merging ${e.message}`));
 
 /** Run `use` in a throwaway worktree of `repo` at its HEAD, removed afterwards whatever happens. */
 const inScratchWorktree = <A, E, R>(

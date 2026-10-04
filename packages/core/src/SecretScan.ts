@@ -371,6 +371,47 @@ export const scanText = (file: string, text: string, allowed: ReadonlyArray<Allo
     allowed,
   );
 
+const C_ESCAPES: Readonly<Record<string, number>> = {
+  a: 7,
+  b: 8,
+  t: 9,
+  n: 10,
+  v: 11,
+  f: 12,
+  r: 13,
+  '"': 34,
+  "\\": 92,
+};
+
+/**
+ * A path as git prints it in a diff header: C-quoted ("…", with \t, \n, \"
+ * and \ooo octal bytes) when it holds a control character, a quote or a
+ * backslash, plain otherwise. Any byte sequence decodes; nothing throws.
+ */
+export const unquotePath = (text: string) => {
+  if (!(text.startsWith('"') && text.endsWith('"') && text.length >= 2)) return text;
+  const inner = text.slice(1, -1);
+  const bytes: Array<number> = [];
+  const encoder = new TextEncoder();
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i] ?? "";
+    if (c !== "\\") {
+      bytes.push(...encoder.encode(c));
+      continue;
+    }
+    const next = inner[i + 1] ?? "";
+    const octal = /^[0-7]{3}/.exec(inner.slice(i + 1, i + 4))?.[0];
+    if (octal !== undefined) {
+      bytes.push(Number.parseInt(octal, 8));
+      i += 3;
+    } else if (next in C_ESCAPES) {
+      bytes.push(C_ESCAPES[next] ?? 0);
+      i += 1;
+    } else bytes.push(92);
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+};
+
 /** The added lines of a `git diff -U0`, by file. */
 export const addedLines = (diff: string) => {
   const files = new Map<string, Array<{ line: number; text: string }>>();
@@ -383,7 +424,7 @@ export const addedLines = (diff: string) => {
         current = null;
         continue;
       }
-      const unquoted = target.startsWith('"') ? (JSON.parse(target) as string) : target;
+      const unquoted = unquotePath(target);
       const name = unquoted.replace(/^b\//, "");
       current = files.get(name) ?? [];
       files.set(name, current);
