@@ -15,7 +15,7 @@ import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 import { expandHome, loadConfig, loadConfigFrom, type Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { exec } from "@t3-fleet/core/Exec";
-import { snapshot } from "@t3-fleet/core/Git";
+import { indexEntries, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
@@ -53,7 +53,7 @@ import {
 } from "@t3-fleet/core/Sync";
 
 import { reportUserErrors } from "./shared.ts";
-import { stateDir } from "@t3-fleet/core/Names";
+import { FLEET_FILE, stateDir } from "@t3-fleet/core/Names";
 
 export const syncCommand = Command.make("sync", {
   noApply: Flag.Boolean("no-apply").pipe(
@@ -457,19 +457,29 @@ export const withMcpServer = (text: string, name: string) =>
   withMcpListItem(text, ["servers", '"servers.add"'], '"servers.add"', name);
 
 /** The [mcp] table of a node file: where its body starts and ends, or null. */
+const MCP_HEADER = /^\[mcp\][ \t]*(?:#.*)?$/m;
+
 const mcpTable = (text: string) => {
-  const table = /^\[mcp\][ \t]*$/m.exec(text);
+  const table = MCP_HEADER.exec(text);
   if (table === null) return null;
   const rest = text.slice(table.index);
   const end = rest.slice(1).search(/^\[/m);
   return { start: table.index, end: end === -1 ? text.length : table.index + end + 1 };
 };
 
+/** A one-line list `key = [ … ]`, a comment after it kept. Anything else is left to the check. */
 const listLine = (key: string) =>
   new RegExp(
-    `^(${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})[ \\t]*=[ \\t]*\\[(.*)\\][ \\t]*$`,
+    `^(${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})[ \\t]*=[ \\t]*\\[([^\\]]*)\\]([ \\t]*#.*)?[ \\t]*$`,
     "m",
   );
+
+/** A list's items, with an empty one from a trailing comma dropped. */
+const listItems = (inner: string | undefined) =>
+  (inner ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
 
 /**
  * Add `name` to a list under a node file's [mcp]: the first of `keys` it has,
@@ -483,9 +493,9 @@ const withMcpListItem = (text: string, keys: ReadonlyArray<string>, add: string,
   const updated = list
     ? body.replace(
         list[0],
-        `${list[1]} = [${[list[2]?.trim(), JSON.stringify(name)].filter(Boolean).join(", ")}]`,
+        `${list[1]} = [${[...listItems(list[2]), JSON.stringify(name)].join(", ")}]${list[3] ?? ""}`,
       )
-    : body.replace(/^\[mcp\][ \t]*$/m, `[mcp]\n${add} = [${JSON.stringify(name)}]`);
+    : body.replace(MCP_HEADER, (header) => `${header}\n${add} = [${JSON.stringify(name)}]`);
   return text.slice(0, table.start) + updated + text.slice(table.end);
 };
 
@@ -496,13 +506,12 @@ const withoutMcpListItem = (text: string, key: string, name: string) => {
   const body = text.slice(table.start, table.end);
   const list = listLine(key).exec(body);
   if (list === null) return text;
-  const items = (list[2] ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item !== "" && item !== JSON.stringify(name) && item !== `'${name}'`);
+  const items = listItems(list[2]).filter(
+    (item) => item !== JSON.stringify(name) && item !== `'${name}'`,
+  );
   return (
     text.slice(0, table.start) +
-    body.replace(list[0], `${list[1]} = [${items.join(", ")}]`) +
+    body.replace(list[0], `${list[1]} = [${items.join(", ")}]${list[3] ?? ""}`) +
     text.slice(table.end)
   );
 };
@@ -684,80 +693,70 @@ export const mcpDefinition = (input: {
 /** A failure after the commit: the change is in the repo, and the next sync pushes it. */
 const landedAnyway = (e: unknown) => typeof e === "string" && e.startsWith("committed");
 
-/** An index entry: `<mode> <object>`, or null for a path the index does not have. */
-const indexEntry = (repo: string, rel: string) =>
-  exec({
-    command: "git",
-    args: ["-C", repo, "--literal-pathspecs", "ls-files", "--stage", "-z", "--", rel],
-  }).pipe(
-    Effect.flatMap((r) =>
-      r.code === 0
-        ? Effect.succeed(/^(\d+) ([0-9a-f]+) 0\t/.exec(r.stdout)?.slice(1, 3).join(" ") ?? null)
-        : Effect.fail(`git ls-files ${rel} failed: ${r.stderr.trim()}`),
-    ),
-  );
+/** JSON with every object's keys sorted: two tables are the same when this is. */
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : typeof value === "object" && value !== null
+      ? `{${Object.keys(value)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
+          .join(",")}}`
+      : JSON.stringify(value);
 
 /**
- * Write files into the repo and land them. When a write or the landing fails
- * before the commit, every file is put back as it was (or removed, if it was
- * new), and its git index entry too, so a failed change leaves nothing
- * behind, not even something staged for the next commit. A path is
- * snapshotted once, before its first write.
+ * Edits to node files, checked before any is written: in a scratch copy of
+ * the fleet's settings, every node's merged settings must come out exactly as
+ * they were, but with `name` in each edited node's [mcp] servers and out of
+ * its ignore. Text edits cannot see every TOML form (a multi-line list, an
+ * escaped name); when one goes wrong, this says what to edit by hand.
  */
-export const stageAndLand = <E, R, E2, R2>(
-  repo: string,
-  files: ReadonlyArray<{ readonly rel: string; readonly write: Effect.Effect<unknown, E, R> }>,
-  landPaths: (paths: ReadonlyArray<string>) => Effect.Effect<string, E2, R2>,
+const checkNodeEdits = (
+  config: Config,
+  before: Config,
+  edits: ReadonlyArray<{ readonly target: string; readonly rel: string; readonly text: string }>,
+  name: string,
 ) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const before = new Map<
-      string,
-      { readonly content: Option.Option<string>; readonly index: string | null }
-    >();
-    const restore = () =>
-      Effect.forEach(
-        [...before],
-        ([rel, { content, index }]) =>
-          Effect.gen(function* () {
-            yield* Option.isSome(content)
-              ? fs.writeFileString(`${repo}/${rel}`, content.value)
-              : fs.remove(`${repo}/${rel}`).pipe(Effect.ignore);
-            const [mode, object] = index?.split(" ") ?? [];
-            yield* exec({
-              command: "git",
-              args:
-                mode !== undefined && object !== undefined
-                  ? ["-C", repo, "update-index", "--add", "--cacheinfo", `${mode},${object},${rel}`]
-                  : ["-C", repo, "update-index", "--force-remove", "--", rel],
-            });
-          }),
-        { discard: true },
-      ).pipe(Effect.ignore);
-    return yield* Effect.gen(function* () {
-      for (const file of files) {
-        if (!before.has(file.rel)) {
-          // Absent is the only reading that means "new"; any other failure stops here.
-          const content = yield* fs.readFileString(`${repo}/${file.rel}`).pipe(
-            Effect.asSome,
-            Effect.catchIf(
-              (e) => e.reason._tag === "NotFound",
-              () => Effect.succeed(Option.none<string>()),
-            ),
-            Effect.mapError((e) => `cannot read ${file.rel}: ${e.message}`),
+  Effect.scoped(
+    Effect.gen(function* () {
+      if (edits.length === 0) return;
+      const fs = yield* FileSystem.FileSystem;
+      const scratch = yield* fs.makeTempDirectoryScoped();
+      for (const entry of [FLEET_FILE, "profiles", "nodes"])
+        if (yield* fs.exists(`${config.repo}/${entry}`))
+          yield* fs.copy(`${config.repo}/${entry}`, `${scratch}/${entry}`);
+      for (const edit of edits) yield* fs.writeFileString(`${scratch}/${edit.rel}`, edit.text);
+      const by = (target: string) =>
+        `${edits.map((e) => e.rel).join(", ")} cannot be edited safely${target}. Add "${name}" to [mcp] servers there by hand (and take it off [mcp] ignore), then run this again. Nothing was changed.`;
+      const after = yield* loadConfigFrom(scratch, config.self).pipe(
+        Effect.mapError((e) => by(` (the result would not load: ${String(e).split("\n")[0]})`)),
+      );
+      const normal = (table: Readonly<Record<string, unknown>>, edited: boolean) => {
+        const mcp = (table["mcp"] ?? {}) as Readonly<Record<string, unknown>>;
+        const list = (key: string) =>
+          (Array.isArray(mcp[key]) ? (mcp[key] as Array<unknown>) : []).filter(
+            (item) => !(edited && item === name),
           );
-          before.set(file.rel, { content, index: yield* indexEntry(repo, file.rel) });
-        }
-        yield* file.write;
+        return canonical({
+          ...table,
+          mcp: {
+            ...mcp,
+            servers: [...list("servers"), ...(edited ? [name] : [])].map(String).sort(),
+            ignore: list("ignore").map(String).sort(),
+          },
+        });
+      };
+      for (const node of before.nodes) {
+        const edited = edits.some((e) => e.target === node.name);
+        const now = after.nodes.find((n) => n.name === node.name);
+        if (
+          now === undefined ||
+          normal(now.settings.table, false) !== normal(node.settings.table, edited)
+        )
+          return yield* Effect.fail(by(""));
       }
-      return yield* landPaths([...before.keys()]);
-    }).pipe(
-      Effect.catchIf(
-        (e) => !landedAnyway(e),
-        (e) => restore().pipe(Effect.andThen(Effect.fail(e))),
-      ),
-    );
-  });
+    }),
+  );
 
 /** Declare an MCP server once; nodes listing it register it on their next sync. */
 export const mcpAddCommand = Command.make("add", {
@@ -840,7 +839,11 @@ export const mcpAddCommand = Command.make("add", {
           if ("problem" in built) return yield* Effect.fail(built.problem);
           // Every check before the first change, against the nodes' settings as they are now.
           const fresh = yield* loadConfigFrom(config.repo, config.self);
-          const nodeFiles: Array<{ readonly rel: string; readonly text: string }> = [];
+          const nodeFiles: Array<{
+            readonly target: string;
+            readonly rel: string;
+            readonly text: string;
+          }> = [];
           for (const target of targets) {
             const settings = fresh.nodes.find((n) => n.name === target)?.settings.table["mcp"];
             if (settings === undefined && !fresh.nodes.some((n) => n.name === target))
@@ -856,39 +859,51 @@ export const mcpAddCommand = Command.make("add", {
             let next = list("servers").includes(name) ? text : withMcpServer(text, name);
             // Adopting a server this machine ignored: it stops ignoring it.
             if (list("ignore").includes(name)) next = withoutMcpIgnore(next, name);
-            if (next !== text) nodeFiles.push({ rel, text: next });
+            if (next !== text) nodeFiles.push({ target, rel, text: next });
           }
+          yield* checkNodeEdits(config, fresh, nodeFiles, name);
           const stored = authority ? built.store : [];
-          const secretsRel = encryptedPath(config.repo).slice(config.repo.length + 1);
-          const landed = yield* stageAndLand(
-            config.repo,
-            [
-              ...(stored.length > 0
-                ? [
-                    {
-                      rel: secretsRel,
-                      write: Effect.suspend(() => {
-                        let text = secretsText;
-                        for (const s of stored) text = setVar(text, s.name, s.value);
-                        return writeSecrets(config.repo, text);
-                      }),
-                    },
-                  ]
-                : []),
-              {
-                rel: `mcp/${name}.json`,
-                write: fs.writeFileString(
-                  `${config.repo}/mcp/${name}.json`,
-                  prettyJson(built.definition),
+          const touched = [
+            ...(stored.length > 0
+              ? [encryptedPath(config.repo).slice(config.repo.length + 1)]
+              : []),
+            `mcp/${name}.json`,
+            ...nodeFiles.map((f) => f.rel),
+          ];
+          // Only resolved index entries can be put back on a refusal: a merge in progress stops here.
+          const conflicted = yield* unmergedHits(config.repo, touched);
+          if (conflicted.length > 0)
+            return yield* Effect.fail(
+              `${conflicted.map((c) => c.file).join(", ")} ${conflicted.length === 1 ? "has" : "have"} an unresolved merge conflict; resolve it first. Nothing was changed.`,
+            );
+          // What is there now, edits and staged changes too, for putting back when the change does not land.
+          const dirs: Array<string> = [];
+          for (const dir of ["mcp", "nodes", "secrets"])
+            if (yield* fs.exists(`${config.repo}/${dir}`)) dirs.push(dir);
+          const before = yield* snapshot(config.repo, dirs);
+          const index = yield* indexEntries(config.repo, touched);
+          const landed = yield* Effect.gen(function* () {
+            if (stored.length > 0) {
+              let text = secretsText;
+              for (const s of stored) text = setVar(text, s.name, s.value);
+              yield* writeSecrets(config.repo, text);
+            }
+            yield* fs.writeFileString(
+              `${config.repo}/mcp/${name}.json`,
+              prettyJson(built.definition),
+            );
+            for (const f of nodeFiles) yield* fs.writeFileString(`${config.repo}/${f.rel}`, f.text);
+            return yield* land(config, touched, `Add MCP server ${name}`, before, index);
+          }).pipe(
+            // Refused or failed before the commit: everything goes back, the index too.
+            Effect.catchIf(
+              (e) => !landedAnyway(e),
+              (e) =>
+                restorePaths(config.repo, touched, before, index).pipe(
+                  Effect.ignore,
+                  Effect.andThen(Effect.fail(e)),
                 ),
-              },
-              ...nodeFiles.map((f) => ({
-                rel: f.rel,
-                write: fs.writeFileString(`${config.repo}/${f.rel}`, f.text),
-              })),
-            ],
-            (paths) => land(config, paths, `Add MCP server ${name}`),
-          ).pipe(
+            ),
             // Committed, and only the push failed: the change stands, and so does this machine's copy.
             Effect.tapError((e) =>
               landedAnyway(e) && stored.length > 0

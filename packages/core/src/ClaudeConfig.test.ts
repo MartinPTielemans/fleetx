@@ -118,6 +118,87 @@ describe("Claude's global config", () => {
     expect(servers(join(dir, "dotfiles/claude.json"))).toEqual(["fleet"]);
   });
 
+  // proper-lockfile's timings, scaled down: stale after 600 ms, refreshed every 200 ms.
+  const quick = { staleMs: 600, updateMs: 200 } as const;
+
+  it("keeps its lock fresh through a slow write, so another writer waits for it", async () => {
+    const dir = home('{"mcpServers":{}}');
+    const file = join(dir, ".claude.json");
+    const slow = Effect.runFork(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        timing: quick,
+        beforeWrite: Effect.sleep("1500 millis"),
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+    await Effect.runPromise(Effect.sleep("100 millis"));
+    // Another writer with the same rules, as Claude is: it would take over a stale lock.
+    const other = await run(updateClaudeConfig(dir, {}, addServer("claudes"), { timing: quick }));
+    expect(other._tag).toBe("Success");
+    await Effect.runPromise(Fiber.join(slow));
+    expect(servers(file).sort()).toEqual(["claudes", "fleet"]);
+    expect(existsSync(`${file}.lock`)).toBe(false);
+  });
+
+  it("writes nothing once its lock was taken over, and leaves the new holder's lock", async () => {
+    const dir = home('{"mcpServers":{"old":{}}}');
+    const file = join(dir, ".claude.json");
+    const slow = Effect.runFork(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        timing: quick,
+        beforeWrite: Effect.sleep("800 millis"),
+      }).pipe(Effect.result, Effect.provide(NodeServices.layer)),
+    );
+    await Effect.runPromise(Effect.sleep("300 millis"));
+    // Someone else's lock now: the old one removed and a new one made, as a takeover does.
+    rmdirSync(`${file}.lock`);
+    mkdirSync(`${file}.lock`);
+    writeFileSync(file, '{"mcpServers":{"old":{},"other":{}}}');
+    const result = await Effect.runPromise(Fiber.join(slow));
+    expect(result._tag).toBe("Failure");
+    expect(servers(file)).toEqual(["old", "other"]);
+    expect(existsSync(`${file}.lock`)).toBe(true);
+    expect(readdirSync(dir).filter((f) => f.includes("t3-fleet"))).toEqual([]);
+  });
+
+  it("makes its update again when the config changed without the lock", async () => {
+    // Claude writes without the lock when it gives up waiting for it.
+    const dir = home('{"mcpServers":{"old":{}}}');
+    const file = join(dir, ".claude.json");
+    let once = true;
+    await run(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        beforeWrite: Effect.sync(() => {
+          if (once) writeFileSync(file, '{"mcpServers":{"old":{},"other":{}}}');
+          once = false;
+        }),
+      }),
+    );
+    expect(servers(file)).toEqual(["old", "other", "fleet"]);
+  });
+
+  it("removes its lock with a plain rmdir, never what someone put in it", async () => {
+    const dir = home('{"mcpServers":{}}');
+    const file = join(dir, ".claude.json");
+    await run(
+      updateClaudeConfig(dir, {}, addServer("fleet"), {
+        beforeWrite: Effect.sync(() => writeFileSync(`${file}.lock/kept`, "")),
+      }),
+    );
+    expect(existsSync(`${file}.lock/kept`)).toBe(true);
+  });
+
+  it("makes a missing CLAUDE_CONFIG_DIR, and takes its value as it is", async () => {
+    const dir = home(null);
+    const custom = join(dir, "nested/claude");
+    expect(
+      (await run(updateClaudeConfig(dir, { CLAUDE_CONFIG_DIR: custom }, addServer("fleet"))))._tag,
+    ).toBe("Success");
+    expect(servers(join(custom, ".claude.json"))).toEqual(["fleet"]);
+    const spaced = join(dir, " spaced ");
+    await run(updateClaudeConfig(dir, { CLAUDE_CONFIG_DIR: spaced }, addServer("fleet")));
+    expect(existsSync(join(spaced, ".claude.json"))).toBe(true);
+  });
+
   it("finds the config where Claude does", async () => {
     const path = (dir: string, env: Record<string, string>) =>
       Effect.runPromise(claudeConfigPath(dir, env).pipe(Effect.provide(NodeServices.layer)));

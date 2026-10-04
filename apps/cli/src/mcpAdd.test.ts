@@ -146,6 +146,66 @@ describe("mcp add", () => {
   });
 });
 
+describe("mcp add: hand-written node files", () => {
+  const settle = (mcp: string) => {
+    writeFileSync(join(repo, "nodes/a.toml"), `roles = ["authority"]\n${mcp}`);
+    git(repo, "commit", "-q", "-am", "by hand");
+    git(repo, "push", "-q");
+  };
+  const merged = () =>
+    Effect.runPromise(loadConfigFrom(repo, "a").pipe(Effect.provide(NodeServices.layer))).then(
+      (config) => config.nodes.find((n) => n.name === "a")?.settings.table["mcp"],
+    );
+
+  for (const [label, mcp] of [
+    ["a comment after the list", '[mcp]\n"ignore.add" = ["figma"] # local\n'],
+    ["a comment after the table", '[mcp] # local\n"ignore.add" = ["figma"]\n'],
+    ["a trailing comma", '[mcp]\n"ignore.add" = ["figma"]\n"ignore.remove" = ["other",]\n'],
+  ] as const)
+    it(`adopts an ignored server with ${label}`, async () => {
+      settle(mcp);
+      await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
+      expect(process.exitCode).toBeUndefined();
+      expect(git(repo, "log", "-1", "--format=%s")).toBe("Add MCP server figma\n");
+      const settings = (await merged()) as { servers: Array<string>; ignore: Array<string> };
+      expect(settings.servers).toEqual(["figma"]);
+      expect(settings.ignore ?? []).not.toContain("figma");
+    });
+
+  it("takes a server off a multi-line ignore list", async () => {
+    settle('[mcp]\nignore = [\n  "figma",\n  "other",\n]\n');
+    await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
+    expect(process.exitCode).toBeUndefined();
+    expect(await merged()).toMatchObject({ servers: ["figma"], ignore: ["other"] });
+  });
+
+  it("refuses, writing nothing, a list it cannot edit safely", async () => {
+    // An escaped name: TOML reads "figma", the text edit cannot see it.
+    settle('[mcp]\nignore = ["fig\\u006da"]\n');
+    const text = read("nodes/a.toml");
+    const head = git(repo, "rev-parse", "HEAD");
+    await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
+    expect(process.exitCode).toBe(1);
+    expect(read("nodes/a.toml")).toBe(text);
+    expect(existsSync(join(repo, "mcp/figma.json"))).toBe(false);
+    expect(git(repo, "rev-parse", "HEAD")).toBe(head);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("refuses, before writing anything, when a file it would change is mid-merge", async () => {
+    const blob = git(repo, "rev-parse", "HEAD:nodes/a.toml").trim();
+    git(repo, "update-index", "--force-remove", "nodes/a.toml");
+    execFileSync("git", ["-C", repo, "update-index", "--index-info"], {
+      input: [1, 2, 3].map((stage) => `100644 ${blob} ${stage}\tnodes/a.toml\n`).join(""),
+    });
+    const stages = git(repo, "ls-files", "--stage", "nodes/a.toml");
+    await add("figma", "--url", "https://figma.example.com/mcp", "--node", "a");
+    expect(process.exitCode).toBe(1);
+    expect(git(repo, "ls-files", "--stage", "nodes/a.toml")).toBe(stages);
+    expect(existsSync(join(repo, "mcp/figma.json"))).toBe(false);
+  });
+});
+
 describe("mcp register-claude", () => {
   const register = (...args: Array<string>) =>
     run(Command.runWith(mcpRegisterClaudeCommand, { version: "t" })(args));

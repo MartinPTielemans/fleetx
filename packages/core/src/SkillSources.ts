@@ -391,13 +391,15 @@ export const removeSkills = (repo: string, names: ReadonlyArray<string>) =>
  * add what looks like a secret, they are put back as `before` (a snapshot
  * taken before the command wrote) has them, on any node, so no later sync
  * commits or proposes part of them and edits waiting there stay. What was
- * fetched can be fetched again once the line is allowed.
+ * fetched can be fetched again once the line is allowed. With `index`
+ * (indexEntries), what was staged there stays staged.
  */
 export const land = (
   config: Config,
   paths: ReadonlyArray<string>,
   message: string,
   before?: string,
+  index?: string,
 ) =>
   underSyncLock(
     Effect.gen(function* () {
@@ -409,7 +411,7 @@ export const land = (
           : yield* allowedAt(config.repo, `origin/${config.branch}`),
       });
       if (hits.length > 0) {
-        yield* restorePaths(config.repo, paths, before);
+        yield* restorePaths(config.repo, paths, before, index);
         return yield* Effect.fail(`${refusal(hits)}\nNothing was changed.`);
       }
       if (authority) {

@@ -824,14 +824,15 @@ fs.appendFileSync(p, out.join("\\n") + "\\n");
     backup("1", '{"mcpServers":{"c":{"headers":{"K":"ctx7sk-123"}}}}', 0o644);
     backup("2", '{"mcpServers":{"c":{"headers":{"K":"ctx7sk-123"}}}}', 0o600);
     backup("3", '{"mcpServers":{}}', 0o644);
-    writeFileSync(join(m.scratch, ".claude.json"), '{"x":"leg-1-but-longer"}', { mode: 0o644 });
+    // The config itself holds a short secret, leg-1: short ones count too.
+    writeFileSync(join(m.scratch, ".claude.json"), '{"x":"leg-1"}', { mode: 0o644 });
     writeFileSync(join(m.scratch, ".claude.json.backup.4"), '{"y":"ctx7sk-123"}', { mode: 0o604 });
     const found = (await m.check()).findings.find((f) => f.key === "mcp-claude-config-exposed");
     expect(found).toMatchObject({
       severity: "error",
       fix: {
         command:
-          'chmod 600 "$HOME"/.claude.json.backup.4 "$HOME"/.claude/backups/.claude.json.backup.1',
+          'chmod 600 "$HOME"/.claude.json "$HOME"/.claude.json.backup.4 "$HOME"/.claude/backups/.claude.json.backup.1',
         safe: true,
       },
     });
@@ -840,6 +841,24 @@ fs.appendFileSync(p, out.join("\\n") + "\\n");
     expect(statSync(join(backups, ".claude.json.backup.1")).mode & 0o777).toBe(0o600);
     expect(statSync(join(backups, ".claude.json.backup.3")).mode & 0o777).toBe(0o644);
     expect((await m.check()).findings.map((f) => f.key)).not.toContain("mcp-claude-config-exposed");
+  });
+
+  it("finds a credential the definitions take from the environment, and never opens a FIFO", async () => {
+    const m = machine({ servers: ["envkey"] }, { ENVKEY: "e-42" });
+    writeFileSync(
+      join(m.scratch, "fleet/mcp/envkey.json"),
+      JSON.stringify({ kind: "direct", url: "https://e/mcp", headers: { K: "$ENVKEY" } }),
+    );
+    const backups = join(m.scratch, ".claude/backups");
+    mkdirSync(backups, { recursive: true });
+    writeFileSync(join(backups, ".claude.json.backup.1"), '{"K":"e-42"}', { mode: 0o644 });
+    execFileSync("mkfifo", ["-m", "644", join(backups, ".claude.json.backup.2")]);
+    const { observed, findings } = await m.check();
+    expect(observed.exposed).toEqual(["~/.claude/backups/.claude.json.backup.1"]);
+    expect(observed.unchecked).toBe(true);
+    expect(findings.find((f) => f.key === "mcp-claude-config-exposed")?.detail).toContain(
+      "some copies were not looked into",
+    );
   });
 
   it("leaves the servers a machine's [mcp] ignore lists unreported", async () => {

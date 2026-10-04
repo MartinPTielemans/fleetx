@@ -177,10 +177,15 @@ Claude's registration stores values. Its fix runs `t3-fleet mcp register-claude
 <name> '<definition>'`, which reads the secrets from the node's secrets.env
 (then its environment) itself, so no value is on a command line, and replaces
 only that entry of Claude's config where Claude keeps it (`~/.claude.json`, or
-in `$CLAUDE_CONFIG_DIR`). It takes Claude's own lock (`<config>.lock`, stale
-after ten seconds, as Claude has it), reads the config fresh under it, and
-writes a temporary file renamed over it: a failure leaves the old entry, and a
-config it cannot read is left alone. A config holding secrets is made
+in `$CLAUDE_CONFIG_DIR`). It takes Claude's own lock (`<config>.lock` beside
+the config's path, refreshed every five seconds and stale after ten, as Claude
+has it), reads the config fresh under it, and writes a temporary file renamed
+over it. Just before the rename it checks the lock is still its own (and
+writes nothing when it is not) and that the config has not changed meanwhile
+(Claude writes without the lock when it gives up waiting); when it has, the
+entry is made again from the new config. A failure leaves the old entry, and
+a config it cannot read is left alone; a missing `$CLAUDE_CONFIG_DIR` is
+made first, as Claude makes it. A config holding secrets is made
 readable by its owner alone (600), and the fix says so when it tightens one. It waits while the node
 lacks a secret (`mcp-<name>-secret-missing`). A registration whose declared
 env or header values differ (a rotated secret, say) is registered again; one
@@ -208,8 +213,13 @@ the server's name, numbered when that name holds another value) and the
 definition refers to it. That needs an authority; elsewhere `mcp add` writes
 the reference and says which secrets to set on one. It decides the names,
 writes and commits under the sync lock, and puts every file and its git index
-entry back when the change does not land. A server the machine listed in its
-`ignore` is taken off that list when `mcp add` declares it there.
+entry back when the change does not land (with what was staged before kept
+staged), and refuses up front while a file it would change is mid-merge. A
+server the machine listed in its `ignore` is taken off that list when `mcp
+add` declares it there. Every node file edit is checked first: in a scratch
+copy, each machine's merged settings must come out the same but for that
+server; when a hand-written file defeats the edit, nothing is written and
+`mcp add` says what to change by hand.
 
 Servers a machine's clients have at user scope that its `[mcp] servers` does
 not list are reported once per machine (`mcp-undeclared`); T3 Fleet leaves

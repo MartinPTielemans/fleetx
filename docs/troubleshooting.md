@@ -187,8 +187,15 @@ declare it in `headers` instead.
 Claude keeps of it (`~/.claude/backups/.claude.json.backup.<time>`), holds one
 of this machine's secrets and other users can read it: Claude copies the
 config's mode into its backups, so a config created 644 left every
-credential readable. The fix makes those files 600; only files others can
-read are looked into, and only for this machine's secret values.
+credential readable. The fix makes those files 600. Only regular files others
+can read are looked into, within bounds, and only for the values the node's
+definitions resolve to (its secrets, then its environment) and its other
+secrets; the detail says when some copies were not looked into.
+
+**`mcp-claude-config-unchecked`** — some of Claude's config backups others
+can read were not looked into for secrets: more than 50 of them, one larger
+than 4 MB or not a regular file, or reading took too long. Nothing is known
+to be exposed; `chmod 600` any that may hold credentials, or remove old ones.
 
 **`mcp-undeclared`** — Claude or Codex on this machine has MCP servers (at
 user scope) that its `[mcp] servers` does not list, so the fleet neither keeps

@@ -67,6 +67,7 @@ import { defineArea, sh, shPath } from "../Area.ts";
 import {
   claudeConfigBackups,
   claudeConfigPath,
+  holdsAny,
   readClaudeConfig,
   updateClaudeConfig,
   type ClaudeConfig,
@@ -218,9 +219,9 @@ export interface ClaudeEntry {
  */
 export const claudeEntry = (e: Endpoint, value: (name: string) => string | undefined) => {
   const missing = new Set<string>();
-  let secret = false;
+  const used = new Set<string>();
   const get = (name: string) => {
-    secret = true;
+    used.add(name);
     const v = value(name);
     if (v === undefined) missing.add(name);
     return v ?? "";
@@ -253,7 +254,7 @@ export const claudeEntry = (e: Endpoint, value: (name: string) => string | undef
       ...(e.env === undefined ? {} : { env: values(e.env) }),
     };
   }
-  return { entry, missing: [...missing].sort(), secret };
+  return { entry, missing: [...missing].sort(), used: [...used].sort() };
 };
 
 /**
@@ -359,6 +360,8 @@ const Observed = Schema.Struct({
    * this node's secrets while others can read them.
    */
   exposed: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Some of Claude's config files could not be looked into: too many, too large, too slow. */
+  unchecked: Schema.optionalKey(Schema.Boolean),
   /** User-scope servers each client has that [mcp] servers does not list. */
   undeclared: Schema.optionalKey(
     Schema.Struct({ claude: Schema.Array(Schema.String), codex: Schema.Array(Schema.String) }),
@@ -477,6 +480,9 @@ export const endpointProblem = (e: Endpoint): string | null => {
 
 export const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
+/** Variables a url or argument may name that are no secret: their values are everywhere. */
+const PLAIN_ENV = new Set(["HOME", "USER", "LOGNAME", "PATH", "SHELL", "PWD", "TMPDIR", "LANG"]);
+
 /** A key a stdio server's env may set (lower case too: it is never left unquoted). */
 const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -569,7 +575,7 @@ export const registerInClaude = (
         .readFileString(path.join(configDir(home), "secrets.env"))
         .pipe(Effect.orElseSucceed(() => "")),
     );
-    const { entry, missing, secret } = claudeEntry(endpoint, (n) => secrets[n] ?? env[n]);
+    const { entry, missing, used } = claudeEntry(endpoint, (n) => secrets[n] ?? env[n]);
     if (missing.length > 0)
       return yield* Effect.fail(
         `${name} needs ${missing.join(", ")}, which this machine's secrets do not have`,
@@ -589,7 +595,7 @@ export const registerInClaude = (
           },
         };
       },
-      { secret },
+      { secret: used.length > 0 },
     );
   });
 
@@ -982,28 +988,54 @@ export const McpArea = defineArea({
         codex: clients.codex ? theirs(codexAll) : [],
       };
       // Claude's config and the backups Claude copies it to, readable by others: is a secret in one?
-      // Only a file others can read is read, and only to look for this node's secret values.
-      const values = Object.values(secrets)
-        .filter((v) => v.length >= 8)
+      // The secrets are what registration would fill in (the node's secrets, then its environment)
+      // and every value in secrets.env; a false hit only suggests a harmless chmod 600. Only a
+      // regular file others can read is read, within bounds, and only to look for those values.
+      const declared = servers.flatMap((s) =>
+        s.endpoint === null ? [] : claudeEntry(s.endpoint, secret).used,
+      );
+      const values = [
+        ...new Set([
+          ...Object.values(secrets),
+          ...declared.filter((n) => !PLAIN_ENV.has(n)).flatMap((n) => secret(n) ?? []),
+        ]),
+      ]
+        .filter((v) => v.length >= 4)
         .flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]);
       const exposed: Array<string> = [];
+      let unchecked = false;
       if (values.length > 0) {
+        const backups = yield* claudeConfigBackups(ctx.home, ctx.env);
+        unchecked = backups.incomplete;
+        const config = yield* claudeConfigPath(ctx.home, ctx.env);
         const files = [
-          yield* claudeConfigPath(ctx.home, ctx.env),
-          ...(yield* claudeConfigBackups(ctx.home, ctx.env)),
+          {
+            path: config,
+            mode: yield* fs.stat(config).pipe(
+              Effect.map((info) => info.mode & 0o777),
+              Effect.orElseSucceed(() => 0o600),
+            ),
+          },
+          ...backups.files,
         ];
-        for (const file of files) {
-          const mode = yield* fs.stat(file).pipe(
-            Effect.map((info) => info.mode & 0o777),
-            Effect.orElseSucceed(() => 0o600),
-          );
-          if ((mode & 0o077) === 0) continue;
-          const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
-          if (values.some((v) => text.includes(v)))
-            exposed.push(
-              file.startsWith(`${ctx.home}/`) ? `~/${file.slice(ctx.home.length + 1)}` : file,
-            );
-        }
+        const scan = Effect.forEach(
+          files.filter((f) => (f.mode & 0o077) !== 0),
+          (f) =>
+            holdsAny(f.path, values).pipe(
+              Effect.map((holds) => {
+                if (holds === null) unchecked = true;
+                else if (holds)
+                  exposed.push(
+                    f.path.startsWith(`${ctx.home}/`)
+                      ? `~/${f.path.slice(ctx.home.length + 1)}`
+                      : f.path,
+                  );
+              }),
+            ),
+          { discard: true },
+        );
+        if (Option.isNone(yield* scan.pipe(Effect.timeout(Duration.seconds(10)), Effect.option)))
+          unchecked = true;
       }
       // Relay node with the hub: what the hub itself says about each server.
       let hub:
@@ -1043,6 +1075,7 @@ export const McpArea = defineArea({
         clients,
         ...(undeclared.claude.length + undeclared.codex.length === 0 ? {} : { undeclared }),
         ...(exposed.length === 0 ? {} : { exposed }),
+        ...(unchecked ? { unchecked: true } : {}),
         ...(hub === undefined ? {} : { hub }),
         ...(toolhive === undefined ? {} : { toolhive }),
       };
@@ -1081,6 +1114,12 @@ export const McpArea = defineArea({
         },
       });
     }
+    const skipped =
+      "more than 50 of them, larger than 4 MB, not a regular file, or too slow to read";
+    const unchecked =
+      observed.unchecked === true
+        ? `; some copies were not looked into (${skipped}), so there may be more`
+        : "";
     if (observed.exposed !== undefined && observed.exposed.length > 0) {
       const files = observed.exposed;
       out.push({
@@ -1089,10 +1128,18 @@ export const McpArea = defineArea({
         key: "mcp-claude-config-exposed",
         severity: "error",
         title: `${files.length === 1 ? "A copy of Claude's config holds" : `${files.length} copies of Claude's config hold`} secrets other users on ${node} can read`,
-        detail: `${files.join(", ")}; making ${files.length === 1 ? "it" : "them"} readable by its owner alone (600) changes nothing else`,
+        detail: `${files.join(", ")}; making ${files.length === 1 ? "it" : "them"} readable by its owner alone (600) changes nothing else${unchecked}`,
         fix: { command: `chmod 600 ${files.map(shPath).join(" ")}`, safe: true },
       });
-    }
+    } else if (observed.unchecked === true)
+      out.push({
+        node,
+        area: "mcp",
+        key: "mcp-claude-config-unchecked",
+        severity: "info",
+        title: `Some copies of Claude's config on ${node} were not checked for readable secrets`,
+        detail: `copies others can read were not looked into (${skipped}); make any that may hold credentials readable by their owner alone (chmod 600)`,
+      });
     if (observed.undeclared !== undefined) {
       const { claude, codex } = observed.undeclared;
       const names = [...new Set([...claude, ...codex])].sort();
