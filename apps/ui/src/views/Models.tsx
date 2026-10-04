@@ -2,7 +2,14 @@
 import type { ModelUpstreamStats, ModelWindow } from "@t3-fleet/core/Api";
 import { ActivityIcon, RefreshCwIcon } from "lucide-react";
 
-import { ErrorState, LoadingRows, Page, SeverityIcon, UnavailableState, type Severity } from "../components/common";
+import {
+  ErrorState,
+  LoadingRows,
+  Page,
+  SeverityIcon,
+  UnavailableState,
+  type Severity,
+} from "../components/common";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Group, GroupLabel } from "../components/ui/group";
@@ -16,7 +23,11 @@ type NodeModels = UiModelsT["nodes"][number];
 
 /** More than 5% failed in the hour, or any fallback: the threshold the models-failing finding uses. */
 const health = (w: ModelWindow): Severity =>
-  w.requests > 0 && w.failed / w.requests > 0.05 ? "error" : w.fallbacks > 0 || w.failed > 0 ? "warn" : "ok";
+  w.requests > 0 && w.failed / w.requests > 0.05
+    ? "error"
+    : w.fallbacks > 0 || w.failed > 0
+      ? "warn"
+      : "ok";
 
 export function ModelsView() {
   const models = useResource(api.models);
@@ -30,18 +41,30 @@ export function ModelsView() {
       title="Models"
       description="Each provider's login under T3, and traffic through the T3 Fleet model proxy, per machine"
       actions={
-        <Button size="sm" variant="outline" disabled={models.loading} onClick={() => void models.reload()}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={models.loading}
+          onClick={() => void models.reload()}
+        >
           {models.loading ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
           Refresh
         </Button>
       }
     >
       {models.data === null ? (
-        <Group>{models.error === null ? <LoadingRows rows={3} /> : <ErrorState error={models.error} what="models" onRetry={() => void models.reload()} />}</Group>
+        <Group>
+          {models.error === null ? (
+            <LoadingRows rows={3} />
+          ) : (
+            <ErrorState error={models.error} what="models" onRetry={() => void models.reload()} />
+          )}
+        </Group>
       ) : reporting.length === 0 ? (
         <Group>
           <UnavailableState error={null} title="No machine reports model traffic yet">
-            The model proxy and the provider login checks come with the models area. Once a machine runs <code>t3-fleet models serve</code>, its traffic shows up here after the next check.
+            The model proxy and the provider login checks come with the models area. Once a machine
+            runs <code>t3-fleet models serve</code>, its traffic shows up here after the next check.
           </UnavailableState>
         </Group>
       ) : (
@@ -66,16 +89,30 @@ function NodeCard({ node: n }: { node: NodeModels }) {
       </GroupLabel>
       <Group>
         {logins.length === 0 ? (
-          <div className="px-4 py-2.5 text-muted-foreground text-xs">No provider logins reported.</div>
+          <div className="px-4 py-2.5 text-muted-foreground text-xs">
+            No provider logins reported.
+          </div>
         ) : (
           logins.map((l) => (
             <div key={l.instanceId} className="flex items-center gap-2 px-4 py-2 text-sm">
-              <SeverityIcon severity={l.status === "authenticated" ? "ok" : l.status === "unauthenticated" ? "error" : "info"} className="size-3.5" />
+              <SeverityIcon
+                severity={
+                  l.status === "authenticated"
+                    ? "ok"
+                    : l.status === "unauthenticated"
+                      ? "error"
+                      : "info"
+                }
+                className="size-3.5"
+              />
               <span className="font-medium">{instanceLabel(l.instanceId)}</span>
               <span className="text-muted-foreground text-xs">{statusText[l.status]}</span>
               {l.method === null ? null : <Badge variant="outline">{l.method}</Badge>}
               {l.detail === "" ? null : (
-                <span className="ml-auto max-w-[50%] truncate text-muted-foreground text-xs" title={l.detail}>
+                <span
+                  className="ml-auto max-w-[50%] truncate text-muted-foreground text-xs"
+                  title={l.detail}
+                >
                   {l.detail}
                 </span>
               )}
@@ -83,7 +120,9 @@ function NodeCard({ node: n }: { node: NodeModels }) {
           ))
         )}
         {n.stats === null ? (
-          <div className="px-4 py-2.5 text-muted-foreground text-xs">The model proxy is not reporting on this machine.</div>
+          <div className="px-4 py-2.5 text-muted-foreground text-xs">
+            The model proxy is not reporting on this machine.
+          </div>
         ) : (
           <>
             <div className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 py-2 text-muted-foreground text-xs">
@@ -104,8 +143,10 @@ function NodeCard({ node: n }: { node: NodeModels }) {
   );
 }
 
-const pct = (part: number, whole: number) => (whole === 0 ? "—" : `${((part / whole) * 100).toFixed(part === 0 ? 0 : 1)}%`);
-const ms = (v: number | null) => (v === null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`);
+const pct = (part: number, whole: number) =>
+  whole === 0 ? "—" : `${((part / whole) * 100).toFixed(part === 0 ? 0 : 1)}%`;
+const ms = (v: number | null) =>
+  v === null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
 
 function Upstream({ stats: u }: { stats: ModelUpstreamStats }) {
   const { now } = useStore();
@@ -137,11 +178,15 @@ function Upstream({ stats: u }: { stats: ModelUpstreamStats }) {
             <tr key={label} className="border-t border-border/50">
               <td className="py-1 text-muted-foreground">{label}</td>
               <td className="py-1 text-right">{w.requests}</td>
-              <td className="py-1 text-right">{w.retried === 0 ? "0" : `${w.retried} · ${pct(w.retried, w.requests)}`}</td>
+              <td className="py-1 text-right">
+                {w.retried === 0 ? "0" : `${w.retried} · ${pct(w.retried, w.requests)}`}
+              </td>
               <td className={cn("py-1 text-right", w.failed > 0 && "text-destructive-foreground")}>
                 {w.failed === 0 ? "0" : `${w.failed} · ${pct(w.failed, w.requests)}`}
               </td>
-              <td className={cn("py-1 text-right", w.fallbacks > 0 && "text-warning-foreground")}>{w.fallbacks}</td>
+              <td className={cn("py-1 text-right", w.fallbacks > 0 && "text-warning-foreground")}>
+                {w.fallbacks}
+              </td>
               <td className="py-1 text-right">{ms(w.ttfbP50Ms)}</td>
               <td className="py-1 text-right">{ms(w.ttfbP95Ms)}</td>
             </tr>
@@ -163,7 +208,8 @@ function Upstream({ stats: u }: { stats: ModelUpstreamStats }) {
       {u.lastError === null ? null : (
         <div className="mt-2 text-xs">
           <span className="text-muted-foreground">last error {ago(u.lastError.at, now)}: </span>
-          <Badge variant="error">{u.lastError.class}</Badge> <span className="break-words">{u.lastError.message}</span>
+          <Badge variant="error">{u.lastError.class}</Badge>{" "}
+          <span className="break-words">{u.lastError.message}</span>
         </div>
       )}
     </div>

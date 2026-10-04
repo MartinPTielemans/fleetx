@@ -85,7 +85,9 @@ export const T3Observation = Schema.Struct({
    * What stood in the way of observing T3, each with a kind that names it
    * (its finding is `t3-<kind>`). Older probes sent the text alone.
    */
-  problems: Schema.Array(Schema.Union([Schema.Struct({ kind: Schema.String, title: Schema.String }), Schema.String])),
+  problems: Schema.Array(
+    Schema.Union([Schema.Struct({ kind: Schema.String, title: Schema.String }), Schema.String]),
+  ),
 });
 export type T3Observation = typeof T3Observation.Type;
 

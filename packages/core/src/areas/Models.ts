@@ -35,9 +35,25 @@ import { exec } from "../Exec.ts";
 import { installedBundle, legacyUnitInstalled, notInstalledTitle, stableNode } from "../Runtime.ts";
 import { localSecretsPath } from "../Secrets.ts";
 import { providerPlans, readT3Settings } from "../T3Settings.ts";
-import { findCli, launcherInstall, launcherText, SERVICE_LABEL, SERVICE_UNIT, serviceInstall, serviceUnitPath, serviceUnitText } from "../models/Launchers.ts";
+import {
+  findCli,
+  launcherInstall,
+  launcherText,
+  SERVICE_LABEL,
+  SERVICE_UNIT,
+  serviceInstall,
+  serviceUnitPath,
+  serviceUnitText,
+} from "../models/Launchers.ts";
 import { fetchStats } from "../models/Proxy.ts";
-import { launcherPath, legacyLauncherPath, ModelsSettings, providerName, resolveRecipe, upstreamsOf } from "../models/Recipes.ts";
+import {
+  launcherPath,
+  legacyLauncherPath,
+  ModelsSettings,
+  providerName,
+  resolveRecipe,
+  upstreamsOf,
+} from "../models/Recipes.ts";
 import { loadFallbacks, WINDOWS } from "../models/Stats.ts";
 
 const Desired = Schema.UndefinedOr(ModelsSettings);
@@ -78,7 +94,9 @@ const Observed = Schema.Struct({
       /** Why it cannot be routed; null when it can. */
       unroutable: Schema.NullOr(Schema.String),
       /** Its long-lived credential, when the recipe has one. */
-      token: Schema.NullOr(Schema.Struct({ env: Schema.String, set: Schema.Boolean, help: Schema.String })),
+      token: Schema.NullOr(
+        Schema.Struct({ env: Schema.String, set: Schema.Boolean, help: Schema.String }),
+      ),
     }),
   ),
   /** Launches that ran a CLI directly in the last hour (from the launchers' log). */
@@ -89,10 +107,12 @@ const Observed = Schema.Struct({
 type Observed = typeof Observed.Type;
 
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-const tilde = (path: string) => path.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
+const tilde = (path: string) =>
+  path.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
 
 /** Whether T3's configured binary for an instance is its launcher (absolute, ~, or a bare name on PATH). */
-export const isRouted = (binaryPath: string | null, launcher: string) => binaryPath !== null && basename(binaryPath) === basename(launcher);
+export const isRouted = (binaryPath: string | null, launcher: string) =>
+  binaryPath !== null && basename(binaryPath) === basename(launcher);
 
 const hasVar = (text: string, name: string) =>
   text.split("\n").some((l) => {
@@ -112,30 +132,79 @@ export const ModelsArea = defineArea({
       const root = process.getuid?.() === 0;
       const now = yield* Clock.currentTimeMillis;
       const stats = yield* fetchStats();
-      const fallbacksH1 = (yield* loadFallbacks(ctx.home, now)).filter((f) => f.at >= now - WINDOWS.h1).length;
+      const fallbacksH1 = (yield* loadFallbacks(ctx.home, now)).filter(
+        (f) => f.at >= now - WINDOWS.h1,
+      ).length;
       const base = { on: desired !== undefined, platform, root, fallbacksH1, stats };
-      if (desired === undefined) return { ...base, service: { installed: null, want: null, running: false }, providers: [] } satisfies Observed;
-      const read = (p: string) => fs.readFileString(p).pipe(Effect.option, Effect.map(Option.getOrNull));
+      if (desired === undefined)
+        return {
+          ...base,
+          service: { installed: null, want: null, running: false },
+          providers: [],
+        } satisfies Observed;
+      const read = (p: string) =>
+        fs.readFileString(p).pipe(Effect.option, Effect.map(Option.getOrNull));
 
-      const want = serviceUnitText(platform, root, ctx.home, yield* stableNode(ctx.home), yield* installedBundle(ctx.home), desired.egress ?? "direct");
+      const want = serviceUnitText(
+        platform,
+        root,
+        ctx.home,
+        yield* stableNode(ctx.home),
+        yield* installedBundle(ctx.home),
+        desired.egress ?? "direct",
+      );
       const check =
         platform === "darwin"
-          ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${SERVICE_LABEL}`], timeout: Duration.seconds(5) })
-          : yield* exec({ command: "systemctl", args: [...(root ? [] : ["--user"]), "is-active", "--quiet", `${SERVICE_UNIT}.service`], timeout: Duration.seconds(5) });
-      const running = platform === "darwin" ? check.code === 0 && /state = running/.test(check.stdout) : check.code === 0;
-      const service = { installed: yield* read(serviceUnitPath(platform, root, ctx.home)), want, running, legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "models") };
+          ? yield* exec({
+              command: "launchctl",
+              args: ["print", `gui/${process.getuid?.() ?? 0}/${SERVICE_LABEL}`],
+              timeout: Duration.seconds(5),
+            })
+          : yield* exec({
+              command: "systemctl",
+              args: [
+                ...(root ? [] : ["--user"]),
+                "is-active",
+                "--quiet",
+                `${SERVICE_UNIT}.service`,
+              ],
+              timeout: Duration.seconds(5),
+            });
+      const running =
+        platform === "darwin"
+          ? check.code === 0 && /state = running/.test(check.stdout)
+          : check.code === 0;
+      const service = {
+        installed: yield* read(serviceUnitPath(platform, root, ctx.home)),
+        want,
+        running,
+        legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "models"),
+      };
 
       const settings = yield* readT3Settings(ctx.home);
-      const plans = Option.isSome(settings) && settings.value !== "invalid" ? providerPlans(settings.value) : [];
+      const plans =
+        Option.isSome(settings) && settings.value !== "invalid"
+          ? providerPlans(settings.value)
+          : [];
       const upstreams = upstreamsOf(desired);
       const secrets = (yield* read(localSecretsPath(ctx.home))) ?? "";
       const providers: Array<Observed["providers"][number]> = [];
       for (const plan of plans.filter((p) => p.enabled)) {
         const resolved = resolveRecipe(plan.instanceId, plan.driver, desired, upstreams);
         if (resolved._tag === "skip") continue;
-        const common = { instanceId: plan.instanceId, driver: plan.driver, binaryPath: plan.binaryPath };
+        const common = {
+          instanceId: plan.instanceId,
+          driver: plan.driver,
+          binaryPath: plan.binaryPath,
+        };
         if (resolved._tag === "unroutable") {
-          providers.push({ ...common, upstream: null, launcher: null, unroutable: resolved.reason, token: null });
+          providers.push({
+            ...common,
+            upstream: null,
+            launcher: null,
+            unroutable: resolved.reason,
+            token: null,
+          });
           continue;
         }
         const { recipe } = resolved;
@@ -149,11 +218,21 @@ export const ModelsArea = defineArea({
             path,
             installed: yield* read(path),
             want: launcherText(plan.instanceId, recipe),
-            cli: { command: recipe.command, found: (yield* findCli(ctx.home, recipe.command, ctx.env["PATH"] ?? "")) !== null },
+            cli: {
+              command: recipe.command,
+              found: (yield* findCli(ctx.home, recipe.command, ctx.env["PATH"] ?? "")) !== null,
+            },
           },
           legacyLauncher: (yield* read(legacy)) === null ? null : legacy,
           unroutable: null,
-          token: tokenEnv === null ? null : { env: tokenEnv, set: hasVar(secrets, tokenEnv) || (ctx.env[tokenEnv] ?? "") !== "", help: recipe.tokenHelp },
+          token:
+            tokenEnv === null
+              ? null
+              : {
+                  env: tokenEnv,
+                  set: hasVar(secrets, tokenEnv) || (ctx.env[tokenEnv] ?? "") !== "",
+                  help: recipe.tokenHelp,
+                },
         });
       }
       return { ...base, service, providers } satisfies Observed;
@@ -164,7 +243,10 @@ export const ModelsArea = defineArea({
     const base = { node, area: "models" as const };
 
     const { service } = observed;
-    if (service.want !== null && (service.installed !== service.want || !service.running || observed.stats === null)) {
+    if (
+      service.want !== null &&
+      (service.installed !== service.want || !service.running || observed.stats === null)
+    ) {
       out.push({
         ...base,
         key: "models-service",
@@ -178,14 +260,23 @@ export const ModelsArea = defineArea({
                 ? "the model proxy is not running"
                 : "the model proxy runs but does not answer on 127.0.0.1:8398",
         detail: "until it runs, the launchers start the CLIs directly",
-        fix: { command: serviceInstall(observed.platform, observed.root, service.want), safe: true },
+        fix: {
+          command: serviceInstall(observed.platform, observed.root, service.want),
+          safe: true,
+        },
       });
     }
 
     for (const p of observed.providers) {
       const name = providerName(p.instanceId);
       if (p.unroutable !== null) {
-        out.push({ ...base, key: `models-unroutable-${p.instanceId}`, severity: "info", title: `${name} is not routed through the model proxy`, detail: p.unroutable });
+        out.push({
+          ...base,
+          key: `models-unroutable-${p.instanceId}`,
+          severity: "info",
+          title: `${name} is not routed through the model proxy`,
+          detail: p.unroutable,
+        });
         continue;
       }
       const launcher = p.launcher;
@@ -220,7 +311,9 @@ export const ModelsArea = defineArea({
           severity: "warn",
           title: `T3 starts ${name} directly, not through the model proxy`,
           ...(cli !== undefined && !cli.found
-            ? { detail: `${basename(launcher.path)} would run ${cli.command}, which is not installed here (nor ${basename(cli.command)} on PATH); set [models.providers.${p.instanceId}] command` }
+            ? {
+                detail: `${basename(launcher.path)} would run ${cli.command}, which is not installed here (nor ${basename(cli.command)} on PATH); set [models.providers.${p.instanceId}] command`,
+              }
             : ready
               ? {
                   detail: `points T3's ${name} at ${basename(launcher.path)}; sessions already running keep their binary`,
@@ -241,7 +334,14 @@ export const ModelsArea = defineArea({
     }
 
     const failing = modelsFailing(observed);
-    if (failing !== null) out.push({ ...base, key: "models-failing", severity: "warn", title: failing.title, detail: failing.detail });
+    if (failing !== null)
+      out.push({
+        ...base,
+        key: "models-failing",
+        severity: "warn",
+        title: failing.title,
+        detail: failing.detail,
+      });
     return out;
   },
 });
@@ -255,7 +355,9 @@ const MIN_FAILURES = 3;
  * errors ("4xx": a prompt too long, a request too large) are the request's
  * own problem and do not count.
  */
-export const modelsFailing = (observed: Pick<Observed, "stats" | "fallbacksH1">): { title: string; detail: string } | null => {
+export const modelsFailing = (
+  observed: Pick<Observed, "stats" | "fallbacksH1">,
+): { title: string; detail: string } | null => {
   const parts: Array<string> = [];
   const details: Array<string> = [];
   for (const u of observed.stats?.upstreams ?? []) {
@@ -265,11 +367,18 @@ export const modelsFailing = (observed: Pick<Observed, "stats" | "fallbacksH1">)
     if (failed < MIN_FAILURES || failed / w.requests <= 0.05) continue;
     const [worst] = failures.sort((a, b) => b[1] - a[1]);
     parts.push(`${u.upstream}: ${failed} of ${w.requests} requests failed in the last hour`);
-    details.push(`${u.upstream} mostly ${worst?.[0] ?? "unknown"}${u.lastError === null ? "" : `; last: ${u.lastError.message}`}`);
+    details.push(
+      `${u.upstream} mostly ${worst?.[0] ?? "unknown"}${u.lastError === null ? "" : `; last: ${u.lastError.message}`}`,
+    );
   }
-  const fallbacks = Math.max(observed.fallbacksH1, ...(observed.stats?.upstreams ?? []).map((u) => u.h1.fallbacks));
+  const fallbacks = Math.max(
+    observed.fallbacksH1,
+    ...(observed.stats?.upstreams ?? []).map((u) => u.h1.fallbacks),
+  );
   if (fallbacks > 0) {
-    parts.push(`${fallbacks} launch${fallbacks === 1 ? "" : "es"} skipped the proxy in the last hour`);
+    parts.push(
+      `${fallbacks} launch${fallbacks === 1 ? "" : "es"} skipped the proxy in the last hour`,
+    );
     details.push("the proxy was not listening (~/.local/state/t3-fleet/models-fallback.log)");
   }
   return parts.length === 0 ? null : { title: parts.join("; "), detail: details.join("; ") };

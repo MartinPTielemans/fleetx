@@ -29,14 +29,27 @@ import { AREAS } from "./Areas.ts";
 import { expandHome } from "./Config.ts";
 import { exec } from "./Exec.ts";
 
-export const pluginKit = { defineArea, sh, shPath, expandHome, exec, Effect, Schema, Option, Duration, FileSystem, Path } as const;
+export const pluginKit = {
+  defineArea,
+  sh,
+  shPath,
+  expandHome,
+  exec,
+  Effect,
+  Schema,
+  Option,
+  Duration,
+  FileSystem,
+  Path,
+} as const;
 export type PluginKit = typeof pluginKit;
 
 /** Why a thrown value or failure stopped something, in one line. */
 export const why = (error: unknown): string =>
   Cause.isUnknownError(error) && error.cause !== undefined
     ? why(error.cause)
-    : ((error instanceof Error ? error.message : String(error)).split("\n")[0]?.slice(0, 240) ?? "");
+    : ((error instanceof Error ? error.message : String(error)).split("\n")[0]?.slice(0, 240) ??
+      "");
 
 /** A plugin that did not load, keyed by its path in the config repo. */
 export interface PluginProblem {
@@ -55,24 +68,37 @@ export const loadAreas = (checkout: string, plugins: ReadonlyArray<string>) =>
     const problems: Array<PluginProblem> = [];
     for (const rel of plugins) {
       const url = pathToFileURL(path.resolve(checkout, rel)).href;
-      const loaded = yield* Effect.tryPromise(() => import(url) as Promise<{ default?: unknown }>).pipe(Effect.result);
+      const loaded = yield* Effect.tryPromise(
+        () => import(url) as Promise<{ default?: unknown }>,
+      ).pipe(Effect.result);
       if (loaded._tag === "Failure") {
         problems.push({ plugin: rel, title: `plugin ${rel} cannot load: ${why(loaded.failure)}` });
         continue;
       }
       const factory = loaded.success.default;
       if (typeof factory !== "function") {
-        problems.push({ plugin: rel, title: `plugin ${rel} cannot load: it must export a default function` });
+        problems.push({
+          plugin: rel,
+          title: `plugin ${rel} cannot load: it must export a default function`,
+        });
         continue;
       }
-      const made = yield* Effect.try(() => (factory as (kit: PluginKit) => AnyArea | undefined)(pluginKit)).pipe(Effect.result);
+      const made = yield* Effect.try(() =>
+        (factory as (kit: PluginKit) => AnyArea | undefined)(pluginKit),
+      ).pipe(Effect.result);
       if (made._tag === "Failure") {
-        problems.push({ plugin: rel, title: `plugin ${rel} failed while making its area: ${why(made.failure)}` });
+        problems.push({
+          plugin: rel,
+          title: `plugin ${rel} failed while making its area: ${why(made.failure)}`,
+        });
         continue;
       }
       const area = made.success;
       if (typeof area?.id !== "string" || areas.some((a) => a.id === area.id)) {
-        problems.push({ plugin: rel, title: `plugin ${rel} has no area id, or one that is already taken` });
+        problems.push({
+          plugin: rel,
+          title: `plugin ${rel} has no area id, or one that is already taken`,
+        });
         continue;
       }
       areas.push(area);

@@ -68,8 +68,10 @@ export const decodeModelsSettings = (raw: unknown): ModelsSettings =>
  * `record[key]` when the record itself has it, never what it inherits: a
  * path like /constructor/… must not find Object.prototype.constructor.
  */
-export const own = <V>(record: Readonly<Record<string, V>> | undefined, key: string): V | undefined =>
-  record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+export const own = <V>(
+  record: Readonly<Record<string, V>> | undefined,
+  key: string,
+): V | undefined => (record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined);
 
 // ---- upstreams ----------------------------------------------------------------
 
@@ -98,16 +100,22 @@ export const upstreamsOf = (settings: ModelsSettings): Upstreams => {
     const url = (declared.url ?? base?.url ?? "").replace(/\/+$/, "");
     if (!/^https?:\/\//.test(url)) continue;
     const chatgpt = declared.chatgpt_url ?? base?.chatgptUrl;
-    out[name] = { url, ...(chatgpt === undefined ? {} : { chatgptUrl: chatgpt.replace(/\/+$/, "") }) };
+    out[name] = {
+      url,
+      ...(chatgpt === undefined ? {} : { chatgptUrl: chatgpt.replace(/\/+$/, "") }),
+    };
   }
   return out;
 };
 
-export const proxyUrl = (upstream: string, port: number = MODELS_PORT) => `http://127.0.0.1:${port}/${upstream}`;
+export const proxyUrl = (upstream: string, port: number = MODELS_PORT) =>
+  `http://127.0.0.1:${port}/${upstream}`;
 
 /** Every base URL these upstreams forward to: what a relay's /egress route may send to. */
 export const upstreamBases = (upstreams: Upstreams): ReadonlyArray<string> =>
-  Object.values(upstreams).flatMap((u) => (u.chatgptUrl === undefined ? [u.url] : [u.url, u.chatgptUrl]));
+  Object.values(upstreams).flatMap((u) =>
+    u.chatgptUrl === undefined ? [u.url] : [u.url, u.chatgptUrl],
+  );
 
 // ---- recipes ------------------------------------------------------------------
 
@@ -132,7 +140,8 @@ export const BUILTIN_RECIPES: Readonly<Record<string, Recipe>> = {
     command: "~/.local/bin/claude",
     direct: ["-v", "--version", "auth", "setup-token", "update", "doctor"],
     tokenEnv: "CLAUDE_CODE_OAUTH_TOKEN",
-    tokenHelp: "run `claude setup-token` once; the token it prints does not rotate, so concurrent sessions cannot log each other out",
+    tokenHelp:
+      "run `claude setup-token` once; the token it prints does not rotate, so concurrent sessions cannot log each other out",
   },
   codex: {
     upstream: "openai",
@@ -156,13 +165,29 @@ export type Resolved =
   | { readonly _tag: "unroutable"; readonly reason: string };
 
 /** The recipe for one T3 instance: the driver's built-in one overlaid with what the settings declare. */
-export const resolveRecipe = (instanceId: string, driver: string, settings: ModelsSettings, upstreams: Upstreams): Resolved => {
+export const resolveRecipe = (
+  instanceId: string,
+  driver: string,
+  settings: ModelsSettings,
+  upstreams: Upstreams,
+): Resolved => {
   const declared = own(settings.providers, instanceId);
   if (declared?.route === false) return { _tag: "skip" };
   // Everything here ends up in a shell script written through a heredoc; one line each, or none at all.
-  const fields = [instanceId, driver, declared?.upstream, declared?.command, declared?.token_env, ...Object.entries(declared?.env ?? {}).flat(), ...(declared?.args ?? [])];
+  const fields = [
+    instanceId,
+    driver,
+    declared?.upstream,
+    declared?.command,
+    declared?.token_env,
+    ...Object.entries(declared?.env ?? {}).flat(),
+    ...(declared?.args ?? []),
+  ];
   if (fields.some((f) => f !== undefined && CONTROL.test(f))) {
-    return { _tag: "unroutable", reason: `the recipe for ${JSON.stringify(instanceId)} has a newline or control character in it, so no launcher is written` };
+    return {
+      _tag: "unroutable",
+      reason: `the recipe for ${JSON.stringify(instanceId)} has a newline or control character in it, so no launcher is written`,
+    };
   }
   const builtin = own(BUILTIN_RECIPES, driver);
   const bin = own(T3_DRIVERS, driver)?.bin;
@@ -178,15 +203,27 @@ export const resolveRecipe = (instanceId: string, driver: string, settings: Mode
     };
   }
   const command = declared?.command ?? builtin?.command ?? bin ?? null;
-  if (command === null) return { _tag: "unroutable", reason: `${driver} has no CLI; set [models.providers.${instanceId}] command` };
+  if (command === null)
+    return {
+      _tag: "unroutable",
+      reason: `${driver} has no CLI; set [models.providers.${instanceId}] command`,
+    };
   const upstream = declared?.upstream ?? builtin?.upstream ?? "";
   if (own(upstreams, upstream) === undefined) {
-    return { _tag: "unroutable", reason: upstream === "" ? `set [models.providers.${instanceId}] upstream` : `no upstream named ${upstream} in [models.upstreams]` };
+    return {
+      _tag: "unroutable",
+      reason:
+        upstream === ""
+          ? `set [models.providers.${instanceId}] upstream`
+          : `no upstream named ${upstream} in [models.upstreams]`,
+    };
   }
   const badEnv = Object.keys(env).find((k) => !ENV_NAME.test(k));
-  if (badEnv !== undefined) return { _tag: "unroutable", reason: `${badEnv} is not a variable name` };
+  if (badEnv !== undefined)
+    return { _tag: "unroutable", reason: `${badEnv} is not a variable name` };
   const tokenEnv = declared?.token_env ?? builtin?.tokenEnv ?? null;
-  if (tokenEnv !== null && !ENV_NAME.test(tokenEnv)) return { _tag: "unroutable", reason: `token_env ${tokenEnv} is not a variable name` };
+  if (tokenEnv !== null && !ENV_NAME.test(tokenEnv))
+    return { _tag: "unroutable", reason: `token_env ${tokenEnv} is not a variable name` };
   return {
     _tag: "route",
     recipe: {
@@ -205,9 +242,13 @@ export const resolveRecipe = (instanceId: string, driver: string, settings: Mode
 };
 
 /** "claudeAgent" → "claude", what people call it and what its launcher is named after. */
-export const providerName = (instanceId: string) => (instanceId === "claudeAgent" ? "claude" : instanceId);
+export const providerName = (instanceId: string) =>
+  instanceId === "claudeAgent" ? "claude" : instanceId;
 
-const launcherName = (instanceId: string) => providerName(instanceId).replace(/[^A-Za-z0-9._-]/g, "-");
-export const launcherPath = (home: string, instanceId: string) => `${home}/.local/bin/${LAUNCHER_PREFIX}${launcherName(instanceId)}`;
+const launcherName = (instanceId: string) =>
+  providerName(instanceId).replace(/[^A-Za-z0-9._-]/g, "-");
+export const launcherPath = (home: string, instanceId: string) =>
+  `${home}/.local/bin/${LAUNCHER_PREFIX}${launcherName(instanceId)}`;
 /** Where the launcher was before the rename. Until 1.0. */
-export const legacyLauncherPath = (home: string, instanceId: string) => `${home}/.local/bin/${LEGACY_LAUNCHER_PREFIX}${launcherName(instanceId)}`;
+export const legacyLauncherPath = (home: string, instanceId: string) =>
+  `${home}/.local/bin/${LEGACY_LAUNCHER_PREFIX}${launcherName(instanceId)}`;

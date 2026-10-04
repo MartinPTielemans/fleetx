@@ -15,19 +15,33 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { describe, expect, it } from "vite-plus/test";
 
-import { currentBundlePath, launchdReload, newBuild, retireLegacyUnit, untilReplaced } from "./Runtime.ts";
+import {
+  currentBundlePath,
+  launchdReload,
+  newBuild,
+  retireLegacyUnit,
+  untilReplaced,
+} from "./Runtime.ts";
 
 describe("untilReplaced", () => {
   // A service whose stop takes a while, like the relay's server waiting out its graceful shutdown.
   const slowToStop = (events: Array<string>) =>
     Effect.never.pipe(
-      Effect.onInterrupt(() => Effect.sleep(Duration.millis(150)).pipe(Effect.andThen(Effect.sync(() => events.push("stopped"))))),
+      Effect.onInterrupt(() =>
+        Effect.sleep(Duration.millis(150)).pipe(
+          Effect.andThen(Effect.sync(() => events.push("stopped"))),
+        ),
+      ),
     );
 
   it("without drain, exits as soon as the new build is seen, not after the service has stopped", async () => {
     const events: Array<string> = [];
     const replaced = Deferred.makeUnsafe<void>();
-    const fiber = Effect.runFork(untilReplaced(slowToStop(events), Deferred.await(replaced), { exit: () => events.push("exit") }));
+    const fiber = Effect.runFork(
+      untilReplaced(slowToStop(events), Deferred.await(replaced), {
+        exit: () => events.push("exit"),
+      }),
+    );
     Effect.runSync(Deferred.succeed(replaced, undefined));
     await Effect.runPromise(Fiber.await(fiber));
     expect(events).toEqual(["exit", "stopped"]);
@@ -39,7 +53,9 @@ describe("untilReplaced", () => {
     const drained = Deferred.makeUnsafe<void>();
     const fiber = Effect.runFork(
       untilReplaced(slowToStop(events), Deferred.await(replaced), {
-        drain: Deferred.await(drained).pipe(Effect.andThen(Effect.sync(() => events.push("drained")))),
+        drain: Deferred.await(drained).pipe(
+          Effect.andThen(Effect.sync(() => events.push("drained"))),
+        ),
         exit: () => events.push("exit"),
       }),
     );
@@ -53,7 +69,9 @@ describe("untilReplaced", () => {
 
   it("never exits when the service stops on its own", async () => {
     const events: Array<string> = [];
-    await Effect.runPromise(untilReplaced(Effect.void, Effect.never, { exit: () => events.push("exit") }));
+    await Effect.runPromise(
+      untilReplaced(Effect.void, Effect.never, { exit: () => events.push("exit") }),
+    );
     expect(events).toEqual([]);
   });
 });
@@ -84,7 +102,10 @@ esac
     chmodSync(join(dir, "bin", "sleep"), 0o755);
     const run = (script: string) => {
       try {
-        execFileSync("/bin/sh", ["-c", script], { env: { PATH: `${dir}/bin:/usr/bin:/bin` }, stdio: "pipe" });
+        execFileSync("/bin/sh", ["-c", script], {
+          env: { PATH: `${dir}/bin:/usr/bin:/bin` },
+          stdio: "pipe",
+        });
         return 0;
       } catch {
         return 1;
@@ -96,7 +117,15 @@ esac
   it("bootstraps only once the old job is gone", () => {
     const launchctl = fakeLaunchctl(3);
     expect(launchctl.run(launchdReload("dev.t3-fleet.models", '"/tmp/x.plist"', 75))).toBe(0);
-    expect(launchctl.log()).toEqual(["bootout", "print", "print", "print", "print", "bootstrap", "bootstrapped"]);
+    expect(launchctl.log()).toEqual([
+      "bootout",
+      "print",
+      "print",
+      "print",
+      "print",
+      "bootstrap",
+      "bootstrapped",
+    ]);
   });
 
   it("gives up waiting after the old job's ExitTimeOut and a margin", () => {
@@ -113,9 +142,13 @@ describe("newBuild", () => {
     const bundle = join(mkdtempSync(join(tmpdir(), "t3-fleet-build-")), "t3-fleet.mjs");
     writeFileSync(bundle, "old build");
     const watch = newBuild(bundle, Duration.millis(20)).pipe(Effect.provide(NodeServices.layer));
-    const unchanged = await Effect.runPromise(watch.pipe(Effect.timeout(Duration.millis(200)), Effect.option));
+    const unchanged = await Effect.runPromise(
+      watch.pipe(Effect.timeout(Duration.millis(200)), Effect.option),
+    );
     expect(unchanged._tag).toBe("None");
-    const replace = Effect.sleep(Duration.millis(60)).pipe(Effect.flatMap(() => Effect.sync(() => writeFileSync(bundle, "new build"))));
+    const replace = Effect.sleep(Duration.millis(60)).pipe(
+      Effect.flatMap(() => Effect.sync(() => writeFileSync(bundle, "new build"))),
+    );
     const [digest] = await Effect.runPromise(Effect.all([watch, replace], { concurrency: 2 }));
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
   }, 15_000);
@@ -123,16 +156,24 @@ describe("newBuild", () => {
 
 describe("currentBundlePath", () => {
   it("names the T3 Fleet copy where the bundle resolved to a fleetx path", () => {
-    expect(currentBundlePath("/home/u", "/home/u/.local/share/fleetx/fleetx.mjs")).toBe("/home/u/.local/share/t3-fleet/t3-fleet.mjs");
-    expect(currentBundlePath("/home/u", "/home/u/.local/share/t3-fleet/fleetx.mjs")).toBe("/home/u/.local/share/t3-fleet/t3-fleet.mjs");
-    expect(currentBundlePath("/home/u", "/home/u/src/fleetx/apps/cli/dist/bin.mjs")).toBe("/home/u/src/fleetx/apps/cli/dist/bin.mjs");
+    expect(currentBundlePath("/home/u", "/home/u/.local/share/fleetx/fleetx.mjs")).toBe(
+      "/home/u/.local/share/t3-fleet/t3-fleet.mjs",
+    );
+    expect(currentBundlePath("/home/u", "/home/u/.local/share/t3-fleet/fleetx.mjs")).toBe(
+      "/home/u/.local/share/t3-fleet/t3-fleet.mjs",
+    );
+    expect(currentBundlePath("/home/u", "/home/u/src/fleetx/apps/cli/dist/bin.mjs")).toBe(
+      "/home/u/src/fleetx/apps/cli/dist/bin.mjs",
+    );
   });
 });
 
 describe("retireLegacyUnit", () => {
   it("stops and disables each systemd unit on its own, so a missing timer cannot block the service", () => {
     const shell = retireLegacyUnit("linux", true, "models");
-    expect(shell).toContain('for u in fleetx-models.timer fleetx-models.service; do systemctl stop "$u"');
+    expect(shell).toContain(
+      'for u in fleetx-models.timer fleetx-models.service; do systemctl stop "$u"',
+    );
     expect(shell).not.toContain("disable --now");
     expect(shell).toMatch(/systemctl daemon-reload/);
   });

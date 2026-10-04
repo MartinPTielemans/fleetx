@@ -11,16 +11,29 @@ import { navigate } from "../lib/router";
 import { useResource, useStore } from "../lib/store";
 
 const sourceVariant = (source: string): BadgeVariant =>
-  source.startsWith("node ") ? "info" : source.startsWith("profile ") ? "outline" : source === "defaults" ? "secondary" : "warning";
+  source.startsWith("node ")
+    ? "info"
+    : source.startsWith("profile ")
+      ? "outline"
+      : source === "defaults"
+        ? "secondary"
+        : "warning";
 
 export function ConfigView({ node }: { node: string }) {
   const { session, sessionError } = useStore();
   const selected = node !== "" ? node : (session?.self ?? "");
-  const rows = useResource(() => (selected === "" ? Promise.resolve(null) : api.config(selected)), [selected]);
+  const rows = useResource(
+    () => (selected === "" ? Promise.resolve(null) : api.config(selected)),
+    [selected],
+  );
   const [filter, setFilter] = useState("");
   const needle = filter.trim().toLowerCase();
   const shown = (rows.data ?? []).filter(
-    (r) => needle === "" || r.path.toLowerCase().includes(needle) || r.value.toLowerCase().includes(needle) || r.source.toLowerCase().includes(needle),
+    (r) =>
+      needle === "" ||
+      r.path.toLowerCase().includes(needle) ||
+      r.value.toLowerCase().includes(needle) ||
+      r.source.toLowerCase().includes(needle),
   );
   return (
     <Page
@@ -59,12 +72,21 @@ export function ConfigView({ node }: { node: string }) {
           // Without the session there is no machine to start from.
           <ErrorState error={sessionError} what="this machine's name" />
         ) : rows.error !== null ? (
-          <ErrorState error={rows.error} what={`${selected}'s settings`} onRetry={() => void rows.reload()} />
+          <ErrorState
+            error={rows.error}
+            what={`${selected}'s settings`}
+            onRetry={() => void rows.reload()}
+          />
         ) : rows.data === null ? (
           <LoadingRows rows={6} />
         ) : shown.length === 0 ? (
-          <Empty icon={<SlidersHorizontalIcon />} title={rows.data.length === 0 ? "No settings" : "Nothing matches"}>
-            {rows.data.length === 0 ? `${selected} uses T3 Fleet's defaults for everything.` : "Try a shorter filter."}
+          <Empty
+            icon={<SlidersHorizontalIcon />}
+            title={rows.data.length === 0 ? "No settings" : "Nothing matches"}
+          >
+            {rows.data.length === 0
+              ? `${selected} uses T3 Fleet's defaults for everything.`
+              : "Try a shorter filter."}
           </Empty>
         ) : (
           <div className="overflow-x-auto">
@@ -80,7 +102,9 @@ export function ConfigView({ node }: { node: string }) {
                 {shown.map((r) => (
                   <tr key={r.path} className="border-b align-top last:border-0 hover:bg-muted/50">
                     <td className="whitespace-nowrap px-4 py-1.5 font-mono">{r.path}</td>
-                    <td className="break-all px-2 py-1.5 font-mono text-muted-foreground">{r.value}</td>
+                    <td className="break-all px-2 py-1.5 font-mono text-muted-foreground">
+                      {r.value}
+                    </td>
                     <td className="whitespace-nowrap px-2 py-1.5 pr-4 text-right">
                       <Badge variant={sourceVariant(r.source)}>{r.source}</Badge>
                     </td>

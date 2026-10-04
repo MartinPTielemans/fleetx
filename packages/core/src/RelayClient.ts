@@ -27,14 +27,22 @@ export const RELAY_TOKEN = "T3_FLEET_RELAY_TOKEN";
 export const secretVar = (name: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const text = yield* fs.readFileString(localSecretsPath(process.env["HOME"] ?? "")).pipe(Effect.orElseSucceed(() => ""));
+    const text = yield* fs
+      .readFileString(localSecretsPath(process.env["HOME"] ?? ""))
+      .pipe(Effect.orElseSucceed(() => ""));
     const values = new Map<string, string>();
     for (const line of text.split("\n")) {
       const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-      if (m?.[1] !== undefined) values.set(m[1], (m[2] ?? "").replace(/^"(.*)"$/, "$1").replace(/\\(.)/g, "$1"));
+      if (m?.[1] !== undefined)
+        values.set(m[1], (m[2] ?? "").replace(/^"(.*)"$/, "$1").replace(/\\(.)/g, "$1"));
     }
     const legacy = legacySecretName(name);
-    return values.get(name) ?? process.env[name] ?? (legacy === null ? undefined : (values.get(legacy) ?? process.env[legacy])) ?? "";
+    return (
+      values.get(name) ??
+      process.env[name] ??
+      (legacy === null ? undefined : (values.get(legacy) ?? process.env[legacy])) ??
+      ""
+    );
   });
 
 const relayOf = (config: Config) => config.settings.relay?.url?.replace(/\/+$/, "") ?? null;
@@ -51,7 +59,12 @@ export const reportToRelay = (config: Config, state: NodeState) =>
     const client = yield* HttpClient.HttpClient;
     const body = yield* encodeState(state);
     const response = yield* client
-      .execute(HttpClientRequest.post(`${url}/report`).pipe(HttpClientRequest.bearerToken(token), HttpClientRequest.bodyText(body, "application/json")))
+      .execute(
+        HttpClientRequest.post(`${url}/report`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.bodyText(body, "application/json"),
+        ),
+      )
       .pipe(Effect.timeout(Duration.seconds(10)), Effect.option);
     return Option.match(response, { onNone: () => false, onSome: (r) => r.status === 204 });
   }).pipe(Effect.orElseSucceed(() => false));
@@ -61,7 +74,11 @@ export const reportToRelay = (config: Config, state: NodeState) =>
  * moves (or was moved while this node was away). Reconnects forever,
  * resuming after the last event it saw.
  */
-export const listen = <E, R>(config: Config, onPull: (rev: string) => Effect.Effect<void, E, R>, log: (line: string) => Effect.Effect<void>) =>
+export const listen = <E, R>(
+  config: Config,
+  onPull: (rev: string) => Effect.Effect<void, E, R>,
+  log: (line: string) => Effect.Effect<void>,
+) =>
   Effect.gen(function* () {
     const url = relayOf(config);
     if (url === null) return yield* Effect.fail("no [relay] url in t3-fleet.toml");
@@ -71,7 +88,10 @@ export const listen = <E, R>(config: Config, onPull: (rev: string) => Effect.Eff
     let lastId = 0;
     const once = Effect.gen(function* () {
       const response = yield* client.execute(
-        HttpClientRequest.get(`${url}/events?since=${lastId}`).pipe(HttpClientRequest.bearerToken(token), HttpClientRequest.setHeader("accept", "text/event-stream")),
+        HttpClientRequest.get(`${url}/events?since=${lastId}`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.setHeader("accept", "text/event-stream"),
+        ),
       );
       if (response.status !== 200) return yield* Effect.fail(`relay answered ${response.status}`);
       yield* log(`connected to ${url}`);
@@ -110,11 +130,19 @@ export const fleetFromRelay = (config: Config) =>
     const token = yield* secretVar(RELAY_TOKEN);
     if (token === "") return null;
     const client = yield* HttpClient.HttpClient;
-    const text = yield* client.execute(HttpClientRequest.get(`${url}/fleet`).pipe(HttpClientRequest.bearerToken(token))).pipe(
-      Effect.flatMap((r) => (r.status === 200 ? r.text.pipe(Effect.asSome) : Effect.succeed(Option.none<string>()))),
-      Effect.timeout(Duration.seconds(8)),
-      Effect.orElseSucceed(() => Option.none<string>()),
-    );
+    const text = yield* client
+      .execute(HttpClientRequest.get(`${url}/fleet`).pipe(HttpClientRequest.bearerToken(token)))
+      .pipe(
+        Effect.flatMap((r) =>
+          r.status === 200 ? r.text.pipe(Effect.asSome) : Effect.succeed(Option.none<string>()),
+        ),
+        Effect.timeout(Duration.seconds(8)),
+        Effect.orElseSucceed(() => Option.none<string>()),
+      );
     if (Option.isNone(text)) return null;
-    return Option.getOrNull(yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Array(NodeState)))(text.value).pipe(Effect.option));
+    return Option.getOrNull(
+      yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Array(NodeState)))(text.value).pipe(
+        Effect.option,
+      ),
+    );
   }).pipe(Effect.orElseSucceed(() => null));

@@ -66,7 +66,8 @@ export const SkillsArea = defineArea({
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const exists = (p: string) => fs.exists(p).pipe(Effect.orElseSucceed(() => false));
-      const list = (dir: string) => fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>));
+      const list = (dir: string) =>
+        fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>));
       const store = expandHome(desired?.store ?? "~/.agents/skills", ctx.home);
       const clients = (desired?.clients ?? []).map((c) => expandHome(c, ctx.home));
       const watch = (desired?.watch ?? []).map((c) => expandHome(c, ctx.home));
@@ -82,18 +83,27 @@ export const SkillsArea = defineArea({
       const linkState = (at: string, want: string) =>
         Effect.gen(function* () {
           const link = yield* fs.readLink(at).pipe(Effect.option);
-          if (Option.isNone(link)) return (yield* exists(at)) ? ("real-dir" as const) : ("missing" as const);
+          if (Option.isNone(link))
+            return (yield* exists(at)) ? ("real-dir" as const) : ("missing" as const);
           const real = yield* fs.realPath(at).pipe(Effect.orElseSucceed(() => ""));
           const wanted = yield* fs.realPath(want).pipe(Effect.orElseSucceed(() => want));
           return real === wanted ? ("ok" as const) : ("wrong" as const);
         });
 
-      const links: Array<typeof Observed.Type["links"][number]> = [];
+      const links: Array<(typeof Observed.Type)["links"][number]> = [];
       for (const skill of vendored) {
         if (ignore.has(skill)) continue;
-        links.push({ skill, dir: store, state: yield* linkState(path.join(store, skill), path.join(repoSkills, skill)) });
+        links.push({
+          skill,
+          dir: store,
+          state: yield* linkState(path.join(store, skill), path.join(repoSkills, skill)),
+        });
         for (const client of clients) {
-          links.push({ skill, dir: client, state: yield* linkState(path.join(client, skill), path.join(repoSkills, skill)) });
+          links.push({
+            skill,
+            dir: client,
+            state: yield* linkState(path.join(client, skill), path.join(repoSkills, skill)),
+          });
         }
       }
 
@@ -108,7 +118,8 @@ export const SkillsArea = defineArea({
             if (!(yield* exists(at))) dangling.push({ skill: name, dir });
             continue;
           }
-          if (!vendored.includes(name) && (yield* exists(path.join(at, "SKILL.md")))) strays.push({ skill: name, dir });
+          if (!vendored.includes(name) && (yield* exists(path.join(at, "SKILL.md"))))
+            strays.push({ skill: name, dir });
         }
       }
       return { store, vendored, links, strays, dangling };
@@ -116,7 +127,8 @@ export const SkillsArea = defineArea({
   diagnose: ({ node, desired, observed }) => {
     const out: Array<Finding> = [];
     const storeConfigured = desired?.store ?? "~/.agents/skills";
-    const tilde = (dir: string) => dir.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
+    const tilde = (dir: string) =>
+      dir.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
     const broken = observed.links.filter((l) => l.state !== "ok");
     if (broken.length > 0) {
       const commands: Array<string> = [];
@@ -126,7 +138,9 @@ export const SkillsArea = defineArea({
       for (const l of broken) {
         const isStore = l.dir === observed.store;
         const at = `${shPath(tilde(l.dir))}/${sh(l.skill)}`;
-        const target = isStore ? `"$T3_FLEET_CHECKOUT/skills/${l.skill}"` : `${shPath(storeConfigured)}/${sh(l.skill)}`;
+        const target = isStore
+          ? `"$T3_FLEET_CHECKOUT/skills/${l.skill}"`
+          : `${shPath(storeConfigured)}/${sh(l.skill)}`;
         // One backup directory per client directory, named after it: ~/.claude/skills → .claude-skills.
         const backup = `"$backups"/${sh(tilde(l.dir).replace(/^~\/?/, "").replaceAll("/", "-") || "home")}`;
         const aside = l.state === "real-dir" ? `mkdir -p ${backup} && mv ${at} ${backup}/ && ` : "";
@@ -139,7 +153,12 @@ export const SkillsArea = defineArea({
         severity: "warn",
         area: "skills",
         title: `${skills.length} skill${skills.length === 1 ? " is" : "s are"} not linked into place: ${skills.slice(0, 5).join(", ")}${skills.length > 5 ? ", …" : ""}`,
-        ...(broken.some((l) => l.state === "real-dir") ? { detail: "real directories in the way are kept in ~/.local/state/t3-fleet/skill-backups" } : {}),
+        ...(broken.some((l) => l.state === "real-dir")
+          ? {
+              detail:
+                "real directories in the way are kept in ~/.local/state/t3-fleet/skill-backups",
+            }
+          : {}),
         fix: { command: commands.join("\n"), safe: true },
       });
     }
@@ -150,7 +169,12 @@ export const SkillsArea = defineArea({
         severity: "warn",
         area: "skills",
         title: `${observed.dangling.length} skill link${observed.dangling.length === 1 ? " points" : "s point"} at nothing: ${observed.dangling.map((d) => d.skill).join(", ")}`,
-        fix: { command: observed.dangling.map((d) => `rm ${shPath(tilde(d.dir))}/${sh(d.skill)}`).join("\n"), safe: true },
+        fix: {
+          command: observed.dangling
+            .map((d) => `rm ${shPath(tilde(d.dir))}/${sh(d.skill)}`)
+            .join("\n"),
+          safe: true,
+        },
       });
     }
     for (const stray of observed.strays) {
@@ -160,8 +184,12 @@ export const SkillsArea = defineArea({
         severity: "warn",
         area: "skills",
         title: `skill ${stray.skill} was installed in ${tilde(stray.dir)} outside T3 Fleet`,
-        detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
-        fix: { command: `t3-fleet skills adopt ${sh(stray.skill)} --from ${shPath(tilde(stray.dir))}`, safe: true },
+        detail:
+          "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
+        fix: {
+          command: `t3-fleet skills adopt ${sh(stray.skill)} --from ${shPath(tilde(stray.dir))}`,
+          safe: true,
+        },
       });
     }
     return out;

@@ -32,7 +32,13 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-import { EGRESS_FAILURE_HEADER, errorCode, requestHeaders, responseHeaders, splitPath } from "./Forward.ts";
+import {
+  EGRESS_FAILURE_HEADER,
+  errorCode,
+  requestHeaders,
+  responseHeaders,
+  splitPath,
+} from "./Forward.ts";
 import { constantTimeEqual, hashToken } from "../hub/Policy.ts";
 import { clientConnection, forwardingClient, sendUpstream } from "./Proxy.ts";
 import { BUILTIN_UPSTREAMS, upstreamBases } from "./Recipes.ts";
@@ -60,11 +66,15 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const given = readHeader(request.headers, "relay-token") ?? "";
-          if (token === "" || !constantTimeEqual(yield* hashToken(given), yield* hashToken(token))) return refused(401, "Unauthorized");
+          if (token === "" || !constantTimeEqual(yield* hashToken(given), yield* hashToken(token)))
+            return refused(401, "Unauthorized");
           const split = splitPath(request.url, "/egress");
           const base = readHeader(request.headers, "egress-base") ?? "";
-          const scheme = base.startsWith("https://") || (options.allowInsecure === true && base.startsWith("http://"));
-          if (split === null || !scheme || !bases().includes(base)) return refused(400, "the relay does not forward to that upstream");
+          const scheme =
+            base.startsWith("https://") ||
+            (options.allowInsecure === true && base.startsWith("http://"));
+          if (split === null || !scheme || !bases().includes(base))
+            return refused(400, "the relay does not forward to that upstream");
           const body =
             request.method === "GET" || request.method === "HEAD"
               ? null
@@ -77,7 +87,10 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
           }).pipe(Effect.result);
           if (sent._tag === "Failure") {
             const code = errorCode(sent.failure) ?? "connection failed";
-            return HttpServerResponse.text("Bad Gateway", { status: 502, headers: { [EGRESS_FAILURE_HEADER]: code } });
+            return HttpServerResponse.text("Bad Gateway", {
+              status: 502,
+              headers: { [EGRESS_FAILURE_HEADER]: code },
+            });
           }
           const response = sent.success;
           const contentType = response.headers["content-type"];
@@ -86,7 +99,8 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
             Stream.mapError(() => "the upstream's response broke off"),
             Stream.onExit((exit) =>
               Effect.sync(() => {
-                if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) connection?.destroy();
+                if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause))
+                  connection?.destroy();
               }),
             ),
           );
@@ -101,4 +115,8 @@ export const egressLayer = (token: string, options: EgressOptions = {}) =>
         ),
       );
     }),
-  ).pipe(Layer.provide(forwardingClient({ headersTimeout: Duration.minutes(10), bodyTimeout: Duration.minutes(10) })));
+  ).pipe(
+    Layer.provide(
+      forwardingClient({ headersTimeout: Duration.minutes(10), bodyTimeout: Duration.minutes(10) }),
+    ),
+  );

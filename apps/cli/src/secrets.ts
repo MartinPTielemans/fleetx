@@ -37,13 +37,19 @@ const asAuthority = Effect.gen(function* () {
   const config = yield* loadConfig;
   const self = config.nodes.find((n) => n.name === config.self);
   if (!self?.roles.includes("authority")) {
-    return yield* Effect.fail(`${config.self} is not an authority; change secrets on a node with the authority role`);
+    return yield* Effect.fail(
+      `${config.self} is not an authority; change secrets on a node with the authority role`,
+    );
   }
   return config;
 });
 
 const commitSecrets = (repo: string, message: string) =>
-  commitAndPush(repo, [encryptedPath(repo), recipientsPath(repo)].map((p) => p.slice(repo.length + 1)), message);
+  commitAndPush(
+    repo,
+    [encryptedPath(repo), recipientsPath(repo)].map((p) => p.slice(repo.length + 1)),
+    message,
+  );
 
 const init = Command.make("init").pipe(
   Command.withDescription("Create this node's key if it has none, and print its public half."),
@@ -56,7 +62,9 @@ const init = Command.make("init").pipe(
 );
 
 const install = Command.make("install").pipe(
-  Command.withDescription("Decrypt the repo's secrets into ~/.config/t3-fleet/secrets.env (mode 600)."),
+  Command.withDescription(
+    "Decrypt the repo's secrets into ~/.config/t3-fleet/secrets.env (mode 600).",
+  ),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
@@ -80,14 +88,17 @@ const list = Command.make("list").pipe(
 const set = Command.make("set", {
   pairs: Argument.String("KEY=VALUE").pipe(Argument.variadic({ min: 1 })),
 }).pipe(
-  Command.withDescription("Set secrets (authority). Re-encrypts for every node, commits and pushes."),
+  Command.withDescription(
+    "Set secrets (authority). Re-encrypts for every node, commits and pushes.",
+  ),
   Command.withHandler(({ pairs }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
       const vars: Array<readonly [string, string]> = [];
       for (const pair of pairs) {
         const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/s.exec(pair);
-        if (m?.[1] === undefined) return yield* Effect.fail(`not KEY=VALUE with an upper-case key: ${pair.split("=")[0]}`);
+        if (m?.[1] === undefined)
+          return yield* Effect.fail(`not KEY=VALUE with an upper-case key: ${pair.split("=")[0]}`);
         vars.push([m[1], m[2] ?? ""]);
       }
       const keys = vars.map(([key]) => key);
@@ -97,7 +108,10 @@ const set = Command.make("set", {
           for (const [key, value] of vars) text = setVar(text, key, value);
           yield* writeSecrets(config.repo, text);
           yield* installSecrets(config.repo);
-          return yield* commitSecrets(config.repo, `Set secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+          return yield* commitSecrets(
+            config.repo,
+            `Set secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`,
+          );
         }),
       );
       yield* Console.log(`set ${keys.join(", ")} (${rev})`);
@@ -118,7 +132,10 @@ const unset = Command.make("unset", {
           for (const key of keys) text = setVar(text, key, null);
           yield* writeSecrets(config.repo, text);
           yield* installSecrets(config.repo);
-          return yield* commitSecrets(config.repo, `Remove secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`);
+          return yield* commitSecrets(
+            config.repo,
+            `Remove secret${keys.length === 1 ? "" : "s"} ${keys.join(", ")}`,
+          );
         }),
       );
       yield* Console.log(`removed ${keys.join(", ")} (${rev})`);
@@ -127,14 +144,18 @@ const unset = Command.make("unset", {
 );
 
 const importFile = Command.make("import", {
-  file: Argument.String("FILE").pipe(Argument.withDescription("A dotenv file; its content replaces the secrets.")),
+  file: Argument.String("FILE").pipe(
+    Argument.withDescription("A dotenv file; its content replaces the secrets."),
+  ),
 }).pipe(
   Command.withDescription("Replace every secret from a dotenv file (authority)."),
   Command.withHandler(({ file }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
       const fs = yield* FileSystem.FileSystem;
-      const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => `cannot read ${file}`));
+      const text = yield* fs
+        .readFileString(file)
+        .pipe(Effect.mapError(() => `cannot read ${file}`));
       const names = varNames(text);
       const rev = yield* underSyncLock(
         Effect.gen(function* () {
@@ -155,14 +176,18 @@ const importFile = Command.make("import", {
 
 const addNode = Command.make("add-node", {
   node: Argument.String("NODE"),
-  recipient: Argument.String("RECIPIENT").pipe(Argument.withDescription("The node's public key (age1…), from `t3-fleet secrets init` there.")),
+  recipient: Argument.String("RECIPIENT").pipe(
+    Argument.withDescription("The node's public key (age1…), from `t3-fleet secrets init` there."),
+  ),
 }).pipe(
   Command.withDescription("Let a node read the secrets (authority): adds its key and re-encrypts."),
   Command.withHandler(({ node, recipient }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
-      if (!config.nodes.some((n) => n.name === node)) return yield* Effect.fail(`unknown machine: ${node}`);
-      if (!/^age1[0-9a-z]+$/.test(recipient)) return yield* Effect.fail("not an age public key (age1…)");
+      if (!config.nodes.some((n) => n.name === node))
+        return yield* Effect.fail(`unknown machine: ${node}`);
+      if (!/^age1[0-9a-z]+$/.test(recipient))
+        return yield* Effect.fail("not an age public key (age1…)");
       const rev = yield* underSyncLock(
         Effect.gen(function* () {
           const text = yield* readSecrets(config.repo);

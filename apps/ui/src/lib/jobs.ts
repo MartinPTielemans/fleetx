@@ -33,6 +33,8 @@ export class JobBook {
     this.update(started);
     const now = this.#known.get(started.id) ?? started;
     if (finished(now)) return Promise.resolve(now);
-    return new Promise((resolve) => this.#waiters.set(started.id, [...(this.#waiters.get(started.id) ?? []), resolve]));
+    return new Promise((resolve) =>
+      this.#waiters.set(started.id, [...(this.#waiters.get(started.id) ?? []), resolve]),
+    );
   }
 }

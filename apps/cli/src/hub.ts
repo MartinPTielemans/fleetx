@@ -25,20 +25,44 @@ import { exec } from "@t3-fleet/core/Exec";
 import { commitAndPush } from "@t3-fleet/core/Git";
 import { clientTokenEnv, expectOk, hubRequest } from "@t3-fleet/core/hub/HubClient";
 import { toJson } from "@t3-fleet/core/hub/JsonRpc";
-import { decodeCalls, decodeCreated, decodeLogin, decodeLoginStatus, decodeServers, decodeTokens } from "@t3-fleet/core/hub/Routes";
-import { encryptedPath, installSecrets, readSecrets, setVar, writeSecrets } from "@t3-fleet/core/Secrets";
+import {
+  decodeCalls,
+  decodeCreated,
+  decodeLogin,
+  decodeLoginStatus,
+  decodeServers,
+  decodeTokens,
+} from "@t3-fleet/core/hub/Routes";
+import {
+  encryptedPath,
+  installSecrets,
+  readSecrets,
+  setVar,
+  writeSecrets,
+} from "@t3-fleet/core/Secrets";
 
 import { reportUserErrors } from "./shared.ts";
 
-const nameArg = Argument.String("name").pipe(Argument.withDescription("The server's name, as in mcp/<name>.json."));
+const nameArg = Argument.String("name").pipe(
+  Argument.withDescription("The server's name, as in mcp/<name>.json."),
+);
 
 const servers = (config: Config) =>
-  hubRequest(config, "GET", "/hub/servers").pipe(Effect.flatMap(expectOk), Effect.flatMap((t) => decodeServers(t).pipe(Effect.mapError(() => "the relay sent an unexpected answer"))));
+  hubRequest(config, "GET", "/hub/servers").pipe(
+    Effect.flatMap(expectOk),
+    Effect.flatMap((t) =>
+      decodeServers(t).pipe(Effect.mapError(() => "the relay sent an unexpected answer")),
+    ),
+  );
 
 const ago = (now: number, at: number | null) => {
   if (at === null) return "never";
   const s = Math.round((now - at) / 1000);
-  return s < 120 ? `${s}s ago` : s < 7200 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+  return s < 120
+    ? `${s}s ago`
+    : s < 7200
+      ? `${Math.round(s / 60)}m ago`
+      : `${Math.round(s / 3600)}h ago`;
 };
 
 const until = (now: number, at: number | null) => {
@@ -48,14 +72,21 @@ const until = (now: number, at: number | null) => {
 };
 
 export const renderServers = (list: ReadonlyArray<HubServer>, now: number) => {
-  if (list.length === 0) return "no hosted MCP servers (definitions with kind remote, container, registry or hosted-stdio in mcp/)";
+  if (list.length === 0)
+    return "no hosted MCP servers (definitions with kind remote, container, registry or hosted-stdio in mcp/)";
   const width = Math.max(...list.map((s) => s.name.length));
   return list
     .map((s) => {
-      const auth = s.auth === "oauth" ? `oauth${s.expiresAt === null ? "" : ` ${until(now, s.expiresAt)}`}` : s.auth;
+      const auth =
+        s.auth === "oauth"
+          ? `oauth${s.expiresAt === null ? "" : ` ${until(now, s.expiresAt)}`}`
+          : s.auth;
       const tools = s.tools === null ? "" : `${s.tools} tools`;
       const line = `${s.name.padEnd(width)}  ${s.state.padEnd(11)}  ${s.kind.padEnd(12)}  ${auth.padEnd(10)}  ${tools.padEnd(9)}  checked ${ago(now, s.lastCheckAt)}`;
-      const hint = s.state === "needs-login" ? `\n${" ".repeat(width)}  sign in: t3-fleet mcp login ${s.name}` : "";
+      const hint =
+        s.state === "needs-login"
+          ? `\n${" ".repeat(width)}  sign in: t3-fleet mcp login ${s.name}`
+          : "";
       return `${line}${s.detail === null ? "" : `\n${" ".repeat(width)}  ${s.detail}`}${hint}`;
     })
     .join("\n");
@@ -73,27 +104,47 @@ const serversCommand = Command.make("servers").pipe(
 
 /** Open a URL in the browser on this machine, when there is one; best effort. */
 const openUrl = (url: string) =>
-  exec({ command: process.platform === "darwin" ? "open" : "xdg-open", args: [url], timeout: Duration.seconds(5) }).pipe(Effect.map((r) => r.code === 0));
+  exec({
+    command: process.platform === "darwin" ? "open" : "xdg-open",
+    args: [url],
+    timeout: Duration.seconds(5),
+  }).pipe(Effect.map((r) => r.code === 0));
 
 /** This sign-in is done: report what the hub's check of the server finds, for up to half a minute. */
 const afterSignIn = (config: Config, name: string) =>
   Effect.gen(function* () {
     for (let i = 0; i < 15; i++) {
-      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find((x) => x.name === name);
-      if (s?.state === "running") return yield* Console.log(`Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`);
-      if (s?.state === "error" || s?.state === "needs-login") return yield* Effect.fail(`signed in, but ${name} is ${s.state === "error" ? "in error" : "still asking for a sign-in"}: ${s.detail ?? ""}`);
+      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find(
+        (x) => x.name === name,
+      );
+      if (s?.state === "running")
+        return yield* Console.log(
+          `Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`,
+        );
+      if (s?.state === "error" || s?.state === "needs-login")
+        return yield* Effect.fail(
+          `signed in, but ${name} is ${s.state === "error" ? "in error" : "still asking for a sign-in"}: ${s.detail ?? ""}`,
+        );
       yield* Effect.sleep(Duration.seconds(2));
     }
-    yield* Console.log(`Signed in to ${name}; the hub is still checking it (t3-fleet mcp servers).`);
+    yield* Console.log(
+      `Signed in to ${name}; the hub is still checking it (t3-fleet mcp servers).`,
+    );
   });
 
 /** Before /hub/logins: wait for the server to be running, which an earlier login also satisfies. */
 const waitForRunning = (config: Config, name: string, polls: number) =>
   Effect.gen(function* () {
     for (let i = 0; i < polls; i++) {
-      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find((x) => x.name === name);
-      if (s?.state === "running") return yield* Console.log(`Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`);
-      if (s?.state === "error" && s.detail !== null && !s.detail.startsWith("signed in")) return yield* Effect.fail(`signed in, but ${name} is in error: ${s.detail}`);
+      const s = (yield* servers(config).pipe(Effect.orElseSucceed(() => []))).find(
+        (x) => x.name === name,
+      );
+      if (s?.state === "running")
+        return yield* Console.log(
+          `Signed in: ${name} is running${s.tools === null ? "" : ` with ${s.tools} tools`}.`,
+        );
+      if (s?.state === "error" && s.detail !== null && !s.detail.startsWith("signed in"))
+        return yield* Effect.fail(`signed in, but ${name} is in error: ${s.detail}`);
       yield* Effect.sleep(Duration.seconds(2));
     }
     return yield* Effect.fail("no sign-in arrived within 10 minutes; run the command again");
@@ -101,33 +152,58 @@ const waitForRunning = (config: Config, name: string, polls: number) =>
 
 const loginCommand = Command.make("login", {
   name: nameArg,
-  wait: Flag.Boolean("no-wait").pipe(Flag.withDescription("Print the URL and return without waiting for the sign-in."), Flag.withDefault(false)),
+  wait: Flag.Boolean("no-wait").pipe(
+    Flag.withDescription("Print the URL and return without waiting for the sign-in."),
+    Flag.withDefault(false),
+  ),
 }).pipe(
-  Command.withDescription("Sign the hub in to a server: prints the URL to open in any browser on the tailnet."),
+  Command.withDescription(
+    "Sign the hub in to a server: prints the URL to open in any browser on the tailnet.",
+  ),
   Command.withHandler(({ name, wait: noWait }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const text = yield* hubRequest(config, "POST", `/hub/servers/${encodeURIComponent(name)}/login`).pipe(Effect.flatMap(expectOk));
-      const { url } = yield* decodeLogin(text).pipe(Effect.mapError(() => "the relay sent an unexpected answer"));
+      const text = yield* hubRequest(
+        config,
+        "POST",
+        `/hub/servers/${encodeURIComponent(name)}/login`,
+      ).pipe(Effect.flatMap(expectOk));
+      const { url } = yield* decodeLogin(text).pipe(
+        Effect.mapError(() => "the relay sent an unexpected answer"),
+      );
       yield* Console.log(`Open this URL to sign in to ${name}:\n\n  ${url}\n`);
       if (process.stdout.isTTY === true) yield* openUrl(url);
       if (noWait) return;
-      yield* Console.log("Waiting for the sign-in (Ctrl-C to stop waiting; the link stays valid for 10 minutes)…");
+      yield* Console.log(
+        "Waiting for the sign-in (Ctrl-C to stop waiting; the link stays valid for 10 minutes)…",
+      );
       const state = new URL(url).searchParams.get("state") ?? "";
       for (let i = 0; i < 300; i++) {
         yield* Effect.sleep(Duration.seconds(2));
-        const reply = yield* hubRequest(config, "GET", `/hub/logins/${encodeURIComponent(state)}`).pipe(Effect.option);
+        const reply = yield* hubRequest(
+          config,
+          "GET",
+          `/hub/logins/${encodeURIComponent(state)}`,
+        ).pipe(Effect.option);
         if (reply._tag === "None") continue;
         // A relay from before /hub/logins: all it can say is the server's state.
         if (reply.value.status === 404) return yield* waitForRunning(config, name, 300 - i);
         const login = yield* Effect.succeed(reply.value).pipe(
           Effect.flatMap(expectOk),
-          Effect.flatMap((t) => decodeLoginStatus(t).pipe(Effect.mapError(() => "the relay sent an unexpected answer"))),
+          Effect.flatMap((t) =>
+            decodeLoginStatus(t).pipe(Effect.mapError(() => "the relay sent an unexpected answer")),
+          ),
           Effect.option,
         );
         if (login._tag === "None" || login.value.status === "pending") continue;
-        if (login.value.status === "failed") return yield* Effect.fail(`the sign-in to ${name} failed: ${login.value.detail ?? "no reason given"}`);
-        if (login.value.status === "unknown") return yield* Effect.fail("the relay no longer knows this sign-in (it restarted, or the link expired); run the command again");
+        if (login.value.status === "failed")
+          return yield* Effect.fail(
+            `the sign-in to ${name} failed: ${login.value.detail ?? "no reason given"}`,
+          );
+        if (login.value.status === "unknown")
+          return yield* Effect.fail(
+            "the relay no longer knows this sign-in (it restarted, or the link expired); run the command again",
+          );
         return yield* afterSignIn(config, name);
       }
       return yield* Effect.fail("no sign-in arrived within 10 minutes; run the command again");
@@ -141,73 +217,123 @@ const simple = (verb: "logout" | "restart", description: string, done: (name: st
     Command.withHandler(({ name }) =>
       Effect.gen(function* () {
         const config = yield* loadConfig;
-        yield* hubRequest(config, "POST", `/hub/servers/${encodeURIComponent(name)}/${verb}`).pipe(Effect.flatMap(expectOk));
+        yield* hubRequest(config, "POST", `/hub/servers/${encodeURIComponent(name)}/${verb}`).pipe(
+          Effect.flatMap(expectOk),
+        );
         yield* Console.log(done(name));
       }).pipe(reportUserErrors),
     ),
   );
 
 const callsCommand = Command.make("calls", {
-  server: Flag.String("server").pipe(Flag.withDescription("Only calls to this server."), Flag.optional),
-  limit: Flag.Int("limit").pipe(Flag.withDescription("How many, newest first."), Flag.withDefault(50)),
+  server: Flag.String("server").pipe(
+    Flag.withDescription("Only calls to this server."),
+    Flag.optional,
+  ),
+  limit: Flag.Int("limit").pipe(
+    Flag.withDescription("How many, newest first."),
+    Flag.withDefault(50),
+  ),
 }).pipe(
-  Command.withDescription("Show the hub's recent tool calls: who called what, how long, how it ended. Never arguments or results."),
+  Command.withDescription(
+    "Show the hub's recent tool calls: who called what, how long, how it ended. Never arguments or results.",
+  ),
   Command.withHandler(({ server, limit }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const query = new URLSearchParams({ limit: String(limit), ...(server._tag === "Some" ? { server: server.value } : {}) });
-      const text = yield* hubRequest(config, "GET", `/hub/calls?${query.toString()}`).pipe(Effect.flatMap(expectOk));
-      const calls = yield* decodeCalls(text).pipe(Effect.mapError(() => "the relay sent an unexpected answer"));
+      const query = new URLSearchParams({
+        limit: String(limit),
+        ...(server._tag === "Some" ? { server: server.value } : {}),
+      });
+      const text = yield* hubRequest(config, "GET", `/hub/calls?${query.toString()}`).pipe(
+        Effect.flatMap(expectOk),
+      );
+      const calls = yield* decodeCalls(text).pipe(
+        Effect.mapError(() => "the relay sent an unexpected answer"),
+      );
       if (calls.length === 0) return yield* Console.log("no calls yet");
       for (const c of calls) {
         const when = DateTime.formatIso(DateTime.makeUnsafe(c.at)).replace("T", " ").slice(0, 19);
         const what = c.tool === null ? c.method : `${c.method} ${c.tool}`;
-        yield* Console.log(`${when}  ${c.server}  ${c.client}  ${what}  ${c.durationMs}ms  ${c.outcome}${c.error === null ? "" : `: ${c.error}`}`);
+        yield* Console.log(
+          `${when}  ${c.server}  ${c.client}  ${what}  ${c.durationMs}ms  ${c.outcome}${c.error === null ? "" : `: ${c.error}`}`,
+        );
       }
     }).pipe(reportUserErrors),
   ),
 );
 
-const clientArg = Argument.String("client").pipe(Argument.withDescription("A name for the client: a machine, an agent, a person."));
+const clientArg = Argument.String("client").pipe(
+  Argument.withDescription("A name for the client: a machine, an agent, a person."),
+);
 
 const tokenCreate = Command.make("create", {
   client: clientArg,
-  server: Flag.String("server").pipe(Flag.withDescription("Only these servers (repeatable); default all."), Flag.atLeast(0)),
+  server: Flag.String("server").pipe(
+    Flag.withDescription("Only these servers (repeatable); default all."),
+    Flag.atLeast(0),
+  ),
 }).pipe(
-  Command.withDescription("Create a gateway token for one client. Kept in the fleet's secrets on an authority; shown once otherwise."),
+  Command.withDescription(
+    "Create a gateway token for one client. Kept in the fleet's secrets on an authority; shown once otherwise.",
+  ),
   Command.withHandler(({ client, server }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const body = toJson(server.length === 0 ? {} : { servers: server });
-      const text = yield* hubRequest(config, "POST", `/hub/tokens/${encodeURIComponent(client)}`, body).pipe(Effect.flatMap(expectOk));
-      const { token } = yield* decodeCreated(text).pipe(Effect.mapError(() => "the relay sent an unexpected answer"));
+      const text = yield* hubRequest(
+        config,
+        "POST",
+        `/hub/tokens/${encodeURIComponent(client)}`,
+        body,
+      ).pipe(Effect.flatMap(expectOk));
+      const { token } = yield* decodeCreated(text).pipe(
+        Effect.mapError(() => "the relay sent an unexpected answer"),
+      );
       const env = clientTokenEnv(config.repo, client);
       const self = config.nodes.find((n) => n.name === config.self);
       if (self?.roles.includes("authority")) {
         const secrets = setVar(yield* readSecrets(config.repo), env, token);
         yield* writeSecrets(config.repo, secrets);
         yield* installSecrets(config.repo);
-        const rev = yield* commitAndPush(config.repo, [encryptedPath(config.repo).slice(config.repo.length + 1)], `Set secret ${env}`);
-        yield* Console.log(`created a token for ${client}${server.length === 0 ? "" : ` (${server.join(", ")})`}, kept in the fleet's secrets as ${env} (${rev}).`);
-        yield* Console.log(`Use it with [mcp] token_env = "${env}" on the nodes that should connect as ${client}.`);
+        const rev = yield* commitAndPush(
+          config.repo,
+          [encryptedPath(config.repo).slice(config.repo.length + 1)],
+          `Set secret ${env}`,
+        );
+        yield* Console.log(
+          `created a token for ${client}${server.length === 0 ? "" : ` (${server.join(", ")})`}, kept in the fleet's secrets as ${env} (${rev}).`,
+        );
+        yield* Console.log(
+          `Use it with [mcp] token_env = "${env}" on the nodes that should connect as ${client}.`,
+        );
       } else {
         yield* Console.log(`created a token for ${client}; it is shown only now:\n\n  ${token}\n`);
-        yield* Console.log(`Keep it in the fleet's secrets from an authority: t3-fleet secrets set ${env}=…`);
+        yield* Console.log(
+          `Keep it in the fleet's secrets from an authority: t3-fleet secrets set ${env}=…`,
+        );
       }
     }).pipe(reportUserErrors),
   ),
 );
 
 const tokenList = Command.make("list").pipe(
-  Command.withDescription("List client tokens (names and scope; the tokens themselves are only stored hashed)."),
+  Command.withDescription(
+    "List client tokens (names and scope; the tokens themselves are only stored hashed).",
+  ),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const text = yield* hubRequest(config, "GET", "/hub/tokens").pipe(Effect.flatMap(expectOk));
-      const tokens = yield* decodeTokens(text).pipe(Effect.mapError(() => "the relay sent an unexpected answer"));
-      if (tokens.length === 0) return yield* Console.log("no client tokens; clients use the relay token");
+      const tokens = yield* decodeTokens(text).pipe(
+        Effect.mapError(() => "the relay sent an unexpected answer"),
+      );
+      if (tokens.length === 0)
+        return yield* Console.log("no client tokens; clients use the relay token");
       for (const t of tokens) {
-        yield* Console.log(`${t.client}  ${t.servers === null ? "all servers" : t.servers.join(", ")}  created ${DateTime.formatIso(DateTime.makeUnsafe(t.createdAt)).slice(0, 10)}`);
+        yield* Console.log(
+          `${t.client}  ${t.servers === null ? "all servers" : t.servers.join(", ")}  created ${DateTime.formatIso(DateTime.makeUnsafe(t.createdAt)).slice(0, 10)}`,
+        );
       }
     }).pipe(reportUserErrors),
   ),
@@ -218,8 +344,12 @@ const tokenRevoke = Command.make("revoke", { client: clientArg }).pipe(
   Command.withHandler(({ client }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      yield* hubRequest(config, "DELETE", `/hub/tokens/${encodeURIComponent(client)}`).pipe(Effect.flatMap(expectOk));
-      yield* Console.log(`revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(config.repo, client)}` : ""}`);
+      yield* hubRequest(config, "DELETE", `/hub/tokens/${encodeURIComponent(client)}`).pipe(
+        Effect.flatMap(expectOk),
+      );
+      yield* Console.log(
+        `revoked ${client}'s token${config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ? `; remove it from the secrets with t3-fleet secrets unset ${clientTokenEnv(config.repo, client)}` : ""}`,
+      );
     }).pipe(reportUserErrors),
   ),
 );
@@ -234,7 +364,11 @@ export const hubCommands = [
   serversCommand,
   loginCommand,
   simple("logout", "Drop the hub's login for a server.", (name) => `signed out of ${name}`),
-  simple("restart", "Restart a hosted server's container or process.", (name) => `restarting ${name}`),
+  simple(
+    "restart",
+    "Restart a hosted server's container or process.",
+    (name) => `restarting ${name}`,
+  ),
   callsCommand,
   tokenCommand,
 ] as const;

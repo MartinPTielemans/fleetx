@@ -37,18 +37,41 @@ describe("inRunOrder", () => {
 
 describe("runFix", () => {
   it("refuses to install a build it was not given, instead of an empty file", async () => {
-    const node = { name: "box", ssh: "box.invalid", roles: [], profiles: [], settings: { table: {}, sources: {} } } as unknown as Node;
-    const outcome = await Effect.runPromise(runFix(node, finding("engine-outdated", ENGINE_INSTALL), "~/fleet", "").pipe(Effect.provide(NodeServices.layer)));
+    const node = {
+      name: "box",
+      ssh: "box.invalid",
+      roles: [],
+      profiles: [],
+      settings: { table: {}, sources: {} },
+    } as unknown as Node;
+    const outcome = await Effect.runPromise(
+      runFix(node, finding("engine-outdated", ENGINE_INSTALL), "~/fleet", "").pipe(
+        Effect.provide(NodeServices.layer),
+      ),
+    );
     expect(outcome.ok).toBe(false);
     expect(outcome.summary).toContain("no T3 Fleet build to install");
   });
 });
 
 describe("runFixes", () => {
-  const self = { name: "box", ssh: null, roles: ["member" as const], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } };
+  const self = {
+    name: "box",
+    ssh: null,
+    roles: ["member" as const],
+    profiles: [],
+    tailnet: null,
+    settings: { table: {}, provenance: new Map() },
+  };
   const checkoutSeen = (localRepo?: string) =>
     Effect.runPromise(
-      runFixes([self], [finding("skills-unlinked", 'echo "$T3_FLEET_CHECKOUT"')], "~/fleet", "", localRepo).pipe(Effect.provide(NodeServices.layer)),
+      runFixes(
+        [self],
+        [finding("skills-unlinked", 'echo "$T3_FLEET_CHECKOUT"')],
+        "~/fleet",
+        "",
+        localRepo,
+      ).pipe(Effect.provide(NodeServices.layer)),
     ).then((outcomes) => outcomes[0]?.summary);
 
   it("runs this machine's fixes in the repo it loaded, as its probe observed", async () => {

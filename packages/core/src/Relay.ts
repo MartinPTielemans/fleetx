@@ -119,12 +119,20 @@ export const relayLayer = (options: RelayOptions) =>
       // Watch the branch on the remote; emit "pull" when it moves.
       const lastRev = yield* Ref.make("");
       yield* Effect.gen(function* () {
-        const remote = yield* git(options.repo, ["ls-remote", "origin", `refs/heads/${options.branch}`]);
+        const remote = yield* git(options.repo, [
+          "ls-remote",
+          "origin",
+          `refs/heads/${options.branch}`,
+        ]);
         const rev = out(remote).split(/\s+/)[0] ?? "";
         if (rev === "") return;
         const previous = yield* Ref.getAndSet(lastRev, rev);
-        if (previous !== "" && previous !== rev) yield* emit({ type: "pull", rev: rev.slice(0, 7) });
-      }).pipe(Effect.repeat(Schedule.spaced(options.pollEvery ?? Duration.seconds(20))), Effect.forkDetach);
+        if (previous !== "" && previous !== rev)
+          yield* emit({ type: "pull", rev: rev.slice(0, 7) });
+      }).pipe(
+        Effect.repeat(Schedule.spaced(options.pollEvery ?? Duration.seconds(20))),
+        Effect.forkDetach,
+      );
 
       const authorized = Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -145,11 +153,14 @@ export const relayLayer = (options: RelayOptions) =>
           const request = yield* HttpServerRequest.HttpServerRequest;
           const body = yield* request.text;
           const state = yield* decodeState(body).pipe(Effect.option);
-          if (Option.isNone(state)) return HttpServerResponse.text("Not a node state", { status: 400 });
+          if (Option.isNone(state))
+            return HttpServerResponse.text("Not a node state", { status: 400 });
           yield* Ref.update(states, (m) => new Map(m).set(state.value.node, state.value));
           yield* emit({ type: "state", node: state.value.node, rev: state.value.rev });
           return HttpServerResponse.empty({ status: 204 });
-        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 }))),
+        }).pipe(
+          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
+        ),
       );
 
       const fleet = HttpRouter.add(
@@ -158,8 +169,14 @@ export const relayLayer = (options: RelayOptions) =>
         Effect.gen(function* () {
           if (!(yield* authorized)) return unauthorized;
           const all = [...(yield* Ref.get(states)).values()];
-          return HttpServerResponse.text(yield* encodeJson(all), { contentType: "application/json" });
-        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 }))),
+          return HttpServerResponse.text(yield* encodeJson(all), {
+            contentType: "application/json",
+          });
+        }).pipe(
+          Effect.orElseSucceed(() =>
+            HttpServerResponse.text("Internal Server Error", { status: 500 }),
+          ),
+        ),
       );
 
       const eventStream = HttpRouter.add(
@@ -169,16 +186,29 @@ export const relayLayer = (options: RelayOptions) =>
           if (!(yield* authorized)) return unauthorized;
           const request = yield* HttpServerRequest.HttpServerRequest;
           const url = new URL(request.url, "http://relay");
-          const since = Number(request.headers["last-event-id"] ?? url.searchParams.get("since") ?? "0") || 0;
+          const since =
+            Number(request.headers["last-event-id"] ?? url.searchParams.get("since") ?? "0") || 0;
           const kept = yield* Ref.get(events);
           const next = yield* Ref.get(nextId);
           const known = ids.knows(since, kept, next);
           const missed = known ? kept.filter((e) => e.id > since) : kept;
           // With the newest id handed out, so the listener's next `since` is one of this run's.
-          const pull: ReadonlyArray<RelayEvent> = known ? [] : [{ id: next - 1, at: yield* Clock.currentTimeMillis, type: "pull", rev: (yield* Ref.get(lastRev)).slice(0, 7) }];
-          const frame = (e: RelayEvent) => `id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
+          const pull: ReadonlyArray<RelayEvent> = known
+            ? []
+            : [
+                {
+                  id: next - 1,
+                  at: yield* Clock.currentTimeMillis,
+                  type: "pull",
+                  rev: (yield* Ref.get(lastRev)).slice(0, 7),
+                },
+              ];
+          const frame = (e: RelayEvent) =>
+            `id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
           const live = Stream.fromPubSub(hub);
-          const keepalive = Stream.tick(Duration.seconds(25)).pipe(Stream.map(() => ": keepalive\n\n"));
+          const keepalive = Stream.tick(Duration.seconds(25)).pipe(
+            Stream.map(() => ": keepalive\n\n"),
+          );
           const body = Stream.make(...[...missed, ...pull].map(frame)).pipe(
             Stream.concat(Stream.merge(live.pipe(Stream.map(frame)), keepalive)),
             Stream.encodeText,
@@ -190,6 +220,16 @@ export const relayLayer = (options: RelayOptions) =>
         }),
       );
 
-      return Layer.mergeAll(health, report, fleet, eventStream, hubRoutes(hubService, options.token), egressLayer(options.token, options.egressBases === undefined ? {} : { bases: options.egressBases }));
+      return Layer.mergeAll(
+        health,
+        report,
+        fleet,
+        eventStream,
+        hubRoutes(hubService, options.token),
+        egressLayer(
+          options.token,
+          options.egressBases === undefined ? {} : { bases: options.egressBases },
+        ),
+      );
     }),
   );

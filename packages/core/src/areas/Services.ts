@@ -46,27 +46,60 @@ export const ServicesArea = defineArea({
       const fs = yield* FileSystem.FileSystem;
       const names = desired ?? [];
       if (names.length === 0) return { docker: false, services: [] };
-      const docker = (yield* exec({ command: "docker", args: ["version", "--format", "{{.Server.Version}}"], env: ctx.env, timeout: Duration.seconds(10) })).code === 0;
-      if (!docker) return { docker, services: names.map((name) => ({ name, running: 0, total: 0, composeFile: null, matchesRepo: null, inRepo: false })) };
+      const docker =
+        (yield* exec({
+          command: "docker",
+          args: ["version", "--format", "{{.Server.Version}}"],
+          env: ctx.env,
+          timeout: Duration.seconds(10),
+        })).code === 0;
+      if (!docker)
+        return {
+          docker,
+          services: names.map((name) => ({
+            name,
+            running: 0,
+            total: 0,
+            composeFile: null,
+            matchesRepo: null,
+            inRepo: false,
+          })),
+        };
       const services = yield* Effect.forEach(names, (name) =>
         Effect.gen(function* () {
           const ps = yield* exec({
             command: "docker",
-            args: ["ps", "-a", "--filter", `label=com.docker.compose.project=${name}`, "--format", '{{.State}}\t{{.Label "com.docker.compose.project.config_files"}}'],
+            args: [
+              "ps",
+              "-a",
+              "--filter",
+              `label=com.docker.compose.project=${name}`,
+              "--format",
+              '{{.State}}\t{{.Label "com.docker.compose.project.config_files"}}',
+            ],
             env: ctx.env,
             timeout: Duration.seconds(15),
           });
-          const rows = ps.stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+          const rows = ps.stdout
+            .split("\n")
+            .filter(Boolean)
+            .map((l) => l.split("\t"));
           const composeFile = rows.find((r) => r[1])?.[1]?.split(",")[0] ?? null;
           const repoFile = `${ctx.checkout}/services/${name}/docker-compose.yml`;
           const repoText = yield* fs.readFileString(repoFile).pipe(Effect.option);
-          const liveText = composeFile === null ? Option.none<string>() : yield* fs.readFileString(composeFile).pipe(Effect.option);
+          const liveText =
+            composeFile === null
+              ? Option.none<string>()
+              : yield* fs.readFileString(composeFile).pipe(Effect.option);
           return {
             name,
             running: rows.filter((r) => r[0] === "running").length,
             total: rows.length,
             composeFile,
-            matchesRepo: Option.isSome(repoText) && Option.isSome(liveText) ? repoText.value === liveText.value : null,
+            matchesRepo:
+              Option.isSome(repoText) && Option.isSome(liveText)
+                ? repoText.value === liveText.value
+                : null,
             inRepo: Option.isSome(repoText),
           };
         }),
@@ -78,13 +111,29 @@ export const ServicesArea = defineArea({
     if ((desired ?? []).length === 0) return out;
     const base = { node, area: "services" as const };
     if (!observed.docker) {
-      out.push({ ...base, key: "services-no-docker", severity: "error", title: "this machine runs services, but Docker is not answering" });
+      out.push({
+        ...base,
+        key: "services-no-docker",
+        severity: "error",
+        title: "this machine runs services, but Docker is not answering",
+      });
       return out;
     }
     for (const s of observed.services) {
-      if (s.total === 0) out.push({ ...base, key: `service-${s.name}-absent`, severity: "error", title: `service ${s.name} has no containers here` });
+      if (s.total === 0)
+        out.push({
+          ...base,
+          key: `service-${s.name}-absent`,
+          severity: "error",
+          title: `service ${s.name} has no containers here`,
+        });
       else if (s.running < s.total) {
-        out.push({ ...base, key: `service-${s.name}-down`, severity: "error", title: `service ${s.name}: ${s.running} of ${s.total} containers running` });
+        out.push({
+          ...base,
+          key: `service-${s.name}-down`,
+          severity: "error",
+          title: `service ${s.name}: ${s.running} of ${s.total} containers running`,
+        });
       }
       if (s.composeFile !== null && (s.matchesRepo === false || !s.inRepo)) {
         out.push({
@@ -93,7 +142,10 @@ export const ServicesArea = defineArea({
           severity: "info",
           title: `service ${s.name} runs from a compose file ${s.inRepo ? "that differs from" : "missing in"} the repo's services/${s.name}/`,
           detail: `running from ${s.composeFile}; services deploy from their own repos, so the repo copy is captured, not applied`,
-          fix: { command: `mkdir -p "$T3_FLEET_CHECKOUT/services/${s.name}" && cp ${sh(s.composeFile)} "$T3_FLEET_CHECKOUT/services/${s.name}/docker-compose.yml"`, safe: true },
+          fix: {
+            command: `mkdir -p "$T3_FLEET_CHECKOUT/services/${s.name}" && cp ${sh(s.composeFile)} "$T3_FLEET_CHECKOUT/services/${s.name}/docker-compose.yml"`,
+            safe: true,
+          },
         });
       }
     }

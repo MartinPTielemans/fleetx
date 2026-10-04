@@ -30,16 +30,22 @@ export const parseJson = (text: string): unknown => Option.getOrUndefined(decode
 /** Serialize a value as JSON text. */
 export const toJson = (value: unknown): string => Option.getOrElse(encodeJson(value), () => "null");
 
-const isRecord = (u: unknown): u is Record<string, unknown> => typeof u === "object" && u !== null && !Array.isArray(u);
+const isRecord = (u: unknown): u is Record<string, unknown> =>
+  typeof u === "object" && u !== null && !Array.isArray(u);
 
-const asMessage = (u: unknown): JsonRpcMessage | null => (isRecord(u) ? (u as JsonRpcMessage) : null);
+const asMessage = (u: unknown): JsonRpcMessage | null =>
+  isRecord(u) ? (u as JsonRpcMessage) : null;
 
 /** The messages in a POST body: one message, or a batch. Null when the body is not JSON-RPC. */
-export const parseMessages = (body: string): { readonly batch: boolean; readonly messages: ReadonlyArray<JsonRpcMessage> } | null => {
+export const parseMessages = (
+  body: string,
+): { readonly batch: boolean; readonly messages: ReadonlyArray<JsonRpcMessage> } | null => {
   const value = parseJson(body);
   if (Array.isArray(value)) {
     const messages = value.map(asMessage);
-    return messages.every((m) => m !== null) && messages.length > 0 ? { batch: true, messages: messages as Array<JsonRpcMessage> } : null;
+    return messages.every((m) => m !== null) && messages.length > 0
+      ? { batch: true, messages: messages as Array<JsonRpcMessage> }
+      : null;
   }
   const message = asMessage(value);
   return message === null ? null : { batch: false, messages: [message] };
@@ -48,8 +54,10 @@ export const parseMessages = (body: string): { readonly batch: boolean; readonly
 const hasId = (m: JsonRpcMessage) => m.id !== undefined && m.id !== null;
 
 export const isRequest = (m: JsonRpcMessage): boolean => typeof m.method === "string" && hasId(m);
-export const isNotification = (m: JsonRpcMessage): boolean => typeof m.method === "string" && !hasId(m);
-export const isResponse = (m: JsonRpcMessage): boolean => m.method === undefined && hasId(m) && ("result" in m || "error" in m);
+export const isNotification = (m: JsonRpcMessage): boolean =>
+  typeof m.method === "string" && !hasId(m);
+export const isResponse = (m: JsonRpcMessage): boolean =>
+  m.method === undefined && hasId(m) && ("result" in m || "error" in m);
 
 const CANONICAL_KEYS: ReadonlyArray<string> = ["jsonrpc", "id", "method", "params"];
 
@@ -58,7 +66,12 @@ const CANONICAL_KEYS: ReadonlyArray<string> = ["jsonrpc", "id", "method", "param
  * folded, with the four non-ASCII letters it folds to ASCII (ſ to s, ı and İ
  * to i, the Kelvin sign to k) folded too.
  */
-export const foldKey = (key: string) => key.replace(/[\u017f\u0131\u0130\u212a]/g, (c) => (c === "\u017f" ? "s" : c === "\u212a" ? "k" : "i")).toLowerCase();
+export const foldKey = (key: string) =>
+  key
+    .replace(/[\u017f\u0131\u0130\u212a]/g, (c) =>
+      c === "\u017f" ? "s" : c === "\u212a" ? "k" : "i",
+    )
+    .toLowerCase();
 
 /**
  * A key that folds to one the hub reads (jsonrpc, id, method, params,
@@ -68,8 +81,11 @@ export const foldKey = (key: string) => key.replace(/[\u017f\u0131\u0130\u212a]/
  * tool and the server another.
  */
 export const caseVariantKey = (m: JsonRpcMessage): string | null => {
-  for (const key of Object.keys(m)) if (CANONICAL_KEYS.includes(foldKey(key)) && !CANONICAL_KEYS.includes(key)) return key;
-  if (isRecord(m.params)) for (const key of Object.keys(m.params)) if (foldKey(key) === "name" && key !== "name") return `params.${key}`;
+  for (const key of Object.keys(m))
+    if (CANONICAL_KEYS.includes(foldKey(key)) && !CANONICAL_KEYS.includes(key)) return key;
+  if (isRecord(m.params))
+    for (const key of Object.keys(m.params))
+      if (foldKey(key) === "name" && key !== "name") return `params.${key}`;
   return null;
 };
 
@@ -80,7 +96,10 @@ export const caseVariantKey = (m: JsonRpcMessage): string | null => {
  * server, however that server matches keys.
  */
 export const rebuildMessage = (m: JsonRpcMessage): JsonRpcMessage => {
-  const keys = typeof m.method === "string" ? ["jsonrpc", "id", "method", "params"] : ["jsonrpc", "id", "result", "error"];
+  const keys =
+    typeof m.method === "string"
+      ? ["jsonrpc", "id", "method", "params"]
+      : ["jsonrpc", "id", "result", "error"];
   const out: Record<string, unknown> = {};
   for (const key of keys) if (Object.hasOwn(m, key)) out[key] = (m as Record<string, unknown>)[key];
   return out as JsonRpcMessage;
@@ -93,7 +112,11 @@ export const toolOf = (m: JsonRpcMessage): string | null => {
   return typeof name === "string" ? name : null;
 };
 
-export const errorMessage = (id: JsonRpcId | null, code: number, message: string): JsonRpcMessage => ({
+export const errorMessage = (
+  id: JsonRpcId | null,
+  code: number,
+  message: string,
+): JsonRpcMessage => ({
   jsonrpc: "2.0",
   id,
   error: { code, message },
@@ -110,7 +133,10 @@ export interface SseEvent {
   readonly data: string;
 }
 
-export const sseFrame = (data: string, options?: { readonly event?: string; readonly id?: string }): string =>
+export const sseFrame = (
+  data: string,
+  options?: { readonly event?: string; readonly id?: string },
+): string =>
   `${options?.id === undefined ? "" : `id: ${options.id}\n`}${options?.event === undefined ? "" : `event: ${options.event}\n`}${data
     .split("\n")
     .map((line) => `data: ${line}`)
@@ -144,11 +170,17 @@ export const makeSseParser = () => {
   };
 };
 
-export const isEventStream = (contentType: string | undefined) => (contentType ?? "").toLowerCase().includes("text/event-stream");
+export const isEventStream = (contentType: string | undefined) =>
+  (contentType ?? "").toLowerCase().includes("text/event-stream");
 
 /** Every JSON-RPC message in a complete response body, JSON or SSE. */
-export const messagesInBody = (contentType: string | undefined, text: string): ReadonlyArray<JsonRpcMessage> => {
-  const chunks = isEventStream(contentType) ? makeSseParser()(`${text}\n\n`).map((e) => e.data) : [text];
+export const messagesInBody = (
+  contentType: string | undefined,
+  text: string,
+): ReadonlyArray<JsonRpcMessage> => {
+  const chunks = isEventStream(contentType)
+    ? makeSseParser()(`${text}\n\n`).map((e) => e.data)
+    : [text];
   const out: Array<JsonRpcMessage> = [];
   for (const chunk of chunks) {
     const parsed = parseMessages(chunk);

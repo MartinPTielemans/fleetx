@@ -24,16 +24,41 @@ const startRelay = async (dir: string, identity: string) => {
     repo,
     branch: "main",
     pollEvery: Duration.hours(1),
-    hub: { repo, home: dir, enabled: false, ports: {}, relayUrl: null, identity, version: "test", stateDir: join(dir, "state") },
+    hub: {
+      repo,
+      home: dir,
+      enabled: false,
+      ports: {},
+      relayUrl: null,
+      identity,
+      version: "test",
+      stateDir: join(dir, "state"),
+    },
   }).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)));
   const web = HttpRouter.toWebHandler(app, { disableLogger: true });
   const request = (path: string, init: RequestInit = {}) =>
-    web.handler(new Request(`http://127.0.0.1:8399${path}`, { ...init, headers: { authorization: `Bearer ${TOKEN}`, ...init.headers } }));
+    web.handler(
+      new Request(`http://127.0.0.1:8399${path}`, {
+        ...init,
+        headers: { authorization: `Bearer ${TOKEN}`, ...init.headers },
+      }),
+    );
   return { request, stop: () => web.dispose() };
 };
 
 const report = (node: string, rev: string) =>
-  JSON.stringify({ node, at: 1, result: "ok", streak: 0, message: "synced", rev, observation: null, findings: [], applied: [], alerts: [] });
+  JSON.stringify({
+    node,
+    at: 1,
+    result: "ok",
+    streak: 0,
+    message: "synced",
+    rev,
+    observation: null,
+    findings: [],
+    applied: [],
+    alerts: [],
+  });
 
 interface Frame {
   readonly id: number | null;
@@ -49,7 +74,10 @@ const readEvents = async (response: Response, done: (frames: ReadonlyArray<Frame
   let buffer = "";
   const deadline = Date.now() + 2000;
   while (!done(frames) && Date.now() < deadline) {
-    const chunk = await Promise.race([reader.read(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 200))]);
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 200)),
+    ]);
     if (chunk === null) continue;
     if (chunk.done) break;
     buffer += decoder.decode(chunk.value, { stream: true });
@@ -60,7 +88,12 @@ const readEvents = async (response: Response, done: (frames: ReadonlyArray<Frame
       const id = /^id: (\d+)$/m.exec(text)?.[1];
       const event = /^event: (\w+)$/m.exec(text)?.[1];
       const data = /^data: (.*)$/m.exec(text)?.[1];
-      if (event !== undefined && data !== undefined) frames.push({ id: id === undefined ? null : Number(id), event, data: JSON.parse(data) as Frame["data"] });
+      if (event !== undefined && data !== undefined)
+        frames.push({
+          id: id === undefined ? null : Number(id),
+          event,
+          data: JSON.parse(data) as Frame["data"],
+        });
     }
   }
   await reader.cancel();
@@ -91,8 +124,12 @@ describe("relay events", () => {
     const identity = await generateX25519Identity();
 
     const first = await startRelay(dir, identity);
-    expect((await first.request("/report", { method: "POST", body: report("box", "aaaaaaa") })).status).toBe(204);
-    expect((await first.request("/report", { method: "POST", body: report("box", "bbbbbbb") })).status).toBe(204);
+    expect(
+      (await first.request("/report", { method: "POST", body: report("box", "aaaaaaa") })).status,
+    ).toBe(204);
+    expect(
+      (await first.request("/report", { method: "POST", body: report("box", "bbbbbbb") })).status,
+    ).toBe(204);
     const before = await readEvents(await first.request("/events?since=0"), (f) => f.length >= 2);
     const since = before.at(-1)?.id ?? 0;
     expect(since).toBeGreaterThan(0);
@@ -101,15 +138,23 @@ describe("relay events", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     const second = await startRelay(dir, identity);
     try {
-      expect((await second.request("/report", { method: "POST", body: report("omarchy", "ccccccc") })).status).toBe(204);
-      const after = await readEvents(await second.request(`/events?since=${since}`), (f) => f.some((e) => e.event === "pull"));
+      expect(
+        (await second.request("/report", { method: "POST", body: report("omarchy", "ccccccc") }))
+          .status,
+      ).toBe(204);
+      const after = await readEvents(await second.request(`/events?since=${since}`), (f) =>
+        f.some((e) => e.event === "pull"),
+      );
       expect(after.map((e) => [e.event, e.data.node ?? null])).toEqual([
         ["state", "omarchy"],
         ["pull", null],
       ]);
       // Ids rise across the restart, and the listener's next `since` is one this run knows.
       expect(after[0]?.id).toBeGreaterThan(since);
-      const resumed = await readEvents(await second.request("/events", { headers: { "last-event-id": String(after.at(-1)?.id) } }), () => false);
+      const resumed = await readEvents(
+        await second.request("/events", { headers: { "last-event-id": String(after.at(-1)?.id) } }),
+        () => false,
+      );
       expect(resumed).toEqual([]);
     } finally {
       await second.stop();

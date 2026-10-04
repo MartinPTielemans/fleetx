@@ -36,7 +36,10 @@ const uiAssets = (): string | undefined => {
       else {
         const path = `/${relative(dist, full).split(sep).join("/")}`;
         const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
-        files[path] = { type: MIME[ext] ?? "application/octet-stream", gz: gzipSync(readFileSync(full), { level: 9 }).toString("base64") };
+        files[path] = {
+          type: MIME[ext] ?? "application/octet-stream",
+          gz: gzipSync(readFileSync(full), { level: 9 }).toString("base64"),
+        };
       }
     }
   };
@@ -52,16 +55,23 @@ const assets = uiAssets();
  * uncommitted changes). The marker format is Build.ts's buildMarker.
  */
 const buildMarker = (): string => {
-  const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")) as { version: string };
+  const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")) as {
+    version: string;
+  };
   const git = (...args: Array<string>) => {
     try {
-      return execFileSync("git", args, { cwd: new URL(".", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      return execFileSync("git", args, {
+        cwd: new URL(".", import.meta.url),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
     } catch {
       return "";
     }
   };
   const commit = git("rev-parse", "--short=12", "HEAD");
-  const dirty = commit !== "" && git("status", "--porcelain", "--untracked-files=no") !== "" ? "-dirty" : "";
+  const dirty =
+    commit !== "" && git("status", "--porcelain", "--untracked-files=no") !== "" ? "-dirty" : "";
   // SOURCE_DATE_EPOCH makes the build reproducible (Nix sets it).
   const epoch = process.env["SOURCE_DATE_EPOCH"];
   const builtAt = epoch !== undefined && /^\d+$/.test(epoch) ? Number(epoch) * 1000 : Date.now();

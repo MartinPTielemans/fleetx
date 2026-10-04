@@ -2,8 +2,15 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  // @effect-diagnostics-next-line nodeBuiltinImport:off
+} from "node:fs";
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
@@ -17,7 +24,13 @@ import { encodeSettings, installedProbe, NOT_INSTALLED, probeRemote } from "./Re
 
 const run = (home: string, script: string) => {
   try {
-    return { code: 0, stdout: execFileSync("bash", ["-c", script], { env: { ...process.env, HOME: home }, encoding: "utf8" }) };
+    return {
+      code: 0,
+      stdout: execFileSync("bash", ["-c", script], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }),
+    };
   } catch (error) {
     return { code: (error as { status: number }).status, stdout: "" };
   }
@@ -33,7 +46,10 @@ describe("installedProbe", () => {
     mkdirSync(join(home, SHARE_DIR), { recursive: true });
     writeFileSync(join(home, SHARE_DIR, BUNDLE_FILE), bundle);
     const out = run(home, installedProbe(engine, settings));
-    expect(out).toEqual({ code: 0, stdout: `${JSON.stringify(["probe", encodeSettings(settings)])}\n` });
+    expect(out).toEqual({
+      code: 0,
+      stdout: `${JSON.stringify(["probe", encodeSettings(settings)])}\n`,
+    });
   });
 
   it("runs a private copy of what it hashed, and removes it after", () => {
@@ -41,7 +57,10 @@ describe("installedProbe", () => {
     const where = "console.log(process.argv[1])\n";
     mkdirSync(join(home, SHARE_DIR), { recursive: true });
     writeFileSync(join(home, SHARE_DIR, BUNDLE_FILE), where);
-    const out = run(home, installedProbe(createHash("sha256").update(where).digest("hex"), settings));
+    const out = run(
+      home,
+      installedProbe(createHash("sha256").update(where).digest("hex"), settings),
+    );
     expect(out.code).toBe(0);
     const ran = out.stdout.trim();
     expect(ran.endsWith(`/${BUNDLE_FILE}`)).toBe(true);
@@ -74,7 +93,16 @@ describe("probeRemote", () => {
     user: "u",
     observedAt: 1,
     agents: [],
-    t3: { runtime: null, descriptor: null, installedVersion: null, runtimeBinary: null, serverPath: null, providers: [], access: null, problems: [] },
+    t3: {
+      runtime: null,
+      descriptor: null,
+      installedVersion: null,
+      runtimeBinary: null,
+      serverPath: null,
+      providers: [],
+      access: null,
+      problems: [],
+    },
     providerAuth: [],
     proxy: null,
     areas: { engine: { installed } },
@@ -85,9 +113,18 @@ describe("probeRemote", () => {
     writeFileSync(join(dir, "out"), `${JSON.stringify(out)}\n`);
     writeFileSync(join(dir, "log"), "");
   };
-  const calls = () => readFileSync(join(dir, "log"), "utf8").trim().split("\n").filter((l) => l !== "");
+  const calls = () =>
+    readFileSync(join(dir, "log"), "utf8")
+      .trim()
+      .split("\n")
+      .filter((l) => l !== "");
   const probe = (ssh: string) =>
-    Effect.runPromise(probeRemote(ssh, "bundle", {}, "engine-sha", 1).pipe(Effect.result, Effect.provide(NodeServices.layer)));
+    Effect.runPromise(
+      probeRemote(ssh, "bundle", {}, "engine-sha", 1).pipe(
+        Effect.result,
+        Effect.provide(NodeServices.layer),
+      ),
+    );
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "t3-fleet-ssh-"));

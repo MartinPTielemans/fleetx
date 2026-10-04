@@ -15,7 +15,14 @@ import { useAction, useStore } from "../lib/store";
 import { plural } from "../lib/utils";
 import { Code } from "./common";
 import { ActionDialog, Failure } from "./dialogs";
-import { AlertDialogBody, AlertDialogClose, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
+import {
+  AlertDialogBody,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./ui/alert-dialog";
 import { Button } from "./ui/button";
 import { Spinner } from "./ui/spinner";
 
@@ -28,7 +35,8 @@ export const byNode = <T extends { readonly node: string }>(items: ReadonlyArray
   return [...groups.entries()];
 };
 
-const machines = (fixes: ReadonlyArray<{ readonly node: string; readonly on?: string }>) => new Set(fixes.map((f) => f.on ?? f.node)).size;
+const machines = (fixes: ReadonlyArray<{ readonly node: string; readonly on?: string }>) =>
+  new Set(fixes.map((f) => f.on ?? f.node)).size;
 
 /** What a fix job did. */
 export function AppliedList({ applied }: { applied: UiApplyResultT }) {
@@ -36,12 +44,18 @@ export function AppliedList({ applied }: { applied: UiApplyResultT }) {
     <>
       {applied.results.map((r) => (
         <div key={r.id} className="flex items-start gap-2 text-sm">
-          {r.ok ? <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" /> : <CircleXIcon className="mt-0.5 size-4 shrink-0 text-destructive" />}
+          {r.ok ? (
+            <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
+          ) : (
+            <CircleXIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
+          )}
           <div className="min-w-0">
             <div>
               <span className="font-medium">{r.node}</span> {r.title}
             </div>
-            {r.output === "" ? null : <div className="break-words text-muted-foreground text-xs">{r.output}</div>}
+            {r.output === "" ? null : (
+              <div className="break-words text-muted-foreground text-xs">{r.output}</div>
+            )}
           </div>
         </div>
       ))}
@@ -49,7 +63,8 @@ export function AppliedList({ applied }: { applied: UiApplyResultT }) {
         <div key={n.id} className="flex items-start gap-2 text-sm">
           <WrenchIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div>
-            <code className="text-xs">{n.id}</code> <span className="text-muted-foreground text-xs">not applied: {n.reason}</span>
+            <code className="text-xs">{n.id}</code>{" "}
+            <span className="text-muted-foreground text-xs">not applied: {n.reason}</span>
           </div>
         </div>
       ))}
@@ -63,13 +78,28 @@ export const appliedTitle = (applied: UiApplyResultT, planned: number) =>
     : `${applied.results.filter((r) => r.ok).length} of ${plural(planned, "fix", "fixes")} applied`;
 
 /** Plans the fixes for `ids` when it opens, shows that plan, asks, applies it, and shows the outcome. */
-export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<string> | null; onClose: () => void; onApplied?: () => void }) {
+export function ApplyDialog({
+  ids,
+  onClose,
+  onApplied,
+}: {
+  ids: ReadonlyArray<string> | null;
+  onClose: () => void;
+  onApplied?: () => void;
+}) {
   const { runJob, jobs } = useStore();
   const [understood, setUnderstood] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const planning = useAction((asked: ReadonlyArray<string>) => api.planFixes(asked));
   const applying = useAction((plan: UiFixPlanT, acknowledged: ReadonlyArray<string>) =>
-    runJob(() => api.applyFixes(plan.fixes.map((f) => ({ id: f.id, digest: f.digest })), acknowledged), setJobId),
+    runJob(
+      () =>
+        api.applyFixes(
+          plan.fixes.map((f) => ({ id: f.id, digest: f.digest })),
+          acknowledged,
+        ),
+      setJobId,
+    ),
   );
   const step = jobs.find((j) => j.id === jobId)?.step ?? null;
   const startPlanning = planning.start;
@@ -109,7 +139,9 @@ export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<st
         <>
           <AlertDialogHeader>
             <AlertDialogTitle>{appliedTitle(job.applied, plan.fixes.length)}</AlertDialogTitle>
-            <AlertDialogDescription>The machines were checked again afterwards; the findings are up to date.</AlertDialogDescription>
+            <AlertDialogDescription>
+              The machines were checked again afterwards; the findings are up to date.
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogBody className="flex flex-col gap-2">
             <AppliedList applied={job.applied} />
@@ -122,11 +154,14 @@ export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<st
         <>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {plan === null ? "Apply fixes?" : `Apply ${plural(plan.fixes.length, "fix", "fixes")} on ${plural(machines(plan.fixes), "machine")}?`}
+              {plan === null
+                ? "Apply fixes?"
+                : `Apply ${plural(plan.fixes.length, "fix", "fixes")} on ${plural(machines(plan.fixes), "machine")}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              These are the exact commands. T3 Fleet checks every machine again first and runs only fixes still exactly as shown here, in order per
-              machine, machines in parallel. Closing this tab does not stop them.
+              These are the exact commands. T3 Fleet checks every machine again first and runs only
+              fixes still exactly as shown here, in order per machine, machines in parallel. Closing
+              this tab does not stop them.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogBody className="flex flex-col gap-4">
@@ -143,13 +178,23 @@ export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<st
                   <div key={node} className="flex flex-col gap-2">
                     <div className="font-semibold text-sm">{node}</div>
                     {items.map((f) => (
-                      <div key={f.id} className="flex flex-col gap-1.5 border-l-2 pl-3" style={{ borderColor: f.disrupts === undefined ? undefined : "var(--warning)" }}>
+                      <div
+                        key={f.id}
+                        className="flex flex-col gap-1.5 border-l-2 pl-3"
+                        style={{
+                          borderColor: f.disrupts === undefined ? undefined : "var(--warning)",
+                        }}
+                      >
                         <div className="text-sm">{f.title}</div>
                         <Code>
                           $ {f.command}
                           {f.on !== undefined && f.on !== f.node ? `\n  (runs on ${f.on})` : ""}
                         </Code>
-                        {f.disrupts === undefined ? null : <div className="font-medium text-warning-foreground text-xs">interrupts: {f.disrupts}</div>}
+                        {f.disrupts === undefined ? null : (
+                          <div className="font-medium text-warning-foreground text-xs">
+                            interrupts: {f.disrupts}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -169,7 +214,10 @@ export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<st
                       className="mt-0.5 size-3.5 accent-[var(--warning)]"
                     />
                     <span>
-                      {disrupting.length === 1 ? "One fix interrupts" : `${disrupting.length} fixes interrupt`} running work, as marked above. Apply anyway.
+                      {disrupting.length === 1
+                        ? "One fix interrupts"
+                        : `${disrupting.length} fixes interrupt`}{" "}
+                      running work, as marked above. Apply anyway.
                     </span>
                   </label>
                 ) : null}
@@ -178,15 +226,28 @@ export function ApplyDialog({ ids, onClose, onApplied }: { ids: ReadonlyArray<st
             <Failure error={planning.error ?? applying.error} />
           </AlertDialogBody>
           <AlertDialogFooter>
-            {applying.running && step !== null ? <span className="mr-auto self-center text-muted-foreground text-xs">{step}…</span> : null}
-            <AlertDialogClose render={<Button variant="ghost" disabled={applying.running} />}>Cancel</AlertDialogClose>
+            {applying.running && step !== null ? (
+              <span className="mr-auto self-center text-muted-foreground text-xs">{step}…</span>
+            ) : null}
+            <AlertDialogClose render={<Button variant="ghost" disabled={applying.running} />}>
+              Cancel
+            </AlertDialogClose>
             <Button
               variant={disrupting.length > 0 ? "destructive" : "default"}
-              disabled={applying.running || plan === null || plan.fixes.length === 0 || (disrupting.length > 0 && !understood)}
+              disabled={
+                applying.running ||
+                plan === null ||
+                plan.fixes.length === 0 ||
+                (disrupting.length > 0 && !understood)
+              }
               onClick={() => void apply()}
             >
               {applying.running ? <Spinner className="size-3.5" /> : <PlayIcon />}
-              {applying.running ? "Applying…" : plan === null ? "Apply" : `Apply ${plural(plan.fixes.length, "fix", "fixes")}`}
+              {applying.running
+                ? "Applying…"
+                : plan === null
+                  ? "Apply"
+                  : `Apply ${plural(plan.fixes.length, "fix", "fixes")}`}
             </Button>
           </AlertDialogFooter>
         </>

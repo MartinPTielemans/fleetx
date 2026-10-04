@@ -25,9 +25,13 @@ import { launchdReload, retireLegacyUnit } from "../Runtime.ts";
 import { MODELS_PORT, proxyUrl, type Recipe } from "./Recipes.ts";
 
 /** A double-quoted shell word, with {proxy} becoming the launcher's $proxy. */
-const word = (value: string) => `"${value.replace(/[\\"$`]/g, "\\$&").replaceAll("{proxy}", "$proxy")}"`;
+const word = (value: string) =>
+  `"${value.replace(/[\\"$`]/g, "\\$&").replaceAll("{proxy}", "$proxy")}"`;
 
-const cliWord = (command: string) => (command.startsWith("~/") ? `"$HOME/${command.slice(2).replace(/[\\"$`]/g, "\\$&")}"` : word(command));
+const cliWord = (command: string) =>
+  command.startsWith("~/")
+    ? `"$HOME/${command.slice(2).replace(/[\\"$`]/g, "\\$&")}"`
+    : word(command);
 
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
@@ -38,7 +42,9 @@ export const launcherText = (instanceId: string, recipe: Recipe, port: number = 
     `# T3's ${instanceId} through the T3 Fleet model proxy (upstream ${recipe.upstream}), or directly when the`,
     "# proxy is not listening. Written by T3 Fleet's models area; edits are replaced.",
     `cli=${cliWord(recipe.command)}`,
-    ...(recipe.command.startsWith("~/") ? [`[ -x "$cli" ] || cli=${word(basename(recipe.command))}`] : []),
+    ...(recipe.command.startsWith("~/")
+      ? [`[ -x "$cli" ] || cli=${word(basename(recipe.command))}`]
+      : []),
     `proxy="${proxyUrl(recipe.upstream, port)}"`,
   ];
   if (recipe.tokenEnv !== null) {
@@ -106,7 +112,14 @@ export const serviceUnitPath = (platform: string, root: boolean, home: string) =
  * (STOP_DRAIN_SECONDS). Egress is an argument, so changing it makes the unit
  * stale and its fix restarts the proxy.
  */
-export const serviceUnitText = (platform: string, root: boolean, home: string, nodePath: string, bundle: string, egress: "direct" | "relay" = "direct") => {
+export const serviceUnitText = (
+  platform: string,
+  root: boolean,
+  home: string,
+  nodePath: string,
+  bundle: string,
+  egress: "direct" | "relay" = "direct",
+) => {
   const args = ["models", "serve", ...(egress === "relay" ? ["--egress", "relay"] : [])];
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
   const log = `${home}/${STATE_DIR}/models.log`;
@@ -169,7 +182,11 @@ export const serviceInstall = (platform: string, root: boolean, text: string) =>
     retireLegacyUnit(platform, root, "models"),
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     write(`${dir}/${SERVICE_UNIT}.service`),
-    ...(root ? [] : ['[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"']),
+    ...(root
+      ? []
+      : [
+          '[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"',
+        ]),
     `${ctl} daemon-reload && ${ctl} enable ${SERVICE_UNIT}.service && ${ctl} restart ${SERVICE_UNIT}.service`,
   ].join("\n");
 };
@@ -182,9 +199,11 @@ export const findCli = (home: string, command: string, path: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const exists = (file: string) => fs.exists(file).pipe(Effect.orElseSucceed(() => false));
-    if (command.startsWith("~/") && (yield* exists(`${home}/${command.slice(2)}`))) return `${home}/${command.slice(2)}`;
+    if (command.startsWith("~/") && (yield* exists(`${home}/${command.slice(2)}`)))
+      return `${home}/${command.slice(2)}`;
     const name = basename(command);
-    if (command.includes("/") && !command.startsWith("~/")) return (yield* exists(command)) ? command : null;
+    if (command.includes("/") && !command.startsWith("~/"))
+      return (yield* exists(command)) ? command : null;
     for (const dir of [...path.split(":").filter((d) => d !== ""), `${home}/.local/bin`]) {
       if (yield* exists(`${dir}/${name}`)) return `${dir}/${name}`;
     }

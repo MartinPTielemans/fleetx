@@ -19,18 +19,28 @@ export const gitConfigPath = (home: string) => `${configDir(home)}/gitconfig`;
  * `repo`, when given, is trusted regardless of who owns it: git's ownership
  * check (safe.directory) normally lives in the global config T3 Fleet skips.
  */
-export const gitEnv = (home: string, env: Readonly<Record<string, string | undefined>>, repo?: string) => ({
+export const gitEnv = (
+  home: string,
+  env: Readonly<Record<string, string | undefined>>,
+  repo?: string,
+) => ({
   ...env,
   GIT_CONFIG_GLOBAL: gitConfigPath(home),
   GIT_TERMINAL_PROMPT: "0",
   GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
-  ...(repo === undefined ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: repo }),
+  ...(repo === undefined
+    ? {}
+    : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: repo }),
 });
 
 export const git = (
   dir: string,
   args: ReadonlyArray<string>,
-  options: { readonly stdin?: string; readonly timeout?: Duration.Input; readonly env?: Readonly<Record<string, string>> } = {},
+  options: {
+    readonly stdin?: string;
+    readonly timeout?: Duration.Input;
+    readonly env?: Readonly<Record<string, string>>;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const home = process.env["HOME"] ?? "";
@@ -45,7 +55,11 @@ export const git = (
 
 export const ok = (r: ExecResult) => r.code === 0;
 export const out = (r: ExecResult) => r.stdout.trim();
-export const why = (r: ExecResult) => (r.stderr.trim().split("\n").filter(Boolean).pop() ?? r.spawnError ?? `exit ${r.code}`).slice(0, 240);
+export const why = (r: ExecResult) =>
+  (r.stderr.trim().split("\n").filter(Boolean).pop() ?? r.spawnError ?? `exit ${r.code}`).slice(
+    0,
+    240,
+  );
 
 /**
  * Write T3 Fleet's git config: the user's name and email (read once from their
@@ -56,14 +70,25 @@ export const ensureGitConfig = Effect.gen(function* () {
   const home = process.env["HOME"] ?? "";
   const path = gitConfigPath(home);
   if (yield* fs.exists(path).pipe(Effect.orElseSucceed(() => false))) return path;
-  const get = (key: string) => exec({ command: "git", args: ["config", "--global", key], timeout: Duration.seconds(5) }).pipe(Effect.map((r) => r.stdout.trim()));
+  const get = (key: string) =>
+    exec({ command: "git", args: ["config", "--global", key], timeout: Duration.seconds(5) }).pipe(
+      Effect.map((r) => r.stdout.trim()),
+    );
   const name = (yield* get("user.name")) || "T3 Fleet";
   const email = (yield* get("user.email")) || "t3-fleet@localhost";
-  const gh = yield* exec({ command: "sh", args: ["-c", "command -v gh"], timeout: Duration.seconds(5) });
+  const gh = yield* exec({
+    command: "sh",
+    args: ["-c", "command -v gh"],
+    timeout: Duration.seconds(5),
+  });
   const lines = ["[user]", `\tname = ${name}`, `\temail = ${email}`];
   if (gh.code === 0) {
     const ghPath = gh.stdout.trim();
-    lines.push('[credential "https://github.com"]', "\thelper =", `\thelper = !${ghPath} auth git-credential`);
+    lines.push(
+      '[credential "https://github.com"]',
+      "\thelper =",
+      `\thelper = !${ghPath} auth git-credential`,
+    );
   }
   yield* fs.makeDirectory(configDir(home), { recursive: true }).pipe(Effect.ignore);
   yield* fs.writeFileString(path, lines.join("\n") + "\n");
@@ -96,13 +121,17 @@ export const statusEntries = (stdout: string) => {
 /** Changed or new files under `paths` (all of the checkout when empty), as git sees them. */
 export const changedFiles = (repo: string, paths: ReadonlyArray<string> = []) =>
   Effect.gen(function* () {
-    const status = yield* git(repo, ["status", "--porcelain", "-z", "-uall", "--", ...paths], { env: literal });
+    const status = yield* git(repo, ["status", "--porcelain", "-z", "-uall", "--", ...paths], {
+      env: literal,
+    });
     return [...new Set(statusEntries(status.stdout).map((e) => e.path))];
   });
 
 /** Files a merge, rebase or stash left conflicted. */
 export const unmergedFiles = (repo: string) =>
-  git(repo, ["diff", "--name-only", "-z", "--diff-filter=U"]).pipe(Effect.map((r) => [...new Set(nulList(r.stdout))]));
+  git(repo, ["diff", "--name-only", "-z", "--diff-filter=U"]).pipe(
+    Effect.map((r) => [...new Set(nulList(r.stdout))]),
+  );
 
 /**
  * Bring the checkout up to origin/<branch>: rebase this node's own commits
@@ -118,7 +147,10 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
     if (behind === 0) return 0;
     const status = yield* git(repo, ["status", "--porcelain", "-z", "-uall"]);
     const dirty = new Map(statusEntries(status.stdout).map((e) => [e.path, e.xy] as const));
-    const incoming = nulList((yield* git(repo, ["diff", "--name-only", "-z", "--no-renames", `HEAD...origin/${branch}`])).stdout);
+    const incoming = nulList(
+      (yield* git(repo, ["diff", "--name-only", "-z", "--no-renames", `HEAD...origin/${branch}`]))
+        .stdout,
+    );
     const overlap: Array<string> = [];
     for (const file of incoming.filter((f) => dirty.has(f))) {
       // A local edit identical to what arrives (an approved proposal coming
@@ -126,13 +158,15 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
       const local = out(yield* git(repo, ["hash-object", "--", file]));
       const remote = out(yield* git(repo, ["rev-parse", `origin/${branch}:${file}`]));
       if (local !== "" && local === remote) {
-        if (dirty.get(file) === "??") yield* git(repo, ["clean", "-q", "-f", "--", file], { env: literal });
+        if (dirty.get(file) === "??")
+          yield* git(repo, ["clean", "-q", "-f", "--", file], { env: literal });
         else yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
         continue;
       }
       overlap.push(file);
     }
-    if (overlap.length > 0) return yield* Effect.fail(`local edits overlap incoming changes: ${overlap.join(", ")}`);
+    if (overlap.length > 0)
+      return yield* Effect.fail(`local edits overlap incoming changes: ${overlap.join(", ")}`);
     const move =
       how === "rebase"
         ? yield* git(repo, ["rebase", "-q", "--autostash", `origin/${branch}`])
@@ -141,7 +175,9 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
     if (!ok(move)) {
       if (how === "rebase") yield* git(repo, ["rebase", "--abort"]);
       return yield* Effect.fail(
-        how === "rebase" ? `rebase onto origin/${branch} conflicted; resolve by hand` : `cannot fast-forward to origin/${branch}: ${why(move)}`,
+        how === "rebase"
+          ? `rebase onto origin/${branch} conflicted; resolve by hand`
+          : `cannot fast-forward to origin/${branch}: ${why(move)}`,
       );
     }
     // Putting the local edits back can still conflict, and git calls that
@@ -149,7 +185,9 @@ export const pullBranch = (repo: string, branch: string, how: "rebase" | "ff-onl
     // version there; the edits stay in git stash.
     const conflicted = yield* putBackConflicted(repo);
     if (conflicted.length > 0) {
-      return yield* Effect.fail(`local edits to ${conflicted.join(", ")} conflicted with incoming changes; they are kept in git stash`);
+      return yield* Effect.fail(
+        `local edits to ${conflicted.join(", ")} conflicted with incoming changes; they are kept in git stash`,
+      );
     }
     return behind;
   });
@@ -165,7 +203,8 @@ export const putBackConflicted = (repo: string) =>
     const conflicted = yield* unmergedFiles(repo);
     for (const file of conflicted) {
       yield* git(repo, ["reset", "-q", "--", file], { env: literal });
-      if (ok(yield* git(repo, ["cat-file", "-e", `HEAD:${file}`]))) yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
+      if (ok(yield* git(repo, ["cat-file", "-e", `HEAD:${file}`])))
+        yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
       else yield* fs.remove(`${repo}/${file}`, { force: true }).pipe(Effect.ignore);
     }
     return conflicted;
@@ -182,7 +221,8 @@ export const addPaths = (repo: string, paths: ReadonlyArray<string>) =>
     const present: Array<string> = [];
     for (const p of paths) {
       const indexed = out(yield* git(repo, ["ls-files", "--", p], { env: literal })) !== "";
-      if (indexed || (yield* fs.exists(`${repo}/${p}`).pipe(Effect.orElseSucceed(() => false)))) present.push(p);
+      if (indexed || (yield* fs.exists(`${repo}/${p}`).pipe(Effect.orElseSucceed(() => false))))
+        present.push(p);
     }
     if (present.length === 0) return;
     const add = yield* git(repo, ["add", "-A", "--", ...present], { env: literal });
@@ -192,7 +232,9 @@ export const addPaths = (repo: string, paths: ReadonlyArray<string>) =>
 /** The branch the checkout tracks on origin: main, usually. */
 const upstreamBranch = (repo: string) =>
   Effect.gen(function* () {
-    const upstream = out(yield* git(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]));
+    const upstream = out(
+      yield* git(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]),
+    );
     if (upstream.startsWith("origin/")) return upstream.slice("origin/".length);
     return out(yield* git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]));
   });
@@ -207,9 +249,17 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
     Effect.gen(function* () {
       yield* ensureGitConfig;
       yield* addPaths(repo, paths);
-      const staged = nulList((yield* git(repo, ["diff", "--cached", "--name-only", "-z", "--no-renames", "--", ...paths], { env: literal })).stdout);
+      const staged = nulList(
+        (yield* git(
+          repo,
+          ["diff", "--cached", "--name-only", "-z", "--no-renames", "--", ...paths],
+          { env: literal },
+        )).stdout,
+      );
       if (staged.length === 0) return "nothing to commit";
-      const commit = yield* git(repo, ["commit", "-q", "-m", message, "--", ...staged], { env: literal });
+      const commit = yield* git(repo, ["commit", "-q", "-m", message, "--", ...staged], {
+        env: literal,
+      });
       if (!ok(commit)) return yield* Effect.fail(`git commit failed: ${why(commit)}`);
       yield* pullBranch(repo, yield* upstreamBranch(repo), "rebase").pipe(
         Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),

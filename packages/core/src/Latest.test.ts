@@ -28,18 +28,31 @@ const fake = (github: { status: number; etag?: string }, down = false) => {
     HttpClient.make((request, url) => {
       seen.push({ url: url.toString(), ifNoneMatch: request.headers["if-none-match"] });
       const reply = (status: number, body: string, headers: Record<string, string> = {}) =>
-        Effect.succeed(HttpClientResponse.fromWeb(request, new Response(status === 304 ? null : body, { status, headers })));
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(status === 304 ? null : body, { status, headers }),
+          ),
+        );
       if (down) return reply(503, "");
-      if (url.hostname === "registry.npmjs.org") return reply(200, JSON.stringify({ version: "9.9.9" }), { etag: '"npm"' });
-      if (request.headers["if-none-match"] === github.etag && github.etag !== undefined) return reply(304, "");
-      return reply(github.status, JSON.stringify([{ tag_name: `v${NIGHTLY}` }]), github.etag === undefined ? {} : { etag: github.etag });
+      if (url.hostname === "registry.npmjs.org")
+        return reply(200, JSON.stringify({ version: "9.9.9" }), { etag: '"npm"' });
+      if (request.headers["if-none-match"] === github.etag && github.etag !== undefined)
+        return reply(304, "");
+      return reply(
+        github.status,
+        JSON.stringify([{ tag_name: `v${NIGHTLY}` }]),
+        github.etag === undefined ? {} : { etag: github.etag },
+      );
     }),
   );
   return { seen, layer };
 };
 
 const lookup = (cache: string, layer: Layer.Layer<HttpClient.HttpClient>) =>
-  Effect.runPromise(lookupLatest([NIGHTLY], cache).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer))));
+  Effect.runPromise(
+    lookupLatest([NIGHTLY], cache).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer))),
+  );
 
 describe("lookupLatest", () => {
   let token: string | undefined;
@@ -68,7 +81,9 @@ describe("lookupLatest", () => {
     writeFileSync(cache, JSON.stringify(entries));
     const third = await lookup(cache, github.layer);
     expect(third.t3.nightly?.versions[0]).toBe(NIGHTLY);
-    expect(github.seen.slice(3).find((s) => s.url.includes("api.github.com"))?.ifNoneMatch).toBe('"r1"');
+    expect(github.seen.slice(3).find((s) => s.url.includes("api.github.com"))?.ifNoneMatch).toBe(
+      '"r1"',
+    );
   });
 
   it("keeps answering from an hours-old lookup while offline, but not from one days old", async () => {

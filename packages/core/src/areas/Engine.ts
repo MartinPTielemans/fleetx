@@ -44,10 +44,20 @@ import {
   STATE_DIR,
   systemdUnit,
 } from "../Names.ts";
-import { installedBundle, launchdReload, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
+import {
+  installedBundle,
+  launchdReload,
+  legacyUnitInstalled,
+  notInstalledTitle,
+  retireLegacyUnit,
+  stableNode,
+} from "../Runtime.ts";
 
 const Desired = Schema.UndefinedOr(
-  Schema.Struct({ timer: Schema.optionalKey(Schema.Boolean), interval: Schema.optionalKey(Schema.Number) }),
+  Schema.Struct({
+    timer: Schema.optionalKey(Schema.Boolean),
+    interval: Schema.optionalKey(Schema.Number),
+  }),
 );
 
 const Observed = Schema.Struct({
@@ -99,10 +109,19 @@ const timerPaths = (platform: string, root: boolean, home: string) =>
     ? { unit: `${home}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`, timer: null }
     : root
       ? { unit: `/etc/systemd/system/${UNIT}.service`, timer: `/etc/systemd/system/${UNIT}.timer` }
-      : { unit: `${home}/.config/systemd/user/${UNIT}.service`, timer: `${home}/.config/systemd/user/${UNIT}.timer` };
+      : {
+          unit: `${home}/.config/systemd/user/${UNIT}.service`,
+          timer: `${home}/.config/systemd/user/${UNIT}.timer`,
+        };
 
 /** The unit (and timer) text; for systemd both files joined with a separator line. */
-const timerUnits = (platform: string, home: string, nodePath: string, bundle: string, interval: number) => {
+const timerUnits = (
+  platform: string,
+  home: string,
+  nodePath: string,
+  bundle: string,
+  interval: number,
+) => {
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
   const log = `${home}/${STATE_DIR}/sync.log`;
   if (platform === "darwin") {
@@ -161,12 +180,18 @@ WantedBy=timers.target
 export const systemdTimerScheduled = (text: string) => {
   const prop = (name: string) => new RegExp(`^${name}=(.*)$`, "m").exec(text)?.[1]?.trim() ?? "";
   const mono = prop("NextElapseUSecMonotonic");
-  return prop("ActiveState") === "active" && (prop("SubState") === "running" || (mono !== "" && mono !== "infinity") || prop("NextElapseUSecRealtime") !== "");
+  return (
+    prop("ActiveState") === "active" &&
+    (prop("SubState") === "running" ||
+      (mono !== "" && mono !== "infinity") ||
+      prop("NextElapseUSecRealtime") !== "")
+  );
 };
 
 export const ENGINE_INSTALL = "t3-fleet:install-self";
 
-const heredoc = (file: string, text: string) => `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
+const heredoc = (file: string, text: string) =>
+  `cat > ${file} <<'T3_FLEET_UNIT'\n${text.endsWith("\n") ? text : `${text}\n`}T3_FLEET_UNIT`;
 
 /** Left by a deferred reload until it runs; holds the pid of the sync that deferred it. */
 export const RELOAD_PENDING = "sync-timer-reload.pending";
@@ -194,9 +219,16 @@ export const outsideSyncJob = (nodePath: string, steps: string) => {
 };
 
 /** The launchctl steps as they run: now, or, inside the timer's own job, once its sync has exited. */
-const launchctlSteps = (inJob: boolean, nodePath: string, steps: string) => (inJob ? outsideSyncJob(nodePath, steps) : steps);
+const launchctlSteps = (inJob: boolean, nodePath: string, steps: string) =>
+  inJob ? outsideSyncJob(nodePath, steps) : steps;
 
-const installTimer = (platform: string, root: boolean, want: string, inJob: boolean, nodePath: string) => {
+const installTimer = (
+  platform: string,
+  root: boolean,
+  want: string,
+  inJob: boolean,
+  nodePath: string,
+) => {
   if (platform === "darwin") {
     const plist = `"$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"`;
     return [
@@ -218,7 +250,11 @@ const installTimer = (platform: string, root: boolean, want: string, inJob: bool
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     heredoc(`${dir}/${UNIT}.service`, service ?? ""),
     heredoc(`${dir}/${UNIT}.timer`, timer ?? ""),
-    ...(root ? [] : ['[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"']),
+    ...(root
+      ? []
+      : [
+          '[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"',
+        ]),
     `${ctl} daemon-reload && ${ctl} enable --now ${UNIT}.timer && ${ctl} restart ${UNIT}.timer`,
   ].join("\n");
 };
@@ -228,7 +264,13 @@ const installTimer = (platform: string, root: boolean, want: string, inJob: bool
  * On macOS every launchctl step is in one batch, so a fix inside the job
  * starts a single helper.
  */
-const removeTimer = (platform: string, root: boolean, ours: boolean, inJob: boolean, nodePath: string) => {
+const removeTimer = (
+  platform: string,
+  root: boolean,
+  ours: boolean,
+  inJob: boolean,
+  nodePath: string,
+) => {
   const legacy = retireLegacyUnit(platform, root, "sync");
   if (platform === "darwin") {
     if (!ours) return launchctlSteps(inJob, nodePath, legacy);
@@ -277,7 +319,10 @@ export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">)
   return steps.join("\n");
 };
 
-const SERVICE_NAMES: Readonly<Record<"serve" | "listen", string>> = { serve: "the relay", listen: "the listener" };
+const SERVICE_NAMES: Readonly<Record<"serve" | "listen", string>> = {
+  serve: "the relay",
+  listen: "the listener",
+};
 
 /**
  * The installed build differs from the controller's. Installing the
@@ -289,7 +334,16 @@ const engineFinding = (node: string, observed: typeof Observed.Type): Finding =>
   const wanted = observed.wantedBuild ?? null;
   const installed = observed.installedBuild ?? null;
   // null: neither is known to be newer.
-  const order = observed.installed === null ? 1 : wanted === null ? (installed === null ? null : -1) : installed === null ? 1 : compareBuilds(wanted, installed);
+  const order =
+    observed.installed === null
+      ? 1
+      : wanted === null
+        ? installed === null
+          ? null
+          : -1
+        : installed === null
+          ? 1
+          : compareBuilds(wanted, installed);
   const here = installed === null ? "" : ` (${describeBuild(installed)})`;
   const controller = wanted === null ? "" : ` (${describeBuild(wanted)})`;
   if (order !== null && order < 0) {
@@ -299,7 +353,8 @@ const engineFinding = (node: string, observed: typeof Observed.Type): Finding =>
       severity: "warn",
       area: "engine",
       title: `T3 Fleet here is a newer build${here} than the controller's${controller}`,
-      detail: "upgrade T3 Fleet on the machine you run it from; installing the controller's build here would downgrade this machine",
+      detail:
+        "upgrade T3 Fleet on the machine you run it from; installing the controller's build here would downgrade this machine",
     };
   }
   const services = observed.services ?? [];
@@ -307,7 +362,14 @@ const engineFinding = (node: string, observed: typeof Observed.Type): Finding =>
     command: ENGINE_INSTALL,
     // Asked first unless the controller's build is known to be the newer one.
     safe: order !== null && order > 0,
-    ...(services.length === 0 ? {} : { disrupts: `restarts ${services.map((s) => SERVICE_NAMES[s]).join(", ").replace(/, ([^,]*)$/, " and $1")} on ${node}` }),
+    ...(services.length === 0
+      ? {}
+      : {
+          disrupts: `restarts ${services
+            .map((s) => SERVICE_NAMES[s])
+            .join(", ")
+            .replace(/, ([^,]*)$/, " and $1")} on ${node}`,
+        }),
   };
   const sameVersion = wanted !== null && installed !== null && wanted.version === installed.version;
   return {
@@ -340,24 +402,40 @@ export const EngineArea = defineArea({
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const at = yield* installedBundle(ctx.home).pipe(Effect.map(Option.some));
-      const bytes = Option.isSome(at) ? yield* fs.readFile(at.value).pipe(Effect.option) : Option.none();
-      const installed = Option.isSome(bytes) ? yield* Effect.promise(() => sha256(bytes.value)) : null;
-      const installedBuild = Option.isSome(bytes) ? buildOf(new TextDecoder().decode(bytes.value)) : null;
-      let local: typeof Observed.Type["local"] = null;
+      const bytes = Option.isSome(at)
+        ? yield* fs.readFile(at.value).pipe(Effect.option)
+        : Option.none();
+      const installed = Option.isSome(bytes)
+        ? yield* Effect.promise(() => sha256(bytes.value))
+        : null;
+      const installedBuild = Option.isSome(bytes)
+        ? buildOf(new TextDecoder().decode(bytes.value))
+        : null;
+      let local: (typeof Observed.Type)["local"] = null;
       if (ctx.node !== null) {
-        const checkout = ctx.checkout.startsWith(`${ctx.home}/`) ? `~${ctx.checkout.slice(ctx.home.length)}` : ctx.checkout;
+        const checkout = ctx.checkout.startsWith(`${ctx.home}/`)
+          ? `~${ctx.checkout.slice(ctx.home.length)}`
+          : ctx.checkout;
         const want = `repo = "${checkout}"\nnode = "${ctx.node}"\n`;
-        const have = yield* fs.readFileString(`${configDir(ctx.home)}/config.toml`).pipe(Effect.orElseSucceed(() => ""));
-        const parsed = (key: string, text: string) => new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m").exec(text)?.[1];
-        const expand = (p: string | undefined) => (p === undefined ? undefined : p.replace(/^~(?=\/|$)/, ctx.home));
-        const matches = expand(parsed("repo", have)) === ctx.checkout && parsed("node", have) === ctx.node;
+        const have = yield* fs
+          .readFileString(`${configDir(ctx.home)}/config.toml`)
+          .pipe(Effect.orElseSucceed(() => ""));
+        const parsed = (key: string, text: string) =>
+          new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m").exec(text)?.[1];
+        const expand = (p: string | undefined) =>
+          p === undefined ? undefined : p.replace(/^~(?=\/|$)/, ctx.home);
+        const matches =
+          expand(parsed("repo", have)) === ctx.checkout && parsed("node", have) === ctx.node;
         local = { want, matches };
       }
       const platform = process.platform;
       const root = process.getuid?.() === 0;
       const paths = timerPaths(platform, root, ctx.home);
       const unitText = yield* fs.readFileString(paths.unit).pipe(Effect.option);
-      const timerText = paths.timer === null ? Option.some("") : yield* fs.readFileString(paths.timer).pipe(Effect.option);
+      const timerText =
+        paths.timer === null
+          ? Option.some("")
+          : yield* fs.readFileString(paths.timer).pipe(Effect.option);
       const installedTimer =
         Option.isSome(unitText) && Option.isSome(timerText)
           ? paths.timer === null
@@ -366,19 +444,43 @@ export const EngineArea = defineArea({
           : null;
       const nodePath = yield* stableNode(ctx.home);
       const bundle = yield* installedBundle(ctx.home);
-      const want = desired?.timer === true ? timerUnits(platform, ctx.home, nodePath, bundle, desired.interval ?? 900) : null;
+      const want =
+        desired?.timer === true
+          ? timerUnits(platform, ctx.home, nodePath, bundle, desired.interval ?? 900)
+          : null;
       const check =
         platform === "darwin"
-          ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`], timeout: Duration.seconds(5) })
+          ? yield* exec({
+              command: "launchctl",
+              args: ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCHD_LABEL}`],
+              timeout: Duration.seconds(5),
+            })
           : yield* exec({
               command: "systemctl",
-              args: [...(root ? [] : ["--user"]), "show", `${UNIT}.timer`, "-p", "ActiveState", "-p", "SubState", "-p", "NextElapseUSecMonotonic", "-p", "NextElapseUSecRealtime"],
+              args: [
+                ...(root ? [] : ["--user"]),
+                "show",
+                `${UNIT}.timer`,
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+                "-p",
+                "NextElapseUSecMonotonic",
+                "-p",
+                "NextElapseUSecRealtime",
+              ],
               timeout: Duration.seconds(5),
             });
       const realDir = (rel: string) =>
         fs.readLink(`${ctx.home}/${rel}`).pipe(
           Effect.map(() => false),
-          Effect.catch(() => fs.stat(`${ctx.home}/${rel}`).pipe(Effect.map((s) => s.type === "Directory"), Effect.orElseSucceed(() => false))),
+          Effect.catch(() =>
+            fs.stat(`${ctx.home}/${rel}`).pipe(
+              Effect.map((s) => s.type === "Directory"),
+              Effect.orElseSucceed(() => false),
+            ),
+          ),
         );
       const services: Array<"serve" | "listen"> = [];
       for (const role of ["serve", "listen"] as const) {
@@ -391,14 +493,23 @@ export const EngineArea = defineArea({
         if (yield* fs.exists(unit).pipe(Effect.orElseSucceed(() => false))) services.push(role);
       }
       // A pending reload's marker names the sync that deferred it: this one (its fix just ran) or one still running is not stuck.
-      const pendingPid = yield* fs.readFileString(`${ctx.home}/${STATE_DIR}/${RELOAD_PENDING}`).pipe(
-        Effect.map((text) => Number(text.trim())),
-        Effect.option,
-      );
+      const pendingPid = yield* fs
+        .readFileString(`${ctx.home}/${STATE_DIR}/${RELOAD_PENDING}`)
+        .pipe(
+          Effect.map((text) => Number(text.trim())),
+          Effect.option,
+        );
       const reloadPending =
         Option.isSome(pendingPid) &&
         pendingPid.value !== process.pid &&
-        !(pendingPid.value > 0 && (yield* exec({ command: "ps", args: ["-p", String(pendingPid.value), "-o", "pid="], timeout: Duration.seconds(5) })).stdout.trim() !== "");
+        !(
+          pendingPid.value > 0 &&
+          (yield* exec({
+            command: "ps",
+            args: ["-p", String(pendingPid.value), "-o", "pid="],
+            timeout: Duration.seconds(5),
+          })).stdout.trim() !== ""
+        );
       const legacy: Array<"config" | "state" | "share"> = [];
       if (yield* realDir(LEGACY_CONFIG_DIR)) legacy.push("config");
       if (yield* realDir(LEGACY_STATE_DIR)) legacy.push("state");
@@ -418,10 +529,14 @@ export const EngineArea = defineArea({
         timer: {
           installed: installedTimer,
           want,
-          loaded: check.code === 0 && (platform === "darwin" || systemdTimerScheduled(check.stdout)),
+          loaded:
+            check.code === 0 && (platform === "darwin" || systemdTimerScheduled(check.stdout)),
           legacy: yield* legacyUnitInstalled(platform, root, ctx.home, "sync"),
           reloadPending,
-          inJob: platform === "darwin" && (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL || ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
+          inJob:
+            platform === "darwin" &&
+            (ctx.env["XPC_SERVICE_NAME"] === LAUNCHD_LABEL ||
+              ctx.env["XPC_SERVICE_NAME"] === legacyLaunchdLabel("sync")),
         },
       };
     }),
@@ -435,7 +550,10 @@ export const EngineArea = defineArea({
         area: "engine",
         title: "~/.config/t3-fleet/config.toml does not name this machine and its config repo",
         // Not safe: which repo this machine uses is a person's choice (join --dir), and a wrong one stops every sync.
-        fix: { command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`, safe: false },
+        fix: {
+          command: `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && printf '%s' ${sh(observed.local.want)} > "$d/config.toml"`,
+          safe: false,
+        },
       });
     }
     const t = observed.timer;
@@ -456,7 +574,16 @@ export const EngineArea = defineArea({
                 ? "the sync timer is not running"
                 : "the sync timer was changed, but launchd never reloaded it",
         detail: `runs ${observed.nodePath} with a fixed PATH`,
-        fix: { command: installTimer(observed.platform, observed.root, t.want, t.inJob === true, observed.nodePath), safe: true },
+        fix: {
+          command: installTimer(
+            observed.platform,
+            observed.root,
+            t.want,
+            t.inJob === true,
+            observed.nodePath,
+          ),
+          safe: true,
+        },
       });
     }
     if (t.want === null && t.installed === null && t.legacy === true && !stuck) {
@@ -465,8 +592,18 @@ export const EngineArea = defineArea({
         key: "engine-timer-unwanted",
         severity: "warn",
         area: "engine",
-        title: "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
-        fix: { command: removeTimer(observed.platform, observed.root, false, t.inJob === true, observed.nodePath), safe: true },
+        title:
+          "a sync timer still runs under its fleetx name, but [engine] timer is not set for this machine",
+        fix: {
+          command: removeTimer(
+            observed.platform,
+            observed.root,
+            false,
+            t.inJob === true,
+            observed.nodePath,
+          ),
+          safe: true,
+        },
       });
     }
     if (t.want === null && (t.installed !== null || stuck)) {
@@ -479,7 +616,16 @@ export const EngineArea = defineArea({
           t.installed !== null
             ? "a sync timer is installed, but [engine] timer is not set for this machine"
             : "the sync timer was removed, but launchd still has it loaded",
-        fix: { command: removeTimer(observed.platform, observed.root, true, t.inJob === true, observed.nodePath), safe: true },
+        fix: {
+          command: removeTimer(
+            observed.platform,
+            observed.root,
+            true,
+            t.inJob === true,
+            observed.nodePath,
+          ),
+          safe: true,
+        },
       });
     }
     if (observed.wanted !== null && observed.installed !== observed.wanted) {
@@ -503,7 +649,15 @@ export const EngineArea = defineArea({
       // Every configured machine, so one that cannot be reached right now is not taken as ready.
       const ready =
         nodes !== undefined &&
-        nodes.every((name) => fleet.some((e) => e.node === name && e.observed.wanted !== null && e.observed.installed === e.observed.wanted && e.observed.repoRenamed !== undefined));
+        nodes.every((name) =>
+          fleet.some(
+            (e) =>
+              e.node === name &&
+              e.observed.wanted !== null &&
+              e.observed.installed === e.observed.wanted &&
+              e.observed.repoRenamed !== undefined,
+          ),
+        );
       out.push({
         node,
         key: "engine-repo-names",

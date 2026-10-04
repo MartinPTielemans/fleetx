@@ -26,7 +26,11 @@ import type { BuildId } from "./Build.ts";
 import type { Finding } from "./Diagnose.ts";
 
 /** Services an area's observe step may use on the node. */
-export type ProbeServices = FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient;
+export type ProbeServices =
+  | FileSystem.FileSystem
+  | Path.Path
+  | ChildProcessSpawner.ChildProcessSpawner
+  | HttpClient.HttpClient;
 
 export interface ObserveContext {
   readonly home: string;
@@ -51,7 +55,11 @@ export interface DiagnoseContext<D, O> {
   readonly desired: D;
   readonly observed: O;
   /** Every node's facts for this area, for cross-machine rules. */
-  readonly fleet: ReadonlyArray<{ readonly node: string; readonly desired: D; readonly observed: O }>;
+  readonly fleet: ReadonlyArray<{
+    readonly node: string;
+    readonly desired: D;
+    readonly observed: O;
+  }>;
   /** The node with the authority role, which fixes that change the repo run on; null if none. */
   readonly authority: string | null;
   /** Every configured node, reachable or not; `fleet` has only those observed. */
@@ -74,7 +82,9 @@ export type AnyArea = Area<any, any>;
 export const defineArea = <D, O>(area: Area<D, O>): AnyArea => area;
 
 /** Shell-quote one argument for a fix command. */
-export const sh = (s: string) => (/^[A-Za-z0-9_./~:@%+=,-]+$/.test(s) && !s.startsWith("~") ? s : `'${s.replaceAll("'", `'\\''`)}'`);
+export const sh = (s: string) =>
+  /^[A-Za-z0-9_./~:@%+=,-]+$/.test(s) && !s.startsWith("~") ? s : `'${s.replaceAll("'", `'\\''`)}'`;
 
 /** A path for a fix command: `~/x` becomes `"$HOME"/x` so the node's own home is used. */
-export const shPath = (p: string) => (p === "~" ? '"$HOME"' : p.startsWith("~/") ? `"$HOME"/${sh(p.slice(2))}` : sh(p));
+export const shPath = (p: string) =>
+  p === "~" ? '"$HOME"' : p.startsWith("~/") ? `"$HOME"/${sh(p.slice(2))}` : sh(p);

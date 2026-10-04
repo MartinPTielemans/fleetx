@@ -23,11 +23,12 @@ const Observed = Schema.Struct({
   /** `url.<x>.insteadOf` rules that rewrite GitHub HTTPS to SSH, as `x -> y`. */
   githubToSsh: Schema.Array(Schema.String),
   /** Whether git can reach the config repo's remote without a terminal. */
-  remote: Schema.NullOr(Schema.Struct({ url: Schema.String, reachable: Schema.Boolean, detail: Schema.String })),
+  remote: Schema.NullOr(
+    Schema.Struct({ url: Schema.String, reachable: Schema.Boolean, detail: Schema.String }),
+  ),
   localBinOnPath: Schema.Boolean,
   fleetxGitConfig: Schema.Boolean,
 });
-
 
 /** The same file Git.ensureGitConfig writes, for a node T3 Fleet is not installed on. */
 const GIT_CONFIG_SCRIPT = `d="${SH_CONFIG_DIR}" && mkdir -p "$d" && {
@@ -43,13 +44,25 @@ export const RuntimeArea = defineArea({
   observe: (_desired, ctx) =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
-      const rewrites = yield* exec({ command: "git", args: ["config", "--global", "--get-regexp", "^url\\..*\\.insteadof$"], timeout: Duration.seconds(5) });
+      const rewrites = yield* exec({
+        command: "git",
+        args: ["config", "--global", "--get-regexp", "^url\\..*\\.insteadof$"],
+        timeout: Duration.seconds(5),
+      });
       const githubToSsh = rewrites.stdout
         .split("\n")
         .map((l) => /^url\.(.+)\.insteadof (.+)$/i.exec(l.trim()))
-        .filter((m): m is RegExpExecArray => m !== null && /github\.com/.test(m[2] ?? "") && /^(git@|ssh:)/.test(m[1] ?? ""))
+        .filter(
+          (m): m is RegExpExecArray =>
+            m !== null && /github\.com/.test(m[2] ?? "") && /^(git@|ssh:)/.test(m[1] ?? ""),
+        )
         .map((m) => `${m[2]} -> ${m[1]}`);
-      const fleetxGitConfig = (yield* exec({ command: "test", args: ["-f", gitConfigPath(ctx.home)], timeout: Duration.seconds(2) })).code === 0;
+      const fleetxGitConfig =
+        (yield* exec({
+          command: "test",
+          args: ["-f", gitConfigPath(ctx.home)],
+          timeout: Duration.seconds(2),
+        })).code === 0;
       // Read through T3 Fleet's git env: the user's insteadOf rules would show a rewritten URL.
       const url = yield* exec({
         command: "git",
@@ -57,7 +70,7 @@ export const RuntimeArea = defineArea({
         env: gitEnv(ctx.home, ctx.env, ctx.checkout),
         timeout: Duration.seconds(5),
       });
-      let remote: typeof Observed.Type["remote"] = null;
+      let remote: (typeof Observed.Type)["remote"] = null;
       if (url.code === 0 && fleetxGitConfig) {
         // As T3 Fleet's sync timer would: its own git config, no prompts, no SSH agent.
         const ls = yield* exec({
@@ -69,7 +82,10 @@ export const RuntimeArea = defineArea({
         remote = {
           url: url.stdout.trim(),
           reachable: ls.code === 0,
-          detail: ls.code === 0 ? "" : (ls.stderr.trim().split("\n").pop() ?? `exit ${ls.code}`).slice(0, 200),
+          detail:
+            ls.code === 0
+              ? ""
+              : (ls.stderr.trim().split("\n").pop() ?? `exit ${ls.code}`).slice(0, 200),
         };
       }
       return {
@@ -89,14 +105,20 @@ export const RuntimeArea = defineArea({
     const base = { node, area: "runtime" as const };
     const major = Number(observed.node.split(".")[0]);
     if (major < MIN_NODE_MAJOR) {
-      out.push({ ...base, key: "node-too-old", severity: "error", title: `Node ${observed.node} is older than ${MIN_NODE_MAJOR}; T3 Fleet and T3 need ${MIN_NODE_MAJOR}+` });
+      out.push({
+        ...base,
+        key: "node-too-old",
+        severity: "error",
+        title: `Node ${observed.node} is older than ${MIN_NODE_MAJOR}; T3 Fleet and T3 need ${MIN_NODE_MAJOR}+`,
+      });
     }
     if (!observed.fleetxGitConfig) {
       out.push({
         ...base,
         key: "t3-fleet-git-config-missing",
         severity: "warn",
-        title: "T3 Fleet's own git config is missing, so sync would use whatever the user's git config says",
+        title:
+          "T3 Fleet's own git config is missing, so sync would use whatever the user's git config says",
         fix: {
           command: GIT_CONFIG_SCRIPT,
           safe: true,
@@ -127,14 +149,22 @@ export const RuntimeArea = defineArea({
         key: "git-rewrites-to-ssh",
         severity: "info",
         title: `git rewrites GitHub HTTPS to SSH (${observed.githubToSsh.join(", ")})`,
-        detail: "T3 Fleet's own git ignores this rule; other unattended git (T3 auto-pull, scripts) cannot use an SSH agent",
+        detail:
+          "T3 Fleet's own git ignores this rule; other unattended git (T3 auto-pull, scripts) cannot use an SSH agent",
       });
     }
     if (!observed.localBinOnPath) {
-      out.push({ ...base, key: "local-bin-not-on-path", severity: "warn",
+      out.push({
+        ...base,
+        key: "local-bin-not-on-path",
+        severity: "warn",
         title: "~/.local/bin is not on the login PATH, where T3 Fleet installs agent CLIs",
-        detail: "login shells (and so T3 Fleet over ssh, and timers) cannot find the managed claude and codex",
-        fix: { command: `printf '\\n# Added by T3 Fleet: agent CLIs live here.\\nexport PATH="$HOME/.local/bin:$PATH"\\n' >> ~/.profile`, safe: false },
+        detail:
+          "login shells (and so T3 Fleet over ssh, and timers) cannot find the managed claude and codex",
+        fix: {
+          command: `printf '\\n# Added by T3 Fleet: agent CLIs live here.\\nexport PATH="$HOME/.local/bin:$PATH"\\n' >> ~/.profile`,
+          safe: false,
+        },
       });
     }
     return out;

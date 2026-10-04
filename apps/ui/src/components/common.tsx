@@ -1,5 +1,12 @@
 /** Pieces every view uses: the page frame, severity marks, and the states a resource can be in. */
-import { AlertTriangleIcon, CircleCheckIcon, CircleIcon, CircleXIcon, PlugZapIcon, RefreshCwIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  CircleCheckIcon,
+  CircleIcon,
+  CircleXIcon,
+  PlugZapIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import type * as React from "react";
 
 import { isUnauthorized, isUnavailable } from "../lib/api";
@@ -24,15 +31,31 @@ export function Page({
   return (
     <div className="h-full overflow-y-auto">
       <header className="surface-glass sticky top-0 z-10 border-b">
-        <div className={cn("mx-auto flex min-h-13 items-center gap-3 px-5 py-2.5 sm:px-8", wide ? "max-w-7xl" : "max-w-5xl")}>
+        <div
+          className={cn(
+            "mx-auto flex min-h-13 items-center gap-3 px-5 py-2.5 sm:px-8",
+            wide ? "max-w-7xl" : "max-w-5xl",
+          )}
+        >
           <div className="min-w-0 flex-1">
             <h1 className="truncate font-semibold text-[0.9375rem] leading-6">{title}</h1>
-            {description === undefined ? null : <div className="truncate text-muted-foreground text-xs">{description}</div>}
+            {description === undefined ? null : (
+              <div className="truncate text-muted-foreground text-xs">{description}</div>
+            )}
           </div>
-          {actions === undefined ? null : <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+          {actions === undefined ? null : (
+            <div className="flex shrink-0 items-center gap-2">{actions}</div>
+          )}
         </div>
       </header>
-      <main className={cn("mx-auto flex flex-col gap-6 px-5 py-6 sm:px-8", wide ? "max-w-7xl" : "max-w-5xl")}>{children}</main>
+      <main
+        className={cn(
+          "mx-auto flex flex-col gap-6 px-5 py-6 sm:px-8",
+          wide ? "max-w-7xl" : "max-w-5xl",
+        )}
+      >
+        {children}
+      </main>
     </div>
   );
 }
@@ -70,17 +93,29 @@ export function LoadingRows({ rows = 4 }: { rows?: number }) {
   );
 }
 
-export function ErrorState({ error, onRetry, what }: { error: unknown; onRetry?: () => void; what: string }) {
+export function ErrorState({
+  error,
+  onRetry,
+  what,
+}: {
+  error: unknown;
+  onRetry?: () => void;
+  what: string;
+}) {
   const message = error instanceof Error ? error.message : String(error);
   if (isUnauthorized(error)) {
     return (
       <Empty icon={<PlugZapIcon />} title="This page has an old token">
-        Each run of <code className="text-foreground">t3-fleet ui</code> makes a new one. Open the link it printed in your terminal.
+        Each run of <code className="text-foreground">t3-fleet ui</code> makes a new one. Open the
+        link it printed in your terminal.
       </Empty>
     );
   }
   return (
-    <Empty icon={<AlertTriangleIcon className="text-destructive" />} title={`Could not load ${what}`}>
+    <Empty
+      icon={<AlertTriangleIcon className="text-destructive" />}
+      title={`Could not load ${what}`}
+    >
       <span className="block break-words">{message}</span>
       {onRetry === undefined ? null : (
         <Button className="mt-4" size="sm" variant="outline" onClick={onRetry}>
@@ -93,19 +128,34 @@ export function ErrorState({ error, onRetry, what }: { error: unknown; onRetry?:
 }
 
 /** For parts that ship separately (the hub, the model proxy): absent is a state, not an error. */
-export function UnavailableState({ error, title, children }: { error: unknown; title: string; children: React.ReactNode }) {
+export function UnavailableState({
+  error,
+  title,
+  children,
+}: {
+  error: unknown;
+  title: string;
+  children: React.ReactNode;
+}) {
   const message = error instanceof Error ? error.message : String(error);
   return (
     <Empty icon={<PlugZapIcon />} title={title}>
       {children}
-      {isUnavailable(error) ? <span className="mt-2 block text-muted-foreground/70 text-xs">{message}</span> : null}
+      {isUnavailable(error) ? (
+        <span className="mt-2 block text-muted-foreground/70 text-xs">{message}</span>
+      ) : null}
     </Empty>
   );
 }
 
 export function Code({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <pre className={cn("overflow-x-auto whitespace-pre-wrap break-all rounded-md border bg-code px-2.5 py-1.5 font-mono text-code-foreground text-xs leading-5", className)}>
+    <pre
+      className={cn(
+        "overflow-x-auto whitespace-pre-wrap break-all rounded-md border bg-code px-2.5 py-1.5 font-mono text-code-foreground text-xs leading-5",
+        className,
+      )}
+    >
       {children}
     </pre>
   );

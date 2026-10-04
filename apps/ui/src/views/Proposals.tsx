@@ -36,7 +36,12 @@ export function ProposalsView() {
             : `${session.self} is not an authority: proposals can be reviewed here and approved on an authority`
       }
       actions={
-        <Button size="sm" variant="outline" disabled={proposals.loading} onClick={() => void proposals.reload()}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={proposals.loading}
+          onClick={() => void proposals.reload()}
+        >
           {proposals.loading ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
           Refresh
         </Button>
@@ -44,22 +49,40 @@ export function ProposalsView() {
     >
       {proposals.data === null ? (
         <Group>
-          {proposals.error === null ? <LoadingRows rows={2} /> : <ErrorState error={proposals.error} what="proposals" onRetry={() => void proposals.reload()} />}
+          {proposals.error === null ? (
+            <LoadingRows rows={2} />
+          ) : (
+            <ErrorState
+              error={proposals.error}
+              what="proposals"
+              onRetry={() => void proposals.reload()}
+            />
+          )}
         </Group>
       ) : list.length === 0 ? (
         <Group>
           <Empty icon={<GitPullRequestArrowIcon />} title="No proposals waiting">
-            When a machine changes something under the auto-commit paths, its next sync proposes it here.
+            When a machine changes something under the auto-commit paths, its next sync proposes it
+            here.
           </Empty>
         </Group>
       ) : (
         list.map((p) => (
-          <Proposal key={p.node} proposal={p} canDecide={session?.authority === true} onDecide={(verb) => setDeciding({ verb, proposal: p })} />
+          <Proposal
+            key={p.node}
+            proposal={p}
+            canDecide={session?.authority === true}
+            onDecide={(verb) => setDeciding({ verb, proposal: p })}
+          />
         ))
       )}
       <DecideDialog
         decision={deciding}
-        current={proposals.data === null || deciding === null ? undefined : (list.find((p) => p.node === deciding.proposal.node) ?? null)}
+        current={
+          proposals.data === null || deciding === null
+            ? undefined
+            : (list.find((p) => p.node === deciding.proposal.node) ?? null)
+        }
         onClose={() => setDeciding(null)}
         onDecided={(node) => proposals.setData(list.filter((x) => x.node !== node))}
       />
@@ -67,7 +90,15 @@ export function ProposalsView() {
   );
 }
 
-function Proposal({ proposal: p, canDecide, onDecide }: { proposal: UiProposalT; canDecide: boolean; onDecide: (verb: "approve" | "reject") => void }) {
+function Proposal({
+  proposal: p,
+  canDecide,
+  onDecide,
+}: {
+  proposal: UiProposalT;
+  canDecide: boolean;
+  onDecide: (verb: "approve" | "reject") => void;
+}) {
   return (
     <Group>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -79,7 +110,12 @@ function Proposal({ proposal: p, canDecide, onDecide }: { proposal: UiProposalT;
         {p.autoApprovable ? <Badge variant="info">auto-approvable</Badge> : null}
         <span className="text-muted-foreground text-xs">{p.summary}</span>
         <span className="ml-auto flex gap-2">
-          <Button size="sm" variant="destructive-outline" disabled={!canDecide} onClick={() => onDecide("reject")}>
+          <Button
+            size="sm"
+            variant="destructive-outline"
+            disabled={!canDecide}
+            onClick={() => onDecide("reject")}
+          >
             <XIcon />
             Reject
           </Button>
@@ -141,12 +177,21 @@ function DecideDialog({
       icon={verb === "approve" ? <CheckIcon /> : <XIcon />}
       variant={verb === "reject" ? "destructive" : "default"}
       disabled={gone || changed}
-      onConfirm={() => runJob(() => (verb === "approve" ? api.approve(proposal.node, proposal.change) : api.reject(proposal.node, proposal.change)))}
+      onConfirm={() =>
+        runJob(() =>
+          verb === "approve"
+            ? api.approve(proposal.node, proposal.change)
+            : api.reject(proposal.node, proposal.change),
+        )
+      }
       onClose={onClose}
       onDone={() => onDecided(proposal.node)}
     >
       {gone || changed ? (
-        <div role="alert" className="rounded-lg border border-warning/32 bg-warning-surface px-3 py-2 text-warning-foreground text-xs">
+        <div
+          role="alert"
+          className="rounded-lg border border-warning/32 bg-warning-surface px-3 py-2 text-warning-foreground text-xs"
+        >
           {gone
             ? `${proposal.node}'s proposal is no longer there: it was approved, rejected or withdrawn meanwhile.`
             : `${proposal.node} proposed something different while this was open. Close this and review the new one.`}

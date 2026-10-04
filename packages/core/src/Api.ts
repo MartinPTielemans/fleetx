@@ -41,7 +41,15 @@ export const ModelUpstream = Schema.String;
 export type ModelUpstream = typeof ModelUpstream.Type;
 
 /** Why a request failed: "connect", "timeout", "429", "5xx", "529", "4xx", "stream" (after the first byte). */
-export const ModelFailureClass = Schema.Literals(["connect", "timeout", "429", "5xx", "529", "4xx", "stream"]);
+export const ModelFailureClass = Schema.Literals([
+  "connect",
+  "timeout",
+  "429",
+  "5xx",
+  "529",
+  "4xx",
+  "stream",
+]);
 export type ModelFailureClass = typeof ModelFailureClass.Type;
 
 export const ModelWindow = Schema.Struct({
@@ -63,7 +71,9 @@ export const ModelUpstreamStats = Schema.Struct({
   m5: ModelWindow,
   h1: ModelWindow,
   h24: ModelWindow,
-  lastError: Schema.NullOr(Schema.Struct({ at: Schema.Number, class: ModelFailureClass, message: Schema.String })),
+  lastError: Schema.NullOr(
+    Schema.Struct({ at: Schema.Number, class: ModelFailureClass, message: Schema.String }),
+  ),
 });
 export type ModelUpstreamStats = typeof ModelUpstreamStats.Type;
 
@@ -102,7 +112,13 @@ export type ProviderAuth = typeof ProviderAuth.Type;
 
 // ── hub ─────────────────────────────────────────────────────────────────
 
-export const HubServerState = Schema.Literals(["starting", "running", "needs-login", "error", "stopped"]);
+export const HubServerState = Schema.Literals([
+  "starting",
+  "running",
+  "needs-login",
+  "error",
+  "stopped",
+]);
 export type HubServerState = typeof HubServerState.Type;
 
 export const HubServer = Schema.Struct({
@@ -175,10 +191,27 @@ export const UiEnvironment = Schema.Struct({
   reachable: Schema.Boolean,
   error: Schema.optionalKey(Schema.String),
   platform: Schema.NullOr(Schema.String),
-  t3: Schema.Struct({ version: Schema.NullOr(Schema.String), channel: Schema.NullOr(Schema.String), behind: Schema.NullOr(Schema.Number) }),
-  agents: Schema.Array(Schema.Struct({ name: Schema.String, version: Schema.NullOr(Schema.String), latest: Schema.NullOr(Schema.String) })),
+  t3: Schema.Struct({
+    version: Schema.NullOr(Schema.String),
+    channel: Schema.NullOr(Schema.String),
+    behind: Schema.NullOr(Schema.Number),
+  }),
+  agents: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      version: Schema.NullOr(Schema.String),
+      latest: Schema.NullOr(Schema.String),
+    }),
+  ),
   providers: Schema.Array(UiProvider),
-  sync: Schema.NullOr(Schema.Struct({ at: Schema.Number, result: Schema.Literals(["ok", "fail"]), streak: Schema.Number, message: Schema.String })),
+  sync: Schema.NullOr(
+    Schema.Struct({
+      at: Schema.Number,
+      result: Schema.Literals(["ok", "fail"]),
+      streak: Schema.Number,
+      message: Schema.String,
+    }),
+  ),
   providerAuth: Schema.Array(ProviderAuth),
   models: Schema.NullOr(ModelProxyStats),
 });
@@ -216,7 +249,10 @@ export type UiPlannedFix = typeof UiPlannedFix.Type;
 
 const NotApplied = Schema.Struct({ id: Schema.String, reason: Schema.String });
 
-export const UiFixPlan = Schema.Struct({ fixes: Schema.Array(UiPlannedFix), notApplicable: Schema.Array(NotApplied) });
+export const UiFixPlan = Schema.Struct({
+  fixes: Schema.Array(UiPlannedFix),
+  notApplicable: Schema.Array(NotApplied),
+});
 export type UiFixPlan = typeof UiFixPlan.Type;
 
 export const UiApplyRequest = Schema.Struct({
@@ -226,7 +262,15 @@ export const UiApplyRequest = Schema.Struct({
 });
 
 export const UiApplyResult = Schema.Struct({
-  results: Schema.Array(Schema.Struct({ id: Schema.String, node: Schema.String, title: Schema.String, ok: Schema.Boolean, output: Schema.String })),
+  results: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      node: Schema.String,
+      title: Schema.String,
+      ok: Schema.Boolean,
+      output: Schema.String,
+    }),
+  ),
   notApplied: Schema.Array(NotApplied),
 });
 export type UiApplyResult = typeof UiApplyResult.Type;
@@ -259,11 +303,22 @@ export const UiAlert = Schema.Struct({
 });
 
 export const UiModels = Schema.Struct({
-  nodes: Schema.Array(Schema.Struct({ node: Schema.String, at: Schema.NullOr(Schema.Number), providerAuth: Schema.Array(ProviderAuth), stats: Schema.NullOr(ModelProxyStats) })),
+  nodes: Schema.Array(
+    Schema.Struct({
+      node: Schema.String,
+      at: Schema.NullOr(Schema.Number),
+      providerAuth: Schema.Array(ProviderAuth),
+      stats: Schema.NullOr(ModelProxyStats),
+    }),
+  ),
 });
 export type UiModels = typeof UiModels.Type;
 
-export const UiConfigRow = Schema.Struct({ path: Schema.String, value: Schema.String, source: Schema.String });
+export const UiConfigRow = Schema.Struct({
+  path: Schema.String,
+  value: Schema.String,
+  source: Schema.String,
+});
 
 export const UiSkillLinkState = Schema.Literals(["ok", "missing", "wrong", "real-dir"]);
 
@@ -282,7 +337,9 @@ export const UiSkillsNode = Schema.Struct({
   node: Schema.String,
   at: Schema.NullOr(Schema.Number),
   store: Schema.NullOr(Schema.String),
-  links: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String, state: UiSkillLinkState })),
+  links: Schema.Array(
+    Schema.Struct({ skill: Schema.String, dir: Schema.String, state: UiSkillLinkState }),
+  ),
   /** Skills installed outside T3 Fleet: name and directory. */
   strays: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
   dangling: Schema.Array(Schema.Struct({ skill: Schema.String, dir: Schema.String })),
@@ -291,31 +348,59 @@ export const UiSkillsNode = Schema.Struct({
 });
 export type UiSkillsNode = typeof UiSkillsNode.Type;
 
-export const UiSkills = Schema.Struct({ skills: Schema.Array(UiSkill), nodes: Schema.Array(UiSkillsNode) });
+export const UiSkills = Schema.Struct({
+  skills: Schema.Array(UiSkill),
+  nodes: Schema.Array(UiSkillsNode),
+});
 export type UiSkills = typeof UiSkills.Type;
 
 export const UiSkillsLookupRequest = Schema.Struct({ source: Schema.String });
-export const UiSkillsLookup = Schema.Struct({ url: Schema.String, skills: Schema.Array(Schema.Struct({ name: Schema.String, exists: Schema.Boolean })) });
+export const UiSkillsLookup = Schema.Struct({
+  url: Schema.String,
+  skills: Schema.Array(Schema.Struct({ name: Schema.String, exists: Schema.Boolean })),
+});
 export type UiSkillsLookup = typeof UiSkillsLookup.Type;
 
-export const UiSkillsAddRequest = Schema.Struct({ source: Schema.String, skills: Schema.Array(Schema.String), as: Schema.optionalKey(Schema.String) });
+export const UiSkillsAddRequest = Schema.Struct({
+  source: Schema.String,
+  skills: Schema.Array(Schema.String),
+  as: Schema.optionalKey(Schema.String),
+});
 
 /** Skill names; empty means every skill with a source, for update. */
 export const UiSkillsNames = Schema.Struct({ skills: Schema.Array(Schema.String) });
 
 /** What an update would change, already put back; `digest` is "" when nothing would. */
-export const UiSkillsPreview = Schema.Struct({ files: Schema.Array(Schema.String), stat: Schema.String, diff: Schema.String, digest: Schema.String });
+export const UiSkillsPreview = Schema.Struct({
+  files: Schema.Array(Schema.String),
+  stat: Schema.String,
+  diff: Schema.String,
+  digest: Schema.String,
+});
 export type UiSkillsPreview = typeof UiSkillsPreview.Type;
 
-export const UiSkillsKeepRequest = Schema.Struct({ skills: Schema.Array(Schema.String), digest: Schema.String });
+export const UiSkillsKeepRequest = Schema.Struct({
+  skills: Schema.Array(Schema.String),
+  digest: Schema.String,
+});
 
 /** What changed in the repo, and whether it was committed or waits for the next sync to propose it. */
-export const UiSkillsLanded = Schema.Struct({ paths: Schema.Array(Schema.String), landed: Schema.String });
+export const UiSkillsLanded = Schema.Struct({
+  paths: Schema.Array(Schema.String),
+  landed: Schema.String,
+});
 export type UiSkillsLanded = typeof UiSkillsLanded.Type;
 
 // ── jobs ────────────────────────────────────────────────────────────────
 
-export const UiJobKind = Schema.Literals(["fixes", "approve", "reject", "skills-add", "skills-update", "skills-remove"]);
+export const UiJobKind = Schema.Literals([
+  "fixes",
+  "approve",
+  "reject",
+  "skills-add",
+  "skills-update",
+  "skills-remove",
+]);
 export type UiJobKind = typeof UiJobKind.Type;
 
 /**

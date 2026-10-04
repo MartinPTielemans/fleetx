@@ -16,20 +16,29 @@ export interface ProviderLogin {
   readonly detail: string;
 }
 
-export function providerLogins(source: { readonly providerAuth: ReadonlyArray<ProviderAuth> }): ReadonlyArray<ProviderLogin> {
+export function providerLogins(source: {
+  readonly providerAuth: ReadonlyArray<ProviderAuth>;
+}): ReadonlyArray<ProviderLogin> {
   return source.providerAuth
     .filter((p) => p.enabled)
-    .map((p) => ({ instanceId: p.instanceId, status: p.auth, method: p.method, detail: p.label === null ? p.detail : `${p.label}${p.detail === "" ? "" : ` · ${p.detail}`}` }));
+    .map((p) => ({
+      instanceId: p.instanceId,
+      status: p.auth,
+      method: p.method,
+      detail: p.label === null ? p.detail : `${p.label}${p.detail === "" ? "" : ` · ${p.detail}`}`,
+    }));
 }
 
 /** What people call a provider instance; T3's ids, as the CLI prints them. */
-export const instanceLabel = (instanceId: string) => (instanceId === "claudeAgent" ? "claude" : instanceId);
+export const instanceLabel = (instanceId: string) =>
+  instanceId === "claudeAgent" ? "claude" : instanceId;
 
 const UPSTREAM_NAMES: Readonly<Record<string, string>> = { openai: "OpenAI" };
 
 /** An upstream as reported ("anthropic", "openai", or any other), for display. */
 export const upstreamLabel = (upstream: string) =>
-  UPSTREAM_NAMES[upstream] ?? (upstream === "" ? "unknown" : upstream.charAt(0).toUpperCase() + upstream.slice(1));
+  UPSTREAM_NAMES[upstream] ??
+  (upstream === "" ? "unknown" : upstream.charAt(0).toUpperCase() + upstream.slice(1));
 
 export const statusText: Readonly<Record<LoginStatus, string>> = {
   authenticated: "signed in",

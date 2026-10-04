@@ -41,40 +41,59 @@ export function FindingsView() {
     });
 
   return (
-    <Page
-      title="Findings"
-      description={<CheckedLine />}
-      actions={<CheckButton />}
-    >
+    <Page title="Findings" description={<CheckedLine />} actions={<CheckButton />}>
       <CheckFailed />
       {status === null ? (
-        <Group>{statusError === null ? <LoadingRows /> : <ErrorState error={statusError} what="the check" onRetry={() => void recheck()} />}</Group>
+        <Group>
+          {statusError === null ? (
+            <LoadingRows />
+          ) : (
+            <ErrorState error={statusError} what="the check" onRetry={() => void recheck()} />
+          )}
+        </Group>
       ) : active.length === 0 ? (
         <Group>
           <Empty icon={<CheckCircle2Icon className="text-success" />} title="Everything matches">
-            Every machine runs what it should. {accepted.length + notes.length > 0 ? `${plural(accepted.length + notes.length, "note")} below.` : ""}
+            Every machine runs what it should.{" "}
+            {accepted.length + notes.length > 0
+              ? `${plural(accepted.length + notes.length, "note")} below.`
+              : ""}
           </Empty>
         </Group>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="text-muted-foreground">
-              {plural(fixes.length + noteFixes.length, "fix", "fixes")} available{noteFixes.length === 0 ? "" : ` (${noteFixes.length} on notes)`} ·{" "}
-              {plural(active.length - fixes.length, "finding")} need{active.length - fixes.length === 1 ? "s" : ""} a decision
+              {plural(fixes.length + noteFixes.length, "fix", "fixes")} available
+              {noteFixes.length === 0 ? "" : ` (${noteFixes.length} on notes)`} ·{" "}
+              {plural(active.length - fixes.length, "finding")} need
+              {active.length - fixes.length === 1 ? "s" : ""} a decision
             </span>
             <span className="ml-auto flex gap-1">
-              <Button size="xs" variant="ghost-muted" onClick={() => setSelected(new Set(fixes.map((f) => f.id)))} disabled={fixes.length === 0}>
+              <Button
+                size="xs"
+                variant="ghost-muted"
+                onClick={() => setSelected(new Set(fixes.map((f) => f.id)))}
+                disabled={fixes.length === 0}
+              >
                 Select all
               </Button>
               <Button
                 size="xs"
                 variant="ghost-muted"
-                onClick={() => setSelected(new Set(fixes.filter((f) => f.fix.safe).map((f) => f.id)))}
+                onClick={() =>
+                  setSelected(new Set(fixes.filter((f) => f.fix.safe).map((f) => f.id)))
+                }
                 disabled={fixes.length === 0}
               >
                 Only safe
               </Button>
-              <Button size="xs" variant="ghost-muted" onClick={() => setSelected(new Set())} disabled={selected.size === 0}>
+              <Button
+                size="xs"
+                variant="ghost-muted"
+                onClick={() => setSelected(new Set())}
+                disabled={selected.size === 0}
+              >
                 Clear
               </Button>
             </span>
@@ -88,7 +107,12 @@ export function FindingsView() {
               </GroupLabel>
               <Group>
                 {items.map((f) => (
-                  <FindingRow key={f.id} finding={f} selected={selected.has(f.id)} onToggle={() => toggle(f.id)} />
+                  <FindingRow
+                    key={f.id}
+                    finding={f}
+                    selected={selected.has(f.id)}
+                    onToggle={() => toggle(f.id)}
+                  />
                 ))}
               </Group>
             </section>
@@ -120,9 +144,13 @@ export function FindingsView() {
       {chosen.length > 0 ? (
         <div className="sticky bottom-4 z-10 mx-auto flex w-full max-w-lg items-center gap-3 rounded-xl border surface-glass px-4 py-2.5 shadow-lg/10">
           <span className="min-w-0 flex-1 text-sm">
-            {plural(chosen.length, "fix", "fixes")} on {plural(new Set(chosen.map((f) => f.fix.on ?? f.node)).size, "machine")}
+            {plural(chosen.length, "fix", "fixes")} on{" "}
+            {plural(new Set(chosen.map((f) => f.fix.on ?? f.node)).size, "machine")}
             {interrupting === 0 ? null : (
-              <span className="text-warning-foreground"> · {interrupting === 1 ? "1 interrupts" : `${interrupting} interrupt`} something</span>
+              <span className="text-warning-foreground">
+                {" "}
+                · {interrupting === 1 ? "1 interrupts" : `${interrupting} interrupt`} something
+              </span>
             )}
           </span>
           <Button size="sm" onClick={() => setReviewing(chosen.map((f) => f.id))}>
@@ -132,12 +160,26 @@ export function FindingsView() {
         </div>
       ) : null}
 
-      <ApplyDialog ids={reviewing} onClose={() => setReviewing(null)} onApplied={() => setSelected(new Set())} />
+      <ApplyDialog
+        ids={reviewing}
+        onClose={() => setReviewing(null)}
+        onApplied={() => setSelected(new Set())}
+      />
     </Page>
   );
 }
 
-function FindingRow({ finding: f, selected, onToggle, showNode = false }: { finding: UiFinding; selected: boolean; onToggle: () => void; showNode?: boolean }) {
+function FindingRow({
+  finding: f,
+  selected,
+  onToggle,
+  showNode = false,
+}: {
+  finding: UiFinding;
+  selected: boolean;
+  onToggle: () => void;
+  showNode?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const command = useId();
   return (
@@ -162,7 +204,9 @@ function FindingRow({ finding: f, selected, onToggle, showNode = false }: { find
           </span>
           <Badge variant="outline">{f.area}</Badge>
         </div>
-        {f.detail === undefined ? null : <div className="pl-5.5 text-muted-foreground text-xs leading-5">{f.detail}</div>}
+        {f.detail === undefined ? null : (
+          <div className="pl-5.5 text-muted-foreground text-xs leading-5">{f.detail}</div>
+        )}
         <div className="flex flex-wrap items-center gap-2 pl-5.5 text-xs">
           {f.fix === undefined ? (
             <span className="text-muted-foreground">needs a decision rather than a command</span>
@@ -175,7 +219,9 @@ function FindingRow({ finding: f, selected, onToggle, showNode = false }: { find
                 onClick={() => setOpen((o) => !o)}
                 className="flex cursor-pointer items-center gap-1 text-muted-foreground hover:text-foreground"
               >
-                <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
+                <ChevronRightIcon
+                  className={cn("size-3 transition-transform", open && "rotate-90")}
+                />
                 fix
               </button>
               {f.fix.disrupts === undefined ? (
@@ -185,7 +231,9 @@ function FindingRow({ finding: f, selected, onToggle, showNode = false }: { find
               ) : (
                 <Badge variant="warning">interrupts: {f.fix.disrupts}</Badge>
               )}
-              {f.fix.on !== undefined && f.fix.on !== f.node ? <span className="text-muted-foreground">runs on {f.fix.on}</span> : null}
+              {f.fix.on !== undefined && f.fix.on !== f.node ? (
+                <span className="text-muted-foreground">runs on {f.fix.on}</span>
+              ) : null}
             </>
           )}
           <code className="ml-auto text-2xs text-muted-foreground/70">{f.id}</code>
@@ -201,7 +249,15 @@ function FindingRow({ finding: f, selected, onToggle, showNode = false }: { find
 }
 
 /** Notes, folded away; one with a fix can be picked here like any other. */
-function Notes({ notes, selected, onToggle }: { notes: ReadonlyArray<UiFinding>; selected: ReadonlySet<string>; onToggle: (id: string) => void }) {
+function Notes({
+  notes,
+  selected,
+  onToggle,
+}: {
+  notes: ReadonlyArray<UiFinding>;
+  selected: ReadonlySet<string>;
+  onToggle: (id: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const list = useId();
   const withFix = notes.filter(fixable).length;
@@ -223,14 +279,22 @@ function Notes({ notes, selected, onToggle }: { notes: ReadonlyArray<UiFinding>;
           <Group>
             {notes.map((f) =>
               fixable(f) ? (
-                <FindingRow key={f.id} finding={f} selected={selected.has(f.id)} onToggle={() => onToggle(f.id)} showNode />
+                <FindingRow
+                  key={f.id}
+                  finding={f}
+                  selected={selected.has(f.id)}
+                  onToggle={() => onToggle(f.id)}
+                  showNode
+                />
               ) : (
                 <div key={f.id} className="flex items-start gap-2 px-4 py-2 text-xs">
                   <SeverityIcon severity="info" className="mt-px size-3.5" />
                   <span className="w-24 shrink-0 font-medium">{f.node}</span>
                   <span className="min-w-0 flex-1">
                     {f.title}
-                    {f.detail === undefined ? null : <span className="block text-muted-foreground">{f.detail}</span>}
+                    {f.detail === undefined ? null : (
+                      <span className="block text-muted-foreground">{f.detail}</span>
+                    )}
                   </span>
                 </div>
               ),

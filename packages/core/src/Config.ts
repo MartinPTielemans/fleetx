@@ -84,7 +84,9 @@ const RelaySection = Schema.Struct({
 const FleetFile = Schema.Struct({
   fleet: Schema.optionalKey(FleetSection),
   /** Plugin areas, relative to the config repo (see Plugins.ts). */
-  plugins: Schema.optionalKey(Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) })),
+  plugins: Schema.optionalKey(
+    Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) }),
+  ),
   relay: Schema.optionalKey(RelaySection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
@@ -134,7 +136,9 @@ const readTomlTable = (file: string) =>
 
 const decodeAs = <S extends Schema.Top>(schema: S, value: unknown, file: string) =>
   Schema.decodeUnknownEffect(schema)(value).pipe(
-    Effect.mapError((error) => new ConfigError({ message: `${file}: ${error.message.split("\n")[0]}` })),
+    Effect.mapError(
+      (error) => new ConfigError({ message: `${file}: ${error.message.split("\n")[0]}` }),
+    ),
   );
 
 const NOT_SET_UP = new ConfigError({
@@ -162,34 +166,55 @@ export const loadConfigFrom = (repo: string, self: string) =>
         if (cached !== undefined) return cached;
         const file = path.join(repo, "profiles", `${name}.toml`);
         const table = yield* readTomlTable(file);
-        if (Option.isNone(table)) return yield* new ConfigError({ message: `profile "${name}" not found: ${file}` });
+        if (Option.isNone(table))
+          return yield* new ConfigError({ message: `profile "${name}" not found: ${file}` });
         profileCache.set(name, table.value);
         return table.value;
       });
 
     const nodesDir = path.join(repo, "nodes");
-    const files = yield* fs.readDirectory(nodesDir).pipe(
-      Effect.mapError(() => new ConfigError({ message: `no machines: ${nodesDir} does not exist` })),
-    );
+    const files = yield* fs
+      .readDirectory(nodesDir)
+      .pipe(
+        Effect.mapError(
+          () => new ConfigError({ message: `no machines: ${nodesDir} does not exist` }),
+        ),
+      );
     const nodes: Array<Node> = [];
     for (const file of files.filter((f) => f.endsWith(".toml")).sort()) {
       const name = file.slice(0, -".toml".length);
       const nodePath = path.join(nodesDir, file);
       const raw = Option.getOrElse(yield* readTomlTable(nodePath), (): Table => ({}));
       const ssh = typeof raw["ssh"] === "string" ? raw["ssh"] : name;
-      const roles = yield* decodeAs(Schema.Array(Schema.Literals(ROLES)), raw["roles"] ?? ["member"], nodePath);
+      const roles = yield* decodeAs(
+        Schema.Array(Schema.Literals(ROLES)),
+        raw["roles"] ?? ["member"],
+        nodePath,
+      );
       const profiles = yield* decodeAs(StringList, raw["profiles"] ?? [], nodePath);
       const own: Record<string, Table[string]> = {};
       for (const [k, v] of Object.entries(raw)) if (!NODE_KEYS.has(k)) own[k] = v;
-      const layers: Array<Layer> = [{ source: "defaults", table: (settings.defaults ?? {}) as Table }];
+      const layers: Array<Layer> = [
+        { source: "defaults", table: (settings.defaults ?? {}) as Table },
+      ];
       for (const p of profiles) layers.push({ source: `profile ${p}`, table: yield* profile(p) });
       layers.push({ source: `node ${name}`, table: own });
       const tailnet = typeof raw["tailnet"] === "string" ? raw["tailnet"] : null;
-      nodes.push({ name, ssh: name === self ? null : ssh, roles, profiles, tailnet, settings: mergeLayers(layers) });
+      nodes.push({
+        name,
+        ssh: name === self ? null : ssh,
+        roles,
+        profiles,
+        tailnet,
+        settings: mergeLayers(layers),
+      });
     }
-    if (nodes.length === 0) return yield* new ConfigError({ message: `no machines in ${nodesDir}` });
+    if (nodes.length === 0)
+      return yield* new ConfigError({ message: `no machines in ${nodesDir}` });
     if (!nodes.some((n) => n.name === self)) {
-      return yield* new ConfigError({ message: `this machine is "${self}", but ${nodesDir} has no ${self}.toml` });
+      return yield* new ConfigError({
+        message: `this machine is "${self}", but ${nodesDir} has no ${self}.toml`,
+      });
     }
     return {
       repo,
@@ -208,16 +233,29 @@ export const localConfigPath = (home: string) => `${configDir(home)}/config.toml
 export const loadConfig = Effect.gen(function* () {
   const home = process.env["HOME"] ?? "";
   const local = yield* readTomlTable(localConfigPath(home));
-  const decoded = Option.isSome(local) ? Option.some(yield* decodeAs(LocalFile, local.value, localConfigPath(home))) : Option.none();
-  const repoSetting = process.env["T3_FLEET_CONFIG_REPO"] ?? process.env["FLEETX_CONFIG_REPO"] ?? Option.getOrUndefined(Option.map(decoded, (l) => l.repo));
-  const self = process.env["T3_FLEET_NODE"] ?? process.env["FLEETX_NODE"] ?? Option.getOrUndefined(Option.flatMap(decoded, (l) => Option.fromNullishOr(l.node)));
+  const decoded = Option.isSome(local)
+    ? Option.some(yield* decodeAs(LocalFile, local.value, localConfigPath(home)))
+    : Option.none();
+  const repoSetting =
+    process.env["T3_FLEET_CONFIG_REPO"] ??
+    process.env["FLEETX_CONFIG_REPO"] ??
+    Option.getOrUndefined(Option.map(decoded, (l) => l.repo));
+  const self =
+    process.env["T3_FLEET_NODE"] ??
+    process.env["FLEETX_NODE"] ??
+    Option.getOrUndefined(Option.flatMap(decoded, (l) => Option.fromNullishOr(l.node)));
   if (repoSetting === undefined || self === undefined) return yield* NOT_SET_UP;
   return yield* loadConfigFrom(expandHome(repoSetting, home), self);
 });
 
 /** What the probe needs to know on a machine it runs on, passed as its argument. */
 export const ProbeSettings = Schema.Struct({
-  proxy: Schema.optionalKey(Schema.Struct({ credentials: Schema.String, launchers: Schema.Record(Schema.String, Schema.String) })),
+  proxy: Schema.optionalKey(
+    Schema.Struct({
+      credentials: Schema.String,
+      launchers: Schema.Record(Schema.String, Schema.String),
+    }),
+  ),
   /** This node's merged area settings. */
   areas: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   /** Where this node keeps the config repo. */
@@ -230,19 +268,43 @@ export const ProbeSettings = Schema.Struct({
   node: Schema.optionalKey(Schema.String),
   roles: Schema.optionalKey(Schema.Array(Schema.String)),
   plugins: Schema.optionalKey(Schema.Array(Schema.String)),
-  relay: Schema.optionalKey(Schema.Struct({ url: Schema.NullOr(Schema.String), port: Schema.Number })),
+  relay: Schema.optionalKey(
+    Schema.Struct({ url: Schema.NullOr(Schema.String), port: Schema.Number }),
+  ),
 });
 export type ProbeSettings = typeof ProbeSettings.Type;
 
-export const probeSettings = (config: Config, node?: Node, engine?: string, build?: BuildId | null): ProbeSettings => ({
+export const probeSettings = (
+  config: Config,
+  node?: Node,
+  engine?: string,
+  build?: BuildId | null,
+): ProbeSettings => ({
   ...(engine === undefined ? {} : { engine }),
   ...(build === undefined || build === null ? {} : { build }),
   ...(config.settings.proxy === undefined
     ? {}
-    : { proxy: { credentials: config.settings.proxy.credentials, launchers: config.settings.proxy.launchers } }),
-  ...(node === undefined ? {} : { areas: node.settings.table as Record<string, unknown>, node: node.name, roles: node.roles }),
-  ...(config.settings.relay === undefined ? {} : { relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 } }),
+    : {
+        proxy: {
+          credentials: config.settings.proxy.credentials,
+          launchers: config.settings.proxy.launchers,
+        },
+      }),
+  ...(node === undefined
+    ? {}
+    : {
+        areas: node.settings.table as Record<string, unknown>,
+        node: node.name,
+        roles: node.roles,
+      }),
+  ...(config.settings.relay === undefined
+    ? {}
+    : {
+        relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
+      }),
   // This machine uses the repo it loaded, wherever it is (join --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,
-  ...(config.settings.plugins?.areas === undefined ? {} : { plugins: config.settings.plugins.areas }),
+  ...(config.settings.plugins?.areas === undefined
+    ? {}
+    : { plugins: config.settings.plugins.areas }),
 });

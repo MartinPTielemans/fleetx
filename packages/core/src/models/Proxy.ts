@@ -87,8 +87,22 @@ import {
   splitPath,
   targetUrl,
 } from "./Forward.ts";
-import { BUILTIN_UPSTREAMS, MODELS_PORT, upstreamsOf, type ModelsSettings, type Upstreams } from "./Recipes.ts";
-import { appendRecord, loadFallbacks, loadRecords, MAX_RECORDS, proxyStats, WINDOWS, type RequestRecord } from "./Stats.ts";
+import {
+  BUILTIN_UPSTREAMS,
+  MODELS_PORT,
+  upstreamsOf,
+  type ModelsSettings,
+  type Upstreams,
+} from "./Recipes.ts";
+import {
+  appendRecord,
+  loadFallbacks,
+  loadRecords,
+  MAX_RECORDS,
+  proxyStats,
+  WINDOWS,
+  type RequestRecord,
+} from "./Stats.ts";
 import { legacyHeader } from "../Names.ts";
 
 export { MODELS_PORT };
@@ -144,9 +158,14 @@ export const makeInFlight = (): InFlight => {
 };
 
 /** Waits until no request is in flight, for at most `within`; true when it got there. */
-export const whenIdle = (inFlight: InFlight, within: Duration.Input, every: Duration.Input = Duration.millis(250)) =>
+export const whenIdle = (
+  inFlight: InFlight,
+  within: Duration.Input,
+  every: Duration.Input = Duration.millis(250),
+) =>
   Effect.gen(function* () {
-    const deadline = (yield* Clock.currentTimeMillis) + Duration.toMillis(Duration.fromInputUnsafe(within));
+    const deadline =
+      (yield* Clock.currentTimeMillis) + Duration.toMillis(Duration.fromInputUnsafe(within));
     while (inFlight.count() > 0) {
       if ((yield* Clock.currentTimeMillis) >= deadline) return false;
       yield* Effect.sleep(every);
@@ -160,7 +179,11 @@ export const whenIdle = (inFlight: InFlight, within: Duration.Input, every: Dura
  * server, so it runs first: the listener keeps answering until the last
  * response is done, for at most `within`, and only then does the server stop.
  */
-export const serveUntilIdle = <E, R>(served: Layer.Layer<never, E, R>, inFlight: InFlight, within: Duration.Input) =>
+export const serveUntilIdle = <E, R>(
+  served: Layer.Layer<never, E, R>,
+  inFlight: InFlight,
+  within: Duration.Input,
+) =>
   Effect.scoped(
     Effect.gen(function* () {
       yield* Layer.build(served);
@@ -204,8 +227,15 @@ export const forwardingClient = (timeouts: {
           // Effect's undici client sets its own timeouts on every request; these replace them.
           Effect.sync(() =>
             new Undici.Agent({
-              factory: (origin, opts) => new Undici.Pool(origin, { ...opts, connectTimeout: connectTimeoutFor(origin, quick) }),
-            }).compose((dispatch) => (opts, handler) => dispatch({ ...opts, headersTimeout, bodyTimeout }, handler)),
+              factory: (origin, opts) =>
+                new Undici.Pool(origin, {
+                  ...opts,
+                  connectTimeout: connectTimeoutFor(origin, quick),
+                }),
+            }).compose(
+              (dispatch) => (opts, handler) =>
+                dispatch({ ...opts, headersTimeout, bodyTimeout }, handler),
+            ),
           ),
           (dispatcher) => Effect.promise(() => dispatcher.destroy()),
         ),
@@ -220,27 +250,45 @@ export const sendUpstream = (input: {
   readonly url: string;
   readonly headers: Record<string, string>;
   readonly body: Uint8Array | null;
-}): Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError, HttpClient.HttpClient> =>
+}): Effect.Effect<
+  HttpClientResponse.HttpClientResponse,
+  HttpClientError.HttpClientError,
+  HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    let request = HttpClientRequest.make(input.method)(input.url).pipe(HttpClientRequest.setHeaders(input.headers));
+    let request = HttpClientRequest.make(input.method)(input.url).pipe(
+      HttpClientRequest.setHeaders(input.headers),
+    );
     if (input.body !== null) {
-      request = HttpClientRequest.bodyUint8Array(request, input.body, input.headers["content-type"] ?? "application/octet-stream");
+      request = HttpClientRequest.bodyUint8Array(
+        request,
+        input.body,
+        input.headers["content-type"] ?? "application/octet-stream",
+      );
     }
     return yield* client.execute(request);
   }).pipe(Effect.provideService(HttpClient.TracerPropagationEnabled, false));
 
 /** A network error in words, without the URL (whose query could carry anything). */
-export const describeTransport = (error: unknown): string => errorCode(error) ?? "connection failed";
+export const describeTransport = (error: unknown): string =>
+  errorCode(error) ?? "connection failed";
 
 /** The client's connection under a request; undefined off Node (tests with another server). */
-export const clientConnection = (request: HttpServerRequest.HttpServerRequest): ReturnType<typeof NodeHttpServerRequest.toServerResponse> | undefined => {
+export const clientConnection = (
+  request: HttpServerRequest.HttpServerRequest,
+): ReturnType<typeof NodeHttpServerRequest.toServerResponse> | undefined => {
   const response: unknown = NodeHttpServerRequest.toServerResponse(request);
-  return typeof response === "object" && response !== null && "destroy" in response ? (response as ReturnType<typeof NodeHttpServerRequest.toServerResponse>) : undefined;
+  return typeof response === "object" && response !== null && "destroy" in response
+    ? (response as ReturnType<typeof NodeHttpServerRequest.toServerResponse>)
+    : undefined;
 };
 
 /** Injects a keepalive comment into an event stream quiet for one interval, only between events. */
-export const withKeepalive = <E>(stream: Stream.Stream<Uint8Array, E>, every: Duration.Input): Stream.Stream<Uint8Array, E> =>
+export const withKeepalive = <E>(
+  stream: Stream.Stream<Uint8Array, E>,
+  every: Duration.Input,
+): Stream.Stream<Uint8Array, E> =>
   Stream.merge(
     stream.pipe(Stream.map((bytes): Uint8Array | null => bytes)),
     Stream.tick(every).pipe(Stream.map((): Uint8Array | null => null)),
@@ -266,12 +314,20 @@ export const withKeepalive = <E>(stream: Stream.Stream<Uint8Array, E>, every: Du
  * and a browser's cross-origin request is refused (403). The CLIs send no
  * Origin.
  */
-export const proxyRefusal = (headers: Readonly<Record<string, string | undefined>>, port: number): { readonly status: number; readonly message: string } | null => {
+export const proxyRefusal = (
+  headers: Readonly<Record<string, string | undefined>>,
+  port: number,
+): { readonly status: number; readonly message: string } | null => {
   const allowed = ["127.0.0.1", "localhost"].map((h) => `${h}:${port}`);
   const host = headers["host"];
-  if (host === undefined || !allowed.includes(host)) return { status: 421, message: "the T3 Fleet model proxy answers only on its loopback address" };
+  if (host === undefined || !allowed.includes(host))
+    return {
+      status: 421,
+      message: "the T3 Fleet model proxy answers only on its loopback address",
+    };
   const origin = headers["origin"];
-  if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`)) return { status: 403, message: "cross-origin requests are refused" };
+  if (origin !== undefined && !allowed.some((h) => origin === `http://${h}`))
+    return { status: 403, message: "cross-origin requests are refused" };
   return null;
 };
 
@@ -279,7 +335,11 @@ export const proxyRefusal = (headers: Readonly<Record<string, string | undefined
  * [models.upstreams] as `load` reads it, read again every `every`. A read
  * that fails (a config mid-sync, a broken table) keeps the last good set.
  */
-export const followUpstreams = <E, R>(load: Effect.Effect<ModelsSettings, E, R>, initial: ModelsSettings, every: Duration.Input) =>
+export const followUpstreams = <E, R>(
+  load: Effect.Effect<ModelsSettings, E, R>,
+  initial: ModelsSettings,
+  every: Duration.Input,
+) =>
   Effect.gen(function* () {
     let current = upstreamsOf(initial);
     yield* load.pipe(
@@ -314,13 +374,17 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const refused = proxyRefusal(request.headers, port);
-          return refused === null ? yield* handler : HttpServerResponse.text(refused.message, { status: refused.status });
+          return refused === null
+            ? yield* handler
+            : HttpServerResponse.text(refused.message, { status: refused.status });
         });
       const persist = options.persist ?? true;
       const upstreams = options.upstreams ?? (() => BUILTIN_UPSTREAMS);
       const keepaliveEvery = options.keepaliveEvery ?? Duration.seconds(15);
       // Plain array, appended by one request at a time; windows filter it on /stats.
-      const records: Array<RequestRecord> = persist ? yield* loadRecords(options.home, startedAt) : [];
+      const records: Array<RequestRecord> = persist
+        ? yield* loadRecords(options.home, startedAt)
+        : [];
       // Records are written from response streams, which must need nothing from outside.
       const services = yield* Effect.context<FileSystem.FileSystem>();
       const client = yield* HttpClient.HttpClient;
@@ -335,17 +399,37 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
           if (persist) yield* appendRecord(options.home, record);
         }).pipe(Effect.provide(services));
 
-      const health = HttpRouter.add("GET", "/health", guarded(Effect.succeed(HttpServerResponse.text("ok"))));
+      const health = HttpRouter.add(
+        "GET",
+        "/health",
+        guarded(Effect.succeed(HttpServerResponse.text("ok"))),
+      );
 
       const stats = HttpRouter.add(
         "GET",
         "/stats",
-        guarded(Effect.gen(function* () {
-          const now = yield* Clock.currentTimeMillis;
-          const fallbacks = yield* loadFallbacks(options.home, now);
-          const body = yield* encodeStats(proxyStats({ names: Object.keys(upstreams()), now, startedAt, version: options.version, egress: options.egress, records, fallbacks }));
-          return HttpServerResponse.text(body, { contentType: "application/json" });
-        }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })))),
+        guarded(
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            const fallbacks = yield* loadFallbacks(options.home, now);
+            const body = yield* encodeStats(
+              proxyStats({
+                names: Object.keys(upstreams()),
+                now,
+                startedAt,
+                version: options.version,
+                egress: options.egress,
+                records,
+                fallbacks,
+              }),
+            );
+            return HttpServerResponse.text(body, { contentType: "application/json" });
+          }).pipe(
+            Effect.orElseSucceed(() =>
+              HttpServerResponse.text("Internal Server Error", { status: 500 }),
+            ),
+          ),
+        ),
       );
 
       const forward = Effect.gen(function* () {
@@ -354,11 +438,16 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
         const split = splitPath(request.url);
         if (split === null) return HttpServerResponse.text("Not Found", { status: 404 });
         if ((request.headers["upgrade"] ?? "").toLowerCase() === "websocket") {
-          return HttpServerResponse.text("The T3 Fleet model proxy speaks HTTP only", { status: 426 });
+          return HttpServerResponse.text("The T3 Fleet model proxy speaks HTTP only", {
+            status: 426,
+          });
         }
         const { upstream, rest } = split;
         const direct = targetUrl(upstreams(), upstream, rest, request.headers);
-        if (direct === null) return HttpServerResponse.text(`No upstream named ${upstream} in [models.upstreams]`, { status: 404 });
+        if (direct === null)
+          return HttpServerResponse.text(`No upstream named ${upstream} in [models.upstreams]`, {
+            status: 404,
+          });
 
         // Counted until the client's connection is done with this response, however that happens.
         const connection = clientConnection(request);
@@ -386,31 +475,52 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
                 },
               };
         let target = relayed ?? { url: direct, headers };
-        const body = request.method === "GET" || request.method === "HEAD" ? null : new Uint8Array(yield* request.arrayBuffer);
+        const body =
+          request.method === "GET" || request.method === "HEAD"
+            ? null
+            : new Uint8Array(yield* request.arrayBuffer);
         const host = new URL(direct).host;
 
-        const record = (fields: { status: number | null; attempts: number; ttfbMs: number | null; failure: ModelFailureClass | null; error: string | null }) =>
+        const record = (fields: {
+          status: number | null;
+          attempts: number;
+          ttfbMs: number | null;
+          failure: ModelFailureClass | null;
+          error: string | null;
+        }) =>
           Clock.currentTimeMillis.pipe(
             Effect.flatMap((now) =>
-              remember({ at: now, upstream, method: request.method, path: logPath(rest), durationMs: now - started, ...fields }),
+              remember({
+                at: now,
+                upstream,
+                method: request.method,
+                path: logPath(rest),
+                durationMs: now - started,
+                ...fields,
+              }),
             ),
           );
 
         let attempt = 0;
         let waited = 0;
         while (true) {
-          const result = yield* sendUpstream({ method: request.method, url: target.url, headers: target.headers, body }).pipe(
-            Effect.timeoutOption(headersTimeout),
-            Effect.result,
-          );
+          const result = yield* sendUpstream({
+            method: request.method,
+            url: target.url,
+            headers: target.headers,
+            body,
+          }).pipe(Effect.timeoutOption(headersTimeout), Effect.result);
           const now = yield* Clock.currentTimeMillis;
           let failure: SendFailure | null = null;
           let response: HttpClientResponse.HttpClientResponse | null = null;
-          if (result._tag === "Failure") failure = { code: errorCode(result.failure), timedOut: false, behindRelay: false };
-          else if (Option.isNone(result.success)) failure = { code: null, timedOut: true, behindRelay: false };
+          if (result._tag === "Failure")
+            failure = { code: errorCode(result.failure), timedOut: false, behindRelay: false };
+          else if (Option.isNone(result.success))
+            failure = { code: null, timedOut: true, behindRelay: false };
           else {
             response = result.success.value;
-            const reported = target === relayed ? response.headers[EGRESS_FAILURE_HEADER] : undefined;
+            const reported =
+              target === relayed ? response.headers[EGRESS_FAILURE_HEADER] : undefined;
             if (reported !== undefined) {
               yield* response.arrayBuffer.pipe(Effect.ignore);
               failure = { code: reported, timedOut: false, behindRelay: true };
@@ -429,7 +539,15 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
               ? `no response from ${host} within ${Duration.format(Duration.fromInputUnsafe(headersTimeout))}`
               : `${code ?? "connection failed"} (${host}${behindRelay ? ", at the relay" : ""})`;
             const delay = neverSent(code)
-              ? retryDelay({ attempt, status: null, retryAfter: null, waited, random: yield* Random.next, maxRetries: options.maxRetries, baseMs: options.retryBaseMs })
+              ? retryDelay({
+                  attempt,
+                  status: null,
+                  retryAfter: null,
+                  waited,
+                  random: yield* Random.next,
+                  maxRetries: options.maxRetries,
+                  baseMs: options.retryBaseMs,
+                })
               : null;
             if (delay !== null) {
               attempt++;
@@ -437,8 +555,16 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
               yield* Effect.sleep(Duration.millis(delay));
               continue;
             }
-            yield* record({ status: null, attempts: attempt + 1, ttfbMs: null, failure: timedOut ? "timeout" : "connect", error: message });
-            return HttpServerResponse.text(`T3 Fleet model proxy: ${message}`, { status: timedOut ? 504 : 502 });
+            yield* record({
+              status: null,
+              attempts: attempt + 1,
+              ttfbMs: null,
+              failure: timedOut ? "timeout" : "connect",
+              error: message,
+            });
+            return HttpServerResponse.text(`T3 Fleet model proxy: ${message}`, {
+              status: timedOut ? 504 : 502,
+            });
           }
 
           const delay = retryDelay({
@@ -462,7 +588,13 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
           const ttfbMs = now - started;
           const status = response.status;
           const statusFailure = failureClassOf(status);
-          const finished = { status, attempts: attempt + 1, ttfbMs, failure: statusFailure, error: statusFailure === null ? null : `HTTP ${status} from ${host}` };
+          const finished = {
+            status,
+            attempts: attempt + 1,
+            ttfbMs,
+            failure: statusFailure,
+            error: statusFailure === null ? null : `HTTP ${status} from ${host}`,
+          };
           const contentType = response.headers["content-type"];
           const outHeaders = responseHeaders(response.headers);
 
@@ -470,18 +602,31 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
           if (request.method === "HEAD") {
             yield* response.arrayBuffer.pipe(Effect.ignore);
             yield* record(finished);
-            return HttpServerResponse.empty({ status, headers: contentType === undefined ? outHeaders : { ...outHeaders, "content-type": contentType } });
+            return HttpServerResponse.empty({
+              status,
+              headers:
+                contentType === undefined
+                  ? outHeaders
+                  : { ...outHeaders, "content-type": contentType },
+            });
           }
 
           const encoded = (response.headers["content-encoding"] ?? "identity") !== "identity";
-          const bytes = (contentType ?? "").includes("text/event-stream") && !encoded ? withKeepalive(response.stream, keepaliveEvery) : response.stream;
+          const bytes =
+            (contentType ?? "").includes("text/event-stream") && !encoded
+              ? withKeepalive(response.stream, keepaliveEvery)
+              : response.stream;
           const streamed = bytes.pipe(
             // The client's error names the request, query and all; the log and the client get no more than this.
             Stream.mapError(() => `the response from ${host} broke off after it started`),
             Stream.onExit((exit) => {
               if (Exit.isSuccess(exit)) return record(finished);
               const interrupted = Cause.hasInterruptsOnly(exit.cause);
-              const clientGone = connection === undefined || connection.destroyed || connection.socket === null || connection.socket.destroyed;
+              const clientGone =
+                connection === undefined ||
+                connection.destroyed ||
+                connection.socket === null ||
+                connection.socket.destroyed;
               // A client that hangs up is not an upstream failure.
               if (interrupted && clientGone) return record(finished);
               // Broken off upstream, or cut by the proxy stopping: drop the connection, so the
@@ -490,7 +635,9 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
               return record({
                 ...finished,
                 failure: "stream",
-                error: interrupted ? `the proxy stopped before the response from ${host} finished` : `the response from ${host} broke off after it started`,
+                error: interrupted
+                  ? `the proxy stopped before the response from ${host} finished`
+                  : `the response from ${host} broke off after it started`,
               });
             }),
           );
@@ -504,15 +651,24 @@ export const modelProxyLayer = (options: ModelProxyOptions) => {
 
       return Layer.mergeAll(health, stats, HttpRouter.add("*", "/*", guarded(forward)));
     }),
-  ).pipe(Layer.provide(forwardingClient({ headersTimeout, bodyTimeout, ...(options.relay === undefined ? {} : { quick: [options.relay.url] }) })));
+  ).pipe(
+    Layer.provide(
+      forwardingClient({
+        headersTimeout,
+        bodyTimeout,
+        ...(options.relay === undefined ? {} : { quick: [options.relay.url] }),
+      }),
+    ),
+  );
 };
 
 /** This node's proxy stats, or null when nothing answers on the port. */
 export const fetchStats = (port: number = MODELS_PORT) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    const response = yield* client.execute(HttpClientRequest.get(`http://127.0.0.1:${port}/stats`)).pipe(Effect.timeout(Duration.seconds(3)));
+    const response = yield* client
+      .execute(HttpClientRequest.get(`http://127.0.0.1:${port}/stats`))
+      .pipe(Effect.timeout(Duration.seconds(3)));
     if (response.status !== 200) return null;
     return yield* Schema.decodeEffect(Schema.fromJsonString(ModelProxyStats))(yield* response.text);
   }).pipe(Effect.orElseSucceed(() => null));
-

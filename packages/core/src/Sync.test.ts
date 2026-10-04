@@ -23,13 +23,30 @@ import { keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
 import { stateDir } from "./Names.ts";
-import { processIdentity, releaseSyncLock, SYNC_LOCK_ENV, syncLockPath, takeSyncLock, underSyncLock } from "./SyncLock.ts";
+import {
+  processIdentity,
+  releaseSyncLock,
+  SYNC_LOCK_ENV,
+  syncLockPath,
+  takeSyncLock,
+  underSyncLock,
+} from "./SyncLock.ts";
 
 const layer = Layer.merge(NodeServices.layer, FetchHttpClient.layer);
-const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices | import("effect/unstable/http").HttpClient.HttpClient>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(layer)));
-const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
-const git = (cwd: string, ...args: Array<string>) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8" });
+const run = <A, E>(
+  effect: Effect.Effect<
+    A,
+    E,
+    NodeServices.NodeServices | import("effect/unstable/http").HttpClient.HttpClient
+  >,
+) => Effect.runPromise(effect.pipe(Effect.provide(layer)));
+const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+  Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
+const git = (cwd: string, ...args: Array<string>) =>
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+    cwd,
+    encoding: "utf8",
+  });
 const put = (dir: string, rel: string, text: string) => {
   mkdirSync(dirname(join(dir, rel)), { recursive: true });
   writeFileSync(join(dir, rel), text);
@@ -51,7 +68,11 @@ const makeFleet = (toml = '[fleet]\nauto_approve = ["skills/"]\n') => {
   const root = mkdtempSync(join(tmpdir(), "t3-fleet-sync-"));
   process.env["HOME"] = root;
   // T3 Fleet's own git config, which git() reads instead of the user's.
-  put(root, ".config/t3-fleet/gitconfig", "[user]\n\tname = T3 Fleet\n\temail = t3-fleet@localhost\n");
+  put(
+    root,
+    ".config/t3-fleet/gitconfig",
+    "[user]\n\tname = T3 Fleet\n\temail = t3-fleet@localhost\n",
+  );
   const origin = join(root, "origin.git");
   git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
   const box = join(root, "box");
@@ -90,7 +111,9 @@ const makeFleet = (toml = '[fleet]\nauto_approve = ["skills/"]\n') => {
 
 describe("git's own lists", () => {
   it("reads paths with spaces, quotes and renames from -z output", () => {
-    expect(statusEntries(' M skills/a/Ref Guide.md\0?? skills/"q".md\0R  new name.md\0old name.md\0')).toEqual([
+    expect(
+      statusEntries(' M skills/a/Ref Guide.md\0?? skills/"q".md\0R  new name.md\0old name.md\0'),
+    ).toEqual([
       { xy: " M", path: "skills/a/Ref Guide.md" },
       { xy: "??", path: 'skills/"q".md' },
       { xy: "R ", path: "new name.md" },
@@ -140,12 +163,16 @@ describe("approving a proposal", () => {
     await f.sync(f.laptop, "laptop");
     const [proposal] = await run(listProposals(f.box, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box", "0000000"))).toContain("review it again");
+    expect(await fails(approve(f.box, "main", proposal, "box", "0000000"))).toContain(
+      "review it again",
+    );
     expect(await fails(reject(f.box, proposal, "0000000"))).toContain("review it again");
     // Laptop changes its proposal after the review.
     put(f.laptop, "skills/a/SKILL.md", "a v3\n");
     await f.sync(f.laptop, "laptop");
-    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain("review it again");
+    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
+      "review it again",
+    );
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
   });
 
@@ -167,7 +194,9 @@ describe("approving a proposal", () => {
     commitAll(f.box, "box edits a");
     const [proposal] = await run(listProposals(f.box, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain("conflicts with what reached main");
+    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain(
+      "conflicts with what reached main",
+    );
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from box\n");
     expect(git(f.box, "status", "--porcelain")).toBe("");
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
@@ -182,7 +211,9 @@ describe("approving a proposal", () => {
     commitAll(f.box, "box edits a");
     const [proposal] = await run(listProposals(f.box, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain("conflicts with what reached main");
+    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain(
+      "conflicts with what reached main",
+    );
     expect(git(f.box, "status", "--porcelain")).toBe("");
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
     expect(existsSync(join(f.box, "skills/a/new.md"))).toBe(false);
@@ -220,7 +251,9 @@ describe("approving a proposal", () => {
     commitAll(f.box, "readme");
     put(f.laptop, "skills/a/SKILL.md", "if x:\n    a()\n    b()\n");
     await f.sync(f.laptop, "laptop");
-    expect(await fails(approve(f.box, "main", reviewed, "box", reviewed.commit))).toContain("review it again");
+    expect(await fails(approve(f.box, "main", reviewed, "box", reviewed.commit))).toContain(
+      "review it again",
+    );
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
   });
 
@@ -244,10 +277,16 @@ describe("approving a proposal", () => {
     const [proposal] = await run(listProposals(f.box, "main"));
     if (proposal === undefined) return expect.unreachable();
     // The remote refuses the staging branch's deletion, as a lease would when the node re-proposed meanwhile.
-    put(f.origin, "hooks/update", '#!/bin/sh\ncase "$1" in refs/heads/t3-fleet/staging/*) [ "$3" = 0000000000000000000000000000000000000000 ] && exit 1;; esac\nexit 0\n');
+    put(
+      f.origin,
+      "hooks/update",
+      '#!/bin/sh\ncase "$1" in refs/heads/t3-fleet/staging/*) [ "$3" = 0000000000000000000000000000000000000000 ] && exit 1;; esac\nexit 0\n',
+    );
     execFileSync("chmod", ["+x", join(f.origin, "hooks/update")]);
     expect(await fails(reject(f.box, proposal, proposal.commit))).toContain("reject failed");
-    expect(git(f.origin, "for-each-ref", "--format=%(refname)", "refs/heads/t3-fleet/").trim()).toBe("refs/heads/t3-fleet/staging/laptop");
+    expect(
+      git(f.origin, "for-each-ref", "--format=%(refname)", "refs/heads/t3-fleet/").trim(),
+    ).toBe("refs/heads/t3-fleet/staging/laptop");
   });
 
   it("clears a scratch worktree a dead approve left locked", async () => {
@@ -327,8 +366,13 @@ describe("pulling", () => {
     git(f.laptop, "rm", "-q", "skills/b/SKILL.md");
     git(f.laptop, "commit", "-qam", "branch");
     spawnSync("git", ["stash", "apply"], { cwd: f.laptop });
-    expect(git(f.laptop, "diff", "--name-only", "--diff-filter=U").trim().split("\n").sort()).toEqual(["skills/a/SKILL.md", "skills/b/SKILL.md"]);
-    expect((await run(putBackConflicted(f.laptop))).sort()).toEqual(["skills/a/SKILL.md", "skills/b/SKILL.md"]);
+    expect(
+      git(f.laptop, "diff", "--name-only", "--diff-filter=U").trim().split("\n").sort(),
+    ).toEqual(["skills/a/SKILL.md", "skills/b/SKILL.md"]);
+    expect((await run(putBackConflicted(f.laptop))).sort()).toEqual([
+      "skills/a/SKILL.md",
+      "skills/b/SKILL.md",
+    ]);
     expect(git(f.laptop, "status", "--porcelain")).toBe("");
     expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a, branch\n");
     expect(git(f.laptop, "stash", "list")).not.toBe("");
@@ -398,7 +442,11 @@ describe("writes outside sync", () => {
     git(f.root, "init", "-q", "upstream");
     git(upstream, "add", "-A");
     git(upstream, "commit", "-qm", "v2");
-    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ sources: { upstream: { type: "github", url: upstream, skills: ["a"], paths: { a: "a" } } } })}\n`);
+    put(
+      f.box,
+      "skills/SOURCES.json",
+      `${JSON.stringify({ sources: { upstream: { type: "github", url: upstream, skills: ["a"], paths: { a: "a" } } } })}\n`,
+    );
     commitAll(f.box, "sources");
 
     const preview = await run(previewUpdate(f.box, ["a"]));
@@ -411,16 +459,24 @@ describe("writes outside sync", () => {
 
     // An edit of the skill's own is never overwritten by keeping the update.
     put(f.box, "skills/a/SKILL.md", "a, edited here\n");
-    expect(await run(keepUpdate(f.box, ["a"], preview.digest).pipe(Effect.flip))).toContain("preview again");
+    expect(await run(keepUpdate(f.box, ["a"], preview.digest).pipe(Effect.flip))).toContain(
+      "preview again",
+    );
     expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited here\n");
   });
 
   it("removing a skill commits on an authority", async () => {
     const f = makeFleet();
-    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ sources: { u: { type: "github", url: "x", skills: ["b"] } } })}\n`);
+    put(
+      f.box,
+      "skills/SOURCES.json",
+      `${JSON.stringify({ sources: { u: { type: "github", url: "x", skills: ["b"] } } })}\n`,
+    );
     commitAll(f.box, "sources");
     const config = await f.config(f.box, "box");
-    const landed = await run(removeSkills(f.box, ["b"]).pipe(Effect.flatMap((paths) => land(config, paths, "Remove b"))));
+    const landed = await run(
+      removeSkills(f.box, ["b"]).pipe(Effect.flatMap((paths) => land(config, paths, "Remove b"))),
+    );
     expect(landed).toContain("committed and pushed");
     expect(onMain(f.origin, "skills/b/SKILL.md")).toBeNull();
   });
@@ -429,7 +485,9 @@ describe("writes outside sync", () => {
     const f = makeFleet();
     put(f.box, "README.md", "x\n");
     const token = await run(takeSyncLock);
-    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain("a sync is running");
+    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
+      "a sync is running",
+    );
     if (token !== null) await run(releaseSyncLock(token));
     expect(await run(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(/^[0-9a-f]{7,}$/);
   });
@@ -463,7 +521,10 @@ describe("the sync lock's owner", () => {
   /** What this machine's boot and a process's start read as, from a lock this build took. */
   const identity = async () => {
     const token = await run(takeSyncLock);
-    const owner = JSON.parse(read(syncLockPath(process.env["HOME"] ?? ""), "owner.json")) as { boot?: string; process?: string };
+    const owner = JSON.parse(read(syncLockPath(process.env["HOME"] ?? ""), "owner.json")) as {
+      boot?: string;
+      process?: string;
+    };
     if (token !== null) await run(releaseSyncLock(token));
     return owner;
   };
@@ -482,7 +543,13 @@ describe("the sync lock's owner", () => {
     const other = spawn("sleep", ["30"]);
     try {
       const { boot } = await identity();
-      writeLock({ pid: other.pid, start: await run(Clock.currentTimeMillis), token: "reused", boot, process: "the process that took it" });
+      writeLock({
+        pid: other.pid,
+        start: await run(Clock.currentTimeMillis),
+        token: "reused",
+        boot,
+        process: "the process that took it",
+      });
       const token = await run(takeSyncLock);
       expect(token).not.toBeNull();
       if (token !== null) await run(releaseSyncLock(token));
@@ -498,7 +565,13 @@ describe("the sync lock's owner", () => {
       const { boot } = await identity();
       const started = Option.getOrThrow(await run(processIdentity(other.pid ?? 0)));
       // Its start says a day ago: no clock time is compared.
-      writeLock({ pid: other.pid, start: (await run(Clock.currentTimeMillis)) - 86_400_000, token: "stepped", boot, process: started });
+      writeLock({
+        pid: other.pid,
+        start: (await run(Clock.currentTimeMillis)) - 86_400_000,
+        token: "stepped",
+        boot,
+        process: started,
+      });
       expect(await run(takeSyncLock)).toBeNull();
     } finally {
       other.kill();
@@ -512,7 +585,9 @@ describe("the sync lock's owner", () => {
     // Another run took it over (this one looked dead to it, say).
     writeLock({ pid: process.ppid, start: 0, token: "theirs" });
     await run(releaseSyncLock(token));
-    expect(JSON.parse(read(syncLockPath(process.env["HOME"] ?? ""), "owner.json")).token).toBe("theirs");
+    expect(JSON.parse(read(syncLockPath(process.env["HOME"] ?? ""), "owner.json")).token).toBe(
+      "theirs",
+    );
   });
 
   it("lets a process the holder started through, with its token", async () => {
@@ -532,13 +607,23 @@ describe("the sync lock's owner", () => {
   it("lets its holder's own steps through (sync approving), but never a second holder", async () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
     expect(await run(underSyncLock(underSyncLock(Effect.succeed("nested"))))).toBe("nested");
-    const results = await run(Effect.forEach([1, 2], () => Effect.result(underSyncLock(Effect.sleep("100 millis"))), { concurrency: 2 }));
+    const results = await run(
+      Effect.forEach([1, 2], () => Effect.result(underSyncLock(Effect.sleep("100 millis"))), {
+        concurrency: 2,
+      }),
+    );
     expect(results.filter((r) => r._tag === "Success")).toHaveLength(1);
   });
 });
 
 describe("reporting a run", () => {
-  const outcome = (config: Config, node: string, at: number, findings: ReadonlyArray<{ key: string; title: string }>, failed = false) => ({
+  const outcome = (
+    config: Config,
+    node: string,
+    at: number,
+    findings: ReadonlyArray<{ key: string; title: string }>,
+    failed = false,
+  ) => ({
     config,
     node,
     now: at,
@@ -546,7 +631,13 @@ describe("reporting a run", () => {
     failed,
     message: failed ? "pull failed" : "",
     lines: [],
-    findings: findings.map((f) => ({ node, key: f.key, severity: "error" as const, area: "sync" as const, title: f.title })),
+    findings: findings.map((f) => ({
+      node,
+      key: f.key,
+      severity: "error" as const,
+      area: "sync" as const,
+      title: f.title,
+    })),
     applied: [],
     observation: null,
   });
@@ -554,10 +645,20 @@ describe("reporting a run", () => {
   it("raises an alert once per problem, though its title counts on", async () => {
     const f = makeFleet();
     const config = await f.config(f.box, "box");
-    const previous = async () => Option.fromNullishOr((await run(readStates(f.box))).find((s) => s.node === "box"));
-    await run(report(outcome(config, "box", 1, [{ key: "sync-failing", title: "failed 3 times" }])));
-    await run(report({ ...outcome(config, "box", 2, [{ key: "sync-failing", title: "failed 4 times" }]), previous: await previous() }));
-    const state = await run(report({ ...outcome(config, "box", 3, []), previous: await previous() }));
+    const previous = async () =>
+      Option.fromNullishOr((await run(readStates(f.box))).find((s) => s.node === "box"));
+    await run(
+      report(outcome(config, "box", 1, [{ key: "sync-failing", title: "failed 3 times" }])),
+    );
+    await run(
+      report({
+        ...outcome(config, "box", 2, [{ key: "sync-failing", title: "failed 4 times" }]),
+        previous: await previous(),
+      }),
+    );
+    const state = await run(
+      report({ ...outcome(config, "box", 3, []), previous: await previous() }),
+    );
     expect(state.alerts.map((a) => [a.at, a.kind, a.message])).toEqual([
       [1, "problem", "failed 3 times"],
       [3, "resolved", "failed 4 times"],
@@ -572,8 +673,12 @@ describe("reporting a run", () => {
     git(f.laptop, "remote", "set-url", "origin", join(f.root, "gone.git"));
     for (const at of [2_000, 3_000, 4_000]) {
       // The published state says streak 0 each time; only the local record knows.
-      expect(await run(report(outcome(config, "laptop", at, [])).pipe(Effect.flip))).toContain("publishing state");
+      expect(await run(report(outcome(config, "laptop", at, [])).pipe(Effect.flip))).toContain(
+        "publishing state",
+      );
     }
-    expect(readFileSync(lastSyncPath(process.env["HOME"] ?? ""), "utf8")).toMatch(/^4\tfail\t3\tpublishing state/);
+    expect(readFileSync(lastSyncPath(process.env["HOME"] ?? ""), "utf8")).toMatch(
+      /^4\tfail\t3\tpublishing state/,
+    );
   });
 });

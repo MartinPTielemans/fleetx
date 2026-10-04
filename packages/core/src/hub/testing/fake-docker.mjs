@@ -18,7 +18,10 @@ appendFileSync(join(dir, "log"), `${args.join(" ")}\n`);
 const container = (labels, port, running = true) => ({
   State: { Running: running, Status: running ? "running" : "created" },
   Config: { Labels: labels },
-  HostConfig: { PortBindings: port === null ? {} : { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] } },
+  HostConfig: {
+    PortBindings:
+      port === null ? {} : { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] },
+  },
 });
 
 const [command, ...rest] = args;
@@ -64,11 +67,15 @@ if (command === "version") {
     rmSync(join(dir, "conflict-once"));
     containers[name] = container({ ...labels, "dev.t3-fleet.run": "someone-else" }, port);
     save(containers);
-    console.error(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "abc".`);
+    console.error(
+      `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "abc".`,
+    );
     process.exit(125);
   }
   if (containers[name] !== undefined) {
-    console.error(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`);
+    console.error(
+      `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`,
+    );
     process.exit(125);
   }
   containers[name] = container(labels, port);

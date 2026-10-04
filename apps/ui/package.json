@@ -1,6 +1,7 @@
 {
   "name": "@t3-fleet/ui",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vp dev",
@@ -27,6 +28,5 @@
     "tailwindcss": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:"
-  },
-  "license": "MIT"
+  }
 }

@@ -22,12 +22,12 @@ consumes those schemas; nobody invents a second shape for the same data.
 
 ## Ports
 
-| Port | Where | What |
-|---|---|---|
-| 8399 | relay node, 127.0.0.1, published to the tailnet | relay: sync events, state, MCP gateway, hub management, OAuth callback |
-| 8398 | every node, 127.0.0.1 only | model proxy |
-| random (or `--port`) | the machine running `t3-fleet ui`, 127.0.0.1 only | UI and its `/api` |
-| 18200–18299 | relay node, 127.0.0.1 only | hub-run MCP servers (allocated by the hub) |
+| Port                 | Where                                             | What                                                                   |
+| -------------------- | ------------------------------------------------- | ---------------------------------------------------------------------- |
+| 8399                 | relay node, 127.0.0.1, published to the tailnet   | relay: sync events, state, MCP gateway, hub management, OAuth callback |
+| 8398                 | every node, 127.0.0.1 only                        | model proxy                                                            |
+| random (or `--port`) | the machine running `t3-fleet ui`, 127.0.0.1 only | UI and its `/api`                                                      |
+| 18200–18299          | relay node, 127.0.0.1 only                        | hub-run MCP servers (allocated by the hub)                             |
 
 ## 1. models: the model proxy
 
@@ -115,7 +115,7 @@ route = false                          # leave an instance alone
 
 - `provider-logged-out-<instance>` (error): T3 reports the instance as not
   logged in (or, without T3's snapshot, `claude auth status` / `codex login
-  status` say so). Every node, with or without `[models]`.
+status` say so). Every node, with or without `[models]`.
 - `provider-unhealthy-<instance>` (warn): T3 reports the instance as warning
   or error; the detail is T3's message.
 - `t3-access` (warn, fix): T3 Fleet has no working read-only T3 token; the fix
@@ -141,12 +141,12 @@ The hub runs inside `t3-fleet relay serve` on the relay node. Every definition
 in the repo's `mcp/` with a hosted kind is served; there is nothing else to
 list. Clients reach every hosted server at `<relay url>/mcp/<name>`.
 
-| kind | the hub |
-|---|---|
-| `remote` | proxies to `url`, adding the server's credential (OAuth or a bearer secret) |
+| kind                    | the hub                                                                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `remote`                | proxies to `url`, adding the server's credential (OAuth or a bearer secret)                                           |
 | `container`, `registry` | runs `image` with Docker on a port it allocates, then proxies to it; `transport = "stdio"` images are bridged (below) |
-| `hosted-stdio` | runs `command` on the relay node and bridges it |
-| `stdio`, `direct` | not hosted; registered in clients as today |
+| `hosted-stdio`          | runs `command` on the relay node and bridges it                                                                       |
+| `stdio`, `direct`       | not hosted; registered in clients as today                                                                            |
 
 Containers run `--cap-drop ALL --security-opt no-new-privileges`, bound to
 127.0.0.1, with `env` from the fleet's secrets and an optional
@@ -317,11 +317,11 @@ finish, and stopping `t3-fleet ui` waits for them (a second Ctrl-C does not).
 
 ## Who builds what
 
-| Part | Owns |
-|---|---|
+| Part   | Owns                                                                                                                                 |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
 | models | `packages/core/src/models/`, `areas/Models.ts`, Claude auth in Probe/Observation/Diagnose, `apps/cli/src/models.ts`, relay `/egress` |
-| hub | `packages/core/src/hub/`, `Relay.ts` changes, `areas/Mcp.ts` changes, `apps/cli/src/hub.ts` (`t3-fleet mcp login`, `token`) |
-| ui | `apps/ui/`, `packages/core/src/UiServer.ts`, `apps/cli/src/ui.ts`, build embedding |
+| hub    | `packages/core/src/hub/`, `Relay.ts` changes, `areas/Mcp.ts` changes, `apps/cli/src/hub.ts` (`t3-fleet mcp login`, `token`)          |
+| ui     | `apps/ui/`, `packages/core/src/UiServer.ts`, `apps/cli/src/ui.ts`, build embedding                                                   |
 
 Shared files (`Areas.ts`, `bin.ts`, `Api.ts`, `PROBE_PROTOCOL`) take small
 additive edits; conflicts there are resolved at integration.

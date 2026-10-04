@@ -1,6 +1,13 @@
 /** The hub's servers, their logins, and the tool-call log, through the relay. */
 import type { HubServerState } from "@t3-fleet/core/Api";
-import { ExternalLinkIcon, LogInIcon, LogOutIcon, PlugIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
+import {
+  ExternalLinkIcon,
+  LogInIcon,
+  LogOutIcon,
+  PlugIcon,
+  RefreshCwIcon,
+  RotateCwIcon,
+} from "lucide-react";
 import { useState } from "react";
 
 import { ErrorState, LoadingRows, Page, UnavailableState } from "../components/common";
@@ -38,9 +45,18 @@ export function McpView() {
     <Page
       wide
       title="MCP"
-      description={session?.relay === null ? "This fleet has no relay" : "Servers the hub runs on the relay, and every tool call through its gateway"}
+      description={
+        session?.relay === null
+          ? "This fleet has no relay"
+          : "Servers the hub runs on the relay, and every tool call through its gateway"
+      }
       actions={
-        <Button size="sm" variant="outline" disabled={servers.loading} onClick={() => void servers.reload()}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={servers.loading}
+          onClick={() => void servers.reload()}
+        >
           {servers.loading ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
           Refresh
         </Button>
@@ -63,14 +79,21 @@ export function McpView() {
                 servers.error === null ? (
                   <LoadingRows rows={3} />
                 ) : (
-                  <ErrorState error={servers.error} what="the hub's servers" onRetry={() => void servers.reload()} />
+                  <ErrorState
+                    error={servers.error}
+                    what="the hub's servers"
+                    onRetry={() => void servers.reload()}
+                  />
                 )
               ) : servers.data.length === 0 ? (
                 <Empty icon={<PlugIcon />} title="No hosted servers">
-                  Definitions in the config repo's <code>mcp/</code> with a hosted kind (remote, container, registry, hosted-stdio) are served here.
+                  Definitions in the config repo's <code>mcp/</code> with a hosted kind (remote,
+                  container, registry, hosted-stdio) are served here.
                 </Empty>
               ) : (
-                servers.data.map((s) => <ServerRow key={s.name} server={s} onChanged={() => void servers.reload()} />)
+                servers.data.map((s) => (
+                  <ServerRow key={s.name} server={s} onChanged={() => void servers.reload()} />
+                ))
               )}
             </Group>
           </section>
@@ -116,13 +139,23 @@ function ServerRow({ server: s, onChanged }: { server: HubServerT; onChanged: ()
         <span className="ml-auto flex gap-1.5">
           {s.auth === "oauth" ? (
             s.state === "needs-login" || s.expiresAt === null ? (
-              <Button size="xs" variant={s.state === "needs-login" ? "default" : "outline"} disabled={busy} onClick={() => void signIn()}>
+              <Button
+                size="xs"
+                variant={s.state === "needs-login" ? "default" : "outline"}
+                disabled={busy}
+                onClick={() => void signIn()}
+              >
                 {busy ? <Spinner className="size-3" /> : <LogInIcon />}
                 Sign in
                 <ExternalLinkIcon className="size-3" />
               </Button>
             ) : (
-              <Button size="xs" variant="outline" disabled={busy} onClick={() => setConfirm("logout")}>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy}
+                onClick={() => setConfirm("logout")}
+              >
                 <LogOutIcon />
                 Sign out
               </Button>
@@ -139,17 +172,38 @@ function ServerRow({ server: s, onChanged }: { server: HubServerT; onChanged: ()
           {s.upstream}
         </span>
         {s.tools === null ? null : <span>{plural(s.tools, "tool")}</span>}
-        {s.expiresAt === null ? null : <span>token {s.expiresAt > now ? `expires ${stamp(s.expiresAt)}` : "expired"}</span>}
+        {s.expiresAt === null ? null : (
+          <span>token {s.expiresAt > now ? `expires ${stamp(s.expiresAt)}` : "expired"}</span>
+        )}
         {s.lastCheckAt === null ? null : <span>checked {ago(s.lastCheckAt, now)}</span>}
       </div>
-      {s.detail === null ? null : <div className={cn("text-xs", s.state === "error" ? "text-destructive-foreground" : "text-muted-foreground")}>{s.detail}</div>}
+      {s.detail === null ? null : (
+        <div
+          className={cn(
+            "text-xs",
+            s.state === "error" ? "text-destructive-foreground" : "text-muted-foreground",
+          )}
+        >
+          {s.detail}
+        </div>
+      )}
       {error === null ? null : <div className="text-destructive-foreground text-xs">{error}</div>}
       <ConfirmHub server={s} verb={confirm} onClose={() => setConfirm(null)} onDone={onChanged} />
     </div>
   );
 }
 
-function ConfirmHub({ server, verb, onClose, onDone }: { server: HubServerT; verb: "logout" | "restart" | null; onClose: () => void; onDone: () => void }) {
+function ConfirmHub({
+  server,
+  verb,
+  onClose,
+  onDone,
+}: {
+  server: HubServerT;
+  verb: "logout" | "restart" | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
   return (
     <ConfirmDialog
       open={verb !== null}
@@ -161,7 +215,9 @@ function ConfirmHub({ server, verb, onClose, onDone }: { server: HubServerT; ver
       }
       confirm={verb === "logout" ? "Sign out" : "Restart"}
       variant={verb === "logout" ? "destructive" : "default"}
-      onConfirm={() => (verb === "logout" ? api.hubLogout(server.name) : api.hubRestart(server.name))}
+      onConfirm={() =>
+        verb === "logout" ? api.hubLogout(server.name) : api.hubRestart(server.name)
+      }
       onClose={onClose}
       onDone={onDone}
     />
@@ -174,7 +230,9 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
   const [outcome, setOutcome] = useState<HubCallT["outcome"] | null>(null);
   const calls = useResource(() => api.hubCalls(server), [server]);
   useEvent("hub", () => void calls.reload());
-  const shown = (calls.data ?? []).filter((c) => outcome === null || c.outcome === outcome).toSorted((a, b) => b.at - a.at);
+  const shown = (calls.data ?? [])
+    .filter((c) => outcome === null || c.outcome === outcome)
+    .toSorted((a, b) => b.at - a.at);
   return (
     <section>
       <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
@@ -195,7 +253,9 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
         <select
           aria-label="Outcome"
           value={outcome ?? ""}
-          onChange={(e) => setOutcome(e.target.value === "" ? null : (e.target.value as HubCallT["outcome"]))}
+          onChange={(e) =>
+            setOutcome(e.target.value === "" ? null : (e.target.value as HubCallT["outcome"]))
+          }
           className="h-6 rounded-md border border-input bg-popover px-1.5 text-xs"
         >
           <option value="">Every outcome</option>
@@ -204,7 +264,12 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
           <option value="denied">denied</option>
           <option value="unauthorized">unauthorized</option>
         </select>
-        <Button size="icon-xs" variant="ghost-muted" aria-label="Refresh calls" onClick={() => void calls.reload()}>
+        <Button
+          size="icon-xs"
+          variant="ghost-muted"
+          aria-label="Refresh calls"
+          onClick={() => void calls.reload()}
+        >
           <RefreshCwIcon />
         </Button>
       </div>
@@ -213,10 +278,17 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
           calls.error === null ? (
             <LoadingRows />
           ) : (
-            <ErrorState error={calls.error} what="the call log" onRetry={() => void calls.reload()} />
+            <ErrorState
+              error={calls.error}
+              what="the call log"
+              onRetry={() => void calls.reload()}
+            />
           )
         ) : shown.length === 0 ? (
-          <Empty title="No calls">Calls through the gateway show up here: server, client, tool, duration and outcome, never arguments or results.</Empty>
+          <Empty title="No calls">
+            Calls through the gateway show up here: server, client, tool, duration and outcome,
+            never arguments or results.
+          </Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -233,8 +305,15 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
               </thead>
               <tbody>
                 {shown.map((c, i) => (
-                  <tr key={`${c.at}-${i}`} className="border-b last:border-0 hover:bg-muted/50" title={c.error ?? undefined}>
-                    <td className="whitespace-nowrap px-4 py-1.5 text-muted-foreground tabular-nums" title={stamp(c.at)}>
+                  <tr
+                    key={`${c.at}-${i}`}
+                    className="border-b last:border-0 hover:bg-muted/50"
+                    title={c.error ?? undefined}
+                  >
+                    <td
+                      className="whitespace-nowrap px-4 py-1.5 text-muted-foreground tabular-nums"
+                      title={stamp(c.at)}
+                    >
                       {ago(c.at, now)}
                     </td>
                     <td className="px-2 py-1.5 font-medium">{c.server}</td>
@@ -244,7 +323,9 @@ function CallLog({ servers }: { servers: ReadonlyArray<HubServerT> }) {
                     <td className="px-2 py-1.5 text-right tabular-nums">{c.durationMs} ms</td>
                     <td className="px-2 py-1.5 pr-4">
                       <Badge variant={OUTCOME[c.outcome]}>{c.outcome}</Badge>
-                      {c.error === null ? null : <span className="ml-2 text-muted-foreground">{c.error}</span>}
+                      {c.error === null ? null : (
+                        <span className="ml-2 text-muted-foreground">{c.error}</span>
+                      )}
                     </td>
                   </tr>
                 ))}

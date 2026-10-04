@@ -109,11 +109,11 @@ token_env = "T3_FLEET_MCP_TOKEN_LAPTOP"            # optional: a client token in
 Each server is defined once in the repo's `mcp/<name>.json`. Its `kind`
 decides where clients connect:
 
-| kind | clients connect to |
-|---|---|
-| `stdio` | `command` with `args`, run on the node itself |
-| `direct` | `url` (`auth = { type = "bearer", token_env = "NAME" }` sends a secret) |
-| `remote`, `container`, `registry`, `hosted-stdio` | the hub: `<gateway>/mcp/<name>`, with the relay token or `token_env` |
+| kind                                              | clients connect to                                                      |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| `stdio`                                           | `command` with `args`, run on the node itself                           |
+| `direct`                                          | `url` (`auth = { type = "bearer", token_env = "NAME" }` sends a secret) |
+| `remote`, `container`, `registry`, `hosted-stdio` | the hub: `<gateway>/mcp/<name>`, with the relay token or `token_env`    |
 
 Every registered HTTP server gets an `initialize` request as a live check.
 
@@ -127,12 +127,12 @@ connect to `http://<origin>:<port>/mcp`, or through the relay's gateway when
 With `hub = true` on the relay node, `t3-fleet relay serve` runs every hosted
 definition in `mcp/` and serves it at `<relay url>/mcp/<name>`:
 
-| kind | the hub |
-|---|---|
-| `remote` | proxies to `url` (https; plain http only on loopback), adding the server's credential (OAuth, or a bearer secret) |
-| `container` | runs `image` with Docker on a port from 18200–18299 and proxies to it (`target_port`, default 8080; `path`, default `/mcp`) |
-| `registry` | the same; `transport = "stdio"` (the default for registry) images are bridged |
-| `hosted-stdio` | runs `command` on the relay node and bridges it |
+| kind           | the hub                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `remote`       | proxies to `url` (https; plain http only on loopback), adding the server's credential (OAuth, or a bearer secret)           |
+| `container`    | runs `image` with Docker on a port from 18200–18299 and proxies to it (`target_port`, default 8080; `path`, default `/mcp`) |
+| `registry`     | the same; `transport = "stdio"` (the default for registry) images are bridged                                               |
+| `hosted-stdio` | runs `command` on the relay node and bridges it                                                                             |
 
 Containers are named `t3-fleet-mcp-<name>`, run with `--cap-drop ALL
 --security-opt no-new-privileges`, publish only on 127.0.0.1, get `env` from
@@ -246,10 +246,10 @@ point the CLI at `{proxy}`, the CLI to run (`command`), and a long-lived
 credential to load from the node's secrets (`token_env`). Two recipes are
 built in:
 
-| driver | points it at the proxy | token_env |
-|---|---|---|
-| claudeAgent | `ANTHROPIC_BASE_URL={proxy}` | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`; does not rotate) |
-| codex | `-c openai_base_url="{proxy}"` (keeps Codex's built-in provider and login) | none |
+| driver      | points it at the proxy                                                     | token_env                                                         |
+| ----------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| claudeAgent | `ANTHROPIC_BASE_URL={proxy}`                                               | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`; does not rotate) |
+| codex       | `-c openai_base_url="{proxy}"` (keeps Codex's built-in provider and login) | none                                                              |
 
 Any other driver whose CLI takes a base URL is routed by declaring its recipe;
 one that runs inside T3 without a CLI, or has no recipe, is a note. When the

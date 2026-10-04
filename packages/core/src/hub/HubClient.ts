@@ -18,14 +18,23 @@ export interface HubReply {
 }
 
 /** One request to the relay's /hub/* routes. */
-export const hubRequest = (config: Config, method: "GET" | "POST" | "DELETE", path: string, body?: string) =>
+export const hubRequest = (
+  config: Config,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body?: string,
+) =>
   Effect.gen(function* () {
     const url = config.settings.relay?.url?.replace(/\/+$/, "");
-    if (url === undefined) return yield* Effect.fail("no [relay] url in t3-fleet.toml: the MCP hub runs in the relay");
+    if (url === undefined)
+      return yield* Effect.fail("no [relay] url in t3-fleet.toml: the MCP hub runs in the relay");
     const token = yield* secretVar(RELAY_TOKEN);
     if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets`);
     const client = yield* HttpClient.HttpClient;
-    let request = HttpClientRequest.make(method)(`${url}${path}`).pipe(HttpClientRequest.bearerToken(token), HttpClientRequest.setHeader("accept", "application/json"));
+    let request = HttpClientRequest.make(method)(`${url}${path}`).pipe(
+      HttpClientRequest.bearerToken(token),
+      HttpClientRequest.setHeader("accept", "application/json"),
+    );
     if (body !== undefined) request = HttpClientRequest.bodyText(request, body, "application/json");
     const response = yield* client.execute(request).pipe(
       Effect.timeout(Duration.seconds(30)),
@@ -38,7 +47,12 @@ export const hubRequest = (config: Config, method: "GET" | "POST" | "DELETE", pa
 
 /** The reply's body when it is a success, else its text as the failure. */
 export const expectOk = (reply: HubReply) =>
-  reply.status >= 200 && reply.status < 300 ? Effect.succeed(reply.text) : Effect.fail(reply.text.trim() === "" ? `the relay answered HTTP ${reply.status}` : reply.text.trim());
+  reply.status >= 200 && reply.status < 300
+    ? Effect.succeed(reply.text)
+    : Effect.fail(
+        reply.text.trim() === "" ? `the relay answered HTTP ${reply.status}` : reply.text.trim(),
+      );
 
 /** The secret a client token is kept under in this repo's secrets: T3_FLEET_MCP_TOKEN_<CLIENT>. */
-export const clientTokenEnv = (repo: string, client: string) => secretName(repo, `MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`);
+export const clientTokenEnv = (repo: string, client: string) =>
+  secretName(repo, `MCP_TOKEN_${client.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`);

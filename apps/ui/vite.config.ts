@@ -26,7 +26,9 @@ const fixtures = (): Plugin => ({
           res.write(fixtureEvents);
           return;
         }
-        res.writeHead(answer.status, { "content-type": answer.body === "" ? "text/plain" : "application/json" });
+        res.writeHead(answer.status, {
+          "content-type": answer.body === "" ? "text/plain" : "application/json",
+        });
         res.end(answer.body);
       });
     });
@@ -36,7 +38,11 @@ const fixtures = (): Plugin => ({
 const target = `http://127.0.0.1:${process.env["T3_FLEET_UI_PORT"] ?? "8397"}`;
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), ...(process.env["T3_FLEET_UI_FIXTURES"] === "1" ? [fixtures()] : [])],
+  plugins: [
+    react(),
+    tailwindcss(),
+    ...(process.env["T3_FLEET_UI_FIXTURES"] === "1" ? [fixtures()] : []),
+  ],
   build: {
     outDir: "dist",
     emptyOutDir: true,

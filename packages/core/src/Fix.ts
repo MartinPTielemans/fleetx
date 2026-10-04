@@ -11,7 +11,15 @@ import { shPath } from "./Area.ts";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
 import type { Node } from "./Config.ts";
-import { BUNDLE_FILE, CLI, LEGACY_CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
+import {
+  BUNDLE_FILE,
+  CLI,
+  LEGACY_CLI,
+  launchdLabel,
+  PRODUCT,
+  SHARE_DIR,
+  systemdUnit,
+} from "./Names.ts";
 
 export interface FixOutcome {
   readonly finding: Finding & { readonly fix: Fix };
@@ -21,7 +29,12 @@ export interface FixOutcome {
 }
 
 const lastLine = (text: string) =>
-  text.trim().split("\n").map((l) => l.trim()).filter((l) => l !== "").pop() ?? "";
+  text
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+    .pop() ?? "";
 
 /**
  * Every fix runs with T3_FLEET_CHECKOUT (and FLEETX_CHECKOUT, until 1.0) set
@@ -41,7 +54,9 @@ const script = (command: string, checkout: string, bundle: string) => {
       ? [
           `mkdir -p ${share} ~/.local/bin`,
           `base64 -d > ${share}/${BUNDLE_FILE}.tmp <<'T3_FLEET_BUNDLE'`,
-          Buffer.from(bundle).toString("base64").replace(/(.{76})/g, "$1\n"),
+          Buffer.from(bundle)
+            .toString("base64")
+            .replace(/(.{76})/g, "$1\n"),
           "T3_FLEET_BUNDLE",
           `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
           ...link(CLI),
@@ -59,15 +74,29 @@ const script = (command: string, checkout: string, bundle: string) => {
   return `export T3_FLEET_CHECKOUT=${shPath(checkout)} FLEETX_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${alias}\n${body}\n`;
 };
 
-export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, checkout: string, bundle: string) =>
+export const runFix = (
+  node: Node,
+  finding: Finding & { readonly fix: Fix },
+  checkout: string,
+  bundle: string,
+) =>
   Effect.gen(function* () {
     // Installing an empty bundle would leave the node without T3 Fleet.
     if (finding.fix.command === ENGINE_INSTALL && bundle === "") {
-      return { finding, ok: false, summary: `no ${PRODUCT} build to install was given; nothing was changed` } satisfies FixOutcome;
+      return {
+        finding,
+        ok: false,
+        summary: `no ${PRODUCT} build to install was given; nothing was changed`,
+      } satisfies FixOutcome;
     }
     const run = yield* exec(
       node.ssh === null
-        ? { command: "bash", args: ["-l", "-s"], stdin: script(finding.fix.command, checkout, bundle), timeout: Duration.minutes(10) }
+        ? {
+            command: "bash",
+            args: ["-l", "-s"],
+            stdin: script(finding.fix.command, checkout, bundle),
+            timeout: Duration.minutes(10),
+          }
         : {
             command: "ssh",
             args: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", node.ssh, "bash -l -s"],
@@ -79,7 +108,8 @@ export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, che
     const ok = run.code === 0;
     const summary = run.timedOut
       ? "timed out after 10 minutes"
-      : run.spawnError ?? (lastLine(ok ? run.stdout || run.stderr : run.stderr || run.stdout) || `exit ${run.code}`);
+      : (run.spawnError ??
+        (lastLine(ok ? run.stdout || run.stderr : run.stderr || run.stdout) || `exit ${run.code}`));
     return { finding, ok, summary: summary.slice(0, 240) } satisfies FixOutcome;
   });
 
@@ -92,8 +122,13 @@ export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, che
 const rank = (f: Finding & { readonly fix: Fix }) =>
   f.fix.command === ENGINE_INSTALL ? 0 : f.key === "engine-legacy-dirs" ? 1 : 2;
 
-export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(fixes: ReadonlyArray<F>): ReadonlyArray<F> =>
-  fixes.map((f, i) => [f, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j).map(([f]) => f);
+export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(
+  fixes: ReadonlyArray<F>,
+): ReadonlyArray<F> =>
+  fixes
+    .map((f, i) => [f, i] as const)
+    .sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j)
+    .map(([f]) => f);
 
 /**
  * Fixes for one node run in order (an upgrade may depend on the one before); nodes run in parallel.
@@ -110,7 +145,12 @@ export const runFixes = (
     nodes,
     (node) =>
       Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) =>
-        runFix(node, f, node.ssh === null && localRepo !== undefined ? localRepo : checkout, bundle),
+        runFix(
+          node,
+          f,
+          node.ssh === null && localRepo !== undefined ? localRepo : checkout,
+          bundle,
+        ),
       ),
     { concurrency: "unbounded" },
   ).pipe(Effect.map((perNode) => perNode.flat()));

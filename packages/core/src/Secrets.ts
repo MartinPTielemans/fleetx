@@ -17,7 +17,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { armor, Decrypter, Encrypter, generateX25519Identity, identityToRecipient } from "age-encryption";
+import {
+  armor,
+  Decrypter,
+  Encrypter,
+  generateX25519Identity,
+  identityToRecipient,
+} from "age-encryption";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { configDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
@@ -32,7 +38,10 @@ export const encryptedPath = (repo: string) => `${repo}/secrets/secrets.env.age`
 export const recipientsPath = (repo: string) => `${repo}/secrets/recipients.toml`;
 
 const promise = <A>(f: () => Promise<A>, what: string) =>
-  Effect.tryPromise({ try: f, catch: (cause) => new SecretsError({ message: `${what}: ${String(cause)}` }) });
+  Effect.tryPromise({
+    try: f,
+    catch: (cause) => new SecretsError({ message: `${what}: ${String(cause)}` }),
+  });
 
 const writePrivate = (file: string, content: string) =>
   Effect.gen(function* () {
@@ -51,7 +60,12 @@ export const ensureIdentity = Effect.gen(function* () {
   const identity = Option.isSome(existing)
     ? (existing.value.split("\n").find((l) => l.startsWith("AGE-SECRET-KEY-")) ?? "")
     : "";
-  if (identity !== "") return { identity, recipient: yield* promise(() => identityToRecipient(identity), "reading key"), created: false };
+  if (identity !== "")
+    return {
+      identity,
+      recipient: yield* promise(() => identityToRecipient(identity), "reading key"),
+      created: false,
+    };
   const fresh = yield* promise(() => generateX25519Identity(), "generating key");
   const recipient = yield* promise(() => identityToRecipient(fresh), "deriving recipient");
   yield* writePrivate(keyPath(home), `# T3 Fleet node key; public: ${recipient}\n${fresh}\n`);
@@ -77,8 +91,13 @@ export const writeRecipients = (repo: string, recipients: Record<string, string>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
-      const sorted = Object.fromEntries(Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)));
-      yield* fs.writeFileString(recipientsPath(repo), `# Public age keys of the nodes that can read secrets.env.age.\n${stringifyToml(sorted)}\n`);
+      const sorted = Object.fromEntries(
+        Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)),
+      );
+      yield* fs.writeFileString(
+        recipientsPath(repo),
+        `# Public age keys of the nodes that can read secrets.env.age.\n${stringifyToml(sorted)}\n`,
+      );
     }),
   );
 
@@ -91,7 +110,8 @@ export const decryptWith = (identity: string, armored: string) =>
 
 export const encryptFor = (recipients: ReadonlyArray<string>, plaintext: string) =>
   Effect.gen(function* () {
-    if (recipients.length === 0) return yield* new SecretsError({ message: "no recipients: add a node key first" });
+    if (recipients.length === 0)
+      return yield* new SecretsError({ message: "no recipients: add a node key first" });
     const e = new Encrypter();
     for (const r of recipients) e.addRecipient(r);
     return armor.encode(yield* promise(() => e.encrypt(plaintext), "encrypting secrets"));
@@ -132,7 +152,12 @@ export const installSecrets = (repo: string) =>
 export const setVar = (text: string, key: string, value: string | null) => {
   const lines = text.split("\n");
   const at = lines.findIndex((l) => new RegExp(`^\\s*(?:export\\s+)?${key}=`).test(l));
-  const quoted = value === null ? null : /^[A-Za-z0-9_./:@+-]*$/.test(value) ? value : `"${value.replace(/["\\$`]/g, "\\$&")}"`;
+  const quoted =
+    value === null
+      ? null
+      : /^[A-Za-z0-9_./:@+-]*$/.test(value)
+        ? value
+        : `"${value.replace(/["\\$`]/g, "\\$&")}"`;
   if (quoted === null) {
     if (at >= 0) lines.splice(at, 1);
   } else if (at >= 0) lines[at] = `${key}=${quoted}`;

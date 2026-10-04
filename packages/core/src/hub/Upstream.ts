@@ -18,12 +18,24 @@ import type * as HttpClientResponse from "effect/unstable/http/HttpClientRespons
 
 import { NeedsLogin, type OAuthError } from "./OAuth.ts";
 
-export class UpstreamError extends Schema.TaggedError<UpstreamError>()("UpstreamError", { message: Schema.String }) {}
+export class UpstreamError extends Schema.TaggedError<UpstreamError>()("UpstreamError", {
+  message: Schema.String,
+}) {}
 
 /** Headers passed from a client to an upstream. Never Authorization: that is the client's token for the hub. */
-export const REQUEST_HEADERS: ReadonlyArray<string> = ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"];
+export const REQUEST_HEADERS: ReadonlyArray<string> = [
+  "content-type",
+  "accept",
+  "mcp-session-id",
+  "mcp-protocol-version",
+  "last-event-id",
+];
 /** Headers passed back from an upstream to a client. Never WWW-Authenticate. */
-export const RESPONSE_HEADERS: ReadonlyArray<string> = ["content-type", "mcp-session-id", "mcp-protocol-version"];
+export const RESPONSE_HEADERS: ReadonlyArray<string> = [
+  "content-type",
+  "mcp-session-id",
+  "mcp-protocol-version",
+];
 
 export interface ForwardRequest {
   readonly method: "GET" | "POST" | "DELETE";
@@ -38,11 +50,17 @@ export interface UpstreamResponse {
 }
 
 export interface Upstream {
-  readonly forward: (request: ForwardRequest) => Effect.Effect<UpstreamResponse, UpstreamError | NeedsLogin>;
+  readonly forward: (
+    request: ForwardRequest,
+  ) => Effect.Effect<UpstreamResponse, UpstreamError | NeedsLogin>;
 }
 
 /** A small complete response. */
-export const textResponse = (status: number, text: string, headers: Readonly<Record<string, string>> = {}): UpstreamResponse => ({
+export const textResponse = (
+  status: number,
+  text: string,
+  headers: Readonly<Record<string, string>> = {},
+): UpstreamResponse => ({
   status,
   headers: { "content-type": "application/json", ...headers },
   body: text === "" ? Stream.empty : Stream.make(new TextEncoder().encode(text)),
@@ -62,7 +80,10 @@ export const readBody = (response: UpstreamResponse, limit = 4_000_000) =>
 export interface Credential {
   readonly token: Effect.Effect<string | null, NeedsLogin | OAuthError | UpstreamError>;
   /** The upstream answered 401 to `token`: a token to retry with once, or a failure. */
-  readonly rejected: (token: string | null, challenge: string | null) => Effect.Effect<string, NeedsLogin | OAuthError | UpstreamError>;
+  readonly rejected: (
+    token: string | null,
+    challenge: string | null,
+  ) => Effect.Effect<string, NeedsLogin | OAuthError | UpstreamError>;
 }
 
 export const noCredential = (server: string): Credential => ({
@@ -70,7 +91,10 @@ export const noCredential = (server: string): Credential => ({
   rejected: () => Effect.fail(new NeedsLogin({ server, message: "the server asks for a sign-in" })),
 });
 
-const pick = (headers: Readonly<Record<string, string | undefined>>, names: ReadonlyArray<string>) => {
+const pick = (
+  headers: Readonly<Record<string, string | undefined>>,
+  names: ReadonlyArray<string>,
+) => {
   const out: Record<string, string> = {};
   for (const name of names) {
     const v = headers[name];
@@ -82,10 +106,13 @@ const pick = (headers: Readonly<Record<string, string | undefined>>, names: Read
 const toUpstreamResponse = (response: HttpClientResponse.HttpClientResponse): UpstreamResponse => ({
   status: response.status,
   headers: pick(response.headers, RESPONSE_HEADERS),
-  body: response.stream.pipe(Stream.mapError((e) => new UpstreamError({ message: `the upstream stream failed: ${e._tag}` }))),
+  body: response.stream.pipe(
+    Stream.mapError((e) => new UpstreamError({ message: `the upstream stream failed: ${e._tag}` })),
+  ),
 });
 
-const asUpstreamError = (e: OAuthError | UpstreamError) => (e._tag === "OAuthError" ? new UpstreamError({ message: e.message }) : e);
+const asUpstreamError = (e: OAuthError | UpstreamError) =>
+  e._tag === "OAuthError" ? new UpstreamError({ message: e.message }) : e;
 
 /** Forward to an HTTP MCP endpoint, adding the credential. */
 export const makeProxy = (server: string, url: string, credential: Credential) =>
@@ -93,26 +120,48 @@ export const makeProxy = (server: string, url: string, credential: Credential) =
     const client = yield* HttpClient.HttpClient;
     const send = (request: ForwardRequest, token: string | null) =>
       Effect.gen(function* () {
-        let outgoing = HttpClientRequest.make(request.method)(url).pipe(HttpClientRequest.setHeaders(pick(request.headers, REQUEST_HEADERS)));
-        if (request.body !== "") outgoing = HttpClientRequest.bodyText(outgoing, request.body, request.headers["content-type"] ?? "application/json");
+        let outgoing = HttpClientRequest.make(request.method)(url).pipe(
+          HttpClientRequest.setHeaders(pick(request.headers, REQUEST_HEADERS)),
+        );
+        if (request.body !== "")
+          outgoing = HttpClientRequest.bodyText(
+            outgoing,
+            request.body,
+            request.headers["content-type"] ?? "application/json",
+          );
         if (token !== null) outgoing = HttpClientRequest.bearerToken(outgoing, token);
         return yield* client.execute(outgoing).pipe(
           Effect.timeout(Duration.minutes(10)),
-          Effect.mapError((e) => new UpstreamError({ message: e._tag === "TimeoutError" ? `${server} did not answer` : `${server} is unreachable (${e._tag})` })),
+          Effect.mapError(
+            (e) =>
+              new UpstreamError({
+                message:
+                  e._tag === "TimeoutError"
+                    ? `${server} did not answer`
+                    : `${server} is unreachable (${e._tag})`,
+              }),
+          ),
         );
       });
 
     const upstream: Upstream = {
       forward: (request) =>
         Effect.gen(function* () {
-          const token = yield* credential.token.pipe(Effect.mapError((e) => (e._tag === "NeedsLogin" ? e : asUpstreamError(e))));
+          const token = yield* credential.token.pipe(
+            Effect.mapError((e) => (e._tag === "NeedsLogin" ? e : asUpstreamError(e))),
+          );
           const first = yield* send(request, token);
           if (first.status !== 401) return toUpstreamResponse(first);
           const challenge = first.headers["www-authenticate"] ?? null;
-          const retry = yield* credential.rejected(token, challenge).pipe(Effect.mapError((e) => (e._tag === "NeedsLogin" ? e : asUpstreamError(e))));
+          const retry = yield* credential
+            .rejected(token, challenge)
+            .pipe(Effect.mapError((e) => (e._tag === "NeedsLogin" ? e : asUpstreamError(e))));
           const second = yield* send(request, retry);
           if (second.status !== 401) return toUpstreamResponse(second);
-          return yield* new NeedsLogin({ server, message: "the server rejected the login even after a refresh" });
+          return yield* new NeedsLogin({
+            server,
+            message: "the server rejected the login even after a refresh",
+          });
         }),
     };
     return upstream;

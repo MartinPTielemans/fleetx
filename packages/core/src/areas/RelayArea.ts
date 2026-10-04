@@ -20,7 +20,14 @@ import { defineArea } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
 import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
-import { installedBundle, launchdReload, legacyUnitInstalled, notInstalledTitle, retireLegacyUnit, stableNode } from "../Runtime.ts";
+import {
+  installedBundle,
+  launchdReload,
+  legacyUnitInstalled,
+  notInstalledTitle,
+  retireLegacyUnit,
+  stableNode,
+} from "../Runtime.ts";
 
 const Observed = Schema.Struct({
   /** "serve", "listen", or null when this node runs neither. */
@@ -47,7 +54,14 @@ const unitPath = (platform: string, root: boolean, home: string, role: string) =
       ? `/etc/systemd/system/${unitName(role)}.service`
       : `${home}/.config/systemd/user/${unitName(role)}.service`;
 
-const unitText = (platform: string, root: boolean, home: string, nodePath: string, bundle: string, role: "serve" | "listen") => {
+const unitText = (
+  platform: string,
+  root: boolean,
+  home: string,
+  nodePath: string,
+  bundle: string,
+  role: "serve" | "listen",
+) => {
   const args = role === "serve" ? ["relay", "serve"] : ["listen"];
   const path = `${home}/.local/bin:${platform === "darwin" ? "/opt/homebrew/bin:" : ""}/usr/local/bin:/usr/bin:/bin`;
   const log = `${home}/${STATE_DIR}/${role}.log`;
@@ -103,7 +117,11 @@ const install = (platform: string, root: boolean, role: "serve" | "listen", text
     retireLegacyUnit(platform, root, role),
     `mkdir -p ${dir} "$HOME/${STATE_DIR}"`,
     write(`${dir}/${unitName(role)}.service`),
-    ...(root ? [] : ['[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"']),
+    ...(root
+      ? []
+      : [
+          '[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ] || sudo -n loginctl enable-linger "$(id -un)"',
+        ]),
     `${ctl} daemon-reload && ${ctl} enable ${unitName(role)}.service && ${ctl} restart ${unitName(role)}.service`,
   ].join("\n");
 };
@@ -119,21 +137,81 @@ export const RelayArea = defineArea({
       const platform = process.platform;
       const root = process.getuid?.() === 0;
       const port = ctx.relay?.port ?? 8399;
-      const role = ctx.relay === null ? null : ctx.roles.includes("relay") ? ("serve" as const) : ctx.relay.url === null ? null : ("listen" as const);
-      if (role === null) return { role, platform, root, installed: null, want: null, running: false, published: null, port };
-      const installed = Option.getOrNull(yield* fs.readFileString(unitPath(platform, root, ctx.home, role)).pipe(Effect.option));
-      const want = unitText(platform, root, ctx.home, yield* stableNode(ctx.home), yield* installedBundle(ctx.home), role);
+      const role =
+        ctx.relay === null
+          ? null
+          : ctx.roles.includes("relay")
+            ? ("serve" as const)
+            : ctx.relay.url === null
+              ? null
+              : ("listen" as const);
+      if (role === null)
+        return {
+          role,
+          platform,
+          root,
+          installed: null,
+          want: null,
+          running: false,
+          published: null,
+          port,
+        };
+      const installed = Option.getOrNull(
+        yield* fs.readFileString(unitPath(platform, root, ctx.home, role)).pipe(Effect.option),
+      );
+      const want = unitText(
+        platform,
+        root,
+        ctx.home,
+        yield* stableNode(ctx.home),
+        yield* installedBundle(ctx.home),
+        role,
+      );
       const check =
         platform === "darwin"
-          ? yield* exec({ command: "launchctl", args: ["print", `gui/${process.getuid?.() ?? 0}/${label(role)}`], timeout: Duration.seconds(5) })
-          : yield* exec({ command: "systemctl", args: [...(root ? [] : ["--user"]), "is-active", "--quiet", `${unitName(role)}.service`], timeout: Duration.seconds(5) });
-      const running = platform === "darwin" ? check.code === 0 && /state = running/.test(check.stdout) : check.code === 0;
+          ? yield* exec({
+              command: "launchctl",
+              args: ["print", `gui/${process.getuid?.() ?? 0}/${label(role)}`],
+              timeout: Duration.seconds(5),
+            })
+          : yield* exec({
+              command: "systemctl",
+              args: [
+                ...(root ? [] : ["--user"]),
+                "is-active",
+                "--quiet",
+                `${unitName(role)}.service`,
+              ],
+              timeout: Duration.seconds(5),
+            });
+      const running =
+        platform === "darwin"
+          ? check.code === 0 && /state = running/.test(check.stdout)
+          : check.code === 0;
       let published: boolean | null = null;
       if (role === "serve") {
-        const serve = yield* exec({ command: "tailscale", args: ["serve", "status"], env: ctx.env, timeout: Duration.seconds(10) });
-        published = serve.code === 0 && serve.stdout.includes(`:${port}`) && serve.stdout.includes(`127.0.0.1:${port}`);
+        const serve = yield* exec({
+          command: "tailscale",
+          args: ["serve", "status"],
+          env: ctx.env,
+          timeout: Duration.seconds(10),
+        });
+        published =
+          serve.code === 0 &&
+          serve.stdout.includes(`:${port}`) &&
+          serve.stdout.includes(`127.0.0.1:${port}`);
       }
-      return { role, platform, root, installed, want, running, published, port, legacy: yield* legacyUnitInstalled(platform, root, ctx.home, role) };
+      return {
+        role,
+        platform,
+        root,
+        installed,
+        want,
+        running,
+        published,
+        port,
+        legacy: yield* legacyUnitInstalled(platform, root, ctx.home, role),
+      };
     }),
   diagnose: ({ node, observed }) => {
     const out: Array<Finding> = [];
@@ -145,8 +223,16 @@ export const RelayArea = defineArea({
         key: `relay-${observed.role}`,
         severity: "warn",
         area: "relay",
-        title: observed.installed === null ? notInstalledTitle(what, observed.legacy) : observed.installed !== observed.want ? `the ${what} is out of date` : `the ${what} is not running`,
-        fix: { command: install(observed.platform, observed.root, observed.role, observed.want), safe: true },
+        title:
+          observed.installed === null
+            ? notInstalledTitle(what, observed.legacy)
+            : observed.installed !== observed.want
+              ? `the ${what} is out of date`
+              : `the ${what} is not running`,
+        fix: {
+          command: install(observed.platform, observed.root, observed.role, observed.want),
+          safe: true,
+        },
       });
     }
     if (observed.role === "serve" && observed.published === false) {
@@ -156,7 +242,10 @@ export const RelayArea = defineArea({
         severity: "warn",
         area: "relay",
         title: `the relay's port ${observed.port} is not published to the tailnet`,
-        fix: { command: `tailscale serve --bg --https=${observed.port} http://127.0.0.1:${observed.port}`, safe: true },
+        fix: {
+          command: `tailscale serve --bg --https=${observed.port} http://127.0.0.1:${observed.port}`,
+          safe: true,
+        },
       });
     }
     return out;
