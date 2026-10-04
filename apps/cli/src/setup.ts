@@ -96,6 +96,7 @@ import {
   unfinishedWork,
 } from "@t3-fleet/core/setup/Unfinished";
 
+import { unfinishedDeparture } from "@t3-fleet/core/Leave";
 import { reportUserErrors } from "./shared.ts";
 import { connectT3 } from "./t3.ts";
 
@@ -381,6 +382,12 @@ const setup = (flags: Flags) =>
       yield* Console.log(abandonReport(record, steps, home).join("\n"));
       return;
     }
+    // Half a departure and a new setup would undo each other: leave finishes, or is set aside, first.
+    const leaving = yield* unfinishedDeparture(home);
+    if (Option.isSome(leaving))
+      return yield* Effect.fail(
+        `this machine is partway through leaving the fleet (${leaving.value.node}); finish that with \`t3-fleet leave\`, or, if that departure is over or given up, set it aside with \`t3-fleet leave --retire\`, then run setup again`,
+      );
     if (flags.resume) {
       if (Option.isNone(unfinished))
         return yield* Effect.fail("there is no unfinished setup to resume");

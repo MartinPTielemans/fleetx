@@ -33,6 +33,7 @@ import { proposalTrailer } from "./Approved.ts";
 import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
 import { readAllowed, refusal } from "./SecretScan.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
+import { isDeparture, removeNode } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { PROPOSED_SECRETS } from "./setup/Plan.ts";
@@ -175,6 +176,22 @@ export const approve = (
   underSyncLock(
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
+      // A machine leaving the fleet, by what the proposal changes: removed from this authority's own current repo and secrets.
+      if (yield* isDeparture(repo, tip, proposal.node)) {
+        const removed = yield* removeNode(
+          repo,
+          branch,
+          proposal.node,
+          process.env["HOME"] ?? "",
+          // The same trailer as any approval names the proposal approved (Approved.ts).
+          `Approve ${proposal.node}'s departure from the fleet (by ${by})\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
+        );
+        yield* dropStaging(repo, proposal, tip);
+        return {
+          rev: removed.rev ?? out(yield* git(repo, ["rev-parse", "--short", "HEAD"])),
+          notes: [...removed.notes],
+        };
+      }
       const files = yield* ownChange(repo, tip);
       // A newline in a path could write a line of the approval's message; no such path enters the fleet.
       const unsafe = files.filter(unsafePath);
@@ -372,6 +389,23 @@ export const reject = (repo: string, proposal: Proposal, expected?: string) =>
 /** Under one of the auto-approve prefixes, every file. */
 export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<string>) =>
   prefixes.length > 0 && proposal.files.every((f) => prefixes.some((p) => f.startsWith(p)));
+
+/**
+ * Whether an authority approves `proposal` unattended: its files are all
+ * under the trusted prefixes, and it is not a machine's departure, which
+ * always needs a person's approve. A departure is told by what it changes
+ * (isDeparture), not by its file names: a member's edit to its own node file
+ * is an ordinary proposal. When that cannot be told (the commit cannot be
+ * read), it is not approved unattended.
+ */
+export const autoApproves = (repo: string, proposal: Proposal, prefixes: ReadonlyArray<string>) =>
+  autoApprovable(proposal, prefixes)
+    ? isDeparture(repo, proposal.commit, proposal.node).pipe(
+        Effect.map((d) => !d),
+        // What cannot be told apart from a departure waits for a person.
+        Effect.orElseSucceed(() => false),
+      )
+    : Effect.succeed(false);
 
 /**
  * On the proposing node: if its proposal was rejected, set aside its local

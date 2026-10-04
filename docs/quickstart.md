@@ -191,3 +191,28 @@ what it changed on top of whatever the branch has now.
 contacting any of them.
 
 Next: [topologies](topologies.md), [areas](areas.md), [troubleshooting](troubleshooting.md).
+
+## Leaving
+
+```sh
+t3-fleet leave --dry-run   # see what it would do
+t3-fleet leave             # do it, after asking
+```
+
+`leave` takes this machine out of the fleet and leaves it working on its own.
+It stops T3 Fleet's timer and services, turns its links (skills, dotfiles,
+instructions) into real copies, points T3's providers back at what they ran
+before, and puts back the MCP servers Claude and Codex had before setup. Entries
+you changed yourself since are left alone. An authority removes itself (unless
+no other authority would be left); a member proposes its departure, and an
+authority approves it with `t3-fleet approve`. `--purge` also removes this
+machine's key, the decrypted secrets and the installed `t3-fleet`, keeping
+backups of your own files. If leaving stops partway, run it again: it picks up
+where it stopped; `setup` will not start until it has, or until
+`t3-fleet leave --retire` sets the departure aside. The config repo checkout is
+never deleted.
+
+While T3 runs, its providers are pointed back through T3 itself, without
+stopping it. T3 takes a provider instance whole and has no revision to check,
+so leave reads each instance right before it sends it back: an edit you make
+to that same instance in that moment, one round trip, can be lost.

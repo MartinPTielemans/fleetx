@@ -403,7 +403,20 @@ export const updateClaudeConfig = (
               (yield* Clock.currentTimeMillis) - start > (options.retryMs ?? RETRY_MS)
             )
               break;
-            const target = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file));
+            // A link is written through to its target; a link to nothing is refused, never replaced by a file.
+            const target = yield* fs.realPath(file).pipe(
+              Effect.catch(() =>
+                fs.readLink(file).pipe(
+                  Effect.matchEffect({
+                    onFailure: () => Effect.succeed(file),
+                    onSuccess: (to) =>
+                      Effect.fail(
+                        `${file} is a link to ${to}, which is missing; leaving it as it is`,
+                      ),
+                  }),
+                ),
+              ),
+            );
             const read = yield* readConfigText(file);
             const config = yield* parseConfig(file, read);
             const had = yield* fs.stat(target).pipe(

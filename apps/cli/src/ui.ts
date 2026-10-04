@@ -46,7 +46,7 @@ import {
 import { sha256 } from "@t3-fleet/core/Hash";
 import {
   approve,
-  autoApprovable,
+  autoApproves,
   listProposals,
   reject,
   type Proposal,
@@ -173,7 +173,7 @@ export const proposalsOf = (config: Config) =>
           summary: p.stat.split("\n").pop()?.trim() ?? "",
           files: p.files,
           diff: diff.stdout,
-          autoApprovable: autoApprovable(p, prefixes),
+          autoApprovable: yield* autoApproves(config.repo, p, prefixes),
         } satisfies UiProposal;
       }),
     );

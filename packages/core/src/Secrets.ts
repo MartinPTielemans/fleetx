@@ -105,15 +105,30 @@ export const RECIPIENTS_FILE = "secrets/recipients.toml";
 export const recipientSet = (keys: ReadonlyArray<string>) =>
   Effect.promise(() => sha256([...new Set(keys)].sort().join("\n")));
 
+/** The recorded set in recipients.toml's text, or null. */
+export const encryptedForIn = (text: string) => {
+  const line = text.split("\n").find((l) => l.startsWith(ENCRYPTED_FOR));
+  return line === undefined ? null : line.slice(ENCRYPTED_FOR.length).trim();
+};
+
 /** The recipient set secrets.env.age was last encrypted to, as recipients.toml records it. */
 export const encryptedFor = (repo: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(recipientsPath(repo)).pipe(Effect.option);
-    if (Option.isNone(text)) return null;
-    const line = text.value.split("\n").find((l) => l.startsWith(ENCRYPTED_FOR));
-    return line === undefined ? null : line.slice(ENCRYPTED_FOR.length).trim();
+    return Option.isNone(text) ? null : encryptedForIn(text.value);
   });
+
+/** recipients.toml's text: the keys, and the recorded set the secrets were encrypted to. */
+export const recipientsText = (recipients: Record<string, string>, recorded: string | null) =>
+  [
+    "# Public age keys of the nodes that can read secrets.env.age.",
+    ...(recorded === null ? [] : [`${ENCRYPTED_FOR}${recorded}`]),
+    stringifyToml(
+      Object.fromEntries(Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b))),
+    ),
+    "",
+  ].join("\n");
 
 /**
  * Write the recipients. `encrypted` is the recipient set the secrets were
@@ -130,18 +145,7 @@ export const writeRecipients = (
       const fs = yield* FileSystem.FileSystem;
       const recorded = encrypted ?? (yield* encryptedFor(repo));
       yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
-      const sorted = Object.fromEntries(
-        Object.entries(recipients).sort(([a], [b]) => a.localeCompare(b)),
-      );
-      yield* fs.writeFileString(
-        recipientsPath(repo),
-        [
-          "# Public age keys of the nodes that can read secrets.env.age.",
-          ...(recorded === null ? [] : [`${ENCRYPTED_FOR}${recorded}`]),
-          stringifyToml(sorted),
-          "",
-        ].join("\n"),
-      );
+      yield* fs.writeFileString(recipientsPath(repo), recipientsText(recipients, recorded));
       return [RECIPIENTS_FILE] as ReadonlyArray<string>;
     }),
   );
