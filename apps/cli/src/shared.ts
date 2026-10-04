@@ -81,7 +81,7 @@ export const applyLive = <E, R>(
   current.pipe(
     Effect.flatMap(({ config, bundle, stale }) => {
       const refused = stale ? fixes.filter((f) => f.fix.command === ENGINE_INSTALL) : [];
-      return runFixes(config.nodes, fixes.filter((f) => !refused.includes(f)), config.checkout, bundle).pipe(
+      return runFixes(config.nodes, fixes.filter((f) => !refused.includes(f)), config.checkout, bundle, config.repo).pipe(
         Effect.map((outcomes) => [...refused.map((finding): FixOutcome => ({ finding, ok: false, summary: staleDetail(command) })), ...outcomes]),
       );
     }),

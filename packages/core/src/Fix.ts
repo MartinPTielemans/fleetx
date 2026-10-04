@@ -95,15 +95,22 @@ const rank = (f: Finding & { readonly fix: Fix }) =>
 export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(fixes: ReadonlyArray<F>): ReadonlyArray<F> =>
   fixes.map((f, i) => [f, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j).map(([f]) => f);
 
-/** Fixes for one node run in order (an upgrade may depend on the one before); nodes run in parallel. */
+/**
+ * Fixes for one node run in order (an upgrade may depend on the one before); nodes run in parallel.
+ * `localRepo` is the repo this machine loaded, which is what its probe observed; other nodes use `checkout`.
+ */
 export const runFixes = (
   nodes: ReadonlyArray<Node>,
   fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
   checkout: string,
   bundle = "",
+  localRepo?: string,
 ) =>
   Effect.forEach(
     nodes,
-    (node) => Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) => runFix(node, f, checkout, bundle)),
+    (node) =>
+      Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) =>
+        runFix(node, f, node.ssh === null && localRepo !== undefined ? localRepo : checkout, bundle),
+      ),
     { concurrency: "unbounded" },
   ).pipe(Effect.map((perNode) => perNode.flat()));

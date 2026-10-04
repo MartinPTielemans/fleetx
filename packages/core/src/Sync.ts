@@ -36,7 +36,7 @@ const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
 
 const DEFAULT_AUTO_COMMIT = ["skills"];
-const DEFAULT_APPLY = ["engine", "secrets", "dotfiles", "instructions", "skills", "mcp", "agents"];
+const DEFAULT_APPLY = ["engine", "secrets", "dotfiles", "instructions", "skills", "mcp", "agents", "t3"];
 const MAX_ALERTS = 50;
 
 const settingList = (config: Config, key: "auto_commit" | "apply" | "auto_approve", fallback: ReadonlyArray<string>) =>
@@ -290,7 +290,7 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
       );
       const applied: Array<{ title: string; ok: boolean; output: string }> = [];
       if (options.apply && applicable.length > 0) {
-        const outcomes = yield* runFixes([{ ...self, ssh: null }], applicable, config.checkout);
+        const outcomes = yield* runFixes([{ ...self, ssh: null }], applicable, repo);
         for (const o of outcomes) applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
         lines.push(...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`));
         selfResult = yield* observeSelf;

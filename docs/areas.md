@@ -86,6 +86,12 @@ ignore = ["synced"]
 A skill installed outside T3 Fleet is a stray: `t3-fleet skills adopt` moves it
 into the repo, where sync commits (authority) or proposes it.
 
+A real directory where a skill's link belongs (the machine had its own copy
+before joining) is moved to `~/.local/state/t3-fleet/skill-backups/<time>/`,
+outside every directory checked for strays. Backups an older T3 Fleet left
+beside a skill (`<name>.t3-fleet-backup.<time>`) are never taken for skills,
+and `skills adopt` refuses them.
+
 `t3-fleet skills add|update|remove` vendor skills from git repositories, with
 their provenance in `skills/SOURCES.json`. The Skills view in `t3-fleet ui` does
 the same, and shows each skill's links on every machine.
@@ -281,4 +287,7 @@ deploys.
 areas = ["plugins/brew.mjs"]
 ```
 
-A plugin exports `(kit) => area`; see `examples/plugins/brew.mjs`.
+A plugin exports `(kit) => area`; see `examples/plugins/brew.mjs`. A plugin
+that fails to load, or an area whose observation or diagnosis fails, is
+reported as a finding (`plugin-failed-<path>`, `<area>-unreadable`); every
+other area is still checked.

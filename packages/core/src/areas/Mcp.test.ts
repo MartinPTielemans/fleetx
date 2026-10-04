@@ -1,7 +1,16 @@
 // The shell-safety test runs a real sh.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync } from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { join } from "node:path";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import { describe, expect, it } from "vite-plus/test";
 
 import { dq, McpArea, resolveEndpoint, toolhiveWorkloads, type McpDesired } from "./Mcp.ts";
@@ -122,5 +131,41 @@ describe("mcp area: shell safety", () => {
       });
       expect(resolveEndpoint("c", { kind: "container" }, { hub: true, gateway, token_env: bad }, home).endpoint).toBeNull();
     }
+  });
+});
+
+describe("mcp area: re-registering", () => {
+  const services = Layer.mergeAll(NodeServices.layer, Layer.succeed(HttpClient.HttpClient)(HttpClient.make(() => Effect.die("no network in this test"))));
+
+  /** A machine whose clients registered `docs` with an env (an API key, say) and options of their own. */
+  const observeDocs = (claudeEntry: Record<string, unknown>, codexEntry: string) => {
+    const scratch = mkdtempSync(join(tmpdir(), "t3f-mcp-"));
+    mkdirSync(join(scratch, "fleet/mcp"), { recursive: true });
+    mkdirSync(join(scratch, "bin"));
+    mkdirSync(join(scratch, ".codex"));
+    for (const bin of ["claude", "codex"]) writeFileSync(join(scratch, "bin", bin), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(scratch, "fleet/mcp/docs.json"), JSON.stringify({ kind: "stdio", command: "docs-mcp", args: ["--new"] }));
+    writeFileSync(join(scratch, ".claude.json"), JSON.stringify({ mcpServers: { docs: claudeEntry } }));
+    writeFileSync(join(scratch, ".codex/config.toml"), `[mcp_servers.docs]\ncommand = "docs-mcp"\nargs = ["--old"]\n${codexEntry}`);
+    const ctx = { home: scratch, checkout: join(scratch, "fleet"), env: { HOME: scratch, PATH: `${join(scratch, "bin")}:/usr/bin:/bin` }, engine: null, engineBuild: null, node: "m", roles: [], relay: null };
+    const desired = { servers: ["docs"] };
+    return Effect.runPromise(McpArea.observe(desired, ctx).pipe(Effect.provide(services))).then((observed) =>
+      McpArea.diagnose({ node: "m", desired, observed, fleet: [], authority: null }).find((f) => f.key === "mcp-docs-unregistered"),
+    );
+  };
+
+  it("leaves it to a person when an entry has settings the definition would drop", async () => {
+    const found = await observeDocs(
+      { type: "stdio", command: "docs-mcp", args: ["--old"], env: { DOCS_API_KEY: "secret" } },
+      `startup_timeout_sec = 30\n[mcp_servers.docs.env]\nDOCS_API_KEY = "secret"\n`,
+    );
+    expect(found?.fix?.safe).toBe(false);
+    expect(found?.detail).toContain("re-registering drops Claude's env, Codex's startup_timeout_sec, Codex's env");
+    expect(JSON.stringify(found)).not.toContain("secret");
+  });
+
+  it("re-registers unattended when nothing would be lost", async () => {
+    const found = await observeDocs({ type: "stdio", command: "docs-mcp", args: ["--old"], env: {} }, "");
+    expect(found?.fix?.safe).toBe(true);
   });
 });

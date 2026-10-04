@@ -5,7 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
 import type { Node } from "./Config.ts";
-import { inRunOrder, runFix } from "./Fix.ts";
+import { inRunOrder, runFix, runFixes } from "./Fix.ts";
 
 const finding = (key: string, command = `echo ${key}`): Finding & { readonly fix: Fix } => ({
   node: "box",
@@ -41,5 +41,18 @@ describe("runFix", () => {
     const outcome = await Effect.runPromise(runFix(node, finding("engine-outdated", ENGINE_INSTALL), "~/fleet", "").pipe(Effect.provide(NodeServices.layer)));
     expect(outcome.ok).toBe(false);
     expect(outcome.summary).toContain("no T3 Fleet build to install");
+  });
+});
+
+describe("runFixes", () => {
+  const self = { name: "box", ssh: null, roles: ["member" as const], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } };
+  const checkoutSeen = (localRepo?: string) =>
+    Effect.runPromise(
+      runFixes([self], [finding("skills-unlinked", 'echo "$T3_FLEET_CHECKOUT"')], "~/fleet", "", localRepo).pipe(Effect.provide(NodeServices.layer)),
+    ).then((outcomes) => outcomes[0]?.summary);
+
+  it("runs this machine's fixes in the repo it loaded, as its probe observed", async () => {
+    expect(await checkoutSeen("/srv/fleet-config")).toBe("/srv/fleet-config");
+    expect(await checkoutSeen()).toMatch(/\/fleet$/);
   });
 });

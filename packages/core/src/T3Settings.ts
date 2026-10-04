@@ -10,21 +10,19 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { ProviderInstanceConfigMap } from "./vendor/t3/providerInstance.ts";
+import { DEFAULT_SERVER_SETTINGS } from "./vendor/t3/settings.ts";
 
 /**
  * T3's built-in providers: whether they are on when settings say nothing, and
- * the command they run (null for SDK-backed providers with no binary).
- * Mirrors the defaults in T3's contracts/settings.ts.
+ * the command they run (null for SDK-backed providers with no binary). Read
+ * from T3's own settings defaults, so a refresh of the vendored contracts
+ * carries any change here.
  */
-export const T3_DRIVERS: Readonly<Record<string, { readonly enabled: boolean; readonly bin: string | null }>> = {
-  codex: { enabled: true, bin: "codex" },
-  claudeAgent: { enabled: true, bin: "claude" },
-  grok: { enabled: false, bin: "grok" },
-  pi: { enabled: false, bin: "pi" },
-  opencode: { enabled: false, bin: "opencode" },
-  cursor: { enabled: false, bin: null },
-  antigravity: { enabled: false, bin: null },
-};
+export const T3_DRIVERS: Readonly<Record<string, { readonly enabled: boolean; readonly bin: string | null }>> = Object.fromEntries(
+  Object.entries(DEFAULT_SERVER_SETTINGS.providers as Readonly<Record<string, { readonly enabled: boolean; readonly binaryPath?: string }>>).map(
+    ([driver, defaults]) => [driver, { enabled: defaults.enabled, bin: defaults.binaryPath || null }],
+  ),
+);
 
 const ProviderSettings = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),

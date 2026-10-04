@@ -124,7 +124,7 @@ const fixCommand = Command.make("fix", {
         const go = yield* Prompt.run(Prompt.Confirm({ message: `Apply ${fixes.length} fix${fixes.length === 1 ? "" : "es"}?` }));
         if (!go) return;
       }
-      const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle);
+      const outcomes = yield* runFixes(nodes, fixes, config.checkout, bundle, config.repo);
       const touched = nodes.filter((n) => fixes.some((f) => f.node === n.name || f.fix.on === n.name));
       const after = narrow(yield* checkNodes(config, bundle), (name) => touched.some((n) => n.name === name));
       yield* Console.log(renderFixResults(outcomes));
