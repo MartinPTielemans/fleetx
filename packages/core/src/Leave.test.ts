@@ -6,7 +6,11 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync, spawnSync } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
+import { createHash } from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
@@ -30,6 +34,8 @@ import { loadConfigFrom } from "./Config.ts";
 import {
   applyLeave,
   currentDeparture,
+  ENROLLMENT_ID,
+  enrollmentOf,
   departureOf,
   departurePath,
   planLeave,
@@ -1146,7 +1152,7 @@ describe("round two", () => {
           origin: "http://127.0.0.1:1",
           cli: { command: join(dir, "t3"), args: [], env: {} },
         },
-        [{ patch: { providers: { codex: { binaryPath: "codex" } } } }],
+        [{ where: "legacy", id: "codex", launcher: "t3-fleet-codex", restore: null }],
       ).pipe(Effect.flip),
     );
     expect(result).toContain("did not answer");
@@ -1209,5 +1215,278 @@ describe("round two", () => {
       "only copy of user edit",
     );
     expect(read(f.home, ".agents/skills/a/new")).toBe("new user directory");
+  });
+});
+
+// ---- review, round three ------------------------------------------------------
+
+/**
+ * A T3 server, as far as leave talks to it: a WebSocket ticket over HTTP, and
+ * server.getSettings and server.updateSettings over a WebSocket (one JSON
+ * message per text frame). `onTicket` runs when the ticket is asked for: a
+ * user changing settings while leave is getting its session.
+ */
+const fakeT3 = async (
+  live: { providerInstances: Record<string, Record<string, unknown>> },
+  onTicket: () => void,
+) => {
+  const updates: Array<unknown> = [];
+  const server = createServer((_req, res) => {
+    onTicket();
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ticket: "t" }));
+  });
+  server.on("upgrade", (req, socket) => {
+    const accept = createHash("sha1")
+      .update(`${String(req.headers["sec-websocket-key"])}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    const send = (value: unknown) => {
+      const body = Buffer.from(JSON.stringify(value));
+      const head =
+        body.length < 126
+          ? Buffer.from([129, body.length])
+          : body.length < 65536
+            ? Buffer.from([129, 126, body.length >> 8, body.length & 255])
+            : Buffer.alloc(0);
+      socket.write(Buffer.concat([head, body]));
+    };
+    let pending = Buffer.alloc(0);
+    socket.on("data", (data: Buffer) => {
+      pending = Buffer.concat([pending, data]);
+      while (pending.length >= 2) {
+        const op = (pending[0] ?? 0) & 15;
+        let size = (pending[1] ?? 0) & 127;
+        let offset = 2;
+        if (size === 126) {
+          if (pending.length < 4) return;
+          size = pending.readUInt16BE(2);
+          offset = 4;
+        }
+        const masked = ((pending[1] ?? 0) & 128) !== 0;
+        if (pending.length < offset + (masked ? 4 : 0) + size) return;
+        const mask = masked ? pending.subarray(offset, offset + 4) : null;
+        if (masked) offset += 4;
+        const body = Buffer.from(pending.subarray(offset, offset + size));
+        if (mask !== null)
+          for (let i = 0; i < body.length; i++) body[i] = (body[i] ?? 0) ^ (mask[i % 4] ?? 0);
+        pending = pending.subarray(offset + size);
+        if (op === 8) {
+          socket.end();
+          continue;
+        }
+        if (op !== 1) continue;
+        const parsed = JSON.parse(body.toString()) as unknown;
+        for (const msg of (Array.isArray(parsed) ? parsed : [parsed]) as Array<
+          Record<string, unknown>
+        >) {
+          if (msg["_tag"] !== "Request") continue;
+          const payload = msg["payload"] as Record<string, unknown>;
+          if (msg["tag"] === "server.updateSettings") {
+            updates.push(payload);
+            const mutation = payload["providerInstanceMutation"] as
+              | { instanceId: string; instance: Record<string, unknown> }
+              | undefined;
+            if (mutation !== undefined)
+              live.providerInstances[mutation.instanceId] = mutation.instance;
+          }
+          send({
+            _tag: "Exit",
+            requestId: msg["id"],
+            exit: { _tag: "Success", value: msg["tag"] === "server.getSettings" ? live : {} },
+          });
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const close = async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+  return { origin: `http://127.0.0.1:${port}`, updates, close };
+};
+
+describe("round three", () => {
+  it("keeps setup's directory whole when the snapshot cannot be read", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(f.home, ".local/state/t3-fleet/setup/moved/original", "only copy of user's data");
+    put(f.home, ".local/state/t3-fleet/setup/before.json", "{interrupted snapshot");
+    const plan = await f.plan(true);
+    expect(planText(plan)).toContain("is kept whole");
+    const outcomes = await run(applyLeave(plan));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(read(f.home, ".local/state/t3-fleet/setup-backups/setup/moved/original")).toBe(
+      "only copy of user's data",
+    );
+    expect(exists(f.home, ".config/t3-fleet")).toBe(false);
+  });
+
+  it("keeps setup's directory whole when it holds anything the snapshot does not list", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(f.home, ".local/state/t3-fleet/setup/backup/unlisted", "user data");
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({ takenAt: 1, moved: [] }),
+    );
+    const outcomes = await run(applyLeave(await f.plan(true)));
+    expect(outcomes.at(-1)?.lines.join("\n")).toContain("it still holds 1 file of setup's");
+    expect(read(f.home, ".local/state/t3-fleet/setup-backups/setup/backup/unlisted")).toBe(
+      "user data",
+    );
+  });
+
+  it("keeps a backup that is a link to nothing, by lstat", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    const backup = join(f.home, ".local/state/t3-fleet/setup/moved/old-link");
+    fs.mkdirSync(dirname(backup), { recursive: true });
+    fs.symlinkSync("/missing/user-target", backup);
+    put(f.home, "old-link", "new user's content");
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({ takenAt: 1, moved: [{ path: join(f.home, "old-link"), backup }] }),
+    );
+    const outcomes = await run(applyLeave(await f.plan(true)));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    const kept = join(f.home, ".local/state/t3-fleet/setup-backups/old-link");
+    expect(fs.readlinkSync(kept)).toBe("/missing/user-target");
+    expect(read(f.home, "old-link")).toBe("new user's content");
+  });
+
+  it("refuses a departure recorded for another checkout, though name, origin and key are the same", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    const recorded = {
+      ...departureOf(f.config),
+      enrollment: await run(enrollmentOf(f.home, f.repo, true)),
+    };
+    put(f.home, ".local/state/t3-fleet/leave.json", JSON.stringify(recorded));
+    // Joined again as laptop, with the same key, into a new checkout.
+    const fresh = join(f.root, "fresh-checkout");
+    git(f.root, "clone", "-q", f.origin, fresh);
+    put(f.home, ".config/t3-fleet/config.toml", `repo = "${fresh}"\nnode = "laptop"\n`);
+    const elsewhere = await run(currentDeparture(f.home).pipe(Effect.flip));
+    expect(elsewhere).toContain("another enrollment");
+    expect(elsewhere).toContain(`its checkout is ${fs.realpathSync(fresh)}`);
+    // Or into a fresh clone in the very same place.
+    put(f.home, ".config/t3-fleet/config.toml", `repo = "${f.repo}"\nnode = "laptop"\n`);
+    fs.rmSync(f.repo, { recursive: true });
+    git(f.root, "clone", "-q", f.origin, f.repo);
+    const reclone = await run(currentDeparture(f.home).pipe(Effect.flip));
+    expect(reclone).toContain("its checkout is a new clone");
+    // The old checkout itself resumes.
+    fs.writeFileSync(join(f.repo, ".git", ENROLLMENT_ID), `${recorded.enrollment.id}\n`);
+    expect((await run(currentDeparture(f.home))).resumed).toBe(true);
+  });
+
+  it("checks who the machine is again under the lock, and runs nothing when it changed after planning", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    const plan = await f.plan(true);
+    // Re-keyed while the plan waited for its confirmation.
+    put(f.home, ".config/t3-fleet/age-key.txt", `${await generateX25519Identity()}\n`, 0o600);
+    const refused = await run(applyLeave(plan).pipe(Effect.flip));
+    expect(refused).toContain("this machine changed since leave planned");
+    expect(refused).toContain("its key is a new one");
+    expect(exists(f.home, ".config/t3-fleet/age-key.txt")).toBe(true);
+    expect(exists(f.home, ".local/state/t3-fleet/leave.json")).toBe(false);
+    expect(
+      spawnSync("git", ["rev-parse", "--verify", "-q", "t3-fleet/staging/laptop"], {
+        cwd: f.origin,
+      }).status,
+    ).not.toBe(0);
+  });
+
+  it("sends T3's instance as T3 has it just before the update, keeping edits made meanwhile", async () => {
+    const live = {
+      providerInstances: {
+        custom: {
+          driver: "codex",
+          displayName: "Before",
+          enabled: true,
+          config: { binaryPath: "t3-fleet-codex", homePath: "/old" },
+        } as Record<string, unknown>,
+      },
+    };
+    // The user edits the instance while leave gets its session and ticket.
+    const t3 = await fakeT3(live, () => {
+      live.providerInstances.custom = {
+        ...live.providerInstances.custom,
+        displayName: "User new name",
+        enabled: false,
+        config: { binaryPath: "t3-fleet-codex", homePath: "/new" },
+      };
+    });
+    const dir = fs.mkdtempSync(join(tmpdir(), "t3-fleet-t3-"));
+    put(
+      dir,
+      "t3",
+      '#!/bin/sh\ncase "$3" in issue) echo \'{"sessionId":"s1","token":"tok"}\' ;; revoke) echo "Revoked session s1" ;; esac\n',
+      0o755,
+    );
+    try {
+      await run(
+        throughT3(
+          {
+            _tag: "running",
+            origin: t3.origin,
+            cli: { command: join(dir, "t3"), args: [], env: {} },
+          },
+          [{ where: "instance", id: "custom", launcher: "t3-fleet-codex", restore: "codex" }],
+        ),
+      );
+      expect(t3.updates).toHaveLength(1);
+      expect(live.providerInstances.custom).toEqual({
+        driver: "codex",
+        displayName: "User new name",
+        enabled: false,
+        config: { binaryPath: "codex", homePath: "/new" },
+      });
+    } finally {
+      await t3.close();
+    }
+  });
+
+  it("sends nothing to T3 when the instance stopped naming the launcher before the update", async () => {
+    const live = {
+      providerInstances: {
+        custom: { driver: "codex", config: { binaryPath: "t3-fleet-codex" } } as Record<
+          string,
+          unknown
+        >,
+      },
+    };
+    const t3 = await fakeT3(live, () => {
+      live.providerInstances.custom = { driver: "codex", config: { binaryPath: "/my/codex" } };
+    });
+    const dir = fs.mkdtempSync(join(tmpdir(), "t3-fleet-t3-"));
+    put(
+      dir,
+      "t3",
+      '#!/bin/sh\ncase "$3" in issue) echo \'{"sessionId":"s1","token":"tok"}\' ;; revoke) echo "Revoked session s1" ;; esac\n',
+      0o755,
+    );
+    try {
+      await run(
+        throughT3(
+          {
+            _tag: "running",
+            origin: t3.origin,
+            cli: { command: join(dir, "t3"), args: [], env: {} },
+          },
+          [{ where: "instance", id: "custom", launcher: "t3-fleet-codex", restore: "codex" }],
+        ),
+      );
+      expect(t3.updates).toEqual([]);
+      expect(live.providerInstances.custom).toEqual({
+        driver: "codex",
+        config: { binaryPath: "/my/codex" },
+      });
+    } finally {
+      await t3.close();
+    }
   });
 });

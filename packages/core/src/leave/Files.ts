@@ -184,7 +184,7 @@ const exists = (p: string) =>
     Effect.orElseSucceed(() => false),
   );
 /** Something is at `p`, even a link to nothing. */
-const present = (p: string) =>
+export const present = (p: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     if (Option.isSome(yield* fs.readLink(p).pipe(Effect.option))) return true;
@@ -284,7 +284,10 @@ export const replaceWith = <E = never, R = never, E2 = never, R2 = never>(input:
       }
       if (!(yield* input.stillWanted)) return false;
       const replacement = input.how === "copy" ? copy : input.source;
-      const isDir = (yield* fs.stat(replacement)).type === "Directory";
+      // A link (even one to nothing) is moved as the link it is.
+      const isDir =
+        Option.isNone(yield* fs.readLink(replacement).pipe(Effect.option)) &&
+        (yield* fs.stat(replacement)).type === "Directory";
       if (isDir && (yield* present(at))) yield* fs.rename(at, path.join(staging, "link"));
       yield* fs.rename(replacement, at);
       return true;

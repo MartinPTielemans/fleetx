@@ -156,14 +156,22 @@ export const runningT3 = (home: string) =>
     } as RunningT3;
   });
 
+const T3Error = Schema.Struct({ _tag: Schema.String, message: Schema.optionalKey(Schema.String) });
+
 class T3SettingsRpcs extends RpcGroup.make(
+  // Redacted for clients: a sensitive variable comes back as valueRedacted, which an update keeps as stored.
+  Rpc.make("server.getSettings", {
+    payload: Schema.Struct({}),
+    success: Schema.Unknown,
+    error: T3Error,
+  }),
   Rpc.make("server.updateSettings", {
     payload: Schema.Struct({
       patch: Schema.Unknown,
       providerInstanceMutation: Schema.optionalKey(Schema.Unknown),
     }),
     success: Schema.Unknown,
-    error: Schema.Struct({ _tag: Schema.String, message: Schema.optionalKey(Schema.String) }),
+    error: T3Error,
   }),
 ) {}
 
@@ -203,9 +211,18 @@ export const settingsUpdates = (settings: Json, routed: ReadonlyArray<Routed>) =
 };
 
 /** Sends the updates to the running T3 with a two-minute session, revoked afterwards. */
+/**
+ * Puts the routed paths back through the running T3, one at a time, with a
+ * two-minute session revoked afterwards. Each is computed from T3's settings
+ * read over the same connection just before it is sent, and only where the
+ * path still names the planned launcher. T3 takes an instance whole and has
+ * no revision to check against, so a change made to that same instance in
+ * the moment between that read and the update is lost; that moment is one
+ * round trip on an open connection.
+ */
 export const throughT3 = (
   t3: Extract<RunningT3, { _tag: "running" }>,
-  updates: ReadonlyArray<{ patch: Json; providerInstanceMutation?: Json }>,
+  routed: ReadonlyArray<Routed>,
 ) =>
   Effect.gen(function* () {
     const cli = t3.cli;
@@ -213,7 +230,7 @@ export const throughT3 = (
       return yield* Effect.fail(
         "T3 is running, but its CLI could not be found from the server's command line; quit T3 and run leave again",
       );
-    if (updates.length === 0) return;
+    if (routed.length === 0) return;
     const run = (args: ReadonlyArray<string>) =>
       exec({
         command: cli.command,
@@ -260,7 +277,11 @@ export const throughT3 = (
         yield* Effect.scoped(
           Effect.gen(function* () {
             const rpc = yield* RpcClient.make(T3SettingsRpcs);
-            for (const update of updates) yield* rpc["server.updateSettings"](update);
+            for (const r of routed) {
+              const live = yield* rpc["server.getSettings"]({});
+              const updates = isObject(live) ? settingsUpdates(live, [r]) : [];
+              for (const update of updates) yield* rpc["server.updateSettings"](update);
+            }
           }),
         ).pipe(
           Effect.provide(
@@ -366,9 +387,7 @@ export const applyModels = (home: string, plan: ModelsPlan) =>
       // Whether T3 runs is asked again: it may have started or stopped since the plan.
       const t3 = yield* runningT3(home);
       if (t3._tag === "running") {
-        const current = yield* readJson(file);
-        if (current._tag !== "ok") return yield* Effect.fail(`${file} is not readable JSON`);
-        yield* throughT3(t3, settingsUpdates(current.value, plan.routed));
+        yield* throughT3(t3, plan.routed);
         done.push("T3's providers point where they did before (through T3's settings)");
       } else {
         yield* editFile(file, (text) =>

@@ -30,6 +30,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import { identityToRecipient } from "age-encryption";
 import { parse as parseToml } from "smol-toml";
@@ -40,7 +41,7 @@ import { shPath } from "./Area.ts";
 import { expandHome, loadConfig, localConfigPath, type Config } from "./Config.ts";
 import { git, ok, out } from "./Git.ts";
 import { leaveFleet, standing, type Standing } from "./leave/Fleet.ts";
-import { linkTarget, replaceWith, tilde, within, writeAtomically } from "./leave/Files.ts";
+import { linkTarget, present, replaceWith, tilde, within, writeAtomically } from "./leave/Files.ts";
 import {
   convert,
   expectedTargets,
@@ -93,6 +94,14 @@ export const Enrollment = Schema.Struct({
   remote: Schema.NullOr(Schema.String),
   /** This machine's public age key. */
   key: Schema.NullOr(Schema.String),
+  /**
+   * The config repo checkout, by its real path and the id kept in its .git
+   * (ENROLLMENT_ID): a machine that joins again under the same name, even
+   * with the same key and remote, has another checkout, or a fresh clone in
+   * the same place with another id. Absent from records of older versions.
+   */
+  checkout: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  id: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type Enrollment = typeof Enrollment.Type;
 
@@ -131,7 +140,15 @@ export const departureOf = (config: Config): Departure => {
 };
 
 /** The enrollment of the repo at `repo` and this machine's key, as they are now. */
-export const enrollmentOf = (home: string, repo: string) =>
+/** The file in a checkout's .git holding its enrollment id, made the first time it is asked for. */
+export const ENROLLMENT_ID = "t3-fleet-enrollment";
+
+/**
+ * The enrollment of the checkout at `repo` and this machine's key, as they
+ * are now. With `create`, a checkout without an id gets one; otherwise its
+ * id is null.
+ */
+export const enrollmentOf = (home: string, repo: string, create = false) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const remote = yield* git(repo, ["remote", "get-url", "origin"]);
@@ -144,8 +161,58 @@ export const enrollmentOf = (home: string, repo: string) =>
         : yield* Effect.tryPromise(() => identityToRecipient(identity)).pipe(
             Effect.orElseSucceed(() => null),
           );
-    return { remote: ok(remote) ? out(remote) : null, key } satisfies Enrollment;
+    const checkout = Option.getOrNull(yield* fs.realPath(repo).pipe(Effect.option));
+    const gitDir = yield* git(repo, ["rev-parse", "--absolute-git-dir"]);
+    let id: string | null = null;
+    if (ok(gitDir)) {
+      const file = `${out(gitDir)}/${ENROLLMENT_ID}`;
+      id = Option.getOrNull(
+        yield* fs.readFileString(file).pipe(
+          Effect.map((t) => t.trim()),
+          Effect.option,
+        ),
+      );
+      if (id === null && create) {
+        const parts: Array<string> = [];
+        for (let i = 0; i < 4; i++)
+          parts.push((yield* Random.nextIntBetween(0, 2 ** 31)).toString(16).padStart(8, "0"));
+        id = parts.join("");
+        yield* fs.writeFileString(file, `${id}\n`).pipe(Effect.orElseSucceed(() => (id = null)));
+      }
+    }
+    return {
+      remote: ok(remote) ? out(remote) : null,
+      key,
+      checkout,
+      id: id === "" ? null : id,
+    } satisfies Enrollment;
   });
+
+/** Who this machine is now: the node its local config names, and that checkout's enrollment. */
+export const currentIdentity = (home: string, fallbackRepo: string, create = false) =>
+  Effect.gen(function* () {
+    const local = yield* localEnrollment(home);
+    return {
+      node: local?.node ?? null,
+      enrollment: yield* enrollmentOf(home, local?.repo ?? fallbackRepo, create),
+    };
+  });
+export type Identity = { readonly node: string | null; readonly enrollment: Enrollment };
+
+/** What differs between an enrollment recorded and one now, said for a person; empty when nothing does. */
+const enrollmentChanges = (was: Enrollment, now: Enrollment) => {
+  const differs: Array<string> = [];
+  const known = <A>(a: A | null | undefined, b: A | null | undefined) =>
+    a !== null && a !== undefined && b !== null && b !== undefined;
+  if (known(was.remote, now.remote) && was.remote !== now.remote)
+    differs.push(`its config repo is ${now.remote} now, not ${was.remote}`);
+  if (known(was.key, now.key) && was.key !== now.key) differs.push("its key is a new one");
+  if (was.checkout !== undefined && was.checkout !== null && was.checkout !== now.checkout)
+    differs.push(`its checkout is ${now.checkout ?? "gone"}, not ${was.checkout}`);
+  else if (was.id !== undefined && was.id !== null && was.id !== now.id)
+    differs.push("its checkout is a new clone");
+  return differs;
+};
 
 /** Which repo and node this machine's local config names, whether or not the repo still has the node. */
 const localEnrollment = (home: string) =>
@@ -185,21 +252,12 @@ const writeDeparture = (home: string, departure: Departure) =>
  */
 const otherEnrollment = (home: string, recorded: Departure) =>
   Effect.gen(function* () {
-    const local = yield* localEnrollment(home);
-    const now = yield* enrollmentOf(home, local?.repo ?? recorded.repo);
-    const was = recorded.enrollment;
+    const now = yield* currentIdentity(home, recorded.repo);
     const differs: Array<string> = [];
-    if (local !== null && local.node !== recorded.node)
-      differs.push(`it is ${local.node} now, not ${recorded.node}`);
-    if (
-      was !== undefined &&
-      was.remote !== null &&
-      now.remote !== null &&
-      was.remote !== now.remote
-    )
-      differs.push(`its config repo is ${now.remote} now, not ${was.remote}`);
-    if (was !== undefined && was.key !== null && now.key !== null && was.key !== now.key)
-      differs.push("its key is a new one");
+    if (now.node !== null && now.node !== recorded.node)
+      differs.push(`it is ${now.node} now, not ${recorded.node}`);
+    if (recorded.enrollment !== undefined)
+      differs.push(...enrollmentChanges(recorded.enrollment, now.enrollment));
     return differs.length === 0 ? null : differs.join("; ");
   });
 
@@ -250,6 +308,8 @@ export interface LeaveStep {
 
 export interface LeavePlan {
   readonly departure: Departure;
+  /** Who this machine was when it planned; checked again before anything runs. */
+  readonly identity: Identity;
   readonly home: string;
   readonly purge: boolean;
   /** Why this machine cannot leave yet; when set, nothing runs. */
@@ -352,7 +412,8 @@ const planBackups = (d: Departure, home: string, snapshot: SetupSnapshot | null)
     for (const m of snapshot?.moved ?? []) {
       const at = expandHome(m.path, home);
       const backup = expandHome(m.backup, home);
-      if (!(yield* fs.exists(backup).pipe(Effect.orElseSucceed(() => false)))) continue;
+      // lstat, not exists: a backup that is a link to nothing is still the user's.
+      if (!(yield* present(backup))) continue;
       if (yield* restorable(at)) back.push({ at, backup });
       else {
         kept.push({ at, backup });
@@ -415,12 +476,14 @@ const purgeStep = (
   home: string,
   moved: ReadonlyArray<{ readonly at: string; readonly backup: string }>,
   restoring: ReadonlySet<string>,
+  snapshotReadable: boolean,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const exists = (p: string) => fs.exists(p).pipe(Effect.orElseSucceed(() => false));
     const state = stateDir(home);
+    const setupDir = `${state}/setup`;
     const notes: Array<string> = [];
     // Backups of the user's files that purge would otherwise take with the state dir.
     const rescued = moved
@@ -429,8 +492,12 @@ const purgeStep = (
       )
       .map((u) => ({ from: u.backup, to: `${state}/setup-backups/${path.basename(u.at)}` }));
     for (const r of rescued)
-      if ((yield* exists(r.from)) && !restoring.has(r.from))
+      if ((yield* present(r.from)) && !restoring.has(r.from))
         notes.push(`setup's backup ${tilde(r.from, home)} is kept, moved to ${tilde(r.to, home)}`);
+    if (!snapshotReadable && (yield* present(setupDir)))
+      notes.push(
+        `setup's snapshot cannot be read, so ${tilde(setupDir, home)} is kept whole, moved into ${tilde(`${state}/setup-backups`, home)}`,
+      );
     for (const k of KEPT)
       if (k !== "setup-backups" && (yield* exists(`${state}/${k}`)))
         notes.push(`kept ${tilde(`${state}/${k}`, home)}: your files from before joining`);
@@ -439,39 +506,70 @@ const purgeStep = (
     for (const e of yield* fs
       .readDirectory(state)
       .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
-      // The lock and the record of this departure go last, once the run is over.
-      if (!KEPT.includes(e) && e !== "sync.lock" && e !== "leave.json")
+      // The lock and the record of this departure go last; setup's directory is decided on when purge runs.
+      if (!KEPT.includes(e) && e !== "sync.lock" && e !== "leave.json" && e !== "setup")
         remove.push(`${state}/${e}`);
     if (yield* exists(`${home}/${SHARE_DIR}`)) remove.push(`${home}/${SHARE_DIR}`);
     const command = `${home}/.local/bin/${CLI}`;
-    if (Option.isSome(yield* fs.readLink(command).pipe(Effect.option)) || (yield* exists(command)))
-      remove.push(command);
+    if (yield* present(command)) remove.push(command);
     else
       notes.push(
         `${CLI} was not installed by its installer here (Homebrew or Nix?); uninstall it there`,
       );
+    /** Moves `from` into setup-backups as `to`, or beside it under a free name; where it went. */
+    const keep = (from: string, to: string) =>
+      Effect.gen(function* () {
+        let free = to;
+        for (let i = 2; yield* present(free); i++) free = `${to}-${i}`;
+        yield* fs.makeDirectory(path.dirname(free), { recursive: true });
+        yield* fs.rename(from, free);
+        return free;
+      });
     const step: LeaveStep = {
       title:
         "Remove T3 Fleet's local state: this machine's key, the decrypted secrets, logs and the installed bundle",
       lines: [
-        ...(rescued.length > 0
-          ? ["every backup setup made that is still there is moved to setup-backups first"]
-          : []),
+        "every backup setup made that is still there moves to setup-backups first",
+        `${tilde(setupDir, home)} is removed only if nothing but its snapshot is left in it; otherwise it moves to setup-backups whole`,
         ...remove.map((p) => `$ rm -rf ${shPath(tilde(p, home))}`),
       ],
       apply: Effect.gen(function* () {
-        for (const r of rescued) {
-          if (!(yield* exists(r.from))) continue;
-          let to = r.to;
-          for (let i = 2; yield* exists(to); i++) to = `${r.to}-${i}`;
-          yield* fs.makeDirectory(path.dirname(to), { recursive: true });
-          yield* fs.rename(r.from, to);
+        const done: Array<string> = [];
+        for (const r of rescued)
+          if (yield* present(r.from))
+            done.push(`kept ${tilde(r.from, home)} as ${tilde(yield* keep(r.from, r.to), home)}`);
+        // Decided from what is on disk, not from the snapshot: anything left but the snapshot is someone's.
+        if (yield* present(setupDir)) {
+          const left = (yield* filesUnder(setupDir)).filter((f) => f !== `${setupDir}/before.json`);
+          if (!snapshotReadable || left.length > 0)
+            done.push(
+              `kept ${tilde(setupDir, home)} whole as ${tilde(yield* keep(setupDir, `${state}/setup-backups/setup`), home)}${left.length > 0 ? `: it still holds ${plural(left.length, "file")} of setup's` : ""}`,
+            );
+          else yield* fs.remove(setupDir, { recursive: true, force: true });
         }
         for (const p of remove) yield* fs.remove(p, { recursive: true, force: true });
-        return [`removed ${plural(remove.length, "path")}`];
+        return [...done, `removed ${plural(remove.length, "path")}`];
       }).pipe(Effect.mapError((e) => e.message)),
     };
     return { step, notes };
+  });
+
+/** Every file and link under `dir` (not following links), as paths. */
+const filesUnder = (dir: string): Effect.Effect<Array<string>, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const found: Array<string> = [];
+    for (const name of yield* fs
+      .readDirectory(dir)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>))) {
+      const at = `${dir}/${name}`;
+      const isLink = Option.isSome(yield* fs.readLink(at).pipe(Effect.option));
+      const info = yield* fs.stat(at).pipe(Effect.option);
+      if (!isLink && Option.isSome(info) && info.value.type === "Directory")
+        found.push(...(yield* filesUnder(at)));
+      else found.push(at);
+    }
+    return found;
   });
 
 /** What leaving does on this machine. Reads only, apart from fetching the config repo's origin. */
@@ -483,8 +581,18 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
     const platform = options.platform ?? process.platform;
     const root = options.root ?? process.getuid?.() === 0;
     const notes: Array<string> = [];
+    // Who this machine is, as leave plans for it: its checkout gets its enrollment id now, if it had none.
+    const identity = yield* currentIdentity(home, d.repo, true);
     const refuse = (refusal: string) =>
-      ({ departure: d, home, purge: options.purge, refusal, steps: [], notes }) satisfies LeavePlan;
+      ({
+        departure: d,
+        identity,
+        home,
+        purge: options.purge,
+        refusal,
+        steps: [],
+        notes,
+      }) satisfies LeavePlan;
 
     const services = yield* findServices(home, platform, options.systemDir, options.stopWait);
     const system = services.filter((s) => s.scope === "system");
@@ -539,7 +647,7 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
     else if (models.routed.length + models.launchers.length > 0) {
       const how =
         models.t3._tag === "running"
-          ? "through T3 (server.updateSettings, with a two-minute session from `t3 auth session issue`, revoked afterwards)"
+          ? "through T3: each instance read with server.getSettings and sent back with server.updateSettings right after, over one connection and a two-minute session from `t3 auth session issue` (revoked afterwards); T3 takes an instance whole, so an edit to that instance in the moment between the two is lost"
           : "T3 is not running, so in ~/.t3/userdata/settings.json, only if nothing changes it meanwhile";
       steps.push({
         title: "Point T3's providers back at what they ran before, and remove the launchers",
@@ -655,6 +763,7 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
         home,
         backups.moved,
         new Set(backups.restoring.map((b) => b.backup)),
+        !(Option.isSome(snapshotText) && snapshot === null),
       );
       steps.push(purge.step);
       notes.push(...purge.notes);
@@ -667,6 +776,7 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
     );
     return {
       departure: d,
+      identity,
       home,
       purge: options.purge,
       refusal: null,
@@ -694,9 +804,25 @@ export const applyLeave = (plan: LeavePlan) =>
     if (plan.refusal !== null) return [] as Array<LeaveOutcome>;
     const outcomes = yield* underSyncLock(
       Effect.gen(function* () {
+        // Who this machine is was captured when it planned; anything changed since (a new key, a
+        // new checkout) and the plan is not for this machine any more: nothing runs, nothing is recorded.
+        const now = yield* currentIdentity(home, plan.departure.repo);
+        const differs = [
+          ...(plan.identity.node !== now.node
+            ? [`it is ${now.node ?? "no node"} now, not ${plan.identity.node ?? "no node"}`]
+            : []),
+          ...enrollmentChanges(plan.identity.enrollment, now.enrollment),
+          ...(plan.identity.enrollment.key === null && now.enrollment.key !== null
+            ? ["it has a new key"]
+            : []),
+        ];
+        if (differs.length > 0)
+          return yield* Effect.fail(
+            `this machine changed since leave planned (${differs.join("; ")}); nothing was done. Run t3-fleet leave again to plan for it as it is now.`,
+          );
         const departure: Departure = {
           ...plan.departure,
-          enrollment: plan.departure.enrollment ?? (yield* enrollmentOf(home, plan.departure.repo)),
+          enrollment: plan.departure.enrollment ?? plan.identity.enrollment,
         };
         yield* writeDeparture(home, departure);
         const outcomes: Array<LeaveOutcome> = [];
