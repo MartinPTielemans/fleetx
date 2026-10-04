@@ -29,6 +29,7 @@ import * as Redacted from "effect/Redacted";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
 import { expandHome, loadConfig, loadConfigFrom } from "@t3-fleet/core/Config";
+import { sh } from "@t3-fleet/core/Area";
 import { exec } from "@t3-fleet/core/Exec";
 import { randomBytes } from "@t3-fleet/core/hub/Policy";
 import { FLEET_FILE } from "@t3-fleet/core/Names";
@@ -463,14 +464,15 @@ const planAndApply = (flags: Flags, scratch: string) =>
         Option.match(record, { onNone: () => [], onSome: (a) => a.written }),
       );
       if (dirty.length > 0) {
-        const files = dirty.map((l) => l.slice(3)).join(" ");
+        const files = dirty.map((l) => sh(l.slice(3))).join(" ");
+        const repo = sh(checkout);
         return yield* Effect.fail(
           [
             `${checkout} has uncommitted changes to the fleet's files; setup would plan against them as if they were the fleet's:`,
-            ...dirty.map((l) => `  ${l}`),
+            ...dirty.map((l) => `  ${l.slice(0, 3)}${JSON.stringify(l.slice(3)).slice(1, -1)}`),
             authority
-              ? `Publish them first (\`git -C ${checkout} add -- ${files} && git -C ${checkout} commit -m "…"\`, then \`t3-fleet sync\`), or set them aside (\`git -C ${checkout} stash push -m t3-fleet -- ${files}\`), then run setup again.`
-              : `\`t3-fleet sync\` proposes edits under [fleet] auto_commit; set the rest aside (\`git -C ${checkout} stash push -m t3-fleet -- ${files}\`), or wait for this machine's proposal to be approved; then run setup again.`,
+              ? `Publish them first (\`git -C ${repo} add -- ${files} && git -C ${repo} commit -m "…"\`, then \`t3-fleet sync\`), or set them aside (\`git -C ${repo} stash push -u -m t3-fleet -- ${files}\`), then run setup again.`
+              : `\`t3-fleet sync\` proposes edits under [fleet] auto_commit; set the rest aside (\`git -C ${repo} stash push -u -m t3-fleet -- ${files}\`), or wait for this machine's proposal to be approved; then run setup again.`,
           ].join("\n"),
         );
       }

@@ -21,10 +21,12 @@ import {
   nulList,
   ok,
   out,
+  pathLine,
   pullBranch,
   scanEdits,
   scanStaged,
   unmergedHits,
+  unsafePath,
   why,
 } from "./Git.ts";
 import { proposalTrailer } from "./Approved.ts";
@@ -174,6 +176,12 @@ export const approve = (
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
       const files = yield* ownChange(repo, tip);
+      // A newline in a path could write a line of the approval's message; no such path enters the fleet.
+      const unsafe = files.filter(unsafePath);
+      if (unsafe.length > 0)
+        return yield* Effect.fail(
+          `${proposal.node}'s proposal has a path with a newline or other control character (${unsafe.map((f) => JSON.stringify(f)).join(", ")}); reject it`,
+        );
       // A proposal carries its own machine's secrets, and no one else's.
       const foreign = files.filter(
         (f) =>
@@ -256,7 +264,7 @@ export const approve = (
             "-q",
             "-m",
             // The trailer names the commit approved: that member drops its copies of it (Approved.ts).
-            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.join("\n")}\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
+            `Approve ${proposal.node}'s proposal (by ${by})\n\n${files.map(pathLine).join("\n")}\n\n${proposalTrailer(out(yield* git(repo, ["rev-parse", `${tip}^{commit}`])))}`,
           ]);
           if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
           return out(yield* git(scratch, ["rev-parse", "HEAD"]));

@@ -38,6 +38,7 @@ import {
   scanCommits,
   scanEdits,
   unmergedHits,
+  unsafePath,
   why,
 } from "./Git.ts";
 import {
@@ -53,7 +54,9 @@ import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
 import {
+  approvedCopies,
   lastProposalPath,
+  permissionProblems,
   PROPOSAL_REF,
   restoreDropped,
   settleApproval,
@@ -314,6 +317,17 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     }
     // What would add a secret is held back, whole skill by whole skill.
     const edited = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
+    // A path with a newline or other control character is never committed or proposed.
+    const unsafe = edited.filter(unsafePath);
+    if (unsafe.length > 0)
+      findings.push({
+        node: self.name,
+        key: "sync-path-unsafe",
+        severity: "warn",
+        area: "sync",
+        title: `sync will not commit or propose ${unsafe.map((f) => JSON.stringify(f)).join(", ")}: a newline or other control character in a path`,
+        detail: "Rename it to a name without control characters; sync then takes it as usual.",
+      });
     const scanned = yield* scanEdits(repo, edited, { allowed: yield* allowedNow() }).pipe(
       Effect.result,
     );
@@ -363,9 +377,24 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         for (const p of yield* listProposals(repo, config.branch))
           if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
       }
+      const moving = [...movable].filter(([, files]) => files.some((f) => incoming.has(f)));
+      // A member's file exactly as its approved proposal had it stays: the pull takes it as it
+      // would anyway, and the unit's stash then holds only edits, which come back cleanly.
+      const approved = authority
+        ? new Set<string>()
+        : yield* approvedCopies(
+            repo,
+            self.name,
+            config.branch,
+            moving.flatMap(([, files]) => files),
+          );
       const aside = yield* setAsideUnits(
         repo,
-        new Map([...movable].filter(([, files]) => files.some((f) => incoming.has(f)))),
+        new Map(
+          moving
+            .map(([unit, files]) => [unit, files.filter((f) => !approved.has(f))] as const)
+            .filter(([, files]) => files.length > 0),
+        ),
       );
       if (aside.size > 0) {
         const moved = new Map([...held].filter(([u]) => aside.has(u)));
@@ -387,7 +416,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     // Held back, or set aside above: either way not this commit's.
     const heldFiles = new Set([...held.values()].flat());
     const changed = (authority ? yield* changedFiles(repo, autoCommit) : []).filter(
-      (f) => edited.includes(f) && !heldFiles.has(f),
+      (f) => edited.includes(f) && !heldFiles.has(f) && !unsafePath(f),
     );
     if (changed.length > 0) {
       const committed = yield* addPaths(repo, changed).pipe(
@@ -456,6 +485,10 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           }),
         ),
       );
+      if (settled !== null && settled.failure !== null) {
+        failed = true;
+        message = settled.failure;
+      }
       if (settled !== null && settled.dropped.length > 0)
         lines.push(
           `took the branch's version of ${settled.dropped.length} approved file${settled.dropped.length === 1 ? "" : "s"}`,
@@ -498,7 +531,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           severity: "warn",
           area: "sync",
           title: `this machine's edit to ${edits.join(", ")} overlaps the branch's change, so sync does not pull`,
-          detail: unmergedStep(repo, edits),
+          detail: unmergedStep(repo, edits, yield* permissionProblems(repo, edits)),
         });
     }
     if (authority && !failed) {
@@ -553,7 +586,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           ...(autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit)),
           ...setupChanged,
         ]),
-      ];
+      ].filter((f) => !unsafePath(f));
       const outcome = yield* Effect.gen(function* () {
         const hits = [
           ...(yield* scanEdits(repo, changed, {

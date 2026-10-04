@@ -109,6 +109,64 @@ export const ensureGitConfig = Effect.gen(function* () {
 /** For commands given file names: a name is a name, never a glob or `:(magic)`. */
 export const literal = { GIT_LITERAL_PATHSPECS: "1" } as const;
 
+/** A path no fleet repository takes: a newline or other control character could forge a line in a commit message. */
+export const unsafePath = (path: string) =>
+  [...path].some((c) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+
+/** A path as a commit message lists it: quoted when it would not read as one line of text. */
+export const pathLine = (path: string) =>
+  unsafePath(path) || path.includes('"') || path.includes("\\") ? JSON.stringify(path) : path;
+
+/** A file's entry in a commit (mode and blob); null when the commit lacks it. */
+export const entryAt = (repo: string, rev: string, file: string) =>
+  git(repo, ["ls-tree", "-z", rev, "--", file], { env: literal }).pipe(
+    Effect.map((r) => {
+      const m = /^(\d+) \w+ ([0-9a-f]+)\t/.exec(r.stdout);
+      return m === null ? null : { mode: m[1] ?? "", blob: m[2] ?? "" };
+    }),
+  );
+
+/**
+ * A file here as git would record it, mode and blob, through a scratch index
+ * (so a symlink, the executable bit and core.fileMode count as git counts
+ * them). "absent", or "unreadable" when git cannot read it.
+ */
+export const entryHere = (repo: string, file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const at = `${repo}/${file}`;
+    const link = yield* fs.readLink(at).pipe(Effect.option);
+    if (link._tag === "None" && !(yield* fs.exists(at).pipe(Effect.orElseSucceed(() => false))))
+      return "absent" as const;
+    const index = out(
+      yield* git(repo, ["rev-parse", "--git-path", `t3-fleet-entry-${process.pid}`]),
+    );
+    const path = index.startsWith("/") ? index : `${repo}/${index}`;
+    const env = { GIT_INDEX_FILE: path, ...literal };
+    const clear = fs.remove(path, { force: true }).pipe(Effect.ignore);
+    yield* clear;
+    const entry = yield* Effect.gen(function* () {
+      if (!ok(yield* git(repo, ["add", "-f", "--", file], { env }))) return "unreadable" as const;
+      const listed = yield* git(repo, ["ls-files", "-s", "-z", "--", file], { env });
+      const m = /^(\d+) ([0-9a-f]+) \d\t/.exec(listed.stdout);
+      return m === null ? ("unreadable" as const) : { mode: m[1] ?? "", blob: m[2] ?? "" };
+    }).pipe(Effect.ensuring(clear));
+    return entry;
+  });
+
+/** Whether the file here is exactly the commit's, content and mode, or absent from both. */
+export const sameAt = (repo: string, rev: string, file: string) =>
+  Effect.gen(function* () {
+    const here = yield* entryHere(repo, file);
+    const there = yield* entryAt(repo, rev, file);
+    if (here === "absent") return there === null;
+    if (here === "unreadable" || there === null) return false;
+    return here.mode === there.mode && here.blob === there.blob;
+  });
+
 /** Paths `-z` output lists, NUL-separated and never quoted. */
 export const nulList = (stdout: string) => stdout.split("\0").filter(Boolean);
 
@@ -173,11 +231,11 @@ export const pullBranch = (
     const overlap: Array<string> = [];
     const identical: Array<string> = [];
     for (const file of incoming.filter((f) => dirty.has(f))) {
-      // A local edit identical to what arrives (an approved proposal coming
-      // back) is not a conflict: the local copy goes and the branch's comes.
-      const local = out(yield* git(repo, ["hash-object", "--", file]));
-      const remote = out(yield* git(repo, ["rev-parse", `origin/${branch}:${file}`]));
-      if (local !== "" && local === remote) identical.push(file);
+      // A local copy identical to what arrives, content and mode (an approved
+      // proposal coming back), is not a conflict: it goes and the branch's comes.
+      const here = yield* entryHere(repo, file);
+      if (here !== "absent" && (yield* sameAt(repo, `origin/${branch}`, file)))
+        identical.push(file);
       else overlap.push(file);
     }
     // Refused: nothing has changed yet, identical copies included.
@@ -187,7 +245,7 @@ export const pullBranch = (
       if (dirty.get(file) === "??")
         yield* git(repo, ["clean", "-q", "-f", "--", file], { env: literal });
       else yield* git(repo, ["checkout", "-q", "HEAD", "--", file], { env: literal });
-    /** The move failed: the identical copies back as they were (the branch's text, not in the index). */
+    /** The move failed: the identical copies back as they were (the branch's content and mode, which were theirs), not in the index. */
     const putBackIdentical = Effect.forEach(identical, (file) =>
       git(repo, ["checkout", "-q", `origin/${branch}`, "--", file], { env: literal }).pipe(
         Effect.andThen(git(repo, ["reset", "-q", "--", file], { env: literal })),
@@ -511,6 +569,11 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
       if (conflicted.length > 0)
         return yield* Effect.fail(
           `refusing to commit: ${conflicted.map((h) => h.file).join(", ")} still conflicted; resolve by hand first`,
+        );
+      const unsafe = (yield* changedFiles(repo, paths)).filter(unsafePath);
+      if (unsafe.length > 0)
+        return yield* Effect.fail(
+          `refusing to commit ${unsafe.map((f) => JSON.stringify(f)).join(", ")}: a newline or other control character in a path; rename it first`,
         );
       yield* addPaths(repo, paths);
       const staged = nulList(

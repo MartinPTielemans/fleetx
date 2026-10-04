@@ -22,7 +22,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 
-import { changedFiles, git, literal, nulList, ok, out } from "./Git.ts";
+import { sh } from "./Area.ts";
+import { exec } from "./Exec.ts";
+import { changedFiles, entryAt, entryHere, git, literal, nulList, ok, out, sameAt } from "./Git.ts";
 import { stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -51,26 +53,56 @@ const lastProposal = (repo: string) =>
     return ok(commit) ? out(commit) : null;
   });
 
-/** A file's blob and mode in a commit; null when the commit lacks it. */
-const entryAt = (repo: string, rev: string, file: string) =>
-  git(repo, ["ls-tree", "-z", rev, "--", file], { env: literal }).pipe(
-    Effect.map((r) => {
-      const m = /^(\d+) blob ([0-9a-f]+)\t/.exec(r.stdout);
-      return m === null ? null : { mode: m[1] ?? "", blob: m[2] ?? "" };
-    }),
-  );
-
-/** Whether the file here is exactly the commit's: content and executable bit, or absent from both. */
-const sameAs = (repo: string, rev: string, file: string) =>
+/**
+ * This node's last proposal: whether an approval naming it is among the
+ * incoming commits, and the files it changed. The proposal an approval names
+ * is in the approval's real trailer block, never a line elsewhere in its message.
+ */
+const proposalState = (repo: string, node: string, branch: string, proposal: string | null) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const there = yield* entryAt(repo, rev, file);
-    const info = yield* fs.stat(`${repo}/${file}`).pipe(Effect.option);
-    if (Option.isNone(info)) return there === null;
-    if (there === null || info.value.type !== "File") return false;
-    const blob = out(yield* git(repo, ["hash-object", "--", file], { env: literal }));
-    const executable = (Number(info.value.mode) & 0o111) !== 0;
-    return blob === there.blob && executable === (there.mode === "100755");
+    if (proposal === null) return { approved: false, proposed: new Set<string>() };
+    const log = (yield* git(repo, [
+      "log",
+      "--format=%s%x00%(trailers:key=Proposal,valueonly)%x1e",
+      `HEAD..origin/${branch}`,
+    ])).stdout;
+    const approved = log
+      .split("\u001e")
+      .map((entry) => entry.replace(/^\n/, "").split("\u0000"))
+      .some(
+        ([subject = "", trailers = ""]) =>
+          subject.startsWith(`Approve ${node}'s proposal`) &&
+          trailers.split("\n").some((v) => v.trim() === proposal),
+      );
+    const proposed = new Set(
+      nulList(
+        (yield* git(repo, ["diff", "--name-only", "-z", "--no-renames", `${proposal}^`, proposal]))
+          .stdout,
+      ),
+    );
+    return { approved, proposed };
+  });
+
+/**
+ * Of `files`, those exactly as this node's approved proposal had them (content
+ * and mode), against origin/<branch> as fetched: what the pull may replace.
+ * Sync leaves them out of a held-back unit it sets aside, so bringing the
+ * unit back never meets a file the pull brought.
+ */
+export const approvedCopies = (
+  repo: string,
+  node: string,
+  branch: string,
+  files: ReadonlyArray<string>,
+) =>
+  Effect.gen(function* () {
+    const proposal = yield* lastProposal(repo);
+    const { approved, proposed } = yield* proposalState(repo, node, branch, proposal);
+    const copies = new Set<string>();
+    if (!approved || proposal === null) return copies;
+    for (const file of files)
+      if (proposed.has(file) && (yield* sameAt(repo, proposal, file))) copies.add(file);
+    return copies;
   });
 
 export interface Settled {
@@ -82,6 +114,8 @@ export interface Settled {
   readonly overlapping: ReadonlyArray<string>;
   /** Of those, the ones exactly as this node proposed them, waiting for an approval. */
   readonly pending: ReadonlyArray<string>;
+  /** Why dropping failed part-way, when it did: everything was put back first. */
+  readonly failure: string | null;
 }
 
 /**
@@ -111,35 +145,10 @@ export const settleApproval = (
       );
       const changed = yield* changedFiles(repo);
       const proposal = yield* lastProposal(repo);
-      const empty: Settled = { proposal, dropped: [], overlapping: [], pending: [] };
+      const empty: Settled = { proposal, dropped: [], overlapping: [], pending: [], failure: null };
       if (changed.length === 0) return empty;
 
-      const log = (yield* git(repo, ["log", "--format=%B%x1e", `HEAD..origin/${branch}`])).stdout;
-      const approved =
-        proposal !== null &&
-        log
-          .split("\u001e")
-          .map((entry) => entry.trim())
-          .some(
-            (entry) =>
-              entry.startsWith(`Approve ${node}'s proposal`) &&
-              entry.split("\n").includes(proposalTrailer(proposal)),
-          );
-      const proposed =
-        proposal === null
-          ? new Set<string>()
-          : new Set(
-              nulList(
-                (yield* git(repo, [
-                  "diff",
-                  "--name-only",
-                  "-z",
-                  "--no-renames",
-                  `${proposal}^`,
-                  proposal,
-                ])).stdout,
-              ),
-            );
+      const { approved, proposed } = yield* proposalState(repo, node, branch, proposal);
 
       const dropped: Array<string> = [];
       const overlapping: Array<string> = [];
@@ -148,12 +157,12 @@ export const settleApproval = (
       // (proposed secrets, once merged) is in the proposal though the branch's diff nets out.
       for (const file of changed.filter((f) => incoming.has(f) || proposed.has(f))) {
         // What arrives as it is here: the pull handles it (Git.pullBranch).
-        if (incoming.has(file) && (yield* sameAs(repo, `origin/${branch}`, file))) continue;
+        if (incoming.has(file) && (yield* sameAt(repo, `origin/${branch}`, file))) continue;
         const asProposed =
           proposal !== null &&
           proposed.has(file) &&
           !exclude.has(file) &&
-          (yield* sameAs(repo, proposal, file));
+          (yield* sameAt(repo, proposal, file));
         if (asProposed && approved && options.how === "ff-only") {
           dropped.push(file);
           continue;
@@ -180,14 +189,25 @@ export const settleApproval = (
           done.push(file);
         }),
       );
-      yield* drop.pipe(
+      // Not dropped after all: every file is left to the pull, which refuses, and named.
+      const failure = yield* drop.pipe(
+        Effect.as(null),
         Effect.catch((e: string) =>
-          restoreDropped(repo, { proposal, dropped: done, overlapping, pending }).pipe(
-            Effect.andThen(Effect.fail(e)),
+          restoreDropped(repo, { ...empty, dropped: done }).pipe(
+            Effect.as(e),
+            Effect.catch((again: string) => Effect.succeed(`${e}; ${again}`)),
           ),
         ),
       );
-      return { proposal, dropped, overlapping, pending } satisfies Settled;
+      if (failure !== null)
+        return {
+          proposal,
+          dropped: [],
+          overlapping: [...dropped.filter((f) => incoming.has(f)), ...overlapping],
+          pending,
+          failure: `settling this machine's approved files: ${failure}`,
+        } satisfies Settled;
+      return { proposal, dropped, overlapping, pending, failure: null } satisfies Settled;
     }).pipe(Effect.mapError((e) => `settling this machine's approved files: ${e}`)),
   );
 
@@ -214,6 +234,31 @@ export const restoreDropped = (repo: string, settled: Settled) =>
     ),
   );
 
+/**
+ * What stops the recovery step itself: a file git cannot read, or a folder it
+ * cannot write (putting the branch's version back writes there). A line each.
+ */
+export const permissionProblems = (repo: string, files: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const problems: Array<string> = [];
+    const dirs = new Set<string>();
+    for (const file of files) {
+      if ((yield* entryHere(repo, file)) === "unreadable")
+        problems.push(`${file} cannot be read: \`chmod u+r ${sh(`${repo}/${file}`)}\``);
+      const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : ".";
+      if (dirs.has(dir)) continue;
+      dirs.add(dir);
+      const writable = yield* exec({ command: "test", args: ["-w", `${repo}/${dir}`] });
+      if (writable.code !== 0)
+        problems.push(`${dir}/ cannot be written: \`chmod u+w ${sh(`${repo}/${dir}`)}\``);
+    }
+    return problems;
+  });
+
 /** What gets past a pull refused for an edit the incoming change also touches: works as written. */
-export const unmergedStep = (repo: string, files: ReadonlyArray<string>) =>
-  `To keep this machine's edit and take the branch's change: \`git -C ${repo} -c user.name=t3-fleet -c user.email=t3-fleet@localhost stash push -m t3-fleet -- ${files.join(" ")}\`, then \`t3-fleet sync\`, then make the edit again on top (\`git -C ${repo} stash show -p\` shows it; \`t3-fleet setup\` offers what setup added again).`;
+export const unmergedStep = (
+  repo: string,
+  files: ReadonlyArray<string>,
+  problems: ReadonlyArray<string> = [],
+) =>
+  `${problems.length > 0 ? `First let git read and write them: ${problems.join("; ")}. Then, to` : "To"} keep this machine's edit and take the branch's change: \`git -C ${sh(repo)} -c user.name=t3-fleet -c user.email=t3-fleet@localhost stash push -u -m t3-fleet -- ${files.map(sh).join(" ")}\`, then \`t3-fleet sync\`, then make the edit again on top (\`git -C ${sh(repo)} stash show -p --include-untracked\` shows it; \`t3-fleet setup\` offers what setup added again).`;

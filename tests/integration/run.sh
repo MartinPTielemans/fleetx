@@ -177,10 +177,17 @@ pass "setup finds how Codex was installed without running it"
 # An uncommitted edit to a fleet file is refused before planning: the plan would pass it off as the fleet's,
 # and an authority's run would publish it. A file setup never writes (a bootstrap.sh) is not its business.
 on laptop 'printf "#!/bin/sh\n" > ~/fleet/bootstrap.sh && cp ~/fleet/mcp/posthog.json /tmp/posthog.json && sed -i "s/mcp.posthog/mcp.draft/" ~/fleet/mcp/posthog.json'
+on laptop 'printf "{}\n" > ~/fleet/mcp/new-untracked.json'
 expect laptop "uncommitted changes to the fleet's files" 't3-fleet setup --plan'
 expect laptop " M mcp/posthog.json" 't3-fleet setup'
-on laptop 'cp /tmp/posthog.json ~/fleet/mcp/posthog.json'
+# The command it prints sets both aside, the untracked one too, as written.
+out=$(on laptop 't3-fleet setup' 2>&1) || true
+cmd=$(printf '%s' "$out" | grep -o '`git -C [^`]*stash push[^`]*`' | tr -d '`')
+[ -n "$cmd" ] || fail "setup should print a stash command: $out"
+on laptop "$cmd" || fail "the printed stash command should work: $cmd"
 expect laptop "Nothing here differs" 't3-fleet setup'
+expect laptop "mcp.draft" 'git -C ~/fleet stash show -p --include-untracked'
+on laptop 'git -C ~/fleet stash drop -q'
 [ -z "$(on laptop 'git -C /srv/remote/fleet.git log -p main -- mcp/posthog.json | grep mcp.draft')" ] || fail "the uncommitted edit should never be published"
 on laptop 'rm ~/fleet/bootstrap.sh'
 pass "setup refuses uncommitted edits to the fleet's files, and ignores files it never writes"

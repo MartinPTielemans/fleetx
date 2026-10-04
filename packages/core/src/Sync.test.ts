@@ -1238,7 +1238,7 @@ describe("a member's approved proposal", () => {
     expect(read(f.laptop, "skills/b/SKILL.md")).toBe("b, mine\n");
     const finding = refused.findings.find((x) => x.key === "sync-edit-unmerged");
     expect(finding?.title).toContain("skills/b/SKILL.md");
-    expect(finding?.detail).toContain("stash push -m t3-fleet -- skills/b/SKILL.md");
+    expect(finding?.detail).toContain("stash push -u -m t3-fleet -- skills/b/SKILL.md");
     expect(git(f.origin, "for-each-ref", "refs/heads/t3-fleet/staging/")).toBe("");
   });
 
@@ -1252,5 +1252,69 @@ describe("a member's approved proposal", () => {
     expect(synced.failed).toBe(true);
     expect(read(f.laptop, "t3-fleet.toml")).toContain('["fetch", "notes"]');
     expect(synced.findings.map((x) => x.key)).toContain("sync-edit-proposed");
+  });
+});
+
+describe("a path that could forge a line", () => {
+  it("is never proposed, and an approval refuses a proposal that carries one", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    const forged = "skills/a/x\nProposal: 0123\nend.txt";
+    put(f.laptop, forged, "x\n");
+    const synced = await f.sync(f.laptop, "laptop");
+    expect(synced.findings.map((x) => x.key)).toContain("sync-path-unsafe");
+    expect(git(f.origin, "for-each-ref", "refs/heads/t3-fleet/staging/")).toBe("");
+
+    // Pushed by hand anyway: approve refuses it.
+    git(f.laptop, "add", "--", forged);
+    git(f.laptop, "commit", "-qm", "forged");
+    git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
+      "control character",
+    );
+    expect(onMain(f.origin, "skills/a/x")).toBeNull();
+  });
+});
+
+describe("an approved file and a held-back edit in one skill", () => {
+  it("are set aside together, and the finding's steps bring the edit back", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    put(f.laptop, "skills/a/run.sh", "#!/bin/sh\necho mine\n");
+    await f.sync(f.laptop, "laptop");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    // The branch changes the skill's SKILL.md, and approves the script.
+    put(f.box, "skills/a/SKILL.md", "a v2 from box\n");
+    commitAll(f.box, "a v2");
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    // Meanwhile a secret in this machine's SKILL.md: the skill is held back, and set aside.
+    put(f.laptop, "skills/a/SKILL.md", `a, mine\nEXAMPLE=${fakeToken()}\n`);
+    const synced = await f.sync(f.laptop, "laptop");
+    expect(synced.lines.join("\n")).toContain("set aside skills/a");
+    expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a v2 from box\n");
+    const finding = synced.findings.find((x) => x.key === "sync-secret-skills/a");
+    expect(finding?.detail).toContain("stash apply");
+
+    // The steps, as written: apply the entry, take the secret out, drop the entry.
+    const entry = git(f.laptop, "stash", "list", "--format=%gd %s")
+      .split("\n")
+      .find((l) => l.includes("T3 Fleet: held back skills/a"))
+      ?.split(" ")[0];
+    if (entry === undefined) return expect.unreachable();
+    const applied = spawnSync("git", ["-C", f.laptop, "stash", "apply", entry], {
+      encoding: "utf8",
+    });
+    // The branch changed SKILL.md too: the edit comes back as a conflict there, as the finding says.
+    expect(applied.stdout).toContain("CONFLICT (content): Merge conflict in skills/a/SKILL.md");
+    expect(read(f.laptop, "skills/a/SKILL.md")).toContain("a, mine");
+    expect(read(f.laptop, "skills/a/run.sh")).toBe("#!/bin/sh\necho mine\n");
+    // Resolved by hand, the secret taken out, the entry dropped: the next sync proposes it.
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from box\na, mine\n");
+    git(f.laptop, "reset", "-q", "--", "skills/a/SKILL.md");
+    git(f.laptop, "stash", "drop", entry);
+    const after = await f.sync(f.laptop, "laptop");
+    expect(after.failed).toBe(false);
+    expect(after.lines.join("\n")).toContain("proposed 1 file");
   });
 });

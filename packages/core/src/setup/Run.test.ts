@@ -142,6 +142,13 @@ describe("a setup that stops part-way", () => {
     fs.writeFileSync(join(repo, "bootstrap.sh"), "#!/bin/sh\n");
     const dirty = await run(uncommittedFleetFiles(repo, "laptop", EMPTY_FLEET));
     expect(dirty).toEqual([" M mcp/ctx.json"]);
+    // Paths as they are, not as git quotes them.
+    fs.writeFileSync(join(repo, "mcp/a b é.json"), "{}\n");
+    expect(await run(uncommittedFleetFiles(repo, "laptop", EMPTY_FLEET))).toEqual([
+      " M mcp/ctx.json",
+      "?? mcp/a b é.json",
+    ]);
+    fs.rmSync(join(repo, "mcp/a b é.json"));
     expect(await run(uncommittedFleetFiles(repo, "laptop", EMPTY_FLEET, ["mcp/ctx.json"]))).toEqual(
       [],
     );

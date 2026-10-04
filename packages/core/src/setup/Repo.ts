@@ -245,13 +245,20 @@ export const uncommittedFleetFiles = (
     ];
     const status = yield* exec({
       command: "git",
-      args: ["-C", repo, "status", "--porcelain", "-uall", "--", ...new Set(paths)],
+      args: ["-C", repo, "status", "--porcelain", "-z", "-uall", "--", ...new Set(paths)],
       env: { ...process.env, GIT_LITERAL_PATHSPECS: "1" },
       timeout: Duration.seconds(30),
     });
     const skip = (file: string) =>
       except.some((e) => file === e || file.startsWith(`${e.replace(/\/$/, "")}/`));
-    return status.stdout
-      .split("\n")
-      .filter((line) => line.trim() !== "" && !skip(line.slice(3).replace(/^"|"$/g, "")));
+    // `XY path`, the path as it is (-z): a rename's source follows it, and is left out.
+    const lines: Array<string> = [];
+    const parts = status.stdout.split("\u0000");
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? "";
+      if (part === "") continue;
+      if (/[RC]/.test(part.slice(0, 2))) i++;
+      if (!skip(part.slice(3))) lines.push(part);
+    }
+    return lines;
   });
