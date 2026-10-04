@@ -48,6 +48,7 @@ import { editCodexServers } from "./leave/Mcp.ts";
 import { settingsUpdates, throughT3, unrouted } from "./leave/Models.ts";
 import { removeService } from "./leave/Services.ts";
 import { approve, autoApprovable, autoApproves, listProposals } from "./Staging.ts";
+import { encryptedForIn, recipientSet } from "./Secrets.ts";
 import { exchange } from "./Sync.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -444,7 +445,7 @@ describe("a member leaving", () => {
     expect(onBranch(f.origin, "secrets/recipients.toml", staging)).not.toContain("laptop");
     expect(
       git(f.origin, "diff", "--name-status", `${staging}^`, staging).trim().split("\n"),
-    ).toEqual(["D\tnodes/laptop.toml", "M\tsecrets/recipients.toml"]);
+    ).toEqual(["D\tnodes/laptop.toml", "M\tsecrets/recipients.toml", "M\tsecrets/secrets.env.age"]);
     expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
     expect(git(f.repo, "status", "--porcelain")).toBe("");
     // Recorded as finished; local state kept without --purge.
@@ -1632,5 +1633,69 @@ describe("final review", () => {
     expect(after.join("\n")).not.toContain("approved laptop's");
     expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
     expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).not.toBeNull();
+  });
+});
+
+// ---- #27: both files of the secrets, in one commit ----------------------------------
+
+describe("the secrets' two files, from a recipients.toml written before encrypted-for", () => {
+  /** What `rev` changed under secrets/: both files, or the test says which. */
+  const secretsChanged = (repo: string, rev: string) =>
+    git(repo, "diff", "--name-only", `${rev}^`, rev, "--", "secrets/").trim().split("\n").sort();
+  const legacy = (f: Fleet) => {
+    const text = onBranch(f.origin, "secrets/recipients.toml") ?? "";
+    expect(text).not.toContain("# encrypted-for:");
+  };
+
+  it("an authority's removal commits both, recording the set the secrets were encrypted to", async () => {
+    const f = await makeFleet({ self: "box", desk: "authority" });
+    legacy(f);
+    expect((await run(applyLeave(await f.plan()))).every((o) => o.ok)).toBe(true);
+    expect(secretsChanged(f.origin, "main")).toEqual([
+      "secrets/recipients.toml",
+      "secrets/secrets.env.age",
+    ]);
+    const { box: _box, ...rest } = f.recipients;
+    expect(encryptedForIn(onBranch(f.origin, "secrets/recipients.toml") ?? "")).toBe(
+      await run(recipientSet(Object.values(rest))),
+    );
+    expect(git(f.box, "status", "--porcelain")).toBe("");
+  });
+
+  it("a member's proposal and its approval each commit both, and both checkouts are clean", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    legacy(f);
+    await run(applyLeave(await f.plan()));
+    const staging = "t3-fleet/staging/laptop";
+    expect(secretsChanged(f.origin, staging)).toEqual([
+      "secrets/recipients.toml",
+      "secrets/secrets.env.age",
+    ]);
+    const { laptop: _laptop, ...rest } = f.recipients;
+    const remaining = await run(recipientSet(Object.values(rest)));
+    expect(encryptedForIn(onBranch(f.origin, "secrets/recipients.toml", staging) ?? "")).toBe(
+      remaining,
+    );
+    await expect(
+      decrypt(f.keys["laptop"] ?? "", onBranch(f.origin, "secrets/secrets.env.age", staging) ?? ""),
+    ).rejects.toThrow();
+    expect(git(f.repo, "status", "--porcelain")).toBe("");
+    // An authority approves it: one commit, both files, its own copy encrypted again.
+    const boxHome = join(f.root, "box-home");
+    process.env["HOME"] = boxHome;
+    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) throw new Error("no proposal");
+    await run(approve(f.box, "main", proposal, "box"));
+    expect(secretsChanged(f.origin, "main")).toEqual([
+      "secrets/recipients.toml",
+      "secrets/secrets.env.age",
+    ]);
+    expect(encryptedForIn(onBranch(f.origin, "secrets/recipients.toml") ?? "")).toBe(remaining);
+    expect(
+      await decrypt(f.keys["box"] ?? "", onBranch(f.origin, "secrets/secrets.env.age") ?? ""),
+    ).toContain("API=one");
+    expect(git(f.box, "status", "--porcelain")).toBe("");
   });
 });

@@ -421,7 +421,7 @@ const fleetStep = (d: Departure, home: string, at: Standing) => {
           `delete ${["state", "staging", "rejected"].map((k) => `${branchPrefix(k as "state")}${d.node}`).join(", ")}`,
         ]
       : [
-          `propose on ${branchPrefix("staging")}${d.node}: delete nodes/${d.node}.toml and drop ${d.node} from secrets/recipients.toml`,
+          `propose on ${branchPrefix("staging")}${d.node}: delete nodes/${d.node}.toml, drop ${d.node} from secrets/recipients.toml and re-encrypt the secrets for the others`,
           "an authority approves it with t3-fleet approve, and re-encrypts the secrets from its own copy then",
         ],
     apply: leaveFleet(d.repo, d.branch, d.node, home).pipe(

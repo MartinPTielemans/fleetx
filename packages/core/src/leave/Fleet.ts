@@ -33,6 +33,7 @@ import { parse as parseToml } from "smol-toml";
 import { ensureGitConfig, git, literal, nulList, ok, out, pullBranch, why } from "../Git.ts";
 import { branchPrefix } from "../Names.ts";
 import {
+  SECRETS_FILES,
   decryptWith,
   encryptedForIn,
   encryptFor,
@@ -42,8 +43,8 @@ import {
 } from "../Secrets.ts";
 import { underSyncLock } from "../SyncLock.ts";
 
-const RECIPIENTS = "secrets/recipients.toml";
-const SECRETS = "secrets/secrets.env.age";
+/** The two files of the fleet's secrets (#27): whatever re-encrypts or rewrites recipients changes both, in one commit. */
+const [SECRETS, RECIPIENTS] = SECRETS_FILES;
 
 const parseKeys = (text: string | null) =>
   Effect.try(() => (text === null ? {} : (parseToml(text) as Record<string, unknown>))).pipe(
@@ -61,8 +62,10 @@ const sameKeys = (a: Record<string, string>, b: Record<string, string>) =>
 
 /**
  * Whether `commit` takes `node` out of the fleet and does nothing else: it
- * deletes nodes/<node>.toml and, at most, drops `node`'s key from the
- * recipients (comments aside). Its message is not read.
+ * deletes nodes/<node>.toml, drops at most `node`'s key from the recipients
+ * (comments aside), and may encrypt the secrets again for the rest. Its
+ * message is not read; an approval never takes the secrets it carries (it
+ * encrypts its own copy again).
  */
 export const isDeparture = (repo: string, commit: string, node: string) =>
   Effect.gen(function* () {
@@ -77,6 +80,7 @@ export const isDeparture = (repo: string, commit: string, node: string) =>
     if (!pairs.some(([status, file]) => status === "D" && file === own)) return false;
     for (const [status, file] of pairs) {
       if (file === own) continue;
+      if (file === SECRETS && status === "M") continue;
       if (file !== RECIPIENTS || status !== "M") return false;
       const show = (rev: string) =>
         git(repo, ["show", `${rev}:${RECIPIENTS}`]).pipe(
@@ -153,18 +157,14 @@ export const standing = (repo: string, branch: string, node: string) =>
 
 /**
  * A commit on origin's tip without `node`: its node file gone and its key
- * dropped from the recipients. With `reencrypt`, the secrets are encrypted
- * again for the remaining recipients from origin's copy, read with this
- * machine's key (left as they are when it cannot read them).
+ * dropped from the recipients, and the secrets encrypted again for the
+ * remaining recipients from origin's copy, read with this machine's key:
+ * both files of SECRETS_FILES in this one commit, with the recipient set
+ * they were encrypted to recorded. When this machine cannot read them, they
+ * stay as they were and the recorded set with them, so nothing claims the
+ * remaining keys alone can read them.
  */
-const removalCommit = (
-  repo: string,
-  branch: string,
-  node: string,
-  home: string,
-  message: string,
-  reencrypt: boolean,
-) =>
+const removalCommit = (repo: string, branch: string, node: string, home: string, message: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const base = `origin/${branch}`;
@@ -205,7 +205,7 @@ const removalCommit = (
       // The recorded set stays what the secrets were encrypted to, unless they are encrypted again here.
       let recorded = originRecipients === null ? null : encryptedForIn(originRecipients);
       const armored = yield* show(SECRETS);
-      if (reencrypt && armored !== null && Object.keys(rest).length > 0) {
+      if (armored !== null && Object.keys(rest).length > 0) {
         const key = (yield* fs.readFileString(keyPath(home)).pipe(Effect.orElseSucceed(() => "")))
           .split("\n")
           .find((l) => l.startsWith("AGE-SECRET-KEY-"));
@@ -272,7 +272,7 @@ export const removeNode = (
           return yield* Effect.fail(
             `${node} is the fleet's only authority on ${branch}; give another machine the authority role first`,
           );
-        const built = yield* removalCommit(repo, branch, node, home, message, true);
+        const built = yield* removalCommit(repo, branch, node, home, message);
         // Checked again in what is about to be pushed, not in what was fetched.
         const after = yield* rolesAt(repo, built.commit);
         if (after.has(node) || authoritiesBesides(after, node).length === 0)
@@ -306,14 +306,13 @@ const proposeDeparture = (repo: string, branch: string, node: string, home: stri
       return yield* Effect.fail(`cannot reach the config repo's origin: ${now.why}`);
     if (now._tag === "out") return null;
     if (now.proposed !== null) return now.proposed;
-    // The secrets are left to the authority approving it: it re-encrypts its own current copy.
+    // Both files, as any re-encryption (#27); the authority approving it encrypts its own current copy again anyway.
     const built = yield* removalCommit(
       repo,
       branch,
       node,
       home,
       `Proposed by ${node}: remove ${node} from the fleet`,
-      false,
     );
     const push = yield* git(repo, [
       "push",
