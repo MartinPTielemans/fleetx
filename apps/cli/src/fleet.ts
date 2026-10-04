@@ -16,7 +16,7 @@ import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 import { expandHome, loadConfig, loadConfigFrom, type Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { exec } from "@t3-fleet/core/Exec";
-import { indexEntries, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
+import { git, indexEntries, out, restorePaths, snapshot, unmergedHits } from "@t3-fleet/core/Git";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { NodeResult } from "@t3-fleet/core/Remote";
 import { renderStatus } from "@t3-fleet/core/Render";
@@ -44,7 +44,7 @@ import {
   setVar,
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
-import { mergeProposedSecrets } from "@t3-fleet/core/setup/Apply";
+import { describeProposed } from "@t3-fleet/core/ProposedSecrets";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -176,9 +176,12 @@ export const reviewCommand = Command.make("review").pipe(
         return;
       }
       for (const p of proposals) {
+        // Secrets are encrypted; their names and what approving does with them are worth seeing.
+        const secrets = yield* describeProposed(config.repo, p.commit, p.node).pipe(
+          Effect.orElseSucceed(() => [] as Array<string>),
+        );
         yield* Console.log(
-          `${p.node}  (${p.commit.slice(0, 7)})\n${p.stat
-            .split("\n")
+          `${p.node}  (${p.commit.slice(0, 7)})\n${[...p.stat.split("\n"), ...secrets]
             .map((l) => `  ${l}`)
             .join("\n")}\n`,
         );
@@ -211,16 +214,21 @@ export const approveCommand = Command.make("approve", {
   Command.withHandler(({ node, commit }) =>
     Effect.gen(function* () {
       const config = yield* asAuthority;
+      const proposal = yield* proposalOf(config, node);
+      for (const line of yield* describeProposed(config.repo, proposal.commit, node))
+        yield* Console.log(line);
       const rev = yield* approve(
         config.repo,
         config.branch,
-        yield* proposalOf(config, node),
+        proposal,
         config.self,
         Option.getOrUndefined(commit),
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
-      // Secrets it proposed (setup on a joining machine) are encrypted to this machine: merge them.
-      for (const line of yield* mergeProposedSecrets(config.repo)) yield* Console.log(line);
+      // What approving did with the secrets it proposed, as the merge commit records it.
+      const merge = out(yield* git(config.repo, ["log", "-1", "--format=%s%n%b"]));
+      if (merge.startsWith("Merge proposed secrets"))
+        for (const line of merge.split("\n").slice(1).filter(Boolean)) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );
