@@ -108,8 +108,12 @@ pick it up on sync.
 
 **`models-service`** — the model proxy's service is missing, out of date, not
 running, or not answering on 127.0.0.1:8398. The fix (re)installs and
-restarts it. Until it runs, the launchers start the CLIs directly. Log:
-`~/.local/state/t3-fleet/models.log`.
+restarts it; a restart waits up to 45 seconds for the responses in flight.
+Until it runs, the launchers start the CLIs directly. Installing a new build
+does not restart it: the proxy notices the build within a minute, keeps
+answering until its last response is done (15 minutes at most), exits, and
+its service starts it again a second later. Log (start-up lines only, no
+per-request lines): `~/.local/state/t3-fleet/models.log`.
 
 **`models-launcher-<instance>`** — that instance's launcher
 (`~/.local/bin/t3-fleet-claude`, `t3-fleet-codex`, `t3-fleet-<instance>`) is missing
@@ -125,7 +129,10 @@ directly rather than through its launcher. The fix, `t3-fleet models route
 <instance>`, sets the instance's binary path in `~/.t3/userdata/settings.json`
 (T3 has no command for it and reloads the file itself); running sessions keep
 their binary. `t3-fleet models route <instance> --undo` puts the old path back.
-It is offered once the launcher is installed.
+It is offered once the launcher is installed, and only when the CLI the
+launcher runs is there: its recipe's `command` (for Claude
+`~/.local/bin/claude`, or `claude` on PATH). If it is not, the finding says
+so; install the CLI or set `[models.providers.<instance>] command`.
 
 **`models-unroutable-<instance>`** — a note: that instance cannot go through
 the proxy. Either it runs inside T3 with no CLI (Cursor, Antigravity), or
@@ -134,12 +141,17 @@ T3 Fleet has no recipe for its driver; declare one with
 set `route = false` to silence it.
 
 **`models-failing`** — more than 5% of an upstream's requests failed in the
-last hour, or launches fell back to the CLI because the proxy was not
-listening. The detail names the most common failure class: `connect` and
-`timeout` (the network), `429` and `529` (rate limits, overload), `5xx`,
-`4xx`, or `stream` (broken off after it started). `t3-fleet models stats` shows
-the windows; `~/.local/state/t3-fleet/models.jsonl` has every request's
-metadata.
+last hour (and at least three of them), or launches fell back to the CLI
+because the proxy was not listening. The detail names the most common failure
+class: `connect` and `timeout` (the network), `429` and `529` (rate limits,
+overload), `5xx`, or `stream` (broken off after it started, including a
+response cut by the proxy stopping). Client errors (`4xx`: a prompt too long,
+a request too large) are the request's own problem and do not count, though
+`t3-fleet models stats` still shows them. `t3-fleet models stats` shows the
+windows; `~/.local/state/t3-fleet/models.jsonl` has every request's metadata.
+With `egress = "relay"`, an error the relay met on the way to the upstream
+says "at the relay"; when the relay itself cannot be reached, requests go
+direct and do not fail.
 
 ## mcp
 

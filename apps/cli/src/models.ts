@@ -15,15 +15,16 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import type { ModelProxyStats, ModelWindow } from "@t3-fleet/core/Api";
 import { loadConfig } from "@t3-fleet/core/Config";
-import { fetchStats, MODELS_PORT, modelProxyLayer } from "@t3-fleet/core/models/Proxy";
-import { decodeModelsSettings, launcherPath, upstreamsOf, type ModelsSettings } from "@t3-fleet/core/models/Recipes";
+import { findCli, STOP_DRAIN_SECONDS } from "@t3-fleet/core/models/Launchers";
+import { fetchStats, followUpstreams, makeInFlight, MODELS_PORT, modelProxyLayer, serveUntilIdle, whenIdle } from "@t3-fleet/core/models/Proxy";
+import { launcherPath, ModelsSettings, resolveRecipe, upstreamsOf } from "@t3-fleet/core/models/Recipes";
 import { routeProvider } from "@t3-fleet/core/models/Route";
 import { RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { providerPlans, readT3Settings } from "@t3-fleet/core/T3Settings";
@@ -32,14 +33,22 @@ import packageJson from "../package.json" with { type: "json" };
 import { encodeJson, reportUserErrors, untilNewBuild } from "./shared.ts";
 import { stateDir } from "@t3-fleet/core/Names";
 
-/** This node's [models] settings; empty when T3 Fleet is not set up here (the proxy still serves). */
-const ownSettings = loadConfig.pipe(
-  Effect.map((config) => {
+/** This node's [models] settings; fails when the config or its [models] table cannot be read. */
+const readSettings = loadConfig.pipe(
+  Effect.flatMap((config) => {
     const self = config.nodes.find((n) => n.name === config.self);
-    return { models: decodeModelsSettings(self?.settings.table["models"]), relayUrl: config.settings.relay?.url ?? null };
+    return Schema.decodeUnknownEffect(ModelsSettings)(self?.settings.table["models"] ?? {}).pipe(
+      Effect.map((models) => ({ models, relayUrl: config.settings.relay?.url ?? null })),
+    );
   }),
-  Effect.orElseSucceed(() => ({ models: {} as ModelsSettings, relayUrl: null as string | null })),
 );
+
+/** The same, empty when T3 Fleet is not set up here (the proxy still serves). */
+const ownSettings = readSettings.pipe(Effect.orElseSucceed(() => ({ models: {} as ModelsSettings, relayUrl: null as string | null })));
+
+/** How long the proxy keeps answering on the old build once a new one is installed, for its responses to finish. */
+const NEW_BUILD_DRAIN = Duration.minutes(15);
+const SERVER_CLOSE = Duration.seconds(3);
 
 const serve = Command.make("serve", {
   egress: Flag.Literals("egress", ["direct", "relay"]).pipe(
@@ -62,25 +71,18 @@ const serve = Command.make("serve", {
       const home = process.env["HOME"] ?? "";
       yield* FileSystem.FileSystem.pipe(Effect.flatMap((fs) => fs.makeDirectory(stateDir(home), { recursive: true })), Effect.ignore);
       // Upstreams follow the config repo as sync updates it, without a restart.
-      let upstreams = upstreamsOf(models);
-      yield* ownSettings.pipe(
-        Effect.map((s) => {
-          upstreams = upstreamsOf(s.models);
-        }),
-        Effect.repeat(Schedule.spaced(Duration.seconds(30))),
-        Effect.forkDetach,
+      const upstreams = yield* followUpstreams(readSettings.pipe(Effect.map((s) => s.models)), models, Duration.seconds(30));
+      yield* Console.log(`model proxy on 127.0.0.1:${MODELS_PORT} for ${Object.keys(upstreams()).join(", ")}, egress ${egress}${relay === undefined ? "" : ` via ${relay.url}`}`);
+      const inFlight = makeInFlight();
+      const routes = modelProxyLayer({ home, version: packageJson.version, egress, upstreams, inFlight, ...(relay === undefined ? {} : { relay }) });
+      // No per-request log: models.log would grow without end, and an error's request carries its query string.
+      const served = HttpRouter.serve(routes, { disableLogger: true }).pipe(
+        // whenIdle has done the draining by the time the server closes; a request that lands in that
+        // moment should be refused quickly, not wait out platform-node's 20s default.
+        Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT, gracefulShutdownTimeout: SERVER_CLOSE })),
       );
-      yield* Console.log(`model proxy on 127.0.0.1:${MODELS_PORT} for ${Object.keys(upstreams).join(", ")}, egress ${egress}${relay === undefined ? "" : ` via ${relay.url}`}`);
-      const routes = modelProxyLayer({ home, version: packageJson.version, egress, upstreams: () => upstreams, ...(relay === undefined ? {} : { relay }) });
-      return yield* untilNewBuild(
-        Layer.launch(
-          HttpRouter.serve(routes).pipe(
-            Layer.provide(FetchHttpClient.layer),
-            Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port: MODELS_PORT })),
-          ),
-        ),
-      );
-    }).pipe(reportUserErrors),
+      return yield* untilNewBuild(serveUntilIdle(served, inFlight, Duration.seconds(STOP_DRAIN_SECONDS)), { drain: whenIdle(inFlight, NEW_BUILD_DRAIN) });
+    }).pipe(Effect.scoped, reportUserErrors),
   ),
 );
 
@@ -131,6 +133,14 @@ const route = Command.make("route", {
       const launcher = launcherPath(home, instance);
       const fs = yield* FileSystem.FileSystem;
       if (!undo && !(yield* fs.exists(launcher))) return yield* Effect.fail(`${launcher} is not installed (t3-fleet fix --area models)`);
+      if (!undo) {
+        // The launcher runs its recipe's CLI; routing T3 to it when that CLI is missing would break the provider.
+        const { models } = yield* ownSettings;
+        const resolved = resolveRecipe(instance, plan.driver, models, upstreamsOf(models));
+        if (resolved._tag === "route" && (yield* findCli(home, resolved.recipe.command, process.env["PATH"] ?? "")) === null) {
+          return yield* Effect.fail(`${resolved.recipe.command} is not installed here, so ${launcher} could not start it; install it or set [models.providers.${instance}] command`);
+        }
+      }
       const result = yield* routeProvider(home, instance, launcher, { undo }).pipe(Effect.mapError((e) => e.message));
       yield* Console.log(`T3 ${instance} binaryPath: ${result.previous ?? "(default)"} → ${result.now ?? "(default)"}`);
       yield* Console.log("T3 reloads its settings; new sessions use this, running ones keep theirs.");
