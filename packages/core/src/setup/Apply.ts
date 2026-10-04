@@ -1,7 +1,9 @@
 /**
- * Setup's changes, in steps. Each step is recorded in setup.json when it
- * finishes, so a run that fails resumes at the step that failed, and every
- * step can run again over its own half-done work.
+ * Setup's changes, in steps. A run is decided in full before its first step
+ * (State.ts keeps it, its secret values encrypted), each step is recorded in
+ * setup.json when it finishes, and every step can run again over its own
+ * half-done work: a run that fails resumes at the step that failed and does
+ * exactly what was decided.
  *
  *   snapshot  before.json, before anything else changes (State.ts)
  *   repo      first machine: the repository, its first commit, and its remote
@@ -16,8 +18,9 @@
  *   t3        T3 Fleet's read-only token for T3 (t3-fleet t3 connect)
  *   sync      a first sync, applying only the areas setup covers
  *
- * A joining machine never commits to the branch: its additions and choices
- * are local edits under [fleet] auto_commit, which its first sync proposes.
+ * A joining machine never commits to the branch: what it writes is listed
+ * (State.addSetupProposed) and its sync proposes exactly that, whatever the
+ * fleet's [fleet] auto_commit says.
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -33,7 +36,6 @@ import { commitAndPush, ensureGitConfig, git, ok, out, why } from "../Git.ts";
 import { writeLocalConfig } from "../Init.ts";
 import { FLEET_FILE } from "../Names.ts";
 import {
-  decryptWith,
   encryptFor,
   ensureIdentity,
   installSecrets,
@@ -41,18 +43,17 @@ import {
   readRecipients,
   readSecrets,
   setVar,
-  varNames,
   writeRecipients,
   writeSecrets,
 } from "../Secrets.ts";
 import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
 import type { Secret } from "./Credentials.ts";
-import type { Discovery } from "./Discover.ts";
+import { cleanUrl, type Discovery } from "./Discover.ts";
 import { PROPOSED_SECRETS, type Actions, type Mode } from "./Plan.ts";
 import type { Preflight } from "./Preflight.ts";
-import { GITIGNORE, newFleetFile, newNodeFile } from "./Repo.ts";
-import { backupDir, recordMoved, takeSnapshot } from "./State.ts";
+import { cloneFleet, GITIGNORE, newFleetFile, newNodeFile } from "./Repo.ts";
+import { addSetupProposed, backupDir, recordMoved, takeSnapshot } from "./State.ts";
 import { addToList, appendEntry, setKey, type Edit } from "./TomlEdit.ts";
 
 export interface Extras {
@@ -69,16 +70,17 @@ export interface SetupInput {
   readonly node: string;
   /** Where the config repo lives on this machine. */
   readonly checkout: string;
-  /** The joining machine's fleet URL, and the scratch clone of it. */
+  /** The joining machine's fleet URL, and the scratch clone of it (gone on a resume: cloned again). */
   readonly join: { readonly url: string; readonly clone: string } | null;
   /** Whether this machine commits (first, or an authority) rather than proposing. */
   readonly commits: boolean;
   readonly actions: Actions;
+  /** Client entries this run hands to the fleet: added to before.json by a later run. */
+  readonly handed: ReadonlyArray<string>;
   readonly extras: Extras;
   readonly timer: Preflight["timer"];
   /** First machine: create this GitHub repository with gh, or push to an existing empty remote. */
   readonly remote: { readonly github: string } | { readonly url: string } | null;
-  readonly raw: Discovery["raw"];
   readonly now: number;
 }
 
@@ -97,6 +99,12 @@ const sh = (command: string, args: ReadonlyArray<string>, seconds = 60) =>
 
 const pretty = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
+const exists = (p: string) =>
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fs) => fs.exists(p)),
+    Effect.orElseSucceed(() => false),
+  );
+
 /** Edit a TOML file in the checkout (creating it from `initial` when missing), or fail with why. */
 const editToml = (file: string, initial: string, steps: ReadonlyArray<(text: string) => Edit>) =>
   Effect.gen(function* () {
@@ -108,18 +116,31 @@ const editToml = (file: string, initial: string, steps: ReadonlyArray<(text: str
       if ("error" in edit) return yield* Effect.fail(`${file}: ${edit.error}`);
       text = edit.text;
     }
-    if (text !== before || !(yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false))))
-      yield* fs.writeFileString(file, text);
+    if (text !== before || !(yield* exists(file))) yield* fs.writeFileString(file, text);
   });
 
-/** Copy a skill into the repo without any .git in it: a clone committed as a gitlink reaches no other machine. */
-const copySkill = (from: string, to: string) =>
+/**
+ * Copy a skill into the repo without .git (a clone committed as a gitlink
+ * reaches no other machine) or node_modules. A skill kept as `name@node`
+ * gets that name in its SKILL.md too.
+ */
+const copySkill = (from: string, to: string, name: string) =>
   Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     yield* sh("rm", ["-rf", to], 30);
     yield* sh("mkdir", ["-p", to.slice(0, to.lastIndexOf("/"))], 5);
     const cp = yield* sh("cp", ["-R", from, to]);
     if (cp.code !== 0) return yield* Effect.fail(`copying ${from}: ${cp.stderr.trim()}`);
-    yield* sh("find", [to, "-name", ".git", "-prune", "-exec", "rm", "-rf", "{}", "+"], 30);
+    for (const junk of [".git", "node_modules"])
+      yield* sh("find", [to, "-name", junk, "-prune", "-exec", "rm", "-rf", "{}", "+"], 30);
+    if (name.includes("@")) {
+      const file = `${to}/SKILL.md`;
+      const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
+      yield* fs.writeFileString(
+        file,
+        text.replace(/^(---\n(?:.*\n)*?)name:.*$/m, `$1name: ${name}`),
+      );
+    }
   });
 
 /** Every secret setup stores: the servers', and the extras'. */
@@ -139,10 +160,108 @@ export const secretsToStore = (input: SetupInput): ReadonlyArray<Secret> => [
     : []),
 ];
 
+/** A run as setup.json keeps it: no secret value, no credential in a URL. */
+export const persistable = (input: SetupInput): SetupInput => ({
+  ...input,
+  join: input.join === null ? null : { ...input.join, url: cleanUrl(input.join.url) },
+  remote:
+    input.remote !== null && "url" in input.remote
+      ? { url: cleanUrl(input.remote.url) }
+      : input.remote,
+  actions: {
+    ...input.actions,
+    secrets: input.actions.secrets.map((s) => ({ ...s, value: "" })),
+  },
+  extras: {
+    ...input.extras,
+    relay: input.extras.relay === null ? null : { ...input.extras.relay, token: null },
+    models: input.extras.models === null ? null : { token: null },
+  },
+});
+
+/** A saved run with its secret values back, from the NAME=value text saved beside it. */
+export const restored = (saved: SetupInput, secrets: string): SetupInput => {
+  const values = new Map<string, string>();
+  for (const line of secrets.split("\n")) {
+    const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (m?.[1] === undefined) continue;
+    const raw = m[2] ?? "";
+    values.set(m[1], /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(["\\$`])/g, "$1") : raw);
+  }
+  const value = (name: string) => values.get(name) ?? null;
+  return {
+    ...saved,
+    actions: {
+      ...saved.actions,
+      secrets: saved.actions.secrets.map((s) => ({ ...s, value: value(s.name) ?? "" })),
+    },
+    extras: {
+      ...saved.extras,
+      relay:
+        saved.extras.relay === null
+          ? null
+          : { ...saved.extras.relay, token: value("T3_FLEET_RELAY_TOKEN") },
+      models: saved.extras.models === null ? null : { token: value("CLAUDE_CODE_OAUTH_TOKEN") },
+    },
+  };
+};
+
+/** The repo paths this run writes: what a joining machine proposes. */
+export const writtenPaths = (input: SetupInput) => [
+  ...input.actions.skills.map((s) => `skills/${s.name}`),
+  ...(input.actions.skills.some((s) => s.source !== null) ? ["skills/SOURCES.json"] : []),
+  ...input.actions.servers.map((s) => `mcp/${s.name}.json`),
+  ...input.actions.instructions.map((i) => i.src),
+  FLEET_FILE,
+  `nodes/${input.node}.toml`,
+  `${PROPOSED_SECRETS}/${input.node}.env.age`,
+];
+
+const rolesOf = (text: string): Array<string> => {
+  try {
+    const roles = (parseToml(text) as { roles?: unknown }).roles;
+    return Array.isArray(roles)
+      ? roles.filter((r): r is string => typeof r === "string")
+      : ["member"];
+  } catch {
+    return ["member"];
+  }
+};
+
+/** Whether a node file turns the sync timer off. */
+export const timerOff = (text: string) => {
+  try {
+    return (parseToml(text) as { engine?: { timer?: unknown } }).engine?.timer === false;
+  } catch {
+    return false;
+  }
+};
+
+/** The destinations `[[defaults.instructions]]` lists already. */
+const listedDests = (text: string): ReadonlySet<unknown> => {
+  try {
+    const defaults = (parseToml(text) as { defaults?: { instructions?: unknown } }).defaults;
+    const list = Array.isArray(defaults?.instructions) ? defaults.instructions : [];
+    return new Set(list.map((e) => (e as { dest?: unknown }).dest));
+  } catch {
+    return new Set();
+  }
+};
+
+const relayEdits = (text: string, url: string | null): Edit => {
+  const port = setKey(text, ["relay"], "port", 8399);
+  if ("error" in port || url === null) return port;
+  return setKey(port.text, ["relay"], "url", url);
+};
+
 /** The steps for this run, in order. `hooks` are what only the command can do. */
 export const setupSteps = (
   input: SetupInput,
-  hooks: { readonly t3Connect: Effect.Effect<string, string, ProbeServices> },
+  hooks: {
+    readonly t3Connect: Effect.Effect<string, string, ProbeServices>;
+    /** The clients' entries as they are now, for the snapshot (never persisted: they hold credentials). */
+    readonly raw: Discovery["raw"];
+  },
 ): ReadonlyArray<Step> => {
   const home = process.env["HOME"] ?? "";
   const repo = input.checkout;
@@ -153,7 +272,7 @@ export const setupSteps = (
   steps.push({
     id: "snapshot",
     title: "snapshot of the clients' MCP servers (for t3-fleet leave)",
-    run: takeSnapshot(home, input.now, input.raw).pipe(
+    run: takeSnapshot(home, input.now, hooks.raw, input.handed).pipe(
       Effect.map(() => ["~/.local/state/t3-fleet/setup/before.json"]),
       Effect.mapError(fail("snapshot")),
     ),
@@ -166,14 +285,16 @@ export const setupSteps = (
       run: Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const lines: Array<string> = [];
-        const exists = yield* fs.exists(`${repo}/.git`).pipe(Effect.orElseSucceed(() => false));
-        if (!exists) {
+        // Each part only when it is missing, so a run that stopped half-way picks up where it was.
+        if (!(yield* exists(`${repo}/.git`)) && !(yield* exists(fleetFile))) {
           const files = yield* fs
             .readDirectory(repo)
             .pipe(Effect.orElseSucceed(() => [] as Array<string>));
           if (files.length > 0)
             return yield* Effect.fail(`${repo} already exists and is not empty; pass --dir`);
-          yield* fs.makeDirectory(`${repo}/nodes`, { recursive: true });
+        }
+        yield* fs.makeDirectory(`${repo}/nodes`, { recursive: true });
+        if (!(yield* exists(fleetFile)))
           yield* fs.writeFileString(
             fleetFile,
             newFleetFile({
@@ -182,12 +303,18 @@ export const setupSteps = (
               instructions: [],
             }),
           );
+        if (!(yield* exists(nodeFile))) {
           const roles = input.extras.relay === null ? ["authority"] : ["authority", "relay"];
           yield* fs.writeFileString(nodeFile, newNodeFile(input.node, roles, "t3-fleet setup"));
+        }
+        if (!(yield* exists(`${repo}/.gitignore`)))
           yield* fs.writeFileString(`${repo}/.gitignore`, GITIGNORE);
-          yield* ensureGitConfig;
+        yield* ensureGitConfig;
+        if (!(yield* exists(`${repo}/.git`))) {
           const init = yield* git(repo, ["init", "-q", "-b", "main"]);
           if (!ok(init)) return yield* Effect.fail(`git init: ${why(init)}`);
+        }
+        if (!ok(yield* git(repo, ["rev-parse", "-q", "--verify", "HEAD"]))) {
           yield* git(repo, ["add", "--", FLEET_FILE, "nodes", ".gitignore"]);
           const commit = yield* git(repo, [
             "commit",
@@ -203,7 +330,7 @@ export const setupSteps = (
           if ("github" in input.remote) {
             const gh = yield* sh(
               "gh",
-              ["repo", "create", input.remote.github, "--private", "--source", repo, "--push"],
+              ["repo", "create", input.remote.github, "--private", "--source", repo],
               120,
             );
             if (gh.code !== 0)
@@ -213,13 +340,15 @@ export const setupSteps = (
             lines.push(`created the private repository ${input.remote.github}`);
           } else {
             yield* git(repo, ["remote", "add", "origin", input.remote.url]);
-            const push = yield* git(repo, ["push", "-q", "-u", "origin", "main"], {
-              timeout: Duration.minutes(2),
-            });
-            if (!ok(push))
-              return yield* Effect.fail(`pushing to ${input.remote.url}: ${why(push)}`);
-            lines.push(`pushed to ${input.remote.url}`);
+            lines.push(`origin is ${cleanUrl(input.remote.url)}`);
           }
+        }
+        // Pushed until the remote has it: a push that failed before is tried again.
+        if (out(yield* git(repo, ["remote", "get-url", "origin"])) !== "") {
+          const push = yield* git(repo, ["push", "-q", "-u", "origin", "main"], {
+            timeout: Duration.minutes(2),
+          });
+          if (!ok(push)) return yield* Effect.fail(`pushing: ${why(push)}`);
         }
         return lines;
       }).pipe(Effect.mapError(fail("creating the repo"))),
@@ -233,18 +362,25 @@ export const setupSteps = (
       title: `the fleet's repo at ${repo}`,
       run: Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        if (yield* fs.exists(`${repo}/.git`).pipe(Effect.orElseSucceed(() => false))) {
+        yield* ensureGitConfig;
+        if (yield* exists(`${repo}/.git`)) {
           const origin = out(yield* git(repo, ["remote", "get-url", "origin"]));
-          if (origin === join.url) return [`${repo} is already a clone of ${join.url}`];
+          if (cleanUrl(origin) === cleanUrl(join.url))
+            return [`${repo} is already a clone of ${cleanUrl(join.url)}`];
           return yield* Effect.fail(
-            `${repo} already holds another repository (${origin || "no remote"}); pass --dir`,
+            `${repo} already holds another repository (${cleanUrl(origin) || "no remote"}); pass --dir`,
           );
         }
-        if (yield* fs.exists(repo).pipe(Effect.orElseSucceed(() => false)))
+        if (yield* exists(repo))
           return yield* Effect.fail(`${repo} already exists; move it or pass --dir`);
         yield* fs.makeDirectory(repo.slice(0, repo.lastIndexOf("/")), { recursive: true });
-        yield* fs.rename(join.clone, repo);
-        return [`cloned ${join.url} into ${repo}`];
+        if (yield* exists(`${join.clone}/.git`)) {
+          // The plan's clone, from a temporary directory: mv crosses filesystems where rename cannot.
+          const mv = yield* sh("mv", [join.clone, repo]);
+          if (mv.code !== 0)
+            return yield* Effect.fail(`moving the clone into place: ${mv.stderr.trim()}`);
+        } else yield* cloneFleet(join.url, repo);
+        return [`cloned ${cleanUrl(join.url)} into ${repo}`];
       }).pipe(Effect.mapError(fail("cloning"))),
     });
   }
@@ -256,7 +392,7 @@ export const setupSteps = (
       const fs = yield* FileSystem.FileSystem;
       const a = input.actions;
       const lines: Array<string> = [];
-      for (const s of a.skills) yield* copySkill(s.from, `${repo}/skills/${s.name}`);
+      for (const s of a.skills) yield* copySkill(s.from, `${repo}/skills/${s.name}`, s.name);
       const sourced = a.skills.flatMap((s) =>
         s.source === null ? [] : [{ name: s.name, ...s.source }],
       );
@@ -269,10 +405,9 @@ export const setupSteps = (
         lines.push(`MCP servers: ${a.servers.map((s) => s.name).join(", ")}`);
       }
       for (const i of a.instructions) {
-        yield* fs.makeDirectory(`${repo}/${i.src}`.slice(0, `${repo}/${i.src}`.lastIndexOf("/")), {
-          recursive: true,
-        });
-        yield* fs.writeFileString(`${repo}/${i.src}`, i.text);
+        const file = `${repo}/${i.src}`;
+        yield* fs.makeDirectory(file.slice(0, file.lastIndexOf("/")), { recursive: true });
+        yield* fs.writeFileString(file, i.text);
       }
       if (a.instructions.length > 0)
         lines.push(`instructions: ${a.instructions.map((i) => i.dest).join(", ")}`);
@@ -285,7 +420,7 @@ export const setupSteps = (
         // An instruction the fleet already lists keeps its entry; only its file changes.
         ...a.instructions.map(
           (i) => (t: string) =>
-            t.includes(`dest = ${JSON.stringify(i.dest)}`)
+            listedDests(t).has(i.dest)
               ? { text: t }
               : appendEntry(t, ["defaults", "instructions"], { src: i.src, dest: i.dest }),
         ),
@@ -303,18 +438,25 @@ export const setupSteps = (
             ]),
       ]);
       const roles = input.extras.relay === null ? ["member"] : ["relay", "member"];
+      const ignored = a.ignored.map((i) => i.name);
       yield* editToml(nodeFile, newNodeFile(input.node, roles, "t3-fleet setup"), [
         (t) => (machine.length === 0 ? { text: t } : addToList(t, ["mcp"], "servers.add", machine)),
         (t) =>
           a.serversHereOnly.length === 0
             ? { text: t }
             : addToList(t, ["mcp"], "servers.remove", a.serversHereOnly),
+        (t) => (ignored.length === 0 ? { text: t } : addToList(t, ["mcp"], "ignore.add", ignored)),
         (t) =>
           a.instructionsHereOnly.length === 0
             ? { text: t }
-            : setKey(t, [], "instructions.remove", a.instructionsHereOnly),
+            : addToList(t, [], "instructions.remove", a.instructionsHereOnly),
+        // Off while this machine cannot run it; on again once it can (lingering enabled since, say).
         (t) =>
-          input.timer.works ? { text: t } : setKey(t, ["engine"], "timer", false, input.timer.why),
+          !input.timer.works
+            ? setKey(t, ["engine"], "timer", false, input.timer.why)
+            : timerOff(t)
+              ? setKey(t, ["engine"], "timer", true)
+              : { text: t },
         (t) => {
           const current = rolesOf(t);
           return input.extras.relay === null || current.includes("relay")
@@ -322,6 +464,7 @@ export const setupSteps = (
             : setKey(t, [], "roles", [...current, "relay"]);
         },
       ]);
+      if (!input.commits) yield* addSetupProposed(home, writtenPaths(input));
       return lines;
     }).pipe(Effect.mapError(fail("writing the repo"))),
   });
@@ -440,6 +583,13 @@ export const setupSteps = (
     id: "sync",
     title: "a first sync",
     run: Effect.gen(function* () {
+      // A fleet with no remote yet is complete here; syncing (and publishing) waits for one.
+      if (out(yield* git(repo, ["remote", "get-url", "origin"])) === "")
+        return [
+          "skipped: the repo has no remote yet. Add one, then sync:",
+          `  git -C ${repo} remote add origin <url> && git -C ${repo} push -u origin main`,
+          "  t3-fleet sync",
+        ];
       const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
       // MCP servers wait until this machine can read the fleet's secrets: registered without them, they would lose their credentials.
       const readable = yield* readSecrets(repo).pipe(Effect.option);
@@ -465,27 +615,10 @@ export const setupSteps = (
   return steps;
 };
 
-const rolesOf = (text: string): Array<string> => {
-  try {
-    const roles = (parseToml(text) as { roles?: unknown }).roles;
-    return Array.isArray(roles)
-      ? roles.filter((r): r is string => typeof r === "string")
-      : ["member"];
-  } catch {
-    return ["member"];
-  }
-};
-
-const relayEdits = (text: string, url: string | null): Edit => {
-  const port = setKey(text, ["relay"], "port", 8399);
-  if ("error" in port || url === null) return port;
-  return setKey(port.text, ["relay"], "url", url);
-};
-
 /**
- * Replace each path with its link. What is there is moved into `backups`
- * (keeping its path under ~) and recorded in before.json first; a path that
- * already links where it should is left as it is.
+ * Replace each path with its link. What is there is recorded in before.json,
+ * then moved into `backups` (keeping its path under ~); a path that already
+ * links where it should is left as it is.
  */
 export const linkAll = (
   links: ReadonlyArray<{ readonly path: string; readonly link: string | null }>,
@@ -506,14 +639,13 @@ export const linkAll = (
         ]);
         if (real === want) continue;
       }
-      const present =
-        Option.isSome(current) || (yield* fs.exists(at).pipe(Effect.orElseSucceed(() => false)));
-      if (present) {
+      if (Option.isSome(current) || (yield* exists(at))) {
         const rel = at.startsWith(`${home}/`) ? at.slice(home.length + 1) : at.replace(/^\//, "");
         const backup = path.join(backups, rel);
         yield* fs.makeDirectory(path.dirname(backup), { recursive: true });
-        yield* fs.rename(at, backup);
+        // Listed first: a run that stops between the two still says where the original went.
         yield* recordMoved(home, at, backup);
+        yield* fs.rename(at, backup);
         moved++;
       }
       if (link !== null) {
@@ -523,59 +655,4 @@ export const linkAll = (
       }
     }
     return [`${linked} linked, ${moved} moved aside to ${backups.replace(home, "~")}`];
-  });
-
-/**
- * Secrets machines proposed (secrets-proposed/<node>.env.age), merged into
- * the fleet's by an authority. A name the fleet already has keeps the
- * fleet's value; the proposal's is reported, not taken. Returns what it did.
- */
-export const mergeProposedSecrets = (repo: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const dir = `${repo}/${PROPOSED_SECRETS}`;
-    const files = (yield* fs
-      .readDirectory(dir)
-      .pipe(Effect.orElseSucceed(() => [] as Array<string>))).filter((f) => f.endsWith(".env.age"));
-    if (files.length === 0) return [] as Array<string>;
-    const { identity } = yield* ensureIdentity;
-    let text = yield* readSecrets(repo);
-    const have = new Set(varNames(text));
-    const lines: Array<string> = [];
-    for (const file of files) {
-      const node = file.slice(0, -".env.age".length);
-      const armored = yield* fs.readFileString(`${dir}/${file}`);
-      const plain = yield* decryptWith(identity, armored).pipe(
-        Effect.mapError(() => `${PROPOSED_SECRETS}/${file} is not encrypted to this machine's key`),
-      );
-      const values = new Map(
-        plain
-          .split("\n")
-          .map((l) => /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(l))
-          .filter((m): m is RegExpExecArray => m !== null)
-          .map(
-            (m) =>
-              [
-                m[1] ?? "",
-                (m[2] ?? "").replace(/^"(.*)"$/s, "$1").replace(/\\(["\\$`])/g, "$1"),
-              ] as const,
-          ),
-      );
-      const taken: Array<string> = [];
-      for (const [name, value] of values) {
-        if (have.has(name)) taken.push(name);
-        else {
-          text = setVar(text, name, value);
-          have.add(name);
-        }
-      }
-      yield* fs.remove(`${dir}/${file}`);
-      lines.push(
-        `merged ${values.size - taken.length} secret${values.size - taken.length === 1 ? "" : "s"} ${node} proposed${taken.length > 0 ? `; kept the fleet's ${taken.join(", ")}` : ""}`,
-      );
-    }
-    yield* writeSecrets(repo, text);
-    yield* installSecrets(repo);
-    const rev = yield* commitAndPush(repo, ["secrets", PROPOSED_SECRETS], "Merge proposed secrets");
-    return [...lines, `committed ${rev}`];
   });

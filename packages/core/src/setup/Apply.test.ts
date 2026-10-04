@@ -61,4 +61,28 @@ describe("the snapshot and links (the contract with t3-fleet leave)", () => {
       fs.lstatSync(join(home, ".claude/CLAUDE.md"), { throwIfNoEntry: false }),
     ).toBeUndefined();
   });
+
+  it("adds to the snapshot the client entries a later run hands to the fleet, and changes none", async () => {
+    const home = fs.mkdtempSync(join(tmpdir(), "t3-fleet-setup-"));
+    const first = { posthog: { type: "http", url: "https://first" } };
+    await run(takeSnapshot(home, 1, { claude: first, codex: null }));
+    await run(
+      takeSnapshot(
+        home,
+        2,
+        {
+          claude: {
+            posthog: { type: "http", url: "https://changed" },
+            notes: { url: "https://n" },
+          },
+          codex: { kept: { command: "x" }, other: { command: "y" } },
+        },
+        ["posthog", "notes", "other"],
+      ),
+    );
+    const snapshot = JSON.parse(fs.readFileSync(snapshotPath(home), "utf8"));
+    expect(snapshot.takenAt).toBe(1);
+    expect(snapshot.claude.mcpServers).toEqual({ ...first, notes: { url: "https://n" } });
+    expect(snapshot.codex.mcp_servers).toEqual({ other: { command: "y" } });
+  });
 });
