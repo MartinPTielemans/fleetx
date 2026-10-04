@@ -19,11 +19,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
+import * as TestClock from "effect/testing/TestClock";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -52,6 +57,31 @@ const home = (config: string | null) => {
   return dir;
 };
 const servers = (file: string) => Object.keys(JSON.parse(readFileSync(file, "utf8")).mcpServers);
+
+/** Node's services with the test clock in place of the real one. */
+const testServices = Layer.mergeAll(NodeServices.layer, TestClock.layer());
+
+/**
+ * The test clock, starting at the real time (lock mtimes stay sensible), wrapped so every sleep
+ * says how long it is before it waits: a test moves time on only once a fiber waits for it.
+ */
+const watchedClock = Effect.gen(function* () {
+  yield* TestClock.setTime(yield* TestClock.withLive(Clock.currentTimeMillis));
+  const clock = yield* TestClock.testClockWith(Effect.succeed);
+  const sleeping = yield* Queue.unbounded<number>();
+  const watched: Clock.Clock = {
+    ...clock,
+    sleep: (duration) =>
+      Queue.offer(sleeping, Duration.toMillis(duration)).pipe(
+        Effect.andThen(clock.sleep(duration)),
+      ),
+  };
+  return { clock: watched, sleeping };
+});
+
+/** Take sleeps from `sleeping` until one `matches`. */
+const waitFor = (sleeping: Queue.Dequeue<number>, matches: (ms: number) => boolean) =>
+  Queue.take(sleeping).pipe(Effect.repeat({ until: matches }));
 
 describe("Claude's global config", () => {
   it("waits for Claude's lock, and keeps what Claude wrote while holding it", async () => {
@@ -132,19 +162,35 @@ describe("Claude's global config", () => {
   const quick = { staleMs: 600, updateMs: 200 } as const;
 
   it("keeps its lock fresh through a slow write, so another writer waits for it", async () => {
+    // Virtual time: the test moves it on only once the heartbeat waits for its next beat, so how
+    // fast the machine runs changes nothing.
     const dir = home('{"mcpServers":{}}');
     const file = join(dir, ".claude.json");
-    const slow = Effect.runFork(
-      updateClaudeConfig(dir, {}, addServer("fleet"), {
-        timing: quick,
-        beforeWrite: Effect.sleep("1500 millis"),
-      }).pipe(Effect.provide(NodeServices.layer)),
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const { clock, sleeping } = yield* watchedClock;
+        const release = yield* Deferred.make<void>();
+        const slow = yield* updateClaudeConfig(dir, {}, addServer("fleet"), {
+          timing: quick,
+          beforeWrite: Deferred.await(release),
+        }).pipe(Effect.provideService(Clock.Clock, clock), Effect.forkChild);
+        // Three stale windows of beats: without them, the lock would be stale three times over.
+        for (let beat = 0; beat < 9; beat++) {
+          yield* waitFor(sleeping, (ms) => ms === quick.updateMs);
+          yield* TestClock.adjust(quick.updateMs);
+        }
+        // Another writer with the same rules, as Claude is: it would take over a stale lock. It
+        // finds this one fresh and backs off.
+        const other = yield* updateClaudeConfig(dir, {}, addServer("claudes"), {
+          timing: quick,
+        }).pipe(Effect.provideService(Clock.Clock, clock), Effect.forkChild);
+        yield* waitFor(sleeping, (ms) => ms !== quick.updateMs);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(slow);
+        yield* TestClock.adjust("2 seconds");
+        yield* Fiber.join(other);
+      }).pipe(Effect.provide(testServices)),
     );
-    await Effect.runPromise(Effect.sleep("100 millis"));
-    // Another writer with the same rules, as Claude is: it would take over a stale lock.
-    const other = await run(updateClaudeConfig(dir, {}, addServer("claudes"), { timing: quick }));
-    expect(other._tag).toBe("Success");
-    await Effect.runPromise(Fiber.join(slow));
     expect(servers(file).sort()).toEqual(["claudes", "fleet"]);
     expect(existsSync(`${file}.lock`)).toBe(false);
   });
@@ -152,19 +198,29 @@ describe("Claude's global config", () => {
   it("writes nothing once its lock was taken over, and leaves the new holder's lock", async () => {
     const dir = home('{"mcpServers":{"old":{}}}');
     const file = join(dir, ".claude.json");
-    const slow = Effect.runFork(
-      updateClaudeConfig(dir, {}, addServer("fleet"), {
-        timing: quick,
-        beforeWrite: Effect.sleep("800 millis"),
-      }).pipe(Effect.result, Effect.provide(NodeServices.layer)),
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const reached = yield* Deferred.make<void>();
+        const go = yield* Deferred.make<void>();
+        // Its writer stops just before writing, while the lock is still its own.
+        const slow = yield* updateClaudeConfig(dir, {}, addServer("fleet"), {
+          beforeWrite: Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Deferred.await(go)),
+          ),
+        }).pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(reached);
+        // Someone else's lock now: the old one moved aside and a new one made, as a takeover does.
+        yield* Effect.sync(() => {
+          renameSync(`${file}.lock`, `${file}.lock-old`);
+          mkdirSync(`${file}.lock`);
+          rmdirSync(`${file}.lock-old`);
+          writeFileSync(file, '{"mcpServers":{"old":{},"other":{}}}');
+        });
+        yield* Deferred.succeed(go, undefined);
+        return yield* Fiber.join(slow);
+      }).pipe(Effect.provide(NodeServices.layer)),
     );
-    await Effect.runPromise(Effect.sleep("300 millis"));
-    // Someone else's lock now: the old one removed and a new one made, as a takeover does.
-    rmdirSync(`${file}.lock`);
-    mkdirSync(`${file}.lock`);
-    writeFileSync(file, '{"mcpServers":{"old":{},"other":{}}}');
-    const result = await Effect.runPromise(Fiber.join(slow));
-    expect(result._tag).toBe("Failure");
+    expect(String(result)).toContain("another process made it anew");
     expect(servers(file)).toEqual(["old", "other"]);
     expect(existsSync(`${file}.lock`)).toBe(true);
     expect(readdirSync(dir).filter((f) => f.includes("t3-fleet"))).toEqual([]);
@@ -288,29 +344,52 @@ describe("Claude's lock, with faults injected", () => {
       timing,
     );
 
+  /**
+   * Holds the lock until `fault` has run inside the first heartbeat's utimes (acquiring makes the
+   * first two: the precision probe, then our mtime), then tries to publish: the error it ends with.
+   * The stale window is far off, so only the fault can lose the lock.
+   */
+  const faulted = (file: string, fault: (lock: string) => void, after: boolean) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const injected = yield* Deferred.make<void>();
+        let touches = 0;
+        const inject = Effect.sync(() => fault(`${file}.lock`)).pipe(
+          Effect.andThen(Deferred.succeed(injected, undefined)),
+        );
+        return yield* patched(
+          withClaudeConfigLock(
+            file,
+            (whileOwned) => Deferred.await(injected).pipe(Effect.andThen(whileOwned(Effect.void))),
+            { staleMs: 60_000, updateMs: 20 },
+          ),
+          (fs) => ({
+            utimes: (path, atime, mtime) =>
+              Effect.suspend(() => {
+                if (++touches !== 3) return fs.utimes(path, atime, mtime);
+                return after
+                  ? fs.utimes(path, atime, mtime).pipe(Effect.andThen(inject))
+                  : inject.pipe(Effect.andThen(fs.utimes(path, atime, mtime)));
+              }),
+          }),
+        ).pipe(Effect.flip);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
   it("loses the lock when another process makes it anew between check and refresh", async () => {
     const dir = home("{}");
     const lock = join(dir, ".claude.json.lock");
-    const published = { value: false };
-    let touches = 0;
-    const result = await run(
-      patched(locked(join(dir, ".claude.json"), 140, published), (fs) => ({
-        utimes: (path, atime, mtime) =>
-          Effect.suspend(() => {
-            touches++;
-            if (touches === 2) {
-              // The original is moved aside before its replacement is made, so the replacement
-              // cannot reuse its inode: the same on every filesystem.
-              renameSync(lock, `${lock}-old`);
-              mkdirSync(lock);
-              rmdirSync(`${lock}-old`);
-            }
-            return fs.utimes(path, atime, mtime);
-          }),
-      })),
+    const error = await faulted(
+      join(dir, ".claude.json"),
+      (lock) => {
+        // Moved aside before its replacement is made, so the inode cannot be reused anywhere.
+        renameSync(lock, `${lock}-old`);
+        mkdirSync(lock);
+        rmdirSync(`${lock}-old`);
+      },
+      false,
     );
-    expect(result._tag).toBe("Failure");
-    expect(published.value).toBe(false);
+    expect(String(error)).toContain("another process made it anew");
     // The other process's lock stays.
     expect(existsSync(lock)).toBe(true);
   });
@@ -318,27 +397,15 @@ describe("Claude's lock, with faults injected", () => {
   it("loses the lock when another process sets its mtime between refresh and look", async () => {
     const dir = home("{}");
     const lock = join(dir, ".claude.json.lock");
-    const published = { value: false };
-    let touches = 0;
-    const result = await run(
-      patched(locked(join(dir, ".claude.json"), 140, published), (fs) => ({
-        utimes: (path, atime, mtime) =>
-          fs.utimes(path, atime, mtime).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                // Acquiring touches it twice (the precision probe, then our mtime); the third is
-                // the first heartbeat's. Right after it, someone else sets another mtime.
-                if (++touches !== 3) return;
-                const now = statSync(lock);
-                utimesSync(lock, now.atime, (now.mtimeMs + 300) / 1000);
-              }),
-            ),
-          ),
-      })),
+    const error = await faulted(
+      join(dir, ".claude.json"),
+      (lock) => {
+        const now = statSync(lock);
+        utimesSync(lock, now.atime, (now.mtimeMs + 300) / 1000);
+      },
+      true,
     );
-    expect(touches).toBeGreaterThanOrEqual(3);
-    expect(result._tag).toBe("Failure");
-    expect(published.value).toBe(false);
+    expect(String(error)).toContain("another process touched it");
     expect(existsSync(lock)).toBe(true);
   });
 
@@ -411,18 +478,20 @@ describe("Claude's config, changed while it was being written", () => {
   });
 
   it("stops starting over once its time is up", async () => {
+    // Virtual time, moved on 200 ms by each attempt: the second starts at 200 (within 300), a
+    // third would start at 400, however slowly the machine runs.
     const dir = home('{"mcpServers":{}}');
     const file = join(dir, ".claude.json");
     let calls = 0;
-    const result = await run(
+    const result = await Effect.runPromise(
       updateClaudeConfig(dir, {}, addServer("fleet"), {
         retryMs: 300,
-        beforeWrite: Effect.sleep("200 millis").pipe(
+        beforeWrite: TestClock.adjust("200 millis").pipe(
           Effect.andThen(
             Effect.sync(() => writeFileSync(file, `{"mcpServers":{"c${++calls}":{}}}`)),
           ),
         ),
-      }),
+      }).pipe(Effect.result, Effect.provide(testServices)),
     );
     expect(result._tag).toBe("Failure");
     expect(calls).toBe(2);
