@@ -192,6 +192,23 @@ on laptop 'git -C ~/fleet stash drop -q'
 on laptop 'rm ~/fleet/bootstrap.sh'
 pass "setup refuses uncommitted edits to the fleet's files, and ignores files it never writes"
 
+# A fleet made before recipients.toml recorded what the secrets were encrypted to: the first change
+# that re-encrypts (mcp add --env) commits the recipients with the secrets, leaving nothing dirty.
+on laptop "sed -i '/^# encrypted-for:/d' ~/fleet/secrets/recipients.toml && git -C ~/fleet commit -qam 'Legacy recipients' && git -C ~/fleet push -q"
+expect laptop "declared rc-legacy" 't3-fleet mcp add rc-legacy --command /usr/bin/env --env API_KEY=SEKRIT_legacy_0011 --node laptop'
+[ -z "$(on laptop 'git -C ~/fleet status --porcelain')" ] || fail "mcp add should leave nothing dirty: $(on laptop 'git -C ~/fleet status --porcelain')"
+expect laptop "# encrypted-for:" 'git -C /srv/remote/fleet.git show main:secrets/recipients.toml'
+on laptop 'git -C ~/fleet show --name-only --format= HEAD' | grep -qx secrets/recipients.toml || fail "the recipients should be in the same commit as the secrets"
+pass "a re-encryption on a legacy fleet commits recipients.toml with the secrets"
+
+# A server added since and left alone is no reason to offer a model proxy, or any other extra.
+on desktop 'mkdir -p ~/.codex && printf "\n[mcp_servers.rc_unmanaged]\ncommand = \"/usr/bin/env\"\n" >> ~/.codex/config.toml'
+out=$(on desktop 't3-fleet setup --plan' 2>&1) || true
+printf '%s' "$out" | grep -q "rc_unmanaged" || fail "the plan should name the new server: $out"
+printf '%s' "$out" | grep -q "Optional extras" && fail "setup should offer no extras for this change: $out"
+on desktop "sed -i '/rc_unmanaged/,+1d' ~/.codex/config.toml"
+pass "setup again offers only what this machine asked for"
+
 # No credential anywhere in the repository: any branch, any commit, state and proposals included.
 leaks=$(on laptop 'git -C /srv/remote/fleet.git log -p --all | grep -o "[A-Za-z_]*SEKRIT[A-Za-z0-9_]*" | sort -u') || true
 [ -z "$leaks" ] || fail "credentials in the repository's history: $leaks"

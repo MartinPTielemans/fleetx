@@ -234,4 +234,36 @@ describe("approve", () => {
     );
     expect(notes.join("\n")).toContain("could not decrypt secrets-proposed/member.env.age");
   });
+
+  it("on a fleet whose recipients.toml has no encrypted-for line yet, commits it with the secrets", async () => {
+    const origin = join(home, "legacy.git");
+    const checkout = join(home, "legacy");
+    git(home, "init", "-q", "--bare", "-b", "main", origin);
+    git(home, "clone", "-q", origin, checkout);
+    const { recipient } = await run(ensureIdentity);
+    fs.mkdirSync(join(checkout, "mcp"));
+    fs.writeFileSync(
+      join(checkout, "mcp/notes.json"),
+      JSON.stringify({ kind: "direct", url: "https://n", headers: { "X-Key": "$NOTES_KEY" } }),
+    );
+    await run(writeSecrets(checkout, "FLEET_A=1\n", { laptop: recipient }));
+    const recipients = join(checkout, "secrets/recipients.toml");
+    fs.writeFileSync(
+      recipients,
+      fs.readFileSync(recipients, "utf8").replace(/^# encrypted-for: .*\n/m, ""),
+    );
+    fs.mkdirSync(join(checkout, "secrets-proposed"));
+    fs.writeFileSync(
+      join(checkout, "secrets-proposed/desktop.env.age"),
+      await run(encryptFor([recipient], "NOTES_KEY=n-value\n")),
+    );
+    git(checkout, "add", "-A");
+    git(checkout, "commit", "-qm", "start");
+    git(checkout, "push", "-q", "-u", "origin", "main");
+
+    await run(mergeProposedSecrets(checkout));
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+    expect(git(origin, "show", "main~1:secrets/recipients.toml")).toContain("# encrypted-for: ");
+    expect(git(origin, "log", "-1", "--format=%s", "main~1")).toBe("Merge proposed secrets");
+  });
 });

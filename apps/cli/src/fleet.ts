@@ -37,10 +37,10 @@ import {
 import { NAME_PATTERN } from "@t3-fleet/core/hub/Definitions";
 import { isSkillBackup } from "@t3-fleet/core/areas/Skills";
 import {
-  encryptedPath,
   installSecrets,
   localSecretsPath,
   readSecrets,
+  SECRETS_FILES,
   setVar,
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
@@ -890,10 +890,9 @@ export const mcpAddCommand = Command.make("add", {
           }
           yield* checkNodeEdits(config, fresh, nodeFiles, name);
           const stored = authority ? built.store : [];
+          // Re-encrypting writes the recipients too (their encrypted-for line): both are committed and put back.
           const touched = [
-            ...(stored.length > 0
-              ? [encryptedPath(config.repo).slice(config.repo.length + 1)]
-              : []),
+            ...(stored.length > 0 ? SECRETS_FILES : []),
             `mcp/${name}.json`,
             ...nodeFiles.map((f) => f.rel),
           ];

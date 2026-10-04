@@ -22,7 +22,6 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import type { HubServer } from "@t3-fleet/core/Api";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
-import { commitAndPush } from "@t3-fleet/core/Git";
 import { clientTokenEnv, expectOk, hubRequest } from "@t3-fleet/core/hub/HubClient";
 import { toJson } from "@t3-fleet/core/hub/JsonRpc";
 import {
@@ -33,13 +32,7 @@ import {
   decodeServers,
   decodeTokens,
 } from "@t3-fleet/core/hub/Routes";
-import {
-  encryptedPath,
-  installSecrets,
-  readSecrets,
-  setVar,
-  writeSecrets,
-} from "@t3-fleet/core/Secrets";
+import { readSecrets, setVar, storeSecrets } from "@t3-fleet/core/Secrets";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -294,13 +287,8 @@ const tokenCreate = Command.make("create", {
       const self = config.nodes.find((n) => n.name === config.self);
       if (self?.roles.includes("authority")) {
         const secrets = setVar(yield* readSecrets(config.repo), env, token);
-        yield* writeSecrets(config.repo, secrets);
-        yield* installSecrets(config.repo);
-        const rev = yield* commitAndPush(
-          config.repo,
-          [encryptedPath(config.repo).slice(config.repo.length + 1)],
-          `Set secret ${env}`,
-        );
+        // The secrets and the recipients both, in one commit.
+        const rev = yield* storeSecrets(config.repo, secrets, `Set secret ${env}`);
         yield* Console.log(
           `created a token for ${client}${server.length === 0 ? "" : ` (${server.join(", ")})`}, kept in the fleet's secrets as ${env} (${rev}).`,
         );

@@ -1,5 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { mkdtempSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
@@ -17,6 +19,8 @@ import {
   recipientSet,
   recipientsPath,
   readSecrets,
+  SECRETS_FILES,
+  storeSecrets,
   writeRecipients,
   writeSecrets,
 } from "./Secrets.ts";
@@ -89,5 +93,40 @@ describe("letting a node read the secrets", () => {
     await run(writeRecipients(repo, { box: own, laptop }));
     expect(await run(encryptedFor(repo))).toBe(recorded);
     expect(readFileSync(recipientsPath(repo), "utf8")).toContain(`laptop = "${laptop}"`);
+  });
+});
+
+describe("storing secrets on a fleet whose recipients.toml has no encrypted-for line yet", () => {
+  it("commits the recipients with the secrets, in one commit, pushed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "t3f-store-"));
+    process.env["HOME"] = home;
+    const git = (cwd: string, ...args: Array<string>) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+        cwd,
+        encoding: "utf8",
+      });
+    const origin = join(home, "origin.git");
+    const repo = join(home, "fleet");
+    git(home, "init", "-q", "--bare", "-b", "main", origin);
+    git(home, "clone", "-q", origin, repo);
+    const { recipient } = await run(ensureIdentity);
+    await run(writeSecrets(repo, "A=1\n", { a: recipient }));
+    // As every fleet made before the line existed has it.
+    writeFileSync(
+      recipientsPath(repo),
+      readFileSync(recipientsPath(repo), "utf8").replace(/^# encrypted-for: .*\n/m, ""),
+    );
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "legacy");
+    git(repo, "push", "-q", "-u", "origin", "main");
+
+    // What `hub token create` does on an authority.
+    const rev = await run(storeSecrets(repo, "A=1\nT3_FLEET_HUB_TOKEN_X=t\n", "Set secret X"));
+    expect(rev).not.toBe("nothing to commit");
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(git(repo, "show", "--name-only", "--format=", "HEAD").trim().split("\n")).toEqual(
+      [...SECRETS_FILES].sort(),
+    );
+    expect(git(origin, "show", "main:secrets/recipients.toml")).toContain("# encrypted-for: ");
   });
 });

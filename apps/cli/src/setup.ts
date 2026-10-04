@@ -65,6 +65,8 @@ import {
   type Mode,
   type Plan,
 } from "@t3-fleet/core/setup/Plan";
+import { extraOffers } from "@t3-fleet/core/setup/Extras";
+import { t3AccessPath } from "@t3-fleet/core/T3Access";
 import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Preflight";
 import { registeredByFleet } from "@t3-fleet/core/setup/RegisteredByFleet";
 import {
@@ -562,24 +564,25 @@ const planAndApply = (flags: Flags, scratch: string) =>
           : "github" in remoteTarget
             ? `gh repo create ${remoteTarget.github} --private`
             : `push to ${cleanUrl(remoteTarget.url)}`;
-    const fleetHasRelay =
-      mode !== "first" &&
-      /^\[relay\]/m.test(
-        yield* fs
-          .readFileString(`${mode === "join" ? scratch : checkout}/${FLEET_FILE}`)
-          .pipe(Effect.orElseSucceed(() => "")),
-      );
-    const offers: Array<readonly [string, string]> = [
-      ...(fleetHasRelay
-        ? []
-        : [
-            ["relay", "an always-on machine gives instant sync and holds your MCP logins"] as const,
-          ]),
-      ["model proxy", "retries, stats, a login that doesn't expire"] as const,
-      ...(found.t3.running
-        ? [["T3 access", "provider logins and health as T3 itself sees them"] as const]
-        : []),
-    ];
+    const fleetText = yield* fs
+      .readFileString(`${mode === "join" ? scratch : checkout}/${FLEET_FILE}`)
+      .pipe(Effect.orElseSucceed(() => ""));
+    const nodeText = yield* fs
+      .readFileString(`${mode === "join" ? scratch : checkout}/nodes/${node}.toml`)
+      .pipe(Effect.orElseSucceed(() => ""));
+    // Only extras not set up yet, and on a machine set up already only those asked for (Extras.ts).
+    const offers = extraOffers({
+      mode,
+      configured: {
+        relay: mode !== "first" && /^\[relay\]/m.test(fleetText),
+        "model proxy":
+          mode !== "first" &&
+          (/^\[defaults\.models\]/m.test(fleetText) || /^\[models\]/m.test(nodeText)),
+        "T3 access": yield* fs.exists(t3AccessPath(home)).pipe(Effect.orElseSucceed(() => false)),
+      },
+      asked: { relay: flags.relay, "model proxy": flags.models },
+      t3Running: found.t3.running,
+    });
     const timerNow = mode === "again" && timerOff && pre.timer.works;
     const preview = withSelf(decide(plan, {}, paths));
     const nothing =

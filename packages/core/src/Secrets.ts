@@ -28,6 +28,7 @@ import {
 } from "age-encryption";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+import { commitAndPush } from "./Git.ts";
 import { sha256 } from "./Hash.ts";
 import { configDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
@@ -92,6 +93,14 @@ export const readRecipients = (repo: string) =>
 
 const ENCRYPTED_FOR = "# encrypted-for: ";
 
+/**
+ * What re-encrypting writes, relative to the repo: the secrets, and the
+ * recipients with the set they were encrypted to. Every change commits both,
+ * in one commit: recipients.toml alone left behind is a dirty fleet file.
+ */
+export const SECRETS_FILES = ["secrets/secrets.env.age", "secrets/recipients.toml"] as const;
+export const RECIPIENTS_FILE = "secrets/recipients.toml";
+
 /** The set of keys, whoever holds them: SHA-256 of the distinct keys, sorted. */
 export const recipientSet = (keys: ReadonlyArray<string>) =>
   Effect.promise(() => sha256([...new Set(keys)].sort().join("\n")));
@@ -133,6 +142,7 @@ export const writeRecipients = (
           "",
         ].join("\n"),
       );
+      return [RECIPIENTS_FILE] as ReadonlyArray<string>;
     }),
   );
 
@@ -181,6 +191,20 @@ export const writeSecrets = (
       yield* fs.makeDirectory(`${repo}/secrets`, { recursive: true }).pipe(Effect.ignore);
       yield* fs.writeFileString(encryptedPath(repo), armored);
       yield* writeRecipients(repo, to, yield* recipientSet(Object.values(to)));
+      return SECRETS_FILES as ReadonlyArray<string>;
+    }),
+  );
+
+/**
+ * Change the secrets on an authority: encrypt `plaintext`, install it here,
+ * and commit and push what that wrote (SECRETS_FILES) with `message`.
+ */
+export const storeSecrets = (repo: string, plaintext: string, message: string) =>
+  underSyncLock(
+    Effect.gen(function* () {
+      const files = yield* writeSecrets(repo, plaintext);
+      yield* installSecrets(repo);
+      return yield* commitAndPush(repo, files, message);
     }),
   );
 

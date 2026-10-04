@@ -189,6 +189,36 @@ describe("a setup that stops part-way", () => {
     fs.rmSync(join(repo, "bootstrap.sh"));
   });
 
+  it("commits the recipients with the secrets on a fleet whose recipients.toml has no encrypted-for line", async () => {
+    const recipients = join(repo, "secrets/recipients.toml");
+    fs.writeFileSync(
+      recipients,
+      fs.readFileSync(recipients, "utf8").replace(/^# encrypted-for: .*\n/m, ""),
+    );
+    const sh = (...args: Array<string>) =>
+      execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], {
+        encoding: "utf8",
+      });
+    sh("commit", "-qam", "legacy recipients");
+    sh("push", "-q");
+    // Again on an authority, with a secret and the relay's token (setup --relay) to store.
+    const again: SetupInput = {
+      ...input(),
+      mode: "again",
+      actions: { ...actions(), skills: [], links: [], ignored: [] },
+      extras: { relay: { url: null, token: `${RELAY}-new` }, models: null, t3: false },
+      now: 3,
+    };
+    expect(await runSteps(again, ["snapshot", "repo"])).toBeNull();
+    expect(sh("status", "--porcelain")).toBe("");
+    expect(
+      execFileSync("git", ["-C", bare, "show", "main:secrets/recipients.toml"], {
+        encoding: "utf8",
+      }),
+    ).toContain("# encrypted-for: ");
+    expect(await run(readSecrets(repo))).toContain(`T3_FLEET_RELAY_TOKEN=${RELAY}-new`);
+  });
+
   it("refuses to resume without its values: missing, another run's, or incomplete", async () => {
     const stopped = await run(Effect.flip(loadRunSecrets(home, 8)));
     expect(stopped).toContain("belongs to another run");
