@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { probeSettings, type Config } from "../Config.ts";
-import { ENGINE_INSTALL, EngineArea } from "./Engine.ts";
+import { ENGINE_INSTALL, EngineArea, systemdTimerScheduled } from "./Engine.ts";
 
 const observed = (over: Record<string, unknown> = {}) => ({
   wanted: "abc",
@@ -102,6 +102,24 @@ describe("engine-outdated", () => {
   it("says which services the install restarts", () => {
     const f = outdated({ wantedBuild: build("0.6.2", 2), installedBuild: build("0.6.1", 1), services: ["serve", "listen"] });
     expect(f?.fix?.disrupts).toBe("restarts the relay and the listener on box");
+  });
+});
+
+describe("engine-timer on systemd", () => {
+  // As `systemctl show t3-fleet-sync.timer -p ActiveState -p SubState -p NextElapseUSecMonotonic -p NextElapseUSecRealtime` prints them.
+  const show = (sub: string, mono: string, real = "") => `NextElapseUSecRealtime=${real}\nNextElapseUSecMonotonic=${mono}\nActiveState=active\nSubState=${sub}\n`;
+
+  it("counts a timer waiting for its next run as scheduled", () => {
+    expect(systemdTimerScheduled(show("waiting", "3month 4w 8h 9min 27.959738s"))).toBe(true);
+  });
+
+  it("counts a timer whose sync is running as scheduled, though it has no next run yet", () => {
+    expect(systemdTimerScheduled(show("running", "infinity"))).toBe(true);
+  });
+
+  it("flags a timer that elapsed and will never run again", () => {
+    expect(systemdTimerScheduled(show("elapsed", "infinity"))).toBe(false);
+    expect(systemdTimerScheduled("ActiveState=inactive\nSubState=dead\nNextElapseUSecMonotonic=infinity\n")).toBe(false);
   });
 });
 
