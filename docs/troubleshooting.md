@@ -37,9 +37,10 @@ controller (or none). Each build carries its version, build time and commit;
 `t3-fleet --version` shows them. The fix streams the controller's build over
 ssh to `~/.local/share/t3-fleet/t3-fleet.mjs`, links it as
 `~/.local/bin/t3-fleet` (and `~/.local/bin/fleetx`, until 1.0), and restarts
-T3 Fleet's services: when the machine runs the relay, the listener or the
-model proxy the fix says it interrupts them, so `fix --safe` leaves it out.
-When neither build is known to be newer the fix asks first. A `t3-fleet ui`
+the relay and the listener when the machine runs them, which interrupts them:
+the fix says so, and `fix --safe` leaves it out. (The model proxy picks up the
+new build itself, once its streams finish.) When neither build is known to be
+newer, the fix asks first. A `t3-fleet ui`
 or `t3-fleet mcp` that started before a newer build was installed on its own
 machine does not install its build anywhere; restart it.
 
@@ -119,8 +120,12 @@ pick it up on sync.
 
 **`models-service`** — the model proxy's service is missing, out of date, not
 running, or not answering on 127.0.0.1:8398. The fix (re)installs and
-restarts it. Until it runs, the launchers start the CLIs directly. Log:
-`~/.local/state/t3-fleet/models.log`.
+restarts it; a restart waits up to 45 seconds for the responses in flight.
+Until it runs, the launchers start the CLIs directly. Installing a new build
+does not restart it: the proxy notices the build within a minute, keeps
+answering until its last response is done (15 minutes at most), exits, and
+its service starts it again a second later. Log (start-up lines only, no
+per-request lines): `~/.local/state/t3-fleet/models.log`.
 
 **`models-launcher-<instance>`** — that instance's launcher
 (`~/.local/bin/t3-fleet-claude`, `t3-fleet-codex`, `t3-fleet-<instance>`) is missing
@@ -136,7 +141,10 @@ directly rather than through its launcher. The fix, `t3-fleet models route
 <instance>`, sets the instance's binary path in `~/.t3/userdata/settings.json`
 (T3 has no command for it and reloads the file itself); running sessions keep
 their binary. `t3-fleet models route <instance> --undo` puts the old path back.
-It is offered once the launcher is installed.
+It is offered once the launcher is installed, and only when the CLI the
+launcher runs is there: its recipe's `command` (for Claude
+`~/.local/bin/claude`, or `claude` on PATH). If it is not, the finding says
+so; install the CLI or set `[models.providers.<instance>] command`.
 
 **`models-unroutable-<instance>`** — a note: that instance cannot go through
 the proxy. Either it runs inside T3 with no CLI (Cursor, Antigravity), or
@@ -145,12 +153,17 @@ T3 Fleet has no recipe for its driver; declare one with
 set `route = false` to silence it.
 
 **`models-failing`** — more than 5% of an upstream's requests failed in the
-last hour, or launches fell back to the CLI because the proxy was not
-listening. The detail names the most common failure class: `connect` and
-`timeout` (the network), `429` and `529` (rate limits, overload), `5xx`,
-`4xx`, or `stream` (broken off after it started). `t3-fleet models stats` shows
-the windows; `~/.local/state/t3-fleet/models.jsonl` has every request's
-metadata.
+last hour (and at least three of them), or launches fell back to the CLI
+because the proxy was not listening. The detail names the most common failure
+class: `connect` and `timeout` (the network), `429` and `529` (rate limits,
+overload), `5xx`, or `stream` (broken off after it started, including a
+response cut by the proxy stopping). Client errors (`4xx`: a prompt too long,
+a request too large) are the request's own problem and do not count, though
+`t3-fleet models stats` still shows them. `t3-fleet models stats` shows the
+windows; `~/.local/state/t3-fleet/models.jsonl` has every request's metadata.
+With `egress = "relay"`, an error the relay met on the way to the upstream
+says "at the relay"; when the relay itself cannot be reached, requests go
+direct and do not fail.
 
 ## mcp
 
@@ -166,9 +179,12 @@ hub, `t3-fleet mcp servers` on any machine shows why; a 401 means its
 credential expired: `t3-fleet mcp login <name>`.
 
 **`mcp-<name>-needs-login`** — the hub has no working login for the server:
-it was never signed in, the refresh token was revoked, or someone signed out.
-A person signs in, so there is no automatic fix: run `t3-fleet mcp login <name>`
-on any machine and open the URL it prints in any browser on the tailnet.
+it was never signed in, the refresh token was revoked, someone signed out, or
+the definition's `url` changed (a login is only sent to the URL it was issued
+for). A person signs in, so there is no automatic fix: run `t3-fleet mcp login <name>`
+on any machine and open the URL it prints in any browser on the tailnet. If
+the provider's page says it does not know the client, run
+`t3-fleet mcp logout <name>` first: the next login registers the hub again.
 
 **`mcp-toolhive-left`** — the hub serves these servers now, but ToolHive
 still runs them on this machine. The fix runs `thv stop` for them (marked as

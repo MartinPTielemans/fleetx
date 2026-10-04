@@ -134,7 +134,7 @@ and any thread can be asked "what's wrong with my environments?".
 
 ```
 $ t3-fleet ui
-t3-fleet ui on http://127.0.0.1:8397/#token=…
+t3-fleet ui on http://127.0.0.1:53117/#ticket=…
 ```
 
 A local web app in T3 Code's look, light and dark, with everything above:
@@ -144,17 +144,23 @@ alerts, skills on every machine (add, update and remove them), the MCP
 hub's servers and tool-call log, model traffic, and every
 machine's merged config. Applying a fix works as `t3-fleet fix` does: the exact
 commands, what each interrupts, an explicit confirmation, then a fresh check.
-It checks every minute while a browser is open and updates as the relay
-reports syncs.
+What runs is what you reviewed: a fix whose command changed since is left out
+and reported, and a proposal is approved only if it still makes the change you
+saw. Fixes and repo changes keep running if you close or reload the tab; any
+tab shows how they went, and Ctrl-C waits for them (a second Ctrl-C stops
+them). It checks every minute while a tab is open and visible, and updates as
+the relay reports syncs.
 
-It listens on 127.0.0.1 only and answers only requests carrying the token in
-the link it opens, from its own address, so no other website can read your
-fleet or apply fixes. `--port` picks another port, `--no-open` prints the link
-instead of opening a browser. The app is built into the single `t3-fleet` file. It
-reads the config again for every check; when T3 Fleet is upgraded on this
-machine while it runs (as `t3-fleet mcp` does too), it stops installing its
-build on other machines until you restart it, since that would put the old
-build back.
+It listens on 127.0.0.1 only, on a new port each run, and answers only the tab
+that opened its link, from its own address, so no other website can read your
+fleet or apply fixes. The link works once: if it was already used, the page
+says so (someone else on the machine may have opened it), and `t3-fleet ui`
+prints a new one for each further tab. `--port` pins the port, `--no-open`
+prints the link instead of opening a browser. The app is built into the single
+`t3-fleet` file. It reads the config again for every check, fix and action;
+when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
+does too), it stops installing its build on other machines until you restart
+it, since that would put the old build back.
 
 ## Renamed from fleetx
 

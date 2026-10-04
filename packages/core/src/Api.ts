@@ -8,10 +8,15 @@
  *   relay (hub)  GET /hub/servers              HubServer[]
  *                POST /hub/servers/<n>/login   HubLoginStart
  *                GET /hub/calls                HubCall[]
- *   t3-fleet ui    GET  /api/status              UiStatus
- *                POST /api/fixes               UiApplyRequest → UiApplyResult
+ *   t3-fleet ui  POST /api/session             (the link's one-use ticket) → UiSessionGrant
+ *                GET  /api/session             UiSession
+ *                GET  /api/status              UiStatus
+ *                POST /api/fixes/plan          UiFixPlanRequest → UiFixPlan
+ *                POST /api/fixes               UiApplyRequest → UiJob
  *                GET  /api/proposals           UiProposal[]
  *                POST /api/proposals/<node>/approve | /reject
+ *                                              UiDecideRequest → UiJob
+ *                GET  /api/jobs                UiJob[]
  *                GET  /api/alerts              UiAlert[]
  *                GET  /api/models              UiModels
  *                GET  /api/hub/servers         HubServer[] (from the relay)
@@ -20,12 +25,12 @@
  *                GET  /api/config/<node>       UiConfigRow[]
  *                GET  /api/skills              UiSkills
  *                POST /api/skills/lookup       UiSkillsLookupRequest → UiSkillsLookup
- *                POST /api/skills/add          UiSkillsAddRequest → UiSkillsLanded
+ *                POST /api/skills/add          UiSkillsAddRequest → UiJob
  *                POST /api/skills/preview      UiSkillsNames → UiSkillsPreview
- *                POST /api/skills/update       UiSkillsKeepRequest → UiSkillsLanded
- *                POST /api/skills/remove       UiSkillsNames → UiSkillsLanded
- *                GET  /api/session             UiSession
+ *                POST /api/skills/update       UiSkillsKeepRequest → UiJob
+ *                POST /api/skills/remove       UiSkillsNames → UiJob
  *                GET  /api/events              server-sent events: relay events, plus "check"
+ *                                              (UiStatus), "check-failed" (UiCheckFailed), "job" (UiJob)
  */
 import * as Schema from "effect/Schema";
 
@@ -189,24 +194,62 @@ export const UiStatus = Schema.Struct({
 });
 export type UiStatus = typeof UiStatus.Type;
 
-export const UiApplyRequest = Schema.Struct({ ids: Schema.Array(Schema.String) });
+/** Which fixes to plan, by finding id. */
+export const UiFixPlanRequest = Schema.Struct({ ids: Schema.Array(Schema.String) });
+
+/**
+ * One fix exactly as the server would run it now. `digest` names this command,
+ * node, `on` and interruption together; applying sends it back, and the server
+ * runs the fix only if a fresh check still gives the same digest.
+ */
+export const UiPlannedFix = Schema.Struct({
+  id: Schema.String,
+  node: Schema.String,
+  title: Schema.String,
+  command: Schema.String,
+  safe: Schema.Boolean,
+  disrupts: Schema.optionalKey(Schema.String),
+  on: Schema.optionalKey(Schema.String),
+  digest: Schema.String,
+});
+export type UiPlannedFix = typeof UiPlannedFix.Type;
+
+const NotApplied = Schema.Struct({ id: Schema.String, reason: Schema.String });
+
+export const UiFixPlan = Schema.Struct({ fixes: Schema.Array(UiPlannedFix), notApplicable: Schema.Array(NotApplied) });
+export type UiFixPlan = typeof UiFixPlan.Type;
+
+export const UiApplyRequest = Schema.Struct({
+  fixes: Schema.Array(Schema.Struct({ id: Schema.String, digest: Schema.String })),
+  /** Ids of the fixes whose interruption the user accepted; a fix that interrupts something runs only if listed. */
+  acknowledged: Schema.Array(Schema.String),
+});
 
 export const UiApplyResult = Schema.Struct({
   results: Schema.Array(Schema.Struct({ id: Schema.String, node: Schema.String, title: Schema.String, ok: Schema.Boolean, output: Schema.String })),
-  notApplied: Schema.Array(Schema.Struct({ id: Schema.String, reason: Schema.String })),
-  status: UiStatus,
+  notApplied: Schema.Array(NotApplied),
 });
 export type UiApplyResult = typeof UiApplyResult.Type;
 
 export const UiProposal = Schema.Struct({
   node: Schema.String,
   branch: Schema.String,
+  /** The staging branch's commit this diff was taken from. */
+  commit: Schema.String,
+  /**
+   * A digest of what approving lands: each file's blob on the branch and in
+   * the proposal. Approving or rejecting names it, so a newer change is not
+   * decided unseen; a sync that re-creates the same change keeps it.
+   */
+  change: Schema.String,
   summary: Schema.String,
   files: Schema.Array(Schema.String),
   diff: Schema.String,
   autoApprovable: Schema.Boolean,
 });
 export type UiProposal = typeof UiProposal.Type;
+
+export const UiDecideRequest = Schema.Struct({ change: Schema.String });
 
 export const UiAlert = Schema.Struct({
   at: Schema.Number,
@@ -269,6 +312,41 @@ export const UiSkillsKeepRequest = Schema.Struct({ skills: Schema.Array(Schema.S
 /** What changed in the repo, and whether it was committed or waits for the next sync to propose it. */
 export const UiSkillsLanded = Schema.Struct({ paths: Schema.Array(Schema.String), landed: Schema.String });
 export type UiSkillsLanded = typeof UiSkillsLanded.Type;
+
+// ── jobs ────────────────────────────────────────────────────────────────
+
+export const UiJobKind = Schema.Literals(["fixes", "approve", "reject", "skills-add", "skills-update", "skills-remove"]);
+export type UiJobKind = typeof UiJobKind.Type;
+
+/**
+ * Something that changes machines or the config repo. It runs in the server,
+ * not in the request that started it, so closing or reloading the tab does
+ * not stop it; every change to it is a "job" event.
+ */
+export const UiJob = Schema.Struct({
+  id: Schema.String,
+  kind: UiJobKind,
+  /** What it does: "Apply 2 fixes on 1 machine". */
+  title: Schema.String,
+  state: Schema.Literals(["waiting", "running", "done", "failed"]),
+  /** What it is doing now, while it runs. */
+  step: Schema.NullOr(Schema.String),
+  startedAt: Schema.Number,
+  finishedAt: Schema.NullOr(Schema.Number),
+  error: Schema.NullOr(Schema.String),
+  /** Fixes: what ran and what did not. */
+  applied: Schema.NullOr(UiApplyResult),
+  /** Skill changes: what changed in the repo. */
+  landed: Schema.NullOr(UiSkillsLanded),
+});
+export type UiJob = typeof UiJob.Type;
+
+/** A check that did not finish; the last good one is still shown. */
+export const UiCheckFailed = Schema.Struct({ at: Schema.Number, message: Schema.String });
+export type UiCheckFailed = typeof UiCheckFailed.Type;
+
+/** What the link's one-use ticket is traded for: this tab's token. */
+export const UiSessionGrant = Schema.Struct({ token: Schema.String });
 
 /** Who is asking, so the UI can label this machine and offer only what it may do. */
 export const UiSession = Schema.Struct({

@@ -17,7 +17,7 @@ import { generateX25519Identity } from "age-encryption";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import type { HubServer } from "../Api.ts";
-import { makeHub, type Hub, type HubEvent } from "./Hub.ts";
+import { makeHub, type Hub, type HubConfig, type HubEvent } from "./Hub.ts";
 import { discover } from "./OAuth.ts";
 import { messagesInBody, toJson, type JsonRpcMessage } from "./JsonRpc.ts";
 import { fakeAuthServer, fakeProtectedMcp, type FakeAuthServer, type FakeMcpServer } from "./testing/fakes.ts";
@@ -50,7 +50,7 @@ const fixture = (definitions: Record<string, unknown>) => {
   return dir;
 };
 
-const startHub = (dir: string, secrets: Record<string, string> = {}) =>
+const startHub = (dir: string, secrets: Record<string, string> = {}, overrides: Partial<HubConfig> = {}) =>
   Effect.gen(function* () {
     const events: Array<HubEvent> = [];
     const hub = yield* makeHub(
@@ -67,6 +67,7 @@ const startHub = (dir: string, secrets: Record<string, string> = {}) =>
         checkEvery: Duration.hours(1),
         allowLoopbackHttp: true,
         secrets: Effect.succeed(secrets),
+        ...overrides,
       },
       (e) => Effect.sync(() => events.push(e)),
     );
@@ -143,6 +144,15 @@ describe("hub OAuth", () => {
         const sent = yield* hub.gateway("protected", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: rawBody });
         yield* readBody(sent);
         expect(mcp.lastBody()).toBe('{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"search","arguments":{}}}');
+        // Only the JSON-RPC fields go on: a key Go would fold into "params" is refused, any other unknown key dropped.
+        const send = (body: string) =>
+          hub.gateway("protected", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body }).pipe(
+            Effect.flatMap((r) => readBody(r).pipe(Effect.as(r.status))),
+          );
+        expect(yield* send('{"jsonrpc":"2.0","id":78,"method":"tools/call","params":{"name":"search"},"param\u017f":{"name":"drop_table"}}')).toBe(400);
+        expect(mcp.lastBody()).not.toContain("drop_table");
+        yield* send('{"jsonrpc":"2.0","id":79,"method":"tools/call","params":{"name":"search","arguments":{}},"Paramz":{"name":"drop_table"},"result":1}');
+        expect(mcp.lastBody()).toBe('{"jsonrpc":"2.0","id":79,"method":"tools/call","params":{"name":"search","arguments":{}}}');
 
         // Fresh tokens are not refreshed; tokens close to expiry are, once, even under concurrency.
         yield* hub.check("protected");
@@ -192,6 +202,34 @@ describe("hub OAuth", () => {
         expect((yield* server(hub, "protected")).state).toBe("needs-login");
       }),
     );
+  }, 30_000);
+
+  it("never sends a login to a URL the definition moved to; the server needs a new one", async () => {
+    const moved = await fakeProtectedMcp(() => as.url, (t) => as.isValid(t));
+    const definition = (url: string) => ({ kind: "remote", url, remote_auth: true });
+    const dir = fixture({ mover: definition(`${mcp.url}/mcp`) });
+    try {
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir);
+          yield* waitFor(hub, "mover", "needs-login");
+          const url = yield* hub.login("mover");
+          yield* hub.finishLogin({ code: as.approve(url), state: new URL(url).searchParams.get("state") ?? "" });
+          yield* waitFor(hub, "mover", "running");
+
+          writeFileSync(join(dir, "repo/mcp/mover.json"), toJson(definition(`${moved.url}/mcp`)));
+          yield* hub.check();
+          const s = yield* waitFor(hub, "mover", "needs-login");
+          expect(s.detail).toMatch(/sign in again/);
+          expect(moved.bearers()).toEqual([]);
+          const refused = yield* rpc(hub, "mover", "tools/list", {});
+          expect(refused.status).toBe(503);
+          expect(moved.bearers()).toEqual([]);
+        }),
+      );
+    } finally {
+      await moved.close();
+    }
   }, 30_000);
 
   it("detects a login from the server's 401 and follows its resource_metadata", async () => {
@@ -339,6 +377,8 @@ describe("hub gateway", () => {
         expect(variant.status).toBe(400);
         expect(variant.text).toContain("differ only in case");
         expect((yield* raw('{"jsonrpc":"2.0","id":51,"Method":"tools/call","method":"ping"}')).status).toBe(400);
+        // Go's encoding/json reads "paramſ" as "params", the last one winning.
+        expect((yield* raw('{"method":"tools/call","jsonrpc":"2.0","id":54,"params":{"name":"echo"},"param\u017f":{"name":"delete_all"}}')).status).toBe(400);
         const duplicate = yield* raw('{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"echo","name":"delete_all","arguments":{}}}');
         expect(duplicate.text).toContain("-32003");
         expect((yield* raw('{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":7}}')).status).toBe(400);
@@ -357,6 +397,88 @@ describe("hub gateway", () => {
         const missing = yield* hub.gateway("notes", `Bearer ${RELAY_TOKEN}`, { method: "POST", headers: {}, body: "{}" });
         expect(missing.status).toBe(404);
         yield* missing.body.pipe(Stream.runDrain, Effect.ignore);
+      }),
+    );
+  }, 30_000);
+
+  it("refuses a session it has no owner for, forgets a deleted one, and keeps owners across a restart", async () => {
+    const plain = await fakeProtectedMcp(() => as.url, () => true);
+    try {
+      const dir = fixture({});
+      const ports = { plain: Number(new URL(plain.url).port) };
+      let token = "";
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir, {}, { ports });
+          yield* waitFor(hub, "plain", "running");
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "made-up" })).status).toBe(404);
+          const session = (yield* rpc(hub, "plain", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } })).headers["mcp-session-id"] ?? "";
+          expect(session).toBe("s-1");
+          token = yield* hub.createToken("laptop", null);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { token, session })).status).toBe(404);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(200);
+          const deleted = yield* hub.gateway("plain", `Bearer ${RELAY_TOKEN}`, { method: "DELETE", headers: { "mcp-session-id": session }, body: "" });
+          expect(deleted.status).toBe(204);
+          // The proxy fails reading a 204's empty body (Upstream.ts); only the status matters here.
+          yield* readBody(deleted).pipe(Effect.ignore);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session })).status).toBe(404);
+          yield* rpc(hub, "plain", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+        }),
+      );
+      // The relay restarts; the upstream's session lives on, and so does its owner. The file never holds the id itself.
+      expect(readFileSync(join(dir, "state/sessions.json"), "utf8")).not.toContain('"s-1"');
+      await run(
+        Effect.gen(function* () {
+          const { hub } = yield* startHub(dir, {}, { ports });
+          yield* waitFor(hub, "plain", "running");
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "s-1" })).status).toBe(200);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { token, session: "s-1" })).status).toBe(404);
+          expect((yield* rpc(hub, "plain", "tools/list", {}, { session: "made-up" })).status).toBe(404);
+        }),
+      );
+    } finally {
+      await plain.close();
+    }
+  }, 30_000);
+});
+
+describe("hub health checks", () => {
+  it("keeps checking when a server answers nonsense, and restarts one that stops answering", async () => {
+    const dir = fixture({
+      nonsense: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer, "--null-tools"] },
+      fine: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer] },
+      silent: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer, "--silent-tools"] },
+    });
+    await run(
+      Effect.gen(function* () {
+        const { hub, events } = yield* startHub(dir, {}, { checkEvery: Duration.millis(300) });
+        const fine = yield* waitFor(hub, "fine", "running");
+        const nonsense = yield* waitFor(hub, "nonsense", "error");
+        expect(nonsense.detail).toMatch(/tools\/list/);
+        yield* Effect.sleep(Duration.millis(1500));
+        expect((yield* server(hub, "fine")).lastCheckAt).toBeGreaterThan(fine.lastCheckAt ?? Infinity);
+        // A definition added later is still picked up.
+        writeFileSync(join(dir, "repo/mcp", "later.json"), toJson({ kind: "hosted-stdio", command: process.execPath, args: [stdioServer] }));
+        yield* waitFor(hub, "later", "running");
+        // Three checks without an answer: the process is started again.
+        const silent = events.filter((e) => e.server === "silent").map((e) => e.state);
+        expect(silent.slice(silent.indexOf("error"))).toContain("starting");
+      }),
+    );
+  }, 30_000);
+
+  it("does not restart a server busy with a client's call", async () => {
+    const dir = fixture({ busy: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer] } });
+    await run(
+      Effect.gen(function* () {
+        const { hub, events } = yield* startHub(dir, {}, { checkEvery: Duration.millis(300) });
+        yield* waitFor(hub, "busy", "running");
+        const session = (yield* rpc(hub, "busy", "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } })).headers["mcp-session-id"] ?? "";
+        const before = events.length;
+        // A synchronous tool holds the process for 2s: every check in that time goes unanswered.
+        const blocked = yield* rpc(hub, "busy", "tools/call", { name: "block", arguments: { ms: 2000 } }, { session });
+        expect(blocked.message?.result).toMatchObject({ content: [{ text: "blocked" }] });
+        expect(events.slice(before).filter((e) => e.server === "busy").map((e) => e.state)).not.toContain("starting");
       }),
     );
   }, 30_000);

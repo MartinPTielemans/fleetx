@@ -4,9 +4,10 @@
 #   curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- join <config-repo-url> <name>    # install, then run a command
 #
-# T3_FLEET_VERSION=v0.5.0 pins a release (FLEETX_VERSION still works). With gh
-# installed, the download is checked against the release's build attestation
-# before it is installed. `fleetx` is installed too, as another name for
+# T3_FLEET_VERSION=v0.5.0 pins a release (FLEETX_VERSION still works). The
+# download is checked against the release's SHA256SUMS and, with gh installed
+# and logged in, its build attestation; a mismatch or failed verification stops
+# the install. `fleetx` is installed too, as another name for
 # `t3-fleet`, until 1.0.
 set -eu
 repo="MartinPTielemans/fleetx"
@@ -24,10 +25,39 @@ else base="https://github.com/$repo/releases/download/$version"; fi
 mkdir -p "$dir" "$bin"
 tmp="$dir/t3-fleet.mjs.download"
 # Releases before the rename have the bundle only as fleetx.mjs.
-curl -fsSL "$base/t3-fleet.mjs" -o "$tmp" 2>/dev/null || curl -fsSL "$base/fleetx.mjs" -o "$tmp"
-if command -v gh >/dev/null 2>&1; then
-  if gh attestation verify "$tmp" --repo "$repo" >/dev/null 2>&1; then echo "verified build attestation"
-  else echo "warning: could not verify the build attestation (offline, or gh not logged in)" >&2; fi
+name=t3-fleet.mjs
+curl -fsSL "$base/$name" -o "$tmp" 2>/dev/null || { name=fleetx.mjs; curl -fsSL "$base/$name" -o "$tmp"; }
+fail() { rm -f "$tmp" "$tmp.sums"; echo "$1; not installing" >&2; exit 1; }
+
+# The release's SHA256SUMS lists every file it ships.
+if curl -fsSL "$base/SHA256SUMS" -o "$tmp.sums" 2>/dev/null; then
+  want=$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }' "$tmp.sums")
+  rm -f "$tmp.sums"
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp" | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then got=$(shasum -a 256 "$tmp" | cut -d' ' -f1)
+  else got=""; fi
+  if [ -z "$want" ]; then fail "SHA256SUMS has no entry for $name"
+  elif [ -z "$got" ]; then echo "warning: no sha256sum or shasum to check the download with" >&2
+  elif [ "$got" != "$want" ]; then fail "$name does not match the release's SHA256SUMS"
+  else echo "checksum matches SHA256SUMS"; fi
+else
+  echo "warning: the release has no SHA256SUMS to check the download against" >&2
+fi
+
+# Not being able to verify (no gh, not logged in, gh too old, GitHub unreachable) is a
+# warning; a verification that runs and fails stops the install.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "note: install gh to verify the build attestation" >&2
+elif ! gh auth status >/dev/null 2>&1; then
+  echo "warning: gh is not logged in, so the build attestation was not verified" >&2
+elif ! gh attestation verify --help >/dev/null 2>&1; then
+  echo "warning: this gh is too old to verify build attestations (needs 2.49 or newer)" >&2
+elif ! gh api rate_limit >/dev/null 2>&1; then
+  echo "warning: GitHub is unreachable, so the build attestation was not verified" >&2
+elif gh attestation verify "$tmp" --repo "$repo" >/dev/null 2>&1; then
+  echo "verified build attestation"
+else
+  fail "$name failed build attestation verification"
 fi
 chmod 755 "$tmp" && mv "$tmp" "$dir/t3-fleet.mjs"
 ln -sfn "$dir/t3-fleet.mjs" "$bin/t3-fleet"

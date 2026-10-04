@@ -56,8 +56,12 @@ const Observed = Schema.Struct({
   /** Which builds those are; null for one from before builds had identities. Absent from older probes. */
   wantedBuild: Schema.optionalKey(Schema.NullOr(BuildId)),
   installedBuild: Schema.optionalKey(Schema.NullOr(BuildId)),
-  /** T3 Fleet's long-running services installed here, which installing a build restarts. Absent from older probes. */
-  services: Schema.optionalKey(Schema.Array(Schema.Literals(["serve", "listen", "models"]))),
+  /**
+   * T3 Fleet's services installed here that installing a build restarts,
+   * cutting what they carry. The model proxy is not one: it drains on its own.
+   * Absent from older probes.
+   */
+  services: Schema.optionalKey(Schema.Array(Schema.Literals(["serve", "listen"]))),
   /** What ~/.config/t3-fleet/config.toml should say, and whether it does. */
   local: Schema.NullOr(Schema.Struct({ want: Schema.String, matches: Schema.Boolean })),
   platform: Schema.String,
@@ -207,7 +211,7 @@ export const migrateDirs = (legacy: ReadonlyArray<"config" | "state" | "share">)
   return steps.join("\n");
 };
 
-const SERVICE_NAMES: Readonly<Record<"serve" | "listen" | "models", string>> = { serve: "the relay", listen: "the listener", models: "the model proxy" };
+const SERVICE_NAMES: Readonly<Record<"serve" | "listen", string>> = { serve: "the relay", listen: "the listener" };
 
 /**
  * The installed build differs from the controller's. Installing the
@@ -316,8 +320,8 @@ export const EngineArea = defineArea({
           Effect.map(() => false),
           Effect.catch(() => fs.stat(`${ctx.home}/${rel}`).pipe(Effect.map((s) => s.type === "Directory"), Effect.orElseSucceed(() => false))),
         );
-      const services: Array<"serve" | "listen" | "models"> = [];
-      for (const role of ["serve", "listen", "models"] as const) {
+      const services: Array<"serve" | "listen"> = [];
+      for (const role of ["serve", "listen"] as const) {
         const unit =
           platform === "darwin"
             ? `${ctx.home}/Library/LaunchAgents/${launchdLabel(role)}.plist`

@@ -54,15 +54,36 @@ export const isResponse = (m: JsonRpcMessage): boolean => m.method === undefined
 const CANONICAL_KEYS: ReadonlyArray<string> = ["jsonrpc", "id", "method", "params"];
 
 /**
- * A key that differs only in case from one the hub reads (jsonrpc, id,
- * method, params, params.name), or null. Some servers (Go's encoding/json)
- * match keys case-insensitively, last one winning, so `{"name":"ok","Name":
- * "delete_repo"}` would show the policy one tool and the server another.
+ * A key as Go's encoding/json compares it when no key matches exactly: case
+ * folded, with the four non-ASCII letters it folds to ASCII (ſ to s, ı and İ
+ * to i, the Kelvin sign to k) folded too.
+ */
+export const foldKey = (key: string) => key.replace(/[\u017f\u0131\u0130\u212a]/g, (c) => (c === "\u017f" ? "s" : c === "\u212a" ? "k" : "i")).toLowerCase();
+
+/**
+ * A key that folds to one the hub reads (jsonrpc, id, method, params,
+ * params.name) without being it, or null. Some servers (Go's encoding/json)
+ * match keys that way, last one winning, so `{"name":"ok","Name":
+ * "delete_repo"}` or `"paramſ"` beside `"params"` would show the policy one
+ * tool and the server another.
  */
 export const caseVariantKey = (m: JsonRpcMessage): string | null => {
-  for (const key of Object.keys(m)) if (CANONICAL_KEYS.includes(key.toLowerCase()) && !CANONICAL_KEYS.includes(key)) return key;
-  if (isRecord(m.params)) for (const key of Object.keys(m.params)) if (key.toLowerCase() === "name" && key !== "name") return `params.${key}`;
+  for (const key of Object.keys(m)) if (CANONICAL_KEYS.includes(foldKey(key)) && !CANONICAL_KEYS.includes(key)) return key;
+  if (isRecord(m.params)) for (const key of Object.keys(m.params)) if (foldKey(key) === "name" && key !== "name") return `params.${key}`;
   return null;
+};
+
+/**
+ * The message rebuilt from its JSON-RPC fields alone: jsonrpc, id, method and
+ * params for a request or notification, jsonrpc, id, result and error for a
+ * response. What the hub forwards, so a key it did not read never reaches a
+ * server, however that server matches keys.
+ */
+export const rebuildMessage = (m: JsonRpcMessage): JsonRpcMessage => {
+  const keys = typeof m.method === "string" ? ["jsonrpc", "id", "method", "params"] : ["jsonrpc", "id", "result", "error"];
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (Object.hasOwn(m, key)) out[key] = (m as Record<string, unknown>)[key];
+  return out as JsonRpcMessage;
 };
 
 /** The tool a `tools/call` request names, or null. */

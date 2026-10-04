@@ -12,7 +12,7 @@ import type { CheckReport } from "@t3-fleet/core/Check";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
 import { runFixes, type FixOutcome } from "@t3-fleet/core/Fix";
-import { newBuild } from "@t3-fleet/core/Runtime";
+import { newBuild, untilReplaced } from "@t3-fleet/core/Runtime";
 
 /**
  * The bundle that gets streamed to other machines. Running from dist/bin.mjs
@@ -138,19 +138,16 @@ export const nodeFlag = Flag.String("node").pipe(
 
 /**
  * Runs a long-running service until it stops or this bundle is replaced by a
- * new build; then it returns, the process exits, and its unit starts the new
- * build (see newBuild in Runtime.ts). The exit is forced after a few seconds:
- * a client's open connection (a streaming model response, a kept-alive
- * socket) would otherwise keep the process alive with nothing listening, and
- * its unit would never start the new build.
+ * new build (untilReplaced and newBuild in Runtime.ts). The exit is forced a
+ * few seconds after: a client's open connection (a kept-alive socket, an
+ * event stream) would otherwise keep the process alive with nothing
+ * listening, and its unit would never start the new build. With `drain`, the
+ * service keeps running once the new build is seen until `drain` completes.
  */
-export const untilNewBuild = <A, E, R>(service: Effect.Effect<A, E, R>) =>
-  Effect.raceFirst(
-    service,
-    newBuild(process.argv[1] ?? "").pipe(
-      Effect.flatMap(() => Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it")),
-      // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
-      // @effect-diagnostics-next-line globalTimersInEffect:off
-      Effect.andThen(Effect.sync(() => setTimeout(() => process.exit(0), 5_000).unref())),
-    ),
-  );
+export const untilNewBuild = <A, E, R, R2 = never>(service: Effect.Effect<A, E, R>, options: { readonly drain?: Effect.Effect<unknown, never, R2> } = {}) =>
+  untilReplaced(service, newBuild(process.argv[1] ?? ""), {
+    ...(options.drain === undefined ? {} : { drain: options.drain }),
+    // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
+    // @effect-diagnostics-next-line globalTimers:off
+    exit: () => setTimeout(() => process.exit(0), 5_000).unref(),
+  });

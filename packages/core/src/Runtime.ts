@@ -8,6 +8,7 @@
  * manager's versioned directory is the last resort, because an upgrade
  * deletes it out from under the unit.
  */
+import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -84,6 +85,27 @@ export const retireLegacyUnit = (platform: string, root: boolean, role: string) 
   return `for u in ${unit}.timer ${unit}.service; do ${ctl} stop "$u" 2>/dev/null; ${ctl} disable "$u" 2>/dev/null; done; rm -f ${dir}/${unit}.service ${dir}/${unit}.timer; ${ctl} daemon-reload 2>/dev/null`;
 };
 
+/** launchd's ExitTimeOut when a plist sets none. */
+export const LAUNCHD_DEFAULT_EXIT_TIMEOUT = 20;
+
+/**
+ * Shell that reloads a launchd job from its (rewritten) plist. `bootout`
+ * only asks the old process to stop and returns at once; a `bootstrap`
+ * while it is still exiting fails ("Bootstrap failed: 5: Input/output
+ * error"), and once it has exited nothing is loaded at all. So this waits
+ * until launchd no longer knows the job, for at most `exitTimeout` (the
+ * ExitTimeOut of the plist being replaced, after which launchd kills it)
+ * plus a margin, and only then bootstraps.
+ */
+export const launchdReload = (label: string, plist: string, exitTimeout: number = LAUNCHD_DEFAULT_EXIT_TIMEOUT) => {
+  const job = `"gui/$(id -u)/${label}"`;
+  return [
+    `launchctl bootout ${job} 2>/dev/null`,
+    `i=0; while launchctl print ${job} >/dev/null 2>&1 && [ "$i" -lt ${exitTimeout + 10} ]; do sleep 1; i=$((i + 1)); done`,
+    `launchctl bootstrap "gui/$(id -u)" ${plist}`,
+  ].join("\n");
+};
+
 /**
  * Completes once the bundle this process runs from holds a different build.
  * T3 Fleet's long-running services (the relay, the listener, the model proxy)
@@ -109,4 +131,50 @@ export const newBuild = (bundle: string, every: Duration.Input = Duration.minute
       yield* Effect.sleep(Duration.seconds(5));
       if ((yield* digest) === now) return now;
     }
+  });
+
+/**
+ * Runs a long-running service until it stops or `replaced` completes (in the
+ * CLI, newBuild); then it returns, `exit` ends the process, and its unit
+ * starts the new build.
+ *
+ * Without `drain` the service stops at once and `exit` is called as soon as
+ * the new build is seen: the relay's event streams never end, so its server
+ * would otherwise wait out its whole graceful shutdown first. With `drain`
+ * the service keeps running until `drain` completes (the model proxy waits
+ * for its responses in flight), and `exit` is called once the service has
+ * stopped, its own finalizers included.
+ */
+export const untilReplaced = <A, E, R, R2, R3 = never>(
+  service: Effect.Effect<A, E, R>,
+  replaced: Effect.Effect<unknown, never, R2>,
+  options: { readonly drain?: Effect.Effect<unknown, never, R3>; readonly exit: () => void },
+) =>
+  Effect.suspend(() => {
+    let drained = false;
+    const drain = options.drain;
+    return Effect.raceFirst(
+      service,
+      replaced.pipe(
+        Effect.andThen(
+          drain === undefined
+            ? Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it").pipe(Effect.andThen(Effect.sync(options.exit)))
+            : Console.log("a new T3 Fleet build is installed; exiting once the requests in flight are done").pipe(
+                Effect.andThen(drain),
+                Effect.andThen(Console.log("exiting so the service restarts on the new build")),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    drained = true;
+                  }),
+                ),
+              ),
+        ),
+      ),
+    ).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          if (drained) options.exit();
+        }),
+      ),
+    );
   });

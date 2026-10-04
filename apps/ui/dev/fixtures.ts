@@ -4,7 +4,7 @@
  * Typed against Api.ts so it stays in step with the real server. Writes
  * succeed and change nothing.
  */
-import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@t3-fleet/core/Api";
+import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiFixPlan, UiJob, UiJobKind, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@t3-fleet/core/Api";
 
 const now = Date.now();
 const min = 60_000;
@@ -122,6 +122,14 @@ const status: UiStatus = {
       detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
       fix: { command: "t3-fleet skills adopt scratchpad --from ~/.codex/skills", safe: true },
     },
+    {
+      id: "desktop:t3-behind",
+      node: "desktop",
+      severity: "info",
+      area: "t3",
+      title: "T3 is 1 nightly release behind (0.0.46 nightly 10-02 → 0.0.46 nightly 10-03)",
+      fix: { command: "t3 update --channel nightly --yes", safe: false, disrupts: "restarts the T3 server on desktop; threads running there stop" },
+    },
     { id: "laptop:claude-other-copies", node: "laptop", severity: "info", area: "agents", title: "another claude on PATH", accepted: "the distribution ships its own package" },
   ],
 };
@@ -130,6 +138,8 @@ const proposals: ReadonlyArray<UiProposal> = [
   {
     node: "server",
     branch: "fleetx/staging/server",
+    commit: "5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e",
+    change: "c".repeat(64),
     summary: "1 file changed, 4 insertions(+), 1 deletion(-)",
     files: ["skills/review/SKILL.md"],
     diff: "diff --git a/skills/review/SKILL.md b/skills/review/SKILL.md\nindex 1a2b3c4..5d6e7f8 100644\n--- a/skills/review/SKILL.md\n+++ b/skills/review/SKILL.md\n@@ -1,6 +1,9 @@\n ---\n name: review\n-description: Review a diff.\n+description: Review a diff against the repo's standards.\n ---\n \n Read the change first.\n+\n+Then check it against AGENTS.md\n+and the originating issue.\n",
@@ -203,19 +213,55 @@ const models: UiModels = {
 
 const json = (value: unknown) => ({ status: 200, body: JSON.stringify(value) });
 
-export const fixtureResponse = (method: string, path: string): { status: number; body: string } | "events" => {
+/** Every fix in the fixtures, planned as the server would. */
+const plan: UiFixPlan = {
+  fixes: status.findings.flatMap((f) => (f.fix === undefined ? [] : [{ id: f.id, node: f.node, title: f.title, ...f.fix, digest: `fixture-${f.id}` }])),
+  notApplicable: [],
+};
+
+/** A job that is already over: fixtures change nothing. */
+const job = (kind: UiJobKind, title: string, result: Partial<Pick<UiJob, "applied" | "landed">> = {}): UiJob => ({
+  id: `fixture-${kind}`,
+  kind,
+  title,
+  state: "done",
+  step: null,
+  startedAt: Date.now(),
+  finishedAt: Date.now(),
+  error: null,
+  applied: null,
+  landed: null,
+  ...result,
+});
+
+/** What the event stream sends first: where things stand. */
+export const fixtureEvents = `: connected\n\nevent: check\ndata: ${JSON.stringify(status)}\n\n`;
+
+export const fixtureResponse = (method: string, path: string, body = ""): { status: number; body: string } | "events" => {
   if (path === "/api/events") return "events";
   if (method === "POST") {
-    if (path === "/api/fixes") return json({ results: [], notApplied: [{ id: "*", reason: "fixtures change nothing" }], status });
+    if (path === "/api/session") return json({ token: "fixture" });
+    if (path === "/api/fixes/plan") {
+      const ids: ReadonlyArray<string> = body === "" ? [] : (JSON.parse(body) as { ids: ReadonlyArray<string> }).ids;
+      return json({ fixes: plan.fixes.filter((f) => ids.includes(f.id)), notApplicable: [] });
+    }
+    if (path === "/api/fixes") return json(job("fixes", "Apply fixes", { applied: { results: [], notApplied: [{ id: "*", reason: "fixtures change nothing" }] } }));
+    if (path.endsWith("/approve")) return json(job("approve", "Approve server's proposal"));
+    if (path.endsWith("/reject")) return json(job("reject", "Reject server's proposal"));
     if (path.endsWith("/login")) return json({ url: "https://example.com/oauth/authorize" });
     if (path === "/api/skills/lookup") return json({ url: "https://github.com/acme/skills.git", skills: [{ name: "code-review", exists: true }, { name: "grilling", exists: false }, { name: "tdd", exists: true }] });
     if (path === "/api/skills/preview") return json(skillsPreview);
-    if (path.startsWith("/api/skills/")) return json({ paths: ["skills/tdd"], landed: "fixtures change nothing" });
+    if (path.startsWith("/api/skills/")) {
+      const kind = path === "/api/skills/add" ? "skills-add" : path === "/api/skills/update" ? "skills-update" : "skills-remove";
+      return json(job(kind, "Change skills", { landed: { paths: ["skills/tdd"], landed: "fixtures change nothing" } }));
+    }
     return { status: 204, body: "" };
   }
   switch (path) {
     case "/api/session":
       return json(session);
+    case "/api/jobs":
+      return json([]);
     case "/api/status":
       return json(status);
     case "/api/proposals":

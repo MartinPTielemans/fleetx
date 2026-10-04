@@ -14,7 +14,7 @@ const sourceVariant = (source: string): BadgeVariant =>
   source.startsWith("node ") ? "info" : source.startsWith("profile ") ? "outline" : source === "defaults" ? "secondary" : "warning";
 
 export function ConfigView({ node }: { node: string }) {
-  const { session } = useStore();
+  const { session, sessionError } = useStore();
   const selected = node !== "" ? node : (session?.self ?? "");
   const rows = useResource(() => (selected === "" ? Promise.resolve(null) : api.config(selected)), [selected]);
   const [filter, setFilter] = useState("");
@@ -55,12 +55,13 @@ export function ConfigView({ node }: { node: string }) {
         />
       </label>
       <Group>
-        {rows.data === null ? (
-          rows.error === null ? (
-            <LoadingRows rows={6} />
-          ) : (
-            <ErrorState error={rows.error} what={`${selected}'s settings`} onRetry={() => void rows.reload()} />
-          )
+        {selected === "" && sessionError !== null ? (
+          // Without the session there is no machine to start from.
+          <ErrorState error={sessionError} what="this machine's name" />
+        ) : rows.error !== null ? (
+          <ErrorState error={rows.error} what={`${selected}'s settings`} onRetry={() => void rows.reload()} />
+        ) : rows.data === null ? (
+          <LoadingRows rows={6} />
         ) : shown.length === 0 ? (
           <Empty icon={<SlidersHorizontalIcon />} title={rows.data.length === 0 ? "No settings" : "Nothing matches"}>
             {rows.data.length === 0 ? `${selected} uses T3 Fleet's defaults for everything.` : "Try a shorter filter."}

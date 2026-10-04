@@ -9,7 +9,11 @@
  *             the upstream, and log every JSON-RPC request as a HubCall
  *   health    every minute: re-read the definitions (starting, replacing or
  *             stopping servers), refresh OAuth logins ahead of expiry, and
- *             run an initialize and tools/list against each server
+ *             run an initialize and tools/list against each server. One
+ *             server's check cannot stop the others'; a process or container
+ *             that misses three checks in a row is restarted
+ *   lifecycle starting, stopping, restarting and reloading take turns, so a
+ *             server never runs twice
  *   logins    start and finish OAuth sign-ins; sign out
  *   tokens    create, list and revoke per-client gateway tokens
  *
@@ -23,8 +27,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -52,12 +59,14 @@ import {
   sseFrame,
   toJson,
   caseVariantKey,
+  rebuildMessage,
   toolOf,
   type JsonRpcMessage,
 } from "./JsonRpc.ts";
-import { makeOAuthManager, type OAuthManager } from "./OAuth.ts";
+import { makeOAuthManager, type LoginStatus, type OAuthManager, type TokenTarget } from "./OAuth.ts";
 import { bearerMatches, bearerOf, compileDeny, constantTimeEqual, hashToken, newClientToken } from "./Policy.ts";
 import { spawnStdio } from "./Process.ts";
+import { makeSessionOwners, type SessionOwners } from "./SessionOwners.ts";
 import { makeTokenStore, tokenStorePath, type TokenStore } from "./TokenStore.ts";
 import {
   makeProxy,
@@ -122,6 +131,8 @@ export interface Hub {
   readonly gateway: (name: string, authorization: string | undefined, request: ForwardRequest) => Effect.Effect<UpstreamResponse>;
   readonly login: (name: string) => Effect.Effect<string, string>;
   readonly finishLogin: (query: Readonly<Record<string, string | undefined>>) => Effect.Effect<string, string>;
+  /** How the sign-in with this state (from the login URL) is going. */
+  readonly loginStatus: (state: string) => Effect.Effect<LoginStatus>;
   readonly logout: (name: string) => Effect.Effect<void, string>;
   readonly restart: (name: string) => Effect.Effect<void, string>;
   readonly createToken: (client: string, servers: ReadonlyArray<string> | null) => Effect.Effect<string, string>;
@@ -136,8 +147,13 @@ interface Entry {
   /** Changes when the definition or its resolved environment changes. */
   readonly key: string;
   readonly scope: Scope.Closeable;
+  /** What clients reach. */
   readonly upstream: Upstream;
+  /** The same server for the health check, outside the count of client requests. */
+  readonly probe: Upstream;
   readonly bridge: Bridge | null;
+  /** Client requests the server has not finished answering. */
+  readonly clientRequests: Effect.Effect<number>;
   /** HTTP container: its local port once running. */
   port: number | null;
   state: HubServerState;
@@ -150,6 +166,8 @@ interface Entry {
   oauthDetected: boolean;
   /** The definition's deny patterns, compiled once. */
   readonly denied: (tool: string) => boolean;
+  /** Health checks in a row that got no answer. */
+  missed: number;
 }
 
 /** Parse dotenv text: KEY=value lines, optional `export`, simple quotes. */
@@ -165,6 +183,37 @@ export const parseDotenv = (text: string) => {
 };
 
 const CLIENT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
+/** Health checks in a row without an answer before a process or container is restarted. */
+const MISSED_CHECKS = 3;
+
+/** What a health check reads from initialize and tools/list. */
+const decodeInitializeResult = Schema.decodeUnknownOption(Schema.Struct({ protocolVersion: Schema.String }));
+const decodeToolList = Schema.decodeUnknownOption(Schema.Struct({ tools: Schema.Array(Schema.Unknown) }));
+const isNamedTool = Schema.is(Schema.Struct({ name: Schema.String }));
+const errorText = (error: unknown) =>
+  Option.match(Schema.decodeUnknownOption(Schema.Struct({ message: Schema.String }))(error), { onNone: () => "an error", onSome: (e) => e.message.slice(0, 200) });
+
+/** An upstream that counts the POSTs it is still answering: a busy server is not a hung one. */
+const counted = (inner: Upstream) => {
+  let inFlight = 0;
+  const upstream: Upstream = {
+    forward: (request) =>
+      request.method !== "POST"
+        ? inner.forward(request)
+        : Effect.gen(function* () {
+            let done = false;
+            const finish = Effect.sync(() => {
+              if (!done) inFlight--;
+              done = true;
+            });
+            inFlight++;
+            const response = yield* inner.forward(request).pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? finish : Effect.void)));
+            return { ...response, body: response.body.pipe(Stream.ensuring(finish)) };
+          }),
+  };
+  return { upstream, inFlight: Effect.sync(() => inFlight) };
+};
 
 /** Sent under its fleetx name too, for a controller on a build from before the rename. Until 1.0. */
 const stateHeaders = (state: string) => ({ [header("hub-state")]: state, [legacyHeader("hub-state")]: state });
@@ -207,11 +256,17 @@ export const makeHub = (
       );
     const store: TokenStore = yield* makeTokenStore({ file: config.stateDir === undefined ? tokenStorePath(config.home) : path.join(stateDir, "tokens.age"), identity: config.identity });
     const log = yield* makeCallLog(path.join(stateDir, "calls.jsonl"));
+    const owners: SessionOwners = yield* makeSessionOwners(path.join(stateDir, "sessions.json"));
     const redirectUri = config.relayUrl === null ? "" : `${config.relayUrl.replace(/\/+$/, "")}/oauth/callback`;
     const oauth: OAuthManager = yield* makeOAuthManager({ store, redirectUri, secrets, clientName: "T3 Fleet hub", allowLoopbackHttp: config.allowLoopbackHttp === true });
 
     const entries = new Map<string, Entry>();
     let problems: ReadonlyArray<{ readonly name: string; readonly problem: string }> = [];
+    /** Starting, stopping, restarting and reloading take turns. */
+    const lifecycle = yield* Semaphore.make(1);
+    const checkEvery = Duration.fromInputUnsafe(config.checkEvery ?? Duration.minutes(1));
+    /** A check gets half the period between checks, and never more than 30 seconds. */
+    const checkTimeout = Duration.min(Duration.seconds(30), Duration.divideUnsafe(checkEvery, 2));
 
     const setState = (entry: Entry, state: HubServerState, detail: string | null) =>
       Effect.gen(function* () {
@@ -227,7 +282,8 @@ export const makeHub = (
 
     const usesOAuth = (entry: Entry) => entry.def.auth.type === "oauth" || entry.oauthDetected;
 
-    const credentialFor = (entry: () => Entry): Credential => ({
+    /** `target`: the URL the token goes to, or null for a container on this machine (see TokenTarget). */
+    const credentialFor = (entry: () => Entry, target: TokenTarget): Credential => ({
       token: Effect.gen(function* () {
         const e = entry();
         const auth = e.def.auth;
@@ -236,7 +292,7 @@ export const makeHub = (
           if (value === undefined || value === "") return yield* new UpstreamError({ message: `the secret ${auth.tokenEnv} is not set on the relay node` });
           return value;
         }
-        if (usesOAuth(e) || (yield* oauth.hasTokens(e.def.name))) return yield* oauth.accessToken(e.def.name);
+        if (usesOAuth(e) || (yield* oauth.hasTokens(e.def.name, target))) return yield* oauth.accessToken(e.def.name, target);
         return null;
       }),
       rejected: (token, challenge) =>
@@ -246,9 +302,9 @@ export const makeHub = (
           if (e.def.auth.type === "bearer") return yield* new UpstreamError({ message: `the server rejected the secret ${e.def.auth.tokenEnv}` });
           if (token === null) {
             e.oauthDetected = true;
-            return yield* oauth.accessToken(e.def.name);
+            return yield* oauth.accessToken(e.def.name, target);
           }
-          return yield* oauth.afterRejection(e.def.name, token);
+          return yield* oauth.afterRejection(e.def.name, target, token);
         }),
     });
 
@@ -256,6 +312,9 @@ export const makeHub = (
 
     const start = (def: HubDefinition, key: string) =>
       Effect.gen(function* () {
+        // Never two entries for one server: whatever runs under this name stops first.
+        const previous = entries.get(def.name);
+        if (previous !== undefined) yield* stop(previous, false);
         const scope = yield* Scope.fork(hubScope);
         const env = resolvedEnv("env" in def.runner ? def.runner.env : {}, yield* secrets);
         let entry: Entry;
@@ -265,8 +324,10 @@ export const makeHub = (
         const r = def.runner;
         let upstream: Upstream;
         let bridge: Bridge | null = null;
+        let clientRequests: Effect.Effect<number> = Effect.succeed(0);
         if (r.type === "remote" || r.type === "port") {
-          upstream = yield* provide(makeProxy(def.name, r.type === "remote" ? r.url : `http://127.0.0.1:${r.port}/mcp`, credentialFor(self)));
+          const url = r.type === "remote" ? r.url : `http://127.0.0.1:${r.port}/mcp`;
+          upstream = yield* provide(makeProxy(def.name, url, credentialFor(self, url)));
         } else if (r.type === "docker-http") {
           const proxies = new Map<number, Upstream>();
           upstream = {
@@ -276,7 +337,8 @@ export const makeHub = (
                 if (port === null) return yield* new UpstreamError({ message: `${def.name} is not running yet` });
                 let proxy = proxies.get(port);
                 if (proxy === undefined) {
-                  proxy = yield* provide(makeProxy(def.name, `http://127.0.0.1:${port}${r.path}`, credentialFor(self)));
+                  // The container's port changes with every start; its login goes with the definition.
+                  proxy = yield* provide(makeProxy(def.name, `http://127.0.0.1:${port}${r.path}`, credentialFor(self, null)));
                   proxies.set(port, proxy);
                 }
                 return yield* proxy.forward(request);
@@ -294,11 +356,19 @@ export const makeHub = (
               version: config.version,
               // Report the process's state as it changes, not only at the next check.
               onStatus: () => Effect.suspend(() => (entry === undefined ? Effect.void : check(entry))).pipe(Effect.forkIn(scope), Effect.asVoid),
+              onSessionEnd: (session) => owners.end(def.name, session),
             }),
           );
           upstream = bridge;
+          clientRequests = bridge.clientRequests;
         }
-        entry = { def, key, scope, upstream, bridge, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false, denied: compileDeny(def.deny) };
+        const probe = upstream;
+        if (r.type === "docker-http") {
+          const tracked = counted(upstream);
+          upstream = tracked.upstream;
+          clientRequests = tracked.inFlight;
+        }
+        entry = { def, key, scope, upstream, probe, bridge, clientRequests, port: null, state: "starting", detail: null, tools: null, lastCheckAt: null, challenge: null, oauthDetected: false, denied: compileDeny(def.deny), missed: 0 };
         entries.set(def.name, entry);
         yield* emit({ server: def.name, state: "starting", detail: null });
 
@@ -346,6 +416,14 @@ export const makeHub = (
         if (remove && entry.def.runner.type === "docker-http") yield* removeContainer(containerName(entry.def.name)).pipe(Effect.provide(services));
       });
 
+    /** Stop a container server and start it again, unless something replaced it meanwhile. */
+    const restartContainer = (entry: Entry) =>
+      Effect.gen(function* () {
+        if (entries.get(entry.def.name) !== entry) return;
+        yield* stop(entry, true);
+        yield* start(entry.def, entry.key);
+      }).pipe(lifecycle.withPermit);
+
     /** Bring the running servers in line with the repo's definitions. */
     const reload = Effect.gen(function* () {
       const loaded = config.enabled ? yield* loadDefinitions(config.repo).pipe(Effect.provide(services)) : { definitions: [], problems: [] };
@@ -370,7 +448,7 @@ export const makeHub = (
         }
         yield* start(def, key);
       }
-    });
+    }).pipe(lifecycle.withPermit);
 
     // ── health ──────────────────────────────────────────────────────────
 
@@ -378,7 +456,7 @@ export const makeHub = (
     const handshake = (entry: Entry) =>
       Effect.gen(function* () {
         const accept = "application/json, text/event-stream";
-        const init = yield* entry.upstream.forward({
+        const init = yield* entry.probe.forward({
           method: "POST",
           headers: { "content-type": "application/json", accept, "mcp-protocol-version": "2025-06-18" },
           body: toJson({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3-fleet-hub", version: config.version } } }),
@@ -387,21 +465,48 @@ export const makeHub = (
         if (init.status < 200 || init.status >= 300) return yield* new UpstreamError({ message: `initialize answered HTTP ${init.status}` });
         const initReply = messagesInBody(init.headers["content-type"], initText).find((m) => isResponse(m));
         if (initReply === undefined) return yield* new UpstreamError({ message: "initialize got no answer" });
-        if (initReply.error !== undefined) return yield* new UpstreamError({ message: `initialize failed: ${String((initReply.error as { message?: unknown }).message).slice(0, 200)}` });
+        if (initReply.error != null) return yield* new UpstreamError({ message: `initialize failed: ${errorText(initReply.error)}` });
+        if (Option.isNone(decodeInitializeResult(initReply.result))) return yield* new UpstreamError({ message: "initialize answered without a protocol version" });
         const session = init.headers["mcp-session-id"];
         const headers = { "content-type": "application/json", accept, "mcp-protocol-version": "2025-06-18", ...(session === undefined ? {} : { "mcp-session-id": session }) };
-        yield* entry.upstream.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", method: "notifications/initialized" }) }).pipe(
+        yield* entry.probe.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", method: "notifications/initialized" }) }).pipe(
           Effect.flatMap((r) => readBody(r)),
           Effect.ignore,
         );
-        const list = yield* entry.upstream.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
+        const list = yield* entry.probe.forward({ method: "POST", headers, body: toJson({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
         const listText = yield* readBody(list).pipe(Effect.orElseSucceed(() => ""));
-        const tools = (messagesInBody(list.headers["content-type"], listText).find((m) => isResponse(m))?.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
-        if (session !== undefined) yield* entry.upstream.forward({ method: "DELETE", headers, body: "" }).pipe(Effect.flatMap(readBody), Effect.ignore);
-        return tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
+        const listReply = messagesInBody(list.headers["content-type"], listText).find((m) => isResponse(m));
+        if (session !== undefined) yield* entry.probe.forward({ method: "DELETE", headers, body: "" }).pipe(Effect.flatMap(readBody), Effect.ignore);
+        return yield* countTools(entry, listReply?.result).pipe(Effect.mapError((message) => new UpstreamError({ message })));
       });
 
-    const check = (entry: Entry): Effect.Effect<void> =>
+    /** The tools a client may call, from a tools/list result; null when the server has none to list. */
+    const countTools = (entry: Entry, result: unknown): Effect.Effect<number | null, string> => {
+      if (result === undefined) return Effect.succeed(null);
+      return Option.match(decodeToolList(result), {
+        onNone: () => Effect.fail("tools/list answered something that is not a list of tools"),
+        onSome: ({ tools }) => Effect.succeed(tools.filter(isNamedTool).filter((t) => !entry.denied(t.name)).length),
+      });
+    };
+
+    /** A check got no answer; after a few in a row, the process or container is started again. */
+    const missed = (entry: Entry) =>
+      Effect.gen(function* () {
+        if (entry.bridge === null && entry.def.runner.type !== "docker-http") return;
+        // A server working on a client's request may be too busy to answer; that is not a hang.
+        if ((yield* entry.clientRequests) > 0) return;
+        entry.missed++;
+        if (entry.missed < MISSED_CHECKS) return;
+        entry.missed = 0;
+        yield* Effect.logWarning(`hub: ${entry.def.name} missed ${MISSED_CHECKS} health checks in a row; restarting it`);
+        if (entry.bridge !== null) yield* entry.bridge.restart;
+        // Forked into the hub's scope: stopping the entry closes the scope this check may run in.
+        else if (entry.def.runner.type === "docker-http") yield* restartContainer(entry).pipe(Effect.forkIn(hubScope));
+      });
+
+    const noAnswer = `no answer within ${Duration.format(checkTimeout)}`;
+
+    const checkOnce = (entry: Entry): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (entries.get(entry.def.name) !== entry) return;
         if (entry.bridge !== null) {
@@ -409,38 +514,61 @@ export const makeHub = (
           if (status.state !== "running") {
             yield* setState(entry, status.state, status.detail);
           } else {
-            const list = yield* entry.bridge.request("tools/list").pipe(Effect.result);
-            if (list._tag === "Failure") yield* setState(entry, "error", list.failure);
-            else {
-              const tools = (list.success.result as { tools?: Array<{ name?: unknown }> } | undefined)?.tools;
-              entry.tools = tools === undefined ? null : tools.filter((t) => typeof t.name === "string" && !entry.denied(t.name)).length;
-              yield* setState(entry, "running", null);
+            const list = yield* entry.bridge.request("tools/list").pipe(
+              Effect.timeoutOption(checkTimeout),
+              Effect.flatMap((o) => (o._tag === "Some" ? Effect.succeed(o.value) : Effect.fail(noAnswer))),
+              Effect.result,
+            );
+            if (list._tag === "Failure") {
+              yield* setState(entry, "error", list.failure);
+              yield* missed(entry);
+            } else {
+              entry.missed = 0;
+              const tools = yield* countTools(entry, list.success.result).pipe(Effect.result);
+              entry.tools = tools._tag === "Success" ? tools.success : null;
+              yield* setState(entry, tools._tag === "Success" ? "running" : "error", tools._tag === "Success" ? null : tools.failure);
             }
           }
         } else if (entry.def.runner.type === "docker-http" && entry.port === null) {
           // The container supervisor reports its own state.
         } else {
-          const result = yield* handshake(entry).pipe(Effect.timeout(Duration.seconds(30)), Effect.result);
+          const result = yield* handshake(entry).pipe(Effect.timeout(checkTimeout), Effect.result);
           if (result._tag === "Success") {
+            entry.missed = 0;
             entry.tools = result.success;
             yield* setState(entry, "running", null);
           } else {
             const e = result.failure;
             if (e._tag === "NeedsLogin") yield* setState(entry, "needs-login", e.message);
-            else if (e._tag === "TimeoutError") yield* setState(entry, "error", "no answer within 30s");
-            else yield* setState(entry, "error", e.message);
+            else if (e._tag === "TimeoutError") {
+              yield* setState(entry, "error", noAnswer);
+              yield* missed(entry);
+            } else yield* setState(entry, "error", e.message);
           }
         }
         entry.lastCheckAt = yield* Clock.currentTimeMillis;
       });
 
+    /** One server's check, whatever happens in it, never stops another's or the loop. */
+    const check = (entry: Entry): Effect.Effect<void> =>
+      checkOnce(entry).pipe(
+        Effect.catchDefect((defect) =>
+          Effect.gen(function* () {
+            yield* Effect.logError(`hub: checking ${entry.def.name} failed: ${String(defect)}`);
+            yield* setState(entry, "error", "the health check failed; see the relay's log");
+            entry.lastCheckAt = yield* Clock.currentTimeMillis;
+          }),
+        ),
+      );
+
     const checkAll = Effect.gen(function* () {
       yield* reload.pipe(Effect.catchCause((cause) => Effect.logError(`hub: reloading definitions failed: ${String(cause)}`)));
+      yield* owners.prune;
       yield* Effect.forEach([...entries.values()], check, { concurrency: 8, discard: true });
-    });
+    }).pipe(Effect.catchDefect((defect) => Effect.logError(`hub: the health check failed: ${String(defect)}`)));
 
     yield* reload;
-    yield* checkAll.pipe(Effect.delay(config.checkEvery ?? Duration.minutes(1)), Effect.repeat(Schedule.spaced(config.checkEvery ?? Duration.minutes(1))), Effect.forkScoped);
+    yield* checkAll.pipe(Effect.delay(checkEvery), Effect.repeat(Schedule.spaced(checkEvery)), Effect.forkScoped);
 
     // ── gateway ─────────────────────────────────────────────────────────
 
@@ -528,11 +656,6 @@ export const makeHub = (
         return textResponse(response.status, toJson(parsed.batch ? parsed.messages.map(filter) : filter(parsed.messages[0] as JsonRpcMessage)), response.headers);
       });
 
-    /** Upstream session ids and the client that opened each: one client cannot use another's session. */
-    const sessionOwners = new Map<string, string>();
-    const MAX_SESSIONS = 10_000;
-    const sessionKey = (server: string, session: string) => `${server}\u0000${session}`;
-
     const authorize: Hub["authorize"] = (name, authorization, method) =>
       Effect.gen(function* () {
         const startedAt = yield* Clock.currentTimeMillis;
@@ -552,8 +675,7 @@ export const makeHub = (
         const entry = entries.get(name);
         if (entry === undefined) return textResponse(404, `No MCP server named ${name}`, { "content-type": "text/plain" });
         const session = request.headers["mcp-session-id"];
-        const owner = session === undefined ? undefined : sessionOwners.get(sessionKey(name, session));
-        if (owner !== undefined && owner !== client) return textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
+        if (session !== undefined && !(yield* owners.owns(name, session, client))) return textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
 
         const parsed = request.method === "POST" ? parseMessages(request.body) : null;
         if (request.method === "POST" && parsed === null) return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
@@ -567,7 +689,7 @@ export const makeHub = (
             return textResponse(status, toJson(parsed?.batch === true ? replies : (replies[0] ?? errorMessage(null, code, "refused"))));
           });
 
-        // Keys that differ only in case would let the server see another tool than the policy did.
+        // Keys that fold to one the hub reads would let the server see another tool than the policy did.
         if (messages.some((m) => caseVariantKey(m) !== null)) {
           return yield* refuse(400, -32600, () => "T3 Fleet hub: refused a message with keys that differ only in case", () => "denied");
         }
@@ -586,8 +708,9 @@ export const makeHub = (
           );
         }
 
-        // Forward what the hub checked, re-serialized, never the raw body.
-        const forward: ForwardRequest = parsed === null ? request : { ...request, body: toJson(parsed.batch ? parsed.messages : parsed.messages[0]) };
+        // Forward what the hub checked, rebuilt from the JSON-RPC fields alone, never the raw body.
+        const rebuilt = messages.map(rebuildMessage);
+        const forward: ForwardRequest = parsed === null ? request : { ...request, body: toJson(parsed.batch ? rebuilt : rebuilt[0]) };
         const result = yield* entry.upstream.forward(forward).pipe(Effect.result);
         if (result._tag === "Failure") {
           const e = result.failure;
@@ -601,14 +724,8 @@ export const makeHub = (
           return jsonRpcFailure(502, `T3 Fleet hub: ${e.message}`, stateHeaders(entry.state));
         }
         const opened = result.success.headers["mcp-session-id"];
-        if (opened !== undefined && !sessionOwners.has(sessionKey(name, opened))) {
-          if (sessionOwners.size >= MAX_SESSIONS) {
-            const oldest = sessionOwners.keys().next();
-            if (oldest.done !== true) sessionOwners.delete(oldest.value);
-          }
-          sessionOwners.set(sessionKey(name, opened), client);
-        }
-        if (request.method === "DELETE" && session !== undefined && result.success.status < 300) sessionOwners.delete(sessionKey(name, session));
+        if (opened !== undefined) yield* owners.record(name, opened, client, { expires: entry.bridge === null });
+        if (session !== undefined && ((request.method === "DELETE" && result.success.status < 300) || result.success.status === 404)) yield* owners.end(name, session);
         const response = entry.def.deny.length > 0 && requested.some((r) => r.method === "tools/list") ? yield* filterToolLists(result.success, requested, entry.denied) : result.success;
         return logged(response, requested, name, client, startedAt);
       });
@@ -670,6 +787,7 @@ export const makeHub = (
           }
           return name;
         }),
+      loginStatus: oauth.loginStatus,
       logout: (name) =>
         Effect.gen(function* () {
           const entry = yield* need(name);
@@ -681,8 +799,7 @@ export const makeHub = (
           const entry = yield* need(name);
           if (entry.bridge !== null) yield* entry.bridge.restart;
           else if (entry.def.runner.type === "docker-http") {
-            yield* stop(entry, true);
-            yield* start(entry.def, entry.key);
+            yield* restartContainer(entry);
             return;
           }
           yield* check(entry).pipe(Effect.delay(Duration.seconds(1)), Effect.forkIn(entry.scope));

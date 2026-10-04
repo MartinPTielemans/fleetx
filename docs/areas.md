@@ -48,7 +48,10 @@ Every node can read the fleet's secrets and has the current ones.
 ## relay
 
 With `[relay]` in t3-fleet.toml: the relay service on the node with the relay
-role (published to the tailnet), and a listener on every other node.
+role (published to the tailnet), and a listener on every other node. A
+listener that reconnects gets the events it missed; when the relay cannot
+know what that was (it restarted since), the listener gets a "pull" and
+syncs.
 
 ## dotfiles
 
@@ -132,7 +135,13 @@ private env file that is removed once docker has read it), and can be
 cut off with `network = "none"` (stdio images). The hub adopts a matching
 running container after a restart and restarts one that dies, with backoff.
 One stdio process serves every client: the bridge gives each its own session,
-and a session belongs to the client token that opened it.
+and a session belongs to the client token that opened it (one the hub has no
+record of is refused; owners of proxied servers' sessions are kept across
+relay restarts). At 1000 sessions a new one replaces the least recently used
+idle one, so clients that never close theirs cannot lock others out; a session
+without an open event stream also ends after a day unused. The hub checks
+every server each minute; a process or container that misses three checks in
+a row, while no client request is in flight, is restarted.
 
 Optional fields in a definition:
 
@@ -155,9 +164,15 @@ the resource metadata is for this server. Fields written
 for ToolHive (callback ports, timeouts, registry references) are ignored.
 
 Sign in once, from any machine: `t3-fleet mcp login <name>` prints the URL to
-open in any browser on the tailnet. The hub keeps the tokens encrypted to the
-relay node's key (`~/.local/state/t3-fleet/hub/tokens.age`) and refreshes them
-ahead of expiry; when a login is lost, the server shows as needing a sign-in.
+open in any browser on the tailnet and waits for that sign-in to finish. The
+hub keeps the tokens encrypted to the relay node's key
+(`~/.local/state/t3-fleet/hub/tokens.age`) and refreshes them ahead of
+expiry. A refresh the authorization server refuses loses the login, and the
+server shows as needing a sign-in; when the authorization server is merely
+down or busy, the hub keeps using the token until it expires and tries again
+with a backoff. A login belongs to the server's URL: point the definition at
+another URL and the server needs a new sign-in. `logout` also forgets the
+hub's client registration, so the next login registers afresh.
 
 ```
 t3-fleet mcp servers                 every hosted server and its state
@@ -168,7 +183,9 @@ t3-fleet mcp token list | revoke <client>
 ```
 
 The call log never holds arguments or results. Denied tools are hidden from
-`tools/list` and refused with a JSON-RPC error. Client tokens are stored only
+`tools/list` and refused with a JSON-RPC error. A server receives only the
+JSON-RPC fields of each message, and a message with a key that folds to one
+the policy reads (`Name` beside `name`, `paramſ` beside `params`) is refused. Client tokens are stored only
 as digests on the relay; on an authority, `token create` keeps the token in
 the fleet's secrets as `T3_FLEET_MCP_TOKEN_<CLIENT>`.
 
@@ -196,12 +213,23 @@ the model providers. It serves `/<upstream>/*` for each upstream: `anthropic`
 ChatGPT login), and any that `[models.upstreams.<name>]` declares (`url`,
 optionally `chatgpt_url`). It is a pass-through: each CLI makes its own
 requests with its own credential, and the proxy forwards them unchanged. It
-retries connection errors and 408, 429, 500, 502, 503, 504 and 529 up to
-three times, only before the first byte reaches the client; sends SSE
-keepalives while an event stream is quiet; and keeps per-upstream stats for
-5 minutes, 1 hour and 24 hours (`t3-fleet models stats`, and the UI). It logs
-metadata only, to `~/.local/state/t3-fleet/models.jsonl`; never bodies or auth
-headers.
+retries 408, 429, 500, 502, 503, 504 and 529, and network errors from before
+the request left the machine (refused, unresolvable, a connect timeout), up
+to three times, only before the first byte reaches the client. It obeys
+`x-should-retry`, honours `retry-after-ms` and `retry-after`, and waits 10
+seconds at most in all; after that the answer goes to the CLI, which retries
+on its own. A request the upstream may have received (a reset, a timeout
+waiting for the answer) is never sent twice. A response that breaks off after
+it started reaches the client as a dropped connection, never as a body that
+ends cleanly. The proxy sends SSE keepalives while an event stream is quiet,
+and keeps per-upstream stats for 5 minutes, 1 hour and 24 hours
+(`t3-fleet models stats`, and the UI). It logs metadata only, to
+`~/.local/state/t3-fleet/models.jsonl`; never bodies or auth headers.
+
+Installing a new build does not cut a response: the proxy notices the build,
+keeps answering until its last response is done (15 minutes at most), and
+exits; its service starts the new build a second later. Stopping the service
+waits up to 45 seconds the same way.
 
 The area installs `t3-fleet models serve` as a service, writes a launcher per
 enabled T3 provider instance it can route (`~/.local/bin/t3-fleet-claude`,
@@ -220,10 +248,15 @@ built in:
 Any other driver whose CLI takes a base URL is routed by declaring its recipe;
 one that runs inside T3 without a CLI, or has no recipe, is a note. When the
 proxy is not listening a launcher runs the CLI directly and notes it in
-`~/.local/state/t3-fleet/models-fallback.log`.
+`~/.local/state/t3-fleet/models-fallback.log`; it asks the proxy with curl,
+wget or bash, whichever the machine has. A recipe's CLI under `~/` that is not
+there is looked up on PATH, and T3 is only pointed at a launcher whose CLI is
+installed.
 
 With `egress = "relay"` the proxy sends traffic through the relay's `/egress`
-route instead of directly, for a node on a bad network.
+route instead of directly, for a node on a bad network. The relay forwards
+only to upstreams some node's `[models]` declares. When the relay cannot be
+reached, or will not forward, the request goes direct.
 
 Independently of `[models]`, every node reports each T3 provider's login and
 health as T3 itself sees it (`provider-logged-out-<instance>`,

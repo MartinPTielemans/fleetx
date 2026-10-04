@@ -8,7 +8,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "vp build ../ui && vp pack"
+    "build": "vp build ../ui && vp pack",
+    "test": "vp test run --config ../../vite.config.ts --dir src"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

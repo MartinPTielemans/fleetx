@@ -89,7 +89,7 @@ describe("engine-outdated", () => {
   });
 
   it("says which services the install restarts", () => {
-    const f = outdated({ wantedBuild: build("0.6.2", 2), installedBuild: build("0.6.1", 1), services: ["serve", "listen", "models"] });
-    expect(f?.fix?.disrupts).toBe("restarts the relay, the listener and the model proxy on box");
+    const f = outdated({ wantedBuild: build("0.6.2", 2), installedBuild: build("0.6.1", 1), services: ["serve", "listen"] });
+    expect(f?.fix?.disrupts).toBe("restarts the relay and the listener on box");
   });
 });

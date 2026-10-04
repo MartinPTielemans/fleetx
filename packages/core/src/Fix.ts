@@ -46,10 +46,11 @@ const script = (command: string, checkout: string, bundle: string) => {
           `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
           ...link(CLI),
           ...link(LEGACY_CLI),
-          // Long-running services hold the old build until restarted.
-          `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")} ${launchdLabel("models")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
-          `elif [ "$(id -u)" = 0 ]; then systemctl try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service ${systemdUnit("models")}.service 2>/dev/null || true`,
-          `else systemctl --user try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service ${systemdUnit("models")}.service 2>/dev/null || true; fi`,
+          // Long-running services hold the old build until restarted. The model proxy is not
+          // restarted: it notices the new build and exits once its responses are done.
+          `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
+          `elif [ "$(id -u)" = 0 ]; then systemctl try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true`,
+          `else systemctl --user try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true; fi`,
           `echo installed ${PRODUCT}`,
         ].join("\n")
       : command;

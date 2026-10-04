@@ -11,7 +11,7 @@
     "t3-fleet": "node apps/cli/src/bin.ts",
     "build": "vp run --filter t3-fleet build",
     "typecheck": "vp run -r typecheck",
-    "lint": "vp lint --report-unused-disable-directives",
+    "lint": "vp lint --report-unused-disable-directives --deny-warnings",
     "test": "scripts/check-no-personal-data.sh && vp run -r test",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check"

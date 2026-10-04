@@ -3,9 +3,7 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 import { McpProtocol, McpServer } from "effect/unstable/ai";
@@ -13,10 +11,10 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import { describeBuild, runningBuild } from "@t3-fleet/core/Build";
-import { checkNodes, type CheckReport } from "@t3-fleet/core/Check";
+import { checkNodes } from "@t3-fleet/core/Check";
 import type { Finding, Fix } from "@t3-fleet/core/Diagnose";
 import { runFixes } from "@t3-fleet/core/Fix";
-import { loadConfig, ProbeSettings, type Config } from "@t3-fleet/core/Config";
+import { loadConfig, ProbeSettings } from "@t3-fleet/core/Config";
 import { FleetToolkit, fleetHandlers } from "@t3-fleet/core/Mcp";
 import { compareWithLast } from "@t3-fleet/core/Memory";
 import { MachineObservation } from "@t3-fleet/core/Observation";
@@ -79,7 +77,7 @@ const statusCommand = Command.make("status", {
         yield* Console.log(yield* renderFleetFromStates(yield* loadConfig, verbose));
         return;
       }
-      const { config, nodes, bundle, shown } = yield* prepare(node);
+      const { config, bundle, shown } = yield* prepare(node);
       const full = yield* checkNodes(config, bundle);
       const report = narrow(full, shown);
       if (changes) {

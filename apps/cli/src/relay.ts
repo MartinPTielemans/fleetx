@@ -9,13 +9,16 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import { Command } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-import { loadConfig } from "@t3-fleet/core/Config";
+import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import { decodeModelsSettings, upstreamBases, upstreamsOf } from "@t3-fleet/core/models/Recipes";
 import { git, out } from "@t3-fleet/core/Git";
 import { relayLayer } from "@t3-fleet/core/Relay";
 import { listen, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
@@ -25,6 +28,10 @@ import { syncRun } from "@t3-fleet/core/Sync";
 import packageJson from "../package.json" with { type: "json" };
 
 import { reportUserErrors, untilNewBuild } from "./shared.ts";
+
+/** Every upstream base some node's [models] declares: where /egress may forward. */
+const egressBasesOf = (config: Config) =>
+  [...new Set(config.nodes.flatMap((n) => upstreamBases(upstreamsOf(decodeModelsSettings(n.settings.table["models"])))))];
 
 const serve = Command.make("serve").pipe(
   Command.withDescription("Run the relay on 127.0.0.1:[relay] port. Publish it to the tailnet, never the internet."),
@@ -38,6 +45,16 @@ const serve = Command.make("serve").pipe(
       const port = config.settings.relay?.port ?? 8399;
       const mcp = (self.settings.table["mcp"] ?? {}) as { ports?: Record<string, number>; hub?: boolean };
       const { identity } = yield* ensureIdentity;
+      // Followed as sync updates the config repo; a read that fails keeps the last good set.
+      let egressBases = egressBasesOf(config);
+      yield* loadConfig.pipe(
+        Effect.map((c) => {
+          egressBases = egressBasesOf(c);
+        }),
+        Effect.ignore,
+        Effect.repeat(Schedule.spaced(Duration.seconds(30))),
+        Effect.forkDetach,
+      );
       const hub = mcp.hub === true;
       yield* Console.log(
         `relay on 127.0.0.1:${port}; ${hub ? "MCP hub serving the repo's hosted servers" : `MCP gateway for ${Object.keys(mcp.ports ?? {}).join(", ") || "no servers"}`}`,
@@ -55,6 +72,7 @@ const serve = Command.make("serve").pipe(
           identity,
           version: packageJson.version,
         },
+        egressBases: () => egressBases,
       });
       return yield* untilNewBuild(
         Layer.launch(
