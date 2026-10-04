@@ -32,6 +32,7 @@ import {
   alertsCommand,
   approveCommand,
   mcpAddCommand,
+  mcpRegisterClaudeCommand,
   takeAlerts,
   rejectCommand,
   renderFleetFromStates,
@@ -318,7 +319,9 @@ const cli = Command.make("t3-fleet").pipe(
     secretsCommand,
     skillsCommand,
     uiCommand,
-    mcpServeCommand.pipe(Command.withSubcommands([mcpAddCommand, ...hubCommands])),
+    mcpServeCommand.pipe(
+      Command.withSubcommands([mcpAddCommand, mcpRegisterClaudeCommand, ...hubCommands]),
+    ),
     probeCommand,
   ]),
 );

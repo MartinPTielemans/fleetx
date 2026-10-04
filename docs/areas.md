@@ -128,7 +128,99 @@ decides where clients connect:
 | `direct`                                          | `url` (`auth = { type = "bearer", token_env = "NAME" }` sends a secret) |
 | `remote`, `container`, `registry`, `hosted-stdio` | the hub: `<gateway>/mcp/<name>`, with the relay token or `token_env`    |
 
-Every registered HTTP server gets an `initialize` request as a live check.
+Every registered HTTP server gets an `initialize` request as a live check
+(an SSE server: its event stream opened and closed again), with the declared
+headers.
+
+A server's credentials are part of its definition:
+
+```json
+{ "kind": "stdio", "command": "github-mcp-server", "args": ["stdio"],
+  "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOOLSETS": "repos" } }
+{ "kind": "direct", "url": "https://mcp.context7.com/mcp",
+  "headers": { "CONTEXT7_API_KEY": "$CONTEXT7_API_KEY" } }
+{ "kind": "direct", "url": "https://legacy.example.com/sse", "transport": "sse" }
+```
+
+A value that is exactly `$NAME` is the fleet secret `NAME` (`t3-fleet secrets
+set NAME=…` on an authority); anything else is literal, and a definition never
+holds a secret literally. How each client gets them:
+
+|                     | Claude (`~/.claude.json`)                | Codex (`~/.codex/config.toml`)                                                      |
+| ------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| `env`, literal      | `env`                                    | `env`                                                                               |
+| `env`, `$NAME`      | `env`, with the secret's value           | `env_vars` passes `NAME` through from Codex's environment¹                          |
+| `headers`, literal  | `headers`                                | `http_headers`                                                                      |
+| `headers`, `$NAME`  | `headers`, with the secret's value       | `env_http_headers`: the header is read from `NAME` in its environment               |
+| `auth` bearer       | an `Authorization` header with the value | `bearer_token_env_var`                                                              |
+| `transport = "sse"` | `type: "sse"`                            | not registered: Codex has no SSE transport (`mcp-<name>-not-in-codex`)              |
+| `$NAME` in `args`   | the argument, with the secret's value    | `sh -c` fills it in at run time; `env_vars` passes `NAME` through¹                  |
+| `$NAME` in `url`    | the url, with the secret's value         | not registered: Codex cannot fill a variable into a url (`mcp-<name>-not-in-codex`) |
+
+¹ When the server expects the secret under another name
+(`GITHUB_PERSONAL_ACCESS_TOKEN` from `$GITHUB_TOKEN`), Codex starts it through
+`sh -c`, which renames the variable; likewise for a secret inside an argument
+(`--api-key $CTX_API_KEY`, `postgres://u:${DB_PW}@db/x`). That shell copies
+every variable it reads before setting any (so `A = "$B"` beside `B = "$A"`
+swaps them, and a literal never overwrites another's source), sets the
+literals itself, and refuses to start the server, saying which on stderr, when
+one is not set. Codex therefore needs every `$NAME` its servers use in its own
+environment, as it already needs each `token_env`. `codex mcp add` replaces an
+entry whole, so a failed one leaves the old.
+
+A credential belongs in `env`, `headers` or `auth` when the server takes it
+there; only one it reads from nowhere else goes into the `url` or `args`.
+The comparison runs on each machine, and its published state names what
+differs (`url`, `args`, `header X`), never a registered value.
+
+Claude's registration stores values. Its fix runs `t3-fleet mcp register-claude
+<name> '<definition>'`, which reads the secrets from the node's secrets.env
+(then its environment) itself, so no value is on a command line, and replaces
+only that entry of Claude's config where Claude keeps it (`~/.claude.json`, or
+in `$CLAUDE_CONFIG_DIR`). It takes Claude's own lock (`<config>.lock`, stale
+after ten seconds, as Claude has it), reads the config fresh under it, and
+writes a temporary file renamed over it: a failure leaves the old entry, and a
+config it cannot read is left alone. A config holding secrets is made
+readable by its owner alone (600), and the fix says so when it tightens one. It waits while the node
+lacks a secret (`mcp-<name>-secret-missing`). A registration whose declared
+env or header values differ (a rotated secret, say) is registered again; one
+with settings the replacement would not write (another variable, a header, an
+Authorization header or `bearer_token_env_var` the definition does not
+declare, Codex's `startup_timeout_sec`) is left to a person, since
+re-registering would drop them. A definition with both bearer `auth` and an
+`Authorization` header is refused.
+
+`t3-fleet mcp add` writes these definitions:
+
+```
+t3-fleet mcp add github --command github-mcp-server --arg stdio \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… --env GITHUB_TOOLSETS=repos
+t3-fleet mcp add context7 --url https://mcp.context7.com/mcp --header 'CONTEXT7_API_KEY: ctx7sk-…'
+t3-fleet mcp add legacy --url https://legacy.example.com/sse --sse
+```
+
+Every `--env` and `--header` value is kept in the fleet's secrets unless it is
+clearly harmless (a number, a boolean, a path, a URL with no user, password or
+credential-named query parameter) and its name does not say credential
+(`TOKEN`, `KEY`, `SECRET`, `Authorization`, …); `--literal NAME` keeps one as
+it is. A secret gets a name of its own (the variable or header, prefixed with
+the server's name, numbered when that name holds another value) and the
+definition refers to it. That needs an authority; elsewhere `mcp add` writes
+the reference and says which secrets to set on one. It decides the names,
+writes and commits under the sync lock, and puts every file and its git index
+entry back when the change does not land. A server the machine listed in its
+`ignore` is taken off that list when `mcp add` declares it there.
+
+Servers a machine's clients have at user scope that its `[mcp] servers` does
+not list are reported once per machine (`mcp-undeclared`); T3 Fleet leaves
+them alone until they are brought in with `t3-fleet mcp add` or `t3-fleet
+setup`. Servers that belong to one machine (an app installed them) go in its
+`ignore`, and are not reported:
+
+```toml
+[mcp]
+"ignore.add" = ["node_repl", "computer-use"]
+```
 
 Without the hub, hosted servers run elsewhere and need a port each:
 `origin = "server.tailnet.ts.net"` and `ports = { fetch = 18100 }` (clients
