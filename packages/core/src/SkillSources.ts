@@ -4,7 +4,8 @@
  *
  *   { "sources": { "<source>": { "type": "github", "url": "…", "skills": [names],
  *                                "paths": { name: "path/in/repo" },
- *                                "renamed": { localName: upstreamName } } } }
+ *                                "renamed": { localName: upstreamName },
+ *                                "commit": "<sha the copy was taken at>" } } }
  *
  * Skills are copied, not referenced, so every node works offline and gets
  * exactly what was reviewed. Everything here that writes to the checkout
@@ -42,6 +43,7 @@ const Source = Schema.Struct({
   skills: Schema.Array(Schema.String),
   paths: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   renamed: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  commit: Schema.optionalKey(Schema.String),
 });
 const SourcesFile = Schema.Struct({
   _comment: Schema.optionalKey(Schema.String),
@@ -107,6 +109,41 @@ const writeSources = (repo: string, sources: SourcesFile) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     yield* fs.writeFileString(sourcesPath(repo), prettyJson(sources));
+  });
+
+/**
+ * Record where skills copied from local clones came from (setup): the
+ * clone's remote, the path of each skill in it, and the commit copied.
+ * Returns the repo path it wrote.
+ */
+export const recordSources = (
+  repo: string,
+  found: ReadonlyArray<{
+    readonly name: string;
+    readonly url: string;
+    readonly path: string;
+    readonly commit: string;
+  }>,
+) =>
+  Effect.gen(function* () {
+    const sources = yield* readSources(repo);
+    const all = { ...sources.sources };
+    for (const f of found) {
+      const key = parseSource(f.url).name;
+      const entry = all[key] ?? {
+        type: f.url.includes("github.com") ? "github" : "git",
+        url: f.url,
+        skills: [],
+      };
+      all[key] = {
+        ...entry,
+        skills: [...new Set([...entry.skills, f.name])].sort(),
+        paths: { ...entry.paths, [f.name]: f.path },
+        commit: f.commit,
+      };
+    }
+    yield* writeSources(repo, { ...sources, sources: all });
+    return "skills/SOURCES.json";
   });
 
 /** owner/repo or a full URL → clone URL and a short source name. */
