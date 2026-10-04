@@ -74,7 +74,11 @@ describe("renaming a config repo", () => {
   });
 
   it("moves the file and the branches, and adds the secrets under their new names", async () => {
+    // An unrelated local edit stays where it is, uncommitted.
+    writeFileSync(join(repo, "nodes", "box.toml"), 'roles = ["authority"]\n[mcp]\ntoken_env = "FLEETX_MCP_TOKEN_BOX"\n# local\n');
     const done = await run(renameRepo(repo, "main"));
+    expect(git(repo, "status", "--porcelain").trim()).toBe("M nodes/box.toml");
+    git(repo, "checkout", "--", "nodes/box.toml");
     expect(done.join("\n")).toContain("fleetx.toml → t3-fleet.toml");
     expect(existsSync(join(repo, "t3-fleet.toml"))).toBe(true);
     // Variable names agents read from T3's environment stay until 1.0.
