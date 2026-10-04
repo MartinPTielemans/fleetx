@@ -2,9 +2,11 @@
  * The server behind `fleetx ui`: the built app and its /api, on 127.0.0.1.
  *
  *   GET  /api/session, /api/status, /api/proposals, /api/alerts,
- *        /api/models, /api/config/<node>, /api/hub/servers, /api/hub/calls
+ *        /api/models, /api/config/<node>, /api/hub/servers, /api/hub/calls,
+ *        /api/skills
  *   POST /api/fixes, /api/proposals/<node>/approve | /reject,
- *        /api/hub/servers/<name>/login | /logout | /restart
+ *        /api/hub/servers/<name>/login | /logout | /restart,
+ *        /api/skills/lookup | /add | /preview | /update | /remove
  *   GET  /api/events     server-sent events: the relay's, plus "check"
  *   GET  *               the app
  *
@@ -21,6 +23,12 @@
  * A check runs at start, then every minute while a browser is connected.
  * Applying fixes follows fleet_apply_fixes: it checks again first and runs
  * only fixes that check still proposes.
+ *
+ * Skill changes edit the config repo the way `fleetx skills` does, one at a
+ * time: an authority commits them, any other machine's next sync proposes
+ * them. Linking them on each machine stays a fix, shown before it runs. An
+ * update is previewed first and kept only if upstream still gives the same
+ * change.
  */
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -51,10 +59,21 @@ import {
   UiModels,
   UiProposal,
   UiSession,
+  UiSkills,
+  UiSkillsAddRequest,
+  UiSkillsKeepRequest,
+  UiSkillsLanded,
+  UiSkillsLookup,
+  UiSkillsLookupRequest,
+  UiSkillsNames,
+  UiSkillsPreview,
   UiStatus,
   type UiEnvironment,
   type UiFinding,
+  type UiSkill,
+  type UiSkillsNode,
 } from "./Api.ts";
+import { Desired as SkillsDesired, Observed as SkillsObserved } from "./areas/Skills.ts";
 import type { CheckReport } from "./Check.ts";
 import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
 import { constantTimeEqual } from "./hub/Policy.ts";
@@ -82,6 +101,15 @@ export interface UiActions {
   readonly reject: (node: string) => Effect.Effect<void, string>;
   readonly alerts: Effect.Effect<ReadonlyArray<typeof UiAlert.Type>, string>;
   readonly config: (node: string) => Effect.Effect<ReadonlyArray<UiConfigRow>, string>;
+  readonly skills: {
+    /** The repo's skills. */
+    readonly list: Effect.Effect<ReadonlyArray<UiSkill>, string>;
+    readonly lookup: (source: string) => Effect.Effect<UiSkillsLookup, string>;
+    readonly add: (source: string, skills: ReadonlyArray<string>, as: string | undefined) => Effect.Effect<UiSkillsLanded, string>;
+    readonly preview: (skills: ReadonlyArray<string>) => Effect.Effect<UiSkillsPreview, string>;
+    readonly update: (skills: ReadonlyArray<string>, digest: string) => Effect.Effect<UiSkillsLanded, string>;
+    readonly remove: (skills: ReadonlyArray<string>) => Effect.Effect<UiSkillsLanded, string>;
+  };
 }
 type UiConfigRow = typeof UiConfigRow.Type;
 
@@ -231,6 +259,19 @@ export const toUiModels = (check: UiCheck): UiModels => ({
   ),
 });
 
+/** The repo's skills, and how each machine's last check found them linked. */
+export const toUiSkills = (check: UiCheck, skills: ReadonlyArray<UiSkill>): UiSkills => ({
+  skills,
+  nodes: check.report.results.map((r): UiSkillsNode => {
+    const desired = Schema.decodeUnknownOption(SkillsDesired)(r.node.settings.table["skills"]);
+    const ignored = Option.isSome(desired) ? [...(desired.value?.ignore ?? [])] : [];
+    const seen = r.ok ? Schema.decodeUnknownOption(SkillsObserved)(r.observation.areas["skills"]) : Option.none();
+    if (!r.ok || Option.isNone(seen)) return { node: r.node.name, at: r.ok ? r.observation.observedAt : null, store: null, links: [], strays: [], dangling: [], ignored };
+    const { store, links, strays, dangling } = seen.value;
+    return { node: r.node.name, at: r.observation.observedAt, store, links, strays, dangling, ignored };
+  }),
+});
+
 // ── the server ──────────────────────────────────────────────────────────
 
 const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
@@ -276,6 +317,9 @@ const jsonResponse = <S extends Schema.Top & { readonly EncodingServices: never 
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/** What `fleetx skills add` takes: owner/repo, or an https or ssh git URL. */
+const SKILL_SOURCE = /^(?:[\w.-]+\/[\w.-]+|https:\/\/[^\s]+|git@[\w.-]+:[^\s]+|ssh:\/\/[^\s]+)$/;
+
 interface ServerEvent {
   readonly type: string;
   readonly data: string;
@@ -294,6 +338,7 @@ export const uiLayer = (options: UiServerOptions) =>
       const events = yield* PubSub.unbounded<ServerEvent>();
       const checking = yield* Semaphore.make(1);
       const applying = yield* Semaphore.make(1);
+      const editingSkills = yield* Semaphore.make(1);
       const encodeStatus = Schema.encodeEffect(Schema.fromJsonString(UiStatus));
 
       /** One full check at a time; the result is kept and announced as a "check" event. */
@@ -464,6 +509,65 @@ export const uiLayer = (options: UiServerOptions) =>
         ),
       );
 
+      const skills = HttpRouter.add(
+        "GET",
+        "/api/skills",
+        api(() =>
+          Effect.all([current, actions.skills.list]).pipe(
+            Effect.flatMap(([c, list]) => jsonResponse(UiSkills)(toUiSkills(c.check, list))),
+            Effect.catch(fail(500)),
+          ),
+        ),
+      );
+
+      /** A skills POST: decode the body, refuse what `invalid` finds wrong, change the repo one request at a time. */
+      const skillsEdit = <S extends Schema.Top & { readonly DecodingServices: never }, O extends Schema.Top & { readonly EncodingServices: never }>(
+        path: `/api/skills/${string}`,
+        body: S,
+        response: O,
+        invalid: (request: S["Type"]) => string | null,
+        run: (request: S["Type"]) => Effect.Effect<O["Type"], string>,
+      ) => {
+        const decode = Schema.decodeEffect(Schema.fromJsonString(body));
+        return HttpRouter.add(
+          "POST",
+          path,
+          api((request) =>
+            Effect.gen(function* () {
+              const text = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
+              const asked = yield* decode(text).pipe(Effect.mapError(() => "the request was not understood"));
+              const why = invalid(asked);
+              if (why !== null) return plain(why, 400);
+              return yield* editingSkills.withPermits(1)(run(asked)).pipe(Effect.flatMap(jsonResponse(response)), Effect.catch(fail(409)));
+            }).pipe(Effect.catch(fail(400))),
+          ),
+        );
+      };
+
+      const badNames = (names: ReadonlyArray<string>) => {
+        const bad = names.find((n) => !NAME.test(n));
+        return bad === undefined ? null : `not a skill name: ${bad}`;
+      };
+      const badSource = (source: string) => (SKILL_SOURCE.test(source) ? null : "give owner/repo, or an https or ssh git URL");
+
+      const skillsLookup = skillsEdit("/api/skills/lookup", UiSkillsLookupRequest, UiSkillsLookup, (r) => badSource(r.source), (r) => actions.skills.lookup(r.source));
+      const skillsAdd = skillsEdit(
+        "/api/skills/add",
+        UiSkillsAddRequest,
+        UiSkillsLanded,
+        (r) => badSource(r.source) ?? badNames(r.as === undefined ? r.skills : [...r.skills, r.as]),
+        (r) => actions.skills.add(r.source, r.skills, r.as),
+      );
+      const skillsPreview = skillsEdit("/api/skills/preview", UiSkillsNames, UiSkillsPreview, (r) => badNames(r.skills), (r) => actions.skills.preview(r.skills));
+      const skillsUpdate = skillsEdit("/api/skills/update", UiSkillsKeepRequest, UiSkillsLanded, (r) => badNames(r.skills), (r) => actions.skills.update(r.skills, r.digest));
+      const skillsRemove = skillsEdit(
+        "/api/skills/remove",
+        UiSkillsNames,
+        UiSkillsLanded,
+        (r) => (r.skills.length === 0 ? "name the skills to remove" : badNames(r.skills)),
+        (r) => actions.skills.remove(r.skills),
+      );
+
       /** Forward to the relay's hub, with the relay token, and check the answer's shape. */
       const hub = <S extends Schema.Top & { readonly DecodingServices: never; readonly EncodingServices: never }>(
         method: "GET" | "POST",
@@ -578,6 +682,12 @@ export const uiLayer = (options: UiServerOptions) =>
         alerts,
         models,
         config,
+        skills,
+        skillsLookup,
+        skillsAdd,
+        skillsPreview,
+        skillsUpdate,
+        skillsRemove,
         hubServers,
         hubCalls,
         hubAction("login"),

@@ -23,7 +23,7 @@ import { defineArea, sh, shPath } from "../Area.ts";
 import { expandHome } from "../Config.ts";
 import type { Finding } from "../Diagnose.ts";
 
-const Desired = Schema.UndefinedOr(
+export const Desired = Schema.UndefinedOr(
   Schema.Struct({
     store: Schema.optionalKey(Schema.String),
     clients: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -32,9 +32,9 @@ const Desired = Schema.UndefinedOr(
   }),
 );
 
-const LinkState = Schema.Literals(["ok", "missing", "wrong", "real-dir"]);
+export const LinkState = Schema.Literals(["ok", "missing", "wrong", "real-dir"]);
 
-const Observed = Schema.Struct({
+export const Observed = Schema.Struct({
   store: Schema.String,
   /** Skills in the repo. */
   vendored: Schema.Array(Schema.String),

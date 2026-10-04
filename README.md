@@ -140,7 +140,8 @@ fleetx ui on http://127.0.0.1:8397/#token=…
 A local web app in T3 Code's look, light and dark, with everything above:
 the environments table (each machine opens to its providers, agent CLIs, sync
 and model proxy), findings with their fixes, staged proposals with diffs,
-alerts, the MCP hub's servers and tool-call log, model traffic, and every
+alerts, skills on every machine (add, update and remove them), the MCP
+hub's servers and tool-call log, model traffic, and every
 machine's merged config. Applying a fix works as `fleetx fix` does: the exact
 commands, what each interrupts, an explicit confirmation, then a fresh check.
 It checks every minute while a browser is open and updates as the relay

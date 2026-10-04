@@ -8,6 +8,7 @@ import {
   PlugIcon,
   ServerIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
   SunIcon,
   WrenchIcon,
   ActivityIcon,
@@ -26,12 +27,14 @@ import { FindingsView } from "./views/Findings";
 import { McpView } from "./views/Mcp";
 import { ModelsView } from "./views/Models";
 import { ProposalsView } from "./views/Proposals";
+import { SkillsView } from "./views/Skills";
 
 const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> = [
   { view: "environments", label: "Environments", icon: <ServerIcon /> },
   { view: "findings", label: "Findings", icon: <WrenchIcon /> },
   { view: "proposals", label: "Proposals", icon: <GitPullRequestArrowIcon /> },
   { view: "alerts", label: "Alerts", icon: <BellIcon /> },
+  { view: "skills", label: "Skills", icon: <SparklesIcon /> },
   { view: "mcp", label: "MCP", icon: <PlugIcon /> },
   { view: "models", label: "Models", icon: <ActivityIcon /> },
   { view: "config", label: "Config", icon: <SlidersHorizontalIcon /> },
@@ -69,6 +72,7 @@ function Shell() {
         {view === "findings" && <FindingsView />}
         {view === "proposals" && <ProposalsView />}
         {view === "alerts" && <AlertsView />}
+        {view === "skills" && <SkillsView />}
         {view === "mcp" && <McpView />}
         {view === "models" && <ModelsView />}
         {view === "config" && <ConfigView node={rest} />}

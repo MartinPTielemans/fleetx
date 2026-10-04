@@ -17,8 +17,7 @@ import { exec } from "@fleetx/core/Exec";
 import { lookupLatest } from "@fleetx/core/Latest";
 import type { NodeResult } from "@fleetx/core/Remote";
 import { renderStatus } from "@fleetx/core/Render";
-import { commitAndPush } from "@fleetx/core/Git";
-import { addSkills, removeSkills, updateSkills } from "@fleetx/core/SkillSources";
+import { addSkills, land, removeSkills, updateSkills } from "@fleetx/core/SkillSources";
 import { approve, listProposals, reject } from "@fleetx/core/Staging";
 import { readStates, syncRun, type Alert, type NodeState } from "@fleetx/core/Sync";
 
@@ -193,16 +192,6 @@ const adopt = Command.make("adopt", {
     }).pipe(reportUserErrors),
   ),
 );
-
-/** An authority commits and pushes; any other node leaves the change for its next sync to propose. */
-const land = (config: Config, paths: ReadonlyArray<string>, message: string) =>
-  Effect.gen(function* () {
-    if (config.nodes.find((n) => n.name === config.self)?.roles.includes("authority")) {
-      const rev = yield* commitAndPush(config.repo, paths, message);
-      return `committed and pushed (${rev})`;
-    }
-    return "the next sync proposes it for an authority's approval";
-  });
 
 const add = Command.make("add", {
   source: Argument.String("source").pipe(Argument.withDescription("owner/repo or a git URL")),

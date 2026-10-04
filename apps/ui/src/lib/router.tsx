@@ -1,7 +1,7 @@
-/** Seven views, one path each; the server answers every path with the app. */
+/** Eight views, one path each; the server answers every path with the app. */
 import { useEffect, useState, type MouseEvent } from "react";
 
-export const VIEWS = ["environments", "findings", "proposals", "alerts", "mcp", "models", "config"] as const;
+export const VIEWS = ["environments", "findings", "proposals", "alerts", "skills", "mcp", "models", "config"] as const;
 export type View = (typeof VIEWS)[number];
 
 const parse = (): { view: View; rest: string } => {

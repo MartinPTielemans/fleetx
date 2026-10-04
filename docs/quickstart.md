@@ -62,7 +62,7 @@ fleetx ui
 ```
 
 Every view the CLI has, live: environments, findings and fixes, proposals,
-alerts, the MCP hub, models, and each machine's config.
+alerts, skills, the MCP hub, models, and each machine's config.
 
 ## What happens from here
 

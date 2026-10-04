@@ -29,8 +29,8 @@ import { useStore } from "../lib/store";
 import { cn, plural } from "../lib/utils";
 import { CheckButton, CheckedLine } from "./Environments";
 
-type Fixable = UiFinding & { readonly fix: NonNullable<UiFinding["fix"]> };
-const fixable = (f: UiFinding): f is Fixable => f.fix !== undefined;
+export type Fixable = UiFinding & { readonly fix: NonNullable<UiFinding["fix"]> };
+export const fixable = (f: UiFinding): f is Fixable => f.fix !== undefined;
 
 const byNode = <T extends { readonly node: string }>(items: ReadonlyArray<T>) => {
   const groups = new Map<string, Array<T>>();
@@ -230,7 +230,8 @@ function Notes({ notes }: { notes: ReadonlyArray<UiFinding> }) {
   );
 }
 
-function ApplyDialog({
+/** Shows the fixes' commands, asks, applies them, and shows the outcome; also used by the Skills view. */
+export function ApplyDialog({
   open,
   fixes,
   onClose,

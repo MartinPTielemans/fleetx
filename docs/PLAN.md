@@ -82,6 +82,7 @@ Ticked items are done and in `main`.
       stdio bridge, OAuth with sign-in through the relay, client tokens,
       tool policy, call log
 - [x] Security review before deploy; its must-fix items fixed
+- [x] ui: Skills view: links per machine; add, update (previewed), remove; adopt as a fix
 - [ ] The author's fleet on the hub and the model proxy
 
 ## Migration (the author's own fleet)

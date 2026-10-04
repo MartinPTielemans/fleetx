@@ -17,6 +17,10 @@ import {
   UiModels,
   UiProposal,
   UiSession,
+  UiSkills,
+  UiSkillsLanded,
+  UiSkillsLookup,
+  UiSkillsPreview,
   UiStatus,
 } from "@fleetx/core/Api";
 import * as Schema from "effect/Schema";
@@ -85,8 +89,17 @@ const getModels = get(UiModels);
 const getHubServers = get(Schema.Array(HubServer));
 const getHubCalls = get(Schema.Array(HubCall));
 const getConfig = get(Schema.Array(UiConfigRow));
+const getSkills = get(UiSkills);
 const decodeApply = decoder(UiApplyResult);
 const decodeLogin = decoder(HubLoginStart);
+
+const post = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) => {
+  const decode = decoder(schema);
+  return async (path: string, body: unknown): Promise<S["Type"]> => decode(path, await request("POST", path, body));
+};
+const postLookup = post(UiSkillsLookup);
+const postPreview = post(UiSkillsPreview);
+const postLanded = post(UiSkillsLanded);
 
 export const decodeStatusEvent = decoder(UiStatus);
 
@@ -109,6 +122,14 @@ export const api = {
   hubLogout: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/logout`).then(() => undefined),
   hubRestart: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/restart`).then(() => undefined),
   config: (node: string) => getConfig(`/api/config/${encodeURIComponent(node)}`),
+  skills: () => getSkills("/api/skills"),
+  skillsLookup: (source: string) => postLookup("/api/skills/lookup", { source }),
+  skillsAdd: (source: string, skills: ReadonlyArray<string>, as?: string) =>
+    postLanded("/api/skills/add", { source, skills, ...(as === undefined ? {} : { as }) }),
+  /** Every skill with a source when `skills` is empty. */
+  skillsPreview: (skills: ReadonlyArray<string>) => postPreview("/api/skills/preview", { skills }),
+  skillsUpdate: (skills: ReadonlyArray<string>, digest: string) => postLanded("/api/skills/update", { skills, digest }),
+  skillsRemove: (skills: ReadonlyArray<string>) => postLanded("/api/skills/remove", { skills }),
   /** EventSource cannot send headers; the token goes in the query instead. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,
 };
@@ -120,6 +141,10 @@ export type {
   UiModels as UiModelsT,
   UiProposal as UiProposalT,
   UiSession,
+  UiSkills as UiSkillsT,
+  UiSkillsLanded as UiSkillsLandedT,
+  UiSkillsLookup as UiSkillsLookupT,
+  UiSkillsPreview as UiSkillsPreviewT,
   UiStatus,
 } from "@fleetx/core/Api";
 export type UiAlertT = typeof UiAlert.Type;

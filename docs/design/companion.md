@@ -231,6 +231,12 @@ still works.
   their reasons.
 - **Proposals**: review, approve and reject staged changes, with diffs.
 - **Alerts**: the alert history.
+- **Skills**: the repo's skills against every machine, each link's state;
+  add from a git repository (looked up first, then chosen), update (a diff
+  first, kept only if upstream still gives the same change), remove; link,
+  clean-up and adopt fixes through the Findings dialog. Repo edits hold
+  sync's lock and land as `fleetx skills` does: committed on an authority,
+  proposed elsewhere.
 - **MCP**: every server with its state; sign in, sign out, restart; the
   tool-call log, filterable.
 - **Models**: per machine and upstream, traffic health from `ModelProxyStats`,

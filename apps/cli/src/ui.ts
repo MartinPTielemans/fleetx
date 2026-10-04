@@ -34,8 +34,9 @@ import { runFixes } from "@fleetx/core/Fix";
 import { git } from "@fleetx/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@fleetx/core/RelayClient";
 import { describeMerged } from "@fleetx/core/Settings";
+import { addSkills, keepUpdate, land, listSkills, lookupSource, previewUpdate, removeSkills } from "@fleetx/core/SkillSources";
 import { approve, autoApprovable, listProposals, reject, STAGING } from "@fleetx/core/Staging";
-import { readStates } from "@fleetx/core/Sync";
+import { readStates, underSyncLock } from "@fleetx/core/Sync";
 import { uiLayer, type UiAsset } from "@fleetx/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
@@ -156,7 +157,7 @@ export const uiCommand = Command.make("ui", {
   port: Flag.Int("port").pipe(Flag.withDescription("Port on 127.0.0.1."), Flag.withDefault(8397)),
   noOpen: Flag.Boolean("no-open").pipe(Flag.withDescription("Print the address instead of opening a browser."), Flag.withDefault(false)),
 }).pipe(
-  Command.withDescription("Open fleetx in the browser: environments, findings and fixes, proposals, alerts, MCP, models, config."),
+  Command.withDescription("Open fleetx in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config."),
   Command.withHandler(({ port, noOpen }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
@@ -201,6 +202,39 @@ export const uiCommand = Command.make("ui", {
           config: (node) => {
             const found = config.nodes.find((n) => n.name === node);
             return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
+          },
+          skills: {
+            list: closed(listSkills(config.repo)),
+            lookup: (source) => closed(lookupSource(config.repo, source)),
+            add: (source, names, as) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* addSkills(config.repo, source, names, as);
+                    const added = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
+                    return { paths, landed: yield* land(config, paths, `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`) };
+                  }),
+                ),
+              ),
+            preview: (names) => closed(underSyncLock(previewUpdate(config.repo, names))),
+            update: (names, digest) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* keepUpdate(config.repo, names, digest);
+                    return { paths, landed: yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`) };
+                  }),
+                ),
+              ),
+            remove: (names) =>
+              closed(
+                underSyncLock(
+                  Effect.gen(function* () {
+                    const paths = yield* removeSkills(config.repo, names);
+                    return { paths, landed: yield* land(config, paths, `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`) };
+                  }),
+                ),
+              ),
           },
         },
       });

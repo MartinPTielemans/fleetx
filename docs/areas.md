@@ -80,6 +80,10 @@ ignore = ["synced"]
 A skill installed outside fleetx is a stray: `fleetx skills adopt` moves it
 into the repo, where sync commits (authority) or proposes it.
 
+`fleetx skills add|update|remove` vendor skills from git repositories, with
+their provenance in `skills/SOURCES.json`. The Skills view in `fleetx ui` does
+the same, and shows each skill's links on every machine.
+
 ## mcp
 
 ```toml

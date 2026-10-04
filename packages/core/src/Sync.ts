@@ -159,16 +159,7 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
     const lines: Array<string> = [];
     const now = yield* Clock.currentTimeMillis;
 
-    // One run at a time; a lock older than an hour belongs to a dead run.
-    const lock = `${home}/.local/state/fleetx/sync.lock`;
-    yield* fs.makeDirectory(`${home}/.local/state/fleetx`, { recursive: true }).pipe(Effect.ignore);
-    const lockStat = yield* fs.stat(lock).pipe(Effect.option);
-    if (Option.isSome(lockStat)) {
-      const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
-      if (age < 3_600_000) return { state: null, lines: ["another sync is running"] } as const;
-      yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
-    }
-    yield* fs.makeDirectory(lock).pipe(Effect.ignore);
+    if (!(yield* takeSyncLock)) return { state: null, lines: ["another sync is running"] } as const;
 
     const run = Effect.gen(function* () {
       yield* ensureGitConfig;
@@ -324,7 +315,37 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
       return { state, lines };
     });
 
-    return yield* run.pipe(Effect.ensuring(fs.remove(lock, { recursive: true }).pipe(Effect.ignore)));
+    return yield* run.pipe(Effect.ensuring(releaseSyncLock));
+  });
+
+const syncLock = () => `${process.env["HOME"] ?? ""}/.local/state/fleetx/sync.lock`;
+
+/** One run at a time; a lock older than an hour belongs to a dead run. False when another run holds it. */
+const takeSyncLock = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const lock = syncLock();
+  const now = yield* Clock.currentTimeMillis;
+  yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
+  const lockStat = yield* fs.stat(lock).pipe(Effect.option);
+  if (Option.isSome(lockStat)) {
+    const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
+    if (age < 3_600_000) return false;
+    yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
+  }
+  yield* fs.makeDirectory(lock).pipe(Effect.ignore);
+  return true;
+});
+
+const releaseSyncLock = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.remove(syncLock(), { recursive: true }).pipe(Effect.ignore);
+});
+
+/** Run `effect` holding sync's lock, so no sync proposes or pulls the repo halfway through an edit. */
+export const underSyncLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    if (!(yield* takeSyncLock)) return yield* Effect.fail("a sync is running on this machine; try again in a moment");
+    return yield* effect.pipe(Effect.ensuring(releaseSyncLock));
   });
 
 
