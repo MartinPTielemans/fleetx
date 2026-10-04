@@ -158,6 +158,16 @@ describe("Claude's global config", () => {
     expect(servers(join(dir, "dotfiles/claude.json"))).toEqual(["fleet"]);
   });
 
+  it("refuses a config that is a link to nothing, and leaves the link", async () => {
+    const dir = home(null);
+    symlinkSync(join(dir, "dotfiles/claude.json"), join(dir, ".claude.json"));
+    const result = await run(updateClaudeConfig(dir, {}, addServer("fleet")));
+    expect(result._tag).toBe("Failure");
+    expect(lstatSync(join(dir, ".claude.json")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(dir, "dotfiles/claude.json"))).toBe(false);
+    expect(existsSync(join(dir, ".claude.json.lock"))).toBe(false);
+  });
+
   // proper-lockfile's timings, scaled down: stale after 600 ms, refreshed every 200 ms.
   const quick = { staleMs: 600, updateMs: 200 } as const;
 
