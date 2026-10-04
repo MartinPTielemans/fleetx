@@ -151,6 +151,15 @@ pass "laptop, server and desktop are equivalent"
 expect laptop "Nothing here differs" 't3-fleet setup'
 expect desktop "Nothing here differs" 't3-fleet setup'
 
+# Run at all, the real Codex writes under ~/.codex (tmp/arg0, locks, helper links); setup only looks.
+on laptop 'printf "#!/bin/sh\nmkdir -p ~/.codex/tmp/arg0/codex-arg0-\$\$\necho codex-cli 0.160.0\n" > ~/.local/bin/codex && chmod +x ~/.local/bin/codex'
+before=$(state laptop)
+expect laptop "Nothing here differs" 't3-fleet setup'
+expect laptop "Nothing here differs" 't3-fleet setup --plan'
+[ "$(state laptop)" = "$before" ] || fail "setup with nothing to do, and --plan, should run no agent CLI: $(on laptop 'ls ~/.codex/tmp/arg0 2>&1')"
+on laptop 'rm ~/.local/bin/codex'
+pass "setup finds how Codex was installed without running it"
+
 # No credential anywhere in the repository: any branch, any commit, state and proposals included.
 leaks=$(on laptop 'git -C /srv/remote/fleet.git log -p --all | grep -o "[A-Za-z_]*SEKRIT[A-Za-z0-9_]*" | sort -u') || true
 [ -z "$leaks" ] || fail "credentials in the repository's history: $leaks"

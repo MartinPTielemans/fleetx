@@ -18,7 +18,14 @@ import { parse as parseToml } from "smol-toml";
 import { exec } from "../Exec.ts";
 import { git, ok, out } from "../Git.ts";
 import { sha256 } from "../Hash.ts";
-import { probeMachine } from "../Probe.ts";
+import {
+  fetchDescriptor,
+  isAlive,
+  providerPlans,
+  resolveAll,
+  runtimeFromCommandLine,
+} from "../Probe.ts";
+import { readT3Settings } from "../T3Settings.ts";
 import { fromClaude, fromCodex, secretNamer, type Extracted } from "./Credentials.ts";
 
 /** Where agents read skills, in the order they are reported. */
@@ -361,33 +368,86 @@ export const discoverInstructions = (home: string, managed: string | null) =>
     return found;
   });
 
-/** T3 and the agent CLIs, as the probe sees them: reported, never changed. */
+/**
+ * The version an agent CLI's install records in its own files: the native
+ * installer's versions/<v>/, Homebrew's Cellar/<name>/<v>/, npm's package.json.
+ */
+const versionAt = (real: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const inPath = /\/(?:versions|Cellar\/[^/]+)\/(\d[^/]*)\//.exec(`${real}/`)?.[1];
+    if (inPath !== undefined) return inPath;
+    for (let dir = real.slice(0, real.lastIndexOf("/")); dir.includes("/node_modules/");) {
+      const text = yield* fs.readFileString(`${dir}/package.json`).pipe(Effect.option);
+      if (Option.isSome(text)) {
+        const pkg = Schema.decodeUnknownOption(PackageJson)(text.value);
+        if (Option.isSome(pkg)) return pkg.value.version;
+      }
+      dir = dir.slice(0, dir.lastIndexOf("/"));
+    }
+    return null;
+  });
+const PackageJson = Schema.fromJsonString(Schema.Struct({ version: Schema.String }));
+
+/**
+ * T3 and the agent CLIs, from their files and the process table: reported,
+ * never changed, and never run. (Running `codex --version` writes under
+ * ~/.codex, and setup's plan writes nothing; the sync probes run them.)
+ */
 const discoverRuntime = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const observed = yield* probeMachine({});
+  const home = process.env["HOME"] ?? "";
   const agents: Array<FoundAgent> = [];
-  for (const a of observed.agents) {
-    const first = a.onPath[0] ?? null;
+  for (const name of ["claude", "codex"] as const) {
+    const first = (yield* resolveAll(name, process.env["PATH"]))[0] ?? null;
     const real =
       first === null ? null : yield* fs.realPath(first).pipe(Effect.orElseSucceed(() => first));
     agents.push({
-      name: a.name,
+      name,
       path: first,
-      version: a.managedVersion,
+      version: real === null ? null : yield* versionAt(real),
       installedBy: real === null ? null : installedBy(real),
     });
   }
-  const version = observed.t3.descriptor?.serverVersion ?? observed.t3.installedVersion;
+  const runtimeText = yield* fs
+    .readFileString(`${home}/.t3/userdata/server-runtime.json`)
+    .pipe(Effect.option);
+  const runtimeFile = Option.flatMap(runtimeText, Schema.decodeUnknownOption(T3Runtime));
+  let running = false;
+  let version: string | null = null;
+  if (Option.isSome(runtimeFile) && (yield* isAlive(runtimeFile.value.pid))) {
+    running = true;
+    const descriptor = yield* fetchDescriptor(runtimeFile.value.origin);
+    version = Option.isSome(descriptor)
+      ? descriptor.value.serverVersion
+      : (yield* runtimeFromCommandLine(runtimeFile.value.pid)).version;
+  }
+  const settings = Option.getOrNull(yield* readT3Settings(home));
+  const providers =
+    settings === null || settings === "invalid"
+      ? []
+      : yield* Effect.forEach(
+          providerPlans(settings).filter((p) => p.enabled),
+          (p) =>
+            Effect.gen(function* () {
+              const resolved =
+                p.binaryPath === null
+                  ? null
+                  : ((yield* resolveAll(p.binaryPath, process.env["PATH"]))[0] ?? null);
+              return { instance: p.instanceId, binary: p.binaryPath, resolved };
+            }),
+        );
   const t3: FoundT3 = {
-    running: observed.t3.runtime?.alive === true,
+    running,
     version,
     channel: version === null ? null : /nightly/.test(version) ? "nightly" : "latest",
-    providers: observed.t3.providers
-      .filter((p) => p.enabled)
-      .map((p) => ({ instance: p.instanceId, binary: p.binaryPath, resolved: p.resolved })),
+    providers,
   };
   return { agents, t3 };
 });
+const T3Runtime = Schema.fromJsonString(
+  Schema.Struct({ pid: Schema.Number, origin: Schema.String }),
+);
 
 /**
  * Everything setup looks at. `managed` is the fleet's checkout when this
