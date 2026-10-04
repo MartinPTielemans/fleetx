@@ -135,7 +135,7 @@ const makeFleet = async (
         'dest = "~/.zshrc"',
         "[mcp]",
         'servers = ["fetch", "docs"]',
-        'gateway = "https://relay.ts.net:8399"',
+        'gateway = "https://relay.tailnet.ts.net:8399"',
         "",
       ].join("\n"),
   );
@@ -207,8 +207,8 @@ describe("a member leaving", () => {
       ".claude.json",
       JSON.stringify({
         mcpServers: {
-          fetch: { type: "http", url: "https://relay.ts.net:8399/mcp/fetch" },
-          docs: { type: "http", url: "https://relay.ts.net:8399/mcp/docs" },
+          fetch: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/fetch" },
+          docs: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/docs" },
           later: { type: "stdio", command: "later" },
         },
       }),
@@ -216,7 +216,7 @@ describe("a member leaving", () => {
     put(
       home,
       ".codex/config.toml",
-      '[mcp_servers.fetch]\nurl = "https://relay.ts.net:8399/mcp/fetch"\n',
+      '[mcp_servers.fetch]\nurl = "https://relay.tailnet.ts.net:8399/mcp/fetch"\n',
     );
     put(home, ".local/state/t3-fleet/setup/moved/b/SKILL.md", "b before setup\n");
     fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/b"));
@@ -302,7 +302,7 @@ describe("a member leaving", () => {
       ".claude.json",
       JSON.stringify({
         mcpServers: {
-          fetch: { type: "http", url: "https://relay.ts.net:8399/mcp/fetch" },
+          fetch: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/fetch" },
           "t3-fleet": { type: "stdio", command: "t3-fleet", args: ["mcp"] },
         },
       }),
@@ -311,7 +311,7 @@ describe("a member leaving", () => {
     const notes = plan.notes.join("\n");
     expect(notes).toContain("no setup snapshot");
     expect(notes).toContain(
-      "fetch (Claude) go through the fleet's hub at https://relay.ts.net:8399",
+      "fetch (Claude) go through the fleet's hub at https://relay.tailnet.ts.net:8399",
     );
     // Only T3 Fleet's own server goes: it cannot work once the machine has left.
     const mcp = plan.steps.find((s) => s.title.startsWith("Remove T3 Fleet's own MCP server"));
