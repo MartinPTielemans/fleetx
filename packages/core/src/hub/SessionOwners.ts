@@ -12,6 +12,13 @@
  * kept in sessions.json in the hub's state directory: the server, the
  * client, and a SHA-256 of the session id, never the id itself. Bridged
  * sessions die with the relay and are not kept.
+ *
+ * The file is saved every ten seconds when something changed, and when the
+ * hub stops. Saves run one at a time, each writing the records as they are
+ * when it starts (the latest state wins), to a temporary file of its own
+ * renamed over sessions.json. A save once started finishes: a write the
+ * system has begun cannot be called back, so stopping waits for it, then
+ * saves the final state.
  */
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -19,7 +26,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import { sha256 } from "../Hash.ts";
 
@@ -81,23 +90,46 @@ export const makeSessionOwners = (file: string) =>
         records.set(keyOf(o.server, o.session), { ...o, expires: true });
     }
 
-    const save = Effect.gen(function* () {
-      if (!dirty) return;
-      dirty = false;
-      const kept = [...records.values()]
-        .filter((r) => r.expires)
-        .map(({ server, session, client, lastSeen }) => ({ server, session, client, lastSeen }));
-      const text = Option.getOrNull(encodeFile(kept));
-      if (text === null) return;
-      const temp = `${file}.tmp`;
-      yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 });
-      yield* fs.writeFileString(temp, text, { mode: 0o600 });
-      yield* fs.rename(temp, file);
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning(`hub: cannot save session owners: ${String(cause)}`),
-      ),
-    );
+    const permit = yield* Semaphore.make(1);
+    const save = permit
+      .withPermit(
+        Effect.gen(function* () {
+          if (!dirty) return;
+          dirty = false;
+          const kept = [...records.values()]
+            .filter((r) => r.expires)
+            .map(({ server, session, client, lastSeen }) => ({
+              server,
+              session,
+              client,
+              lastSeen,
+            }));
+          const text = Option.getOrNull(encodeFile(kept));
+          if (text === null) return;
+          const temp = `${file}.${yield* Random.nextIntBetween(0, 1e9)}.tmp`;
+          yield* Effect.gen(function* () {
+            yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 });
+            yield* fs.writeFileString(temp, text, { mode: 0o600 });
+            yield* fs.rename(temp, file);
+          }).pipe(
+            Effect.catchCause((cause) =>
+              fs.remove(temp).pipe(
+                Effect.ignore,
+                Effect.andThen(
+                  Effect.sync(() => {
+                    // Not saved: the next save tries again.
+                    dirty = true;
+                  }),
+                ),
+                Effect.andThen(
+                  Effect.logWarning(`hub: cannot save session owners: ${String(cause)}`),
+                ),
+              ),
+            ),
+          );
+        }),
+      )
+      .pipe(Effect.uninterruptible);
     yield* save.pipe(Effect.delay(Duration.seconds(10)), Effect.forever, Effect.forkScoped);
     yield* Effect.addFinalizer(() => save);
 
