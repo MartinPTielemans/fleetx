@@ -1,5 +1,5 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
@@ -20,19 +20,24 @@ const services = Layer.mergeAll(
   ),
 );
 
-/** A relay node in a temp HOME whose PATH has only the system's own tools and `bin`. */
+/**
+ * A relay node in a temp HOME whose PATH is `bin` alone: a shell to look
+ * commands up with, and whatever tools a test puts there. Tailscale and
+ * Docker are present because the test says so, whatever this machine has.
+ */
 const relayNode = (url: string) => {
   const home = mkdtempSync(join(tmpdir(), "t3f-relay-"));
   const checkout = join(home, "fleet");
   const bin = join(home, "bin");
   mkdirSync(join(checkout, "mcp"), { recursive: true });
   mkdirSync(bin, { recursive: true });
+  symlinkSync("/bin/sh", join(bin, "sh"));
   writeFileSync(join(checkout, "mcp/github.json"), '{"kind": "container", "image": "gh"}\n');
   writeFileSync(join(checkout, "mcp/exa.json"), '{"kind": "remote", "url": "https://x"}\n');
   const ctx = {
     home,
     checkout,
-    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+    env: { HOME: home, PATH: bin },
     engine: null,
     engineBuild: null,
     node: "box",
