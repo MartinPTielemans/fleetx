@@ -23,6 +23,7 @@ import * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 // Effect's FileSystem removes with rm, which takes a directory only recursively; a lock is removed with rmdir.
@@ -208,11 +209,19 @@ export const withClaudeConfigLock = <A, E, R>(
           // seconds). Then give it our mtime, remember it, and its identity.
           const touch = (seconds: number) =>
             fs.utimes(lock, seconds, seconds).pipe(Effect.mapError((e) => e.message));
+          // The directory we made, and every mtime we saw on it: if this fails, the directory goes
+          // again while it is still that one, untouched by anyone else, so Claude need not wait
+          // out its stale window.
+          let created: Seen | undefined;
+          const known = new Set<number | undefined>();
           const probed = yield* Effect.gen(function* () {
+            created = yield* look.pipe(Effect.mapError((e) => e.message));
+            known.add(created.mtime);
             yield* touch(
               utimesSeconds(Math.ceil((yield* Clock.currentTimeMillis) / 1000) * 1000 + 5, "ms"),
             );
             const seen = yield* look.pipe(Effect.mapError((e) => e.message));
+            known.add(seen.mtime);
             const precision: Precision = (seen.mtime ?? 0) % 1000 === 0 ? "s" : "ms";
             const at = yield* Clock.currentTimeMillis;
             const mtime = mtimeFor(at, precision);
@@ -226,10 +235,16 @@ export const withClaudeConfigLock = <A, E, R>(
               atPrecision(after.mtime, precision) === mtime
               ? Option.some({ id: after.id, mtime, at, precision })
               : Option.none();
-          }).pipe(Effect.orElseSucceed(() => Option.none()));
-          if (Option.isSome(probed)) return probed.value;
+          }).pipe(Effect.result);
+          if (Result.isSuccess(probed) && Option.isSome(probed.success))
+            return probed.success.value;
+          const ours = created;
+          if (ours !== undefined)
+            yield* removeIfStill((now) => now.ino === ours.ino && known.has(now.mtime));
           return yield* Effect.fail(
-            `${lock} was changed by another process as it was made; try again`,
+            Result.isFailure(probed)
+              ? `cannot lock ${file}: ${probed.failure}`
+              : `${lock} was changed by another process as it was made; try again`,
           );
         }
         const now = yield* Clock.currentTimeMillis;
