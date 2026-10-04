@@ -44,12 +44,14 @@ else
   echo "warning: the release has no SHA256SUMS to check the download against" >&2
 fi
 
-# Not being able to verify (no gh, not logged in, GitHub unreachable) is a
+# Not being able to verify (no gh, not logged in, gh too old, GitHub unreachable) is a
 # warning; a verification that runs and fails stops the install.
 if ! command -v gh >/dev/null 2>&1; then
   echo "note: install gh to verify the build attestation" >&2
 elif ! gh auth status >/dev/null 2>&1; then
   echo "warning: gh is not logged in, so the build attestation was not verified" >&2
+elif ! gh attestation verify --help >/dev/null 2>&1; then
+  echo "warning: this gh is too old to verify build attestations (needs 2.49 or newer)" >&2
 elif ! gh api rate_limit >/dev/null 2>&1; then
   echo "warning: GitHub is unreachable, so the build attestation was not verified" >&2
 elif gh attestation verify "$tmp" --repo "$repo" >/dev/null 2>&1; then
