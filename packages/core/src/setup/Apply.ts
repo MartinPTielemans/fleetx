@@ -32,7 +32,16 @@ import { parse as parseToml } from "smol-toml";
 import type { ProbeServices } from "../Area.ts";
 import { loadConfig } from "../Config.ts";
 import { exec } from "../Exec.ts";
-import { commitAndPush, ensureGitConfig, git, ok, out, why } from "../Git.ts";
+import {
+  commitAndPush,
+  ensureGitConfig,
+  git,
+  ok,
+  out,
+  refuseSecrets,
+  scanCommits,
+  why,
+} from "../Git.ts";
 import { writeLocalConfig } from "../Init.ts";
 import { FLEET_FILE } from "../Names.ts";
 import {
@@ -46,6 +55,7 @@ import {
   writeRecipients,
   writeSecrets,
 } from "../Secrets.ts";
+import { refusal } from "../SecretScan.ts";
 import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
 import type { Secret } from "./Credentials.ts";
@@ -316,6 +326,7 @@ export const setupSteps = (
         }
         if (!ok(yield* git(repo, ["rev-parse", "-q", "--verify", "HEAD"]))) {
           yield* git(repo, ["add", "--", FLEET_FILE, "nodes", ".gitignore"]);
+          yield* refuseSecrets(repo);
           const commit = yield* git(repo, [
             "commit",
             "-q",
@@ -328,9 +339,19 @@ export const setupSteps = (
         const origin = out(yield* git(repo, ["remote", "get-url", "origin"]));
         if (origin === "" && input.remote !== null) {
           if ("github" in input.remote) {
+            // Created empty, with origin set; the commit step pushes.
             const gh = yield* sh(
               "gh",
-              ["repo", "create", input.remote.github, "--private", "--source", repo],
+              [
+                "repo",
+                "create",
+                input.remote.github,
+                "--private",
+                "--source",
+                repo,
+                "--remote",
+                "origin",
+              ],
               120,
             );
             if (gh.code !== 0)
@@ -343,13 +364,7 @@ export const setupSteps = (
             lines.push(`origin is ${cleanUrl(input.remote.url)}`);
           }
         }
-        // Pushed until the remote has it: a push that failed before is tried again.
-        if (out(yield* git(repo, ["remote", "get-url", "origin"])) !== "") {
-          const push = yield* git(repo, ["push", "-q", "-u", "origin", "main"], {
-            timeout: Duration.minutes(2),
-          });
-          if (!ok(push)) return yield* Effect.fail(`pushing: ${why(push)}`);
-        }
+        // Pushed by the commit step, through commitAndPush: scanned from the first commit.
         return lines;
       }).pipe(Effect.mapError(fail("creating the repo"))),
     });
@@ -539,12 +554,12 @@ export const setupSteps = (
         const origin = out(yield* git(repo, ["remote", "get-url", "origin"]));
         if (origin !== "") {
           const rev = yield* commitAndPush(repo, paths, `Set up ${input.node}`);
-          return [
-            rev === "nothing to commit" ? "nothing new to commit" : `committed and pushed ${rev}`,
-          ];
+          if (rev !== "nothing to commit") return [`committed and pushed ${rev}`];
+          return [yield* pushLeftover(repo)];
         }
-        // No remote yet: commit here; pushing is the next step shown.
+        // No remote yet: commit here, scanned as commitAndPush would; pushing is the next step shown.
         yield* git(repo, ["add", "-A", "--", ...paths]);
+        yield* refuseSecrets(repo);
         const commit = yield* git(repo, ["commit", "-q", "-m", `Set up ${input.node}`]);
         return [ok(commit) ? "committed (no remote yet)" : "nothing new to commit"];
       }).pipe(Effect.mapError(fail("committing"))),
@@ -614,6 +629,28 @@ export const setupSteps = (
   });
   return steps;
 };
+
+/**
+ * Commits an earlier run made but could not push (a resume after a failed
+ * push): scanned as commitAndPush scans, from the root when the remote has
+ * nothing yet, then pushed.
+ */
+const pushLeftover = (repo: string) =>
+  Effect.gen(function* () {
+    const empty =
+      (yield* git(repo, ["ls-remote", "--exit-code", "origin", "refs/heads/main"])).code === 2;
+    const range = empty ? "HEAD" : "origin/main..HEAD";
+    if (!empty && out(yield* git(repo, ["rev-list", "--count", range])) === "0")
+      return "nothing new to commit";
+    const hits = yield* scanCommits(repo, [range]);
+    if (hits.length > 0) return yield* Effect.fail(refusal(hits, "push"));
+    const push = yield* git(
+      repo,
+      empty ? ["push", "-q", "-u", "origin", "HEAD:refs/heads/main"] : ["push", "-q"],
+    );
+    if (!ok(push)) return yield* Effect.fail(`the push failed: ${why(push)}`);
+    return "pushed what an earlier run committed";
+  });
 
 /**
  * Replace each path with its link. What is there is recorded in before.json,
