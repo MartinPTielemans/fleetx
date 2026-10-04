@@ -25,6 +25,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
@@ -56,6 +57,9 @@ const home = (config: string | null) => {
   return dir;
 };
 const servers = (file: string) => Object.keys(JSON.parse(readFileSync(file, "utf8")).mcpServers);
+
+/** Node's services with the test clock in place of the real one. */
+const testServices = Layer.mergeAll(NodeServices.layer, TestClock.layer());
 
 /**
  * The test clock, starting at the real time (lock mtimes stay sensible), wrapped so every sleep
@@ -185,7 +189,7 @@ describe("Claude's global config", () => {
         yield* Fiber.join(slow);
         yield* TestClock.adjust("2 seconds");
         yield* Fiber.join(other);
-      }).pipe(Effect.provide(TestClock.layer()), Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(testServices)),
     );
     expect(servers(file).sort()).toEqual(["claudes", "fleet"]);
     expect(existsSync(`${file}.lock`)).toBe(false);
@@ -487,7 +491,7 @@ describe("Claude's config, changed while it was being written", () => {
             Effect.sync(() => writeFileSync(file, `{"mcpServers":{"c${++calls}":{}}}`)),
           ),
         ),
-      }).pipe(Effect.result, Effect.provide(TestClock.layer()), Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.result, Effect.provide(testServices)),
     );
     expect(result._tag).toBe("Failure");
     expect(calls).toBe(2);
