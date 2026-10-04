@@ -23,7 +23,13 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { RELAY_TOKEN_ENV, resolveEndpoint, type Endpoint, type McpDesired } from "../areas/Mcp.ts";
 import { localSecretsPath } from "../Secrets.ts";
 import { CLI } from "../Names.ts";
-import { claudeConfigPath, updateClaudeConfig, updateCodexConfig } from "./ClientConfig.ts";
+import {
+  claudeConfigPath,
+  readClaudeConfig,
+  updateClaudeConfig,
+  type ClaudeConfig,
+} from "../ClaudeConfig.ts";
+import { updateCodexConfig } from "./CodexConfig.ts";
 import { isObject, prettyJson } from "./Files.ts";
 
 type Json = Record<string, unknown>;
@@ -458,17 +464,22 @@ export const applyMcp = (home: string, plan: McpPlan) =>
         }
         return edits;
       };
-      if (client === "claude")
-        yield* updateClaudeConfig(home, process.env, (config) => {
-          const servers = isObject(config["mcpServers"]) ? config["mcpServers"] : {};
-          const next = { ...servers };
-          for (const [name, entry] of Object.entries(editsFor(servers))) {
-            if (entry === null) delete next[name];
-            else next[name] = entry;
-          }
-          return { ...config, mcpServers: next };
-        });
-      else
+      if (client === "claude") {
+        // The shared writer always writes: it is called only when there is something to change,
+        // and the edits are made again from the config it reads under Claude's lock.
+        const before = yield* readClaudeConfig(yield* claudeConfigPath(home, process.env));
+        const servers = (config: ClaudeConfig) =>
+          (isObject(config["mcpServers"]) ? config["mcpServers"] : {}) as Json;
+        if (Object.keys(editsFor(servers(before))).length > 0)
+          yield* updateClaudeConfig(home, process.env, (config) => {
+            const next = { ...servers(config) };
+            for (const [name, entry] of Object.entries(editsFor(servers(config)))) {
+              if (entry === null) delete next[name];
+              else next[name] = entry;
+            }
+            return { ...config, mcpServers: next };
+          });
+      } else
         yield* updateCodexConfig(home, (text) =>
           Effect.gen(function* () {
             const config =

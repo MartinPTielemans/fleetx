@@ -1167,7 +1167,7 @@ describe("round two", () => {
     const outcomes = await run(applyLeave(await f.plan()));
     const mcp = outcomes.find((o) => o.title.startsWith("Put back the MCP servers"));
     expect(mcp).toMatchObject({ ok: false });
-    expect(mcp?.lines.join("")).toContain("which is missing; it was left as it is");
+    expect(mcp?.lines.join("")).toContain("which is missing; leaving it as it is");
     expect(isLink(join(f.home, ".claude.json"))).toBe(true);
   });
 
