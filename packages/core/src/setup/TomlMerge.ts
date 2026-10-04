@@ -68,12 +68,14 @@ export const additions = (base: unknown, side: unknown): Additions | null => {
     if (!isTable(b) || !isTable(s)) return false;
     for (const k of new Set([...Object.keys(b), ...Object.keys(s)])) {
       if (!(k in s)) return false;
-      // A whole new table is an addition; a new value in a table that was there only as one of the lists.
+      // A whole new table is an addition; a new value in a table that was there only as one of the
+      // lists, `[[defaults.instructions]]` included when it is not there yet.
       if (!(k in b) && isTable(s[k])) {
         out.tables.set(JSON.stringify([...path, k]), s[k]);
         continue;
       }
-      if (!(k in b) && !(LISTS.has(k) && Array.isArray(s[k]))) return false;
+      const list = LISTS.has(k) || ENTRY_LISTS.has(JSON.stringify([...path, k]));
+      if (!(k in b) && !(list && Array.isArray(s[k]))) return false;
       if (!walk(b[k], s[k], [...path, k])) return false;
     }
     return true;

@@ -42,6 +42,33 @@ describe("mergeAdditions", () => {
     });
   });
 
+  it("merges the first instruction entries when the fleet has none yet, from any number of machines", () => {
+    const base = BASE.replace(/\n\[\[defaults\.instructions\]\][^]*$/, "");
+    const claude = `\n[[defaults.instructions]]\nsrc = "instructions/claude/CLAUDE.md"\ndest = "~/.claude/CLAUDE.md"\n`;
+    const a = `${base.replace('["fetch"]', '["fetch", "notes"]')}${claude}`;
+    const b = `${base.replace('["fetch"]', '["fetch", "weather"]')}${ENTRY}`;
+    const ab = mergeAdditions(base, a, b);
+    expect(parse(ab ?? "")).toMatchObject({
+      defaults: {
+        mcp: { servers: ["fetch", "notes", "weather"] },
+        instructions: [{ dest: "~/.claude/CLAUDE.md" }, { dest: "~/.codex/AGENTS.md" }],
+      },
+    });
+    // A third machine, approved after both: each addition lands once.
+    const c = `${base.replace('["fetch"]', '["fetch", "notes", "maps"]')}${claude}`;
+    const abc = parse(mergeAdditions(base, ab ?? "", c) ?? "") as {
+      defaults: { mcp: { servers: Array<string> }; instructions: Array<{ dest: string }> };
+    };
+    expect(abc.defaults.mcp.servers).toEqual(["fetch", "notes", "weather", "maps"]);
+    expect(abc.defaults.instructions.map((i) => i.dest)).toEqual([
+      "~/.claude/CLAUDE.md",
+      "~/.codex/AGENTS.md",
+    ]);
+    // Two different entries for one file are still a real conflict.
+    const other = claude.replace("instructions/claude/CLAUDE.md", "instructions/claude/OTHER.md");
+    expect(mergeAdditions(base, a, `${base}${other}`)).toBeNull();
+  });
+
   it("refuses anything else: removals, changed values, new tables, reorders, conflicts", () => {
     const adds = BASE.replace('["fetch"]', '["fetch", "notes"]');
     const refused = {
