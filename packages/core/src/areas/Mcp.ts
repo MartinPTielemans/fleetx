@@ -66,13 +66,23 @@ const Definition = Schema.Struct({
   url: Schema.optionalKey(Schema.String),
   command: Schema.optionalKey(Schema.String),
   args: Schema.optionalKey(Schema.Array(Schema.String)),
-  auth: Schema.optionalKey(Schema.Struct({ type: Schema.String, token_env: Schema.optionalKey(Schema.String) })),
+  auth: Schema.optionalKey(
+    Schema.Struct({ type: Schema.String, token_env: Schema.optionalKey(Schema.String) }),
+  ),
 });
 
 /** Where a client should reach a server. */
 export const Endpoint = Schema.Union([
-  Schema.Struct({ type: Schema.Literal("http"), url: Schema.String, tokenEnv: Schema.NullOr(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal("stdio"), command: Schema.String, args: Schema.Array(Schema.String) }),
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    url: Schema.String,
+    tokenEnv: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    command: Schema.String,
+    args: Schema.Array(Schema.String),
+  }),
 ]);
 export type Endpoint = typeof Endpoint.Type;
 
@@ -96,19 +106,32 @@ const Registered = Schema.Union([
     args: Schema.Array(Schema.String),
     kept: Schema.optionalKey(Schema.Array(Schema.String)),
   }),
-  Schema.Struct({ type: Schema.Literal("other"), kept: Schema.optionalKey(Schema.Array(Schema.String)) }),
+  Schema.Struct({
+    type: Schema.Literal("other"),
+    kept: Schema.optionalKey(Schema.Array(Schema.String)),
+  }),
 ]);
 
 /**
  * Settings of a client's entry that re-registering from a definition would
  * drop: everything but the fields T3 Fleet writes, and empty or default values.
  */
-export const keptSettings = (entry: Readonly<Record<string, unknown>>, writes: ReadonlyArray<string>): Array<string> => {
+export const keptSettings = (
+  entry: Readonly<Record<string, unknown>>,
+  writes: ReadonlyArray<string>,
+): Array<string> => {
   const kept: Array<string> = [];
   for (const [key, value] of Object.entries(entry)) {
-    if (writes.includes(key) || value === undefined || value === null || (key === "enabled" && value === true)) continue;
+    if (
+      writes.includes(key) ||
+      value === undefined ||
+      value === null ||
+      (key === "enabled" && value === true)
+    )
+      continue;
     if (key === "headers" && typeof value === "object") {
-      for (const header of Object.keys(value)) if (header.toLowerCase() !== "authorization") kept.push(`header ${header}`);
+      for (const header of Object.keys(value))
+        if (header.toLowerCase() !== "authorization") kept.push(`header ${header}`);
       continue;
     }
     if (typeof value === "object" && Object.keys(value).length === 0) continue;
@@ -135,7 +158,17 @@ const Observed = Schema.Struct({
   ),
   clients: Schema.Struct({ claude: Schema.Boolean, codex: Schema.Boolean }),
   /** Relay node with the hub on: each hosted server's state, as the hub reports it; null if unknown. */
-  hub: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Struct({ name: Schema.String, state: Schema.String, detail: Schema.NullOr(Schema.String) })))),
+  hub: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          name: Schema.String,
+          state: Schema.String,
+          detail: Schema.NullOr(Schema.String),
+        }),
+      ),
+    ),
+  ),
   /** Hub on: ToolHive workloads still running servers the hub serves. */
   toolhive: Schema.optionalKey(Schema.Array(Schema.String)),
 });
@@ -156,14 +189,20 @@ const ClaudeJson = Schema.Struct({
 });
 
 const ClaudeJsonRaw = Schema.Struct({
-  mcpServers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown))),
+  mcpServers: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
+  ),
 });
 
 const INITIALIZE = JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
   method: "initialize",
-  params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3-fleet", version: "1" } },
+  params: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "t3-fleet", version: "1" },
+  },
 });
 
 /** The hub's gateway names a server's state in this header when it cannot serve it. */
@@ -179,11 +218,20 @@ export const resolveEndpoint = (
   desired: McpDesired,
   home: string,
   relayTokenEnv: string = RELAY_TOKEN_ENV,
-): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
+):
+  | { readonly endpoint: Endpoint; readonly problem: null }
+  | { readonly endpoint: null; readonly problem: string } => {
   const resolved = resolveUnchecked(name, d, desired, home, relayTokenEnv);
   // The variable's name goes into fix commands unquoted; only a plain name may.
-  if (resolved.endpoint?.type === "http" && resolved.endpoint.tokenEnv !== null && !ENV_NAME.test(resolved.endpoint.tokenEnv)) {
-    return { endpoint: null, problem: `token_env ${JSON.stringify(resolved.endpoint.tokenEnv)} is not a variable name (A-Z, 0-9, _)` };
+  if (
+    resolved.endpoint?.type === "http" &&
+    resolved.endpoint.tokenEnv !== null &&
+    !ENV_NAME.test(resolved.endpoint.tokenEnv)
+  ) {
+    return {
+      endpoint: null,
+      problem: `token_env ${JSON.stringify(resolved.endpoint.tokenEnv)} is not a variable name (A-Z, 0-9, _)`,
+    };
   }
   return resolved;
 };
@@ -205,13 +253,19 @@ const resolveUnchecked = (
   desired: McpDesired,
   home: string,
   relayTokenEnv: string,
-): { readonly endpoint: Endpoint; readonly problem: null } | { readonly endpoint: null; readonly problem: string } => {
+):
+  | { readonly endpoint: Endpoint; readonly problem: null }
+  | { readonly endpoint: null; readonly problem: string } => {
   const tokenEnv = d.auth?.type === "bearer" ? (d.auth.token_env ?? null) : null;
   const fail = (problem: string) => ({ endpoint: null, problem }) as const;
   const ok = (endpoint: Endpoint) => ({ endpoint, problem: null }) as const;
   if (d.kind === "stdio") {
     if (d.command === undefined) return fail("stdio definition has no command");
-    return ok({ type: "stdio", command: expandHome(d.command, home), args: (d.args ?? []).map((a) => expandHome(a, home)) });
+    return ok({
+      type: "stdio",
+      command: expandHome(d.command, home),
+      args: (d.args ?? []).map((a) => expandHome(a, home)),
+    });
   }
   if (d.kind === "direct") {
     if (d.url === undefined) return fail("direct definition has no url");
@@ -222,14 +276,24 @@ const resolveUnchecked = (
   if (desired?.hub === true) {
     if (!isHosted(d.kind)) return fail(`unknown kind ${d.kind}`);
     // The hub serves every hosted definition; clients authenticate to the gateway, never upstream.
-    if (gateway === undefined) return fail("[mcp] hub = true, but no [mcp] gateway (the relay's URL)");
-    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired.token_env ?? relayTokenEnv });
+    if (gateway === undefined)
+      return fail("[mcp] hub = true, but no [mcp] gateway (the relay's URL)");
+    return ok({
+      type: "http",
+      url: `${gateway}/mcp/${name}`,
+      tokenEnv: desired.token_env ?? relayTokenEnv,
+    });
   }
   if (gateway !== undefined && port !== undefined) {
     // Through the relay: one endpoint, one token, for every hosted server.
-    return ok({ type: "http", url: `${gateway}/mcp/${name}`, tokenEnv: desired?.token_env ?? relayTokenEnv });
+    return ok({
+      type: "http",
+      url: `${gateway}/mcp/${name}`,
+      tokenEnv: desired?.token_env ?? relayTokenEnv,
+    });
   }
-  if (desired?.origin === undefined || port === undefined) return fail(`hosted server, but no [mcp] origin and port for ${name} (or [mcp] hub = true)`);
+  if (desired?.origin === undefined || port === undefined)
+    return fail(`hosted server, but no [mcp] origin and port for ${name} (or [mcp] hub = true)`);
   return ok({ type: "http", url: `http://${desired.origin}:${port}/mcp`, tokenEnv });
 };
 
@@ -240,9 +304,13 @@ const resolveUnchecked = (
 export const liveCheck = (url: string, token: string | undefined) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    const authorized = (request: HttpClientRequest.HttpClientRequest) => (token ? HttpClientRequest.bearerToken(request, token) : request);
+    const authorized = (request: HttpClientRequest.HttpClientRequest) =>
+      token ? HttpClientRequest.bearerToken(request, token) : request;
     const request = HttpClientRequest.post(url).pipe(
-      HttpClientRequest.setHeaders({ "content-type": "application/json", accept: "application/json, text/event-stream" }),
+      HttpClientRequest.setHeaders({
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      }),
       HttpClientRequest.bodyText(INITIALIZE, "application/json"),
       authorized,
     );
@@ -251,8 +319,14 @@ export const liveCheck = (url: string, token: string | undefined) =>
         Effect.gen(function* () {
           const session = r.headers["mcp-session-id"];
           if (session !== undefined) {
-            const close = HttpClientRequest.delete(url).pipe(HttpClientRequest.setHeader("mcp-session-id", session), authorized);
-            yield* client.execute(close).pipe(Effect.flatMap((d) => d.text), Effect.ignore);
+            const close = HttpClientRequest.delete(url).pipe(
+              HttpClientRequest.setHeader("mcp-session-id", session),
+              authorized,
+            );
+            yield* client.execute(close).pipe(
+              Effect.flatMap((d) => d.text),
+              Effect.ignore,
+            );
           }
           if (readHeader(r.headers, "hub-state") === "needs-login") return NEEDS_LOGIN;
           if (r.status >= 200 && r.status < 300) return "ok";
@@ -265,28 +339,47 @@ export const liveCheck = (url: string, token: string | undefined) =>
     return Option.getOrElse(result, () => "no answer within 8s");
   });
 
-const HubStates = Schema.Array(Schema.Struct({ name: Schema.String, state: Schema.String, detail: Schema.NullOr(Schema.String) }));
+const HubStates = Schema.Array(
+  Schema.Struct({
+    name: Schema.String,
+    state: Schema.String,
+    detail: Schema.NullOr(Schema.String),
+  }),
+);
 
 /** The hub's view of its servers, from the relay on this node; null when it does not answer. */
 const hubStates = (port: number, token: string) =>
   Effect.gen(function* () {
     if (token === "") return null;
     const client = yield* HttpClient.HttpClient;
-    const text = yield* client.execute(HttpClientRequest.get(`http://127.0.0.1:${port}/hub/servers`).pipe(HttpClientRequest.bearerToken(token))).pipe(
-      Effect.flatMap((r) => (r.status === 200 ? r.text.pipe(Effect.asSome) : Effect.succeed(Option.none<string>()))),
-      Effect.timeout(Duration.seconds(8)),
-      Effect.orElseSucceed(() => Option.none<string>()),
-    );
+    const text = yield* client
+      .execute(
+        HttpClientRequest.get(`http://127.0.0.1:${port}/hub/servers`).pipe(
+          HttpClientRequest.bearerToken(token),
+        ),
+      )
+      .pipe(
+        Effect.flatMap((r) =>
+          r.status === 200 ? r.text.pipe(Effect.asSome) : Effect.succeed(Option.none<string>()),
+        ),
+        Effect.timeout(Duration.seconds(8)),
+        Effect.orElseSucceed(() => Option.none<string>()),
+      );
     if (Option.isNone(text)) return null;
     return Option.getOrNull(Schema.decodeOption(Schema.fromJsonString(HubStates))(text.value));
   });
 
 /** Names of running workloads in `thv list --format json` output (an array, or null when there are none). */
 export const toolhiveWorkloads = (text: string): Array<string> => {
-  const value = Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(text.trim() === "" ? "null" : text));
+  const value = Option.getOrUndefined(
+    Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(text.trim() === "" ? "null" : text),
+  );
   if (!Array.isArray(value)) return [];
   return value
-    .filter((w): w is { name: string; status?: unknown } => typeof w === "object" && w !== null && typeof (w as { name?: unknown }).name === "string")
+    .filter(
+      (w): w is { name: string; status?: unknown } =>
+        typeof w === "object" && w !== null && typeof (w as { name?: unknown }).name === "string",
+    )
     .filter((w) => w.status === undefined || w.status === "running")
     .map((w) => w.name);
 };
@@ -303,8 +396,13 @@ export const dq = (text: string) =>
 const sameEndpoint = (want: Endpoint, got: Registered | null) =>
   got !== null &&
   (want.type === "http"
-    ? got.type === "http" && got.url === want.url && got.auth === (want.tokenEnv !== null) && got.credential !== false
-    : got.type === "stdio" && got.command === want.command && JSON.stringify(got.args) === JSON.stringify(want.args));
+    ? got.type === "http" &&
+      got.url === want.url &&
+      got.auth === (want.tokenEnv !== null) &&
+      got.credential !== false
+    : got.type === "stdio" &&
+      got.command === want.command &&
+      JSON.stringify(got.args) === JSON.stringify(want.args));
 
 export const McpArea = defineArea({
   id: "mcp",
@@ -315,24 +413,46 @@ export const McpArea = defineArea({
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const has = (bin: string) => exec({ command: "sh", args: ["-c", `command -v ${bin}`], env: ctx.env, timeout: Duration.seconds(5) }).pipe(Effect.map((r) => r.code === 0));
+      const has = (bin: string) =>
+        exec({
+          command: "sh",
+          args: ["-c", `command -v ${bin}`],
+          env: ctx.env,
+          timeout: Duration.seconds(5),
+        }).pipe(Effect.map((r) => r.code === 0));
       const clients = { claude: yield* has("claude"), codex: yield* has("codex") };
 
-      const claudeText = yield* fs.readFileString(path.join(ctx.home, ".claude.json")).pipe(Effect.option);
+      const claudeText = yield* fs
+        .readFileString(path.join(ctx.home, ".claude.json"))
+        .pipe(Effect.option);
       const claude = Option.isSome(claudeText)
-        ? Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(ClaudeJson))(claudeText.value))?.mcpServers ?? {}
+        ? (Option.getOrUndefined(
+            Schema.decodeOption(Schema.fromJsonString(ClaudeJson))(claudeText.value),
+          )?.mcpServers ?? {})
         : {};
       // The same entries with every field, for what re-registering would drop.
       const claudeRaw = Option.isSome(claudeText)
-        ? Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(ClaudeJsonRaw))(claudeText.value))?.mcpServers ?? {}
+        ? (Option.getOrUndefined(
+            Schema.decodeOption(Schema.fromJsonString(ClaudeJsonRaw))(claudeText.value),
+          )?.mcpServers ?? {})
         : {};
-      const codexText = yield* fs.readFileString(path.join(ctx.home, ".codex/config.toml")).pipe(Effect.option);
+      const codexText = yield* fs
+        .readFileString(path.join(ctx.home, ".codex/config.toml"))
+        .pipe(Effect.option);
       const codexAll = Option.isSome(codexText)
-        ? ((yield* Effect.try(() => parseToml(codexText.value)).pipe(Effect.orElseSucceed(() => ({})))) as { mcp_servers?: Record<string, Record<string, unknown>> }).mcp_servers ?? {}
+        ? ((
+            (yield* Effect.try(() => parseToml(codexText.value)).pipe(
+              Effect.orElseSucceed(() => ({})),
+            )) as { mcp_servers?: Record<string, Record<string, unknown>> }
+          ).mcp_servers ?? {})
         : {};
 
       // Claude stores the header with the token in it, Codex the variable's name.
-      const fromClaude = (name: string, tokenEnv: string | null, token: string | undefined): Registered | null => {
+      const fromClaude = (
+        name: string,
+        tokenEnv: string | null,
+        token: string | undefined,
+      ): Registered | null => {
         const e = claude[name];
         if (e === undefined) return null;
         const kept = keptSettings(claudeRaw[name] ?? {}, CLAUDE_WRITES);
@@ -343,11 +463,14 @@ export const McpArea = defineArea({
             type: "http",
             url: e.url,
             auth: header !== undefined,
-            ...(tokenEnv === null || token === undefined || header === undefined ? {} : { credential: header === `Bearer ${token}` }),
+            ...(tokenEnv === null || token === undefined || header === undefined
+              ? {}
+              : { credential: header === `Bearer ${token}` }),
             ...keeps,
           };
         }
-        if (e.command !== undefined) return { type: "stdio", command: e.command, args: e.args ?? [], ...keeps };
+        if (e.command !== undefined)
+          return { type: "stdio", command: e.command, args: e.args ?? [], ...keeps };
         return { type: "other", ...keeps };
       };
       const fromCodex = (name: string, tokenEnv: string | null): Registered | null => {
@@ -357,27 +480,51 @@ export const McpArea = defineArea({
         const keeps = kept.length === 0 ? {} : { kept };
         if (typeof e["url"] === "string") {
           const env = e["bearer_token_env_var"];
-          return { type: "http", url: e["url"], auth: typeof env === "string", ...(tokenEnv === null || typeof env !== "string" ? {} : { credential: env === tokenEnv }), ...keeps };
+          return {
+            type: "http",
+            url: e["url"],
+            auth: typeof env === "string",
+            ...(tokenEnv === null || typeof env !== "string"
+              ? {}
+              : { credential: env === tokenEnv }),
+            ...keeps,
+          };
         }
-        if (typeof e["command"] === "string") return { type: "stdio", command: e["command"], args: (e["args"] as Array<string> | undefined) ?? [], ...keeps };
+        if (typeof e["command"] === "string")
+          return {
+            type: "stdio",
+            command: e["command"],
+            args: (e["args"] as Array<string> | undefined) ?? [],
+            ...keeps,
+          };
         return { type: "other", ...keeps };
       };
 
       // Secrets for live checks: the node's t3-fleet secrets file, then the environment.
-      const secretsText = yield* fs.readFileString(path.join(configDir(ctx.home), "secrets.env")).pipe(Effect.orElseSucceed(() => ""));
+      const secretsText = yield* fs
+        .readFileString(path.join(configDir(ctx.home), "secrets.env"))
+        .pipe(Effect.orElseSucceed(() => ""));
       const secrets: Record<string, string> = {};
       for (const line of secretsText.split("\n")) {
         const m = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
         if (m?.[1] !== undefined) secrets[m[1]] = (m[2] ?? "").replace(/^["']|["']$/g, "");
       }
 
-      const relayTokenEnv = secrets[LEGACY_RELAY_TOKEN_ENV] !== undefined || ctx.env[LEGACY_RELAY_TOKEN_ENV] !== undefined ? LEGACY_RELAY_TOKEN_ENV : RELAY_TOKEN_ENV;
+      const relayTokenEnv =
+        secrets[LEGACY_RELAY_TOKEN_ENV] !== undefined ||
+        ctx.env[LEGACY_RELAY_TOKEN_ENV] !== undefined
+          ? LEGACY_RELAY_TOKEN_ENV
+          : RELAY_TOKEN_ENV;
       const servers = yield* Effect.forEach(
         desired?.servers ?? [],
         (name) =>
           Effect.gen(function* () {
-            const text = yield* fs.readFileString(path.join(ctx.checkout, "mcp", `${name}.json`)).pipe(Effect.option);
-            const def = Option.isSome(text) ? Schema.decodeOption(Schema.fromJsonString(Definition))(text.value) : Option.none();
+            const text = yield* fs
+              .readFileString(path.join(ctx.checkout, "mcp", `${name}.json`))
+              .pipe(Effect.option);
+            const def = Option.isSome(text)
+              ? Schema.decodeOption(Schema.fromJsonString(Definition))(text.value)
+              : Option.none();
             const resolved = Option.isNone(def)
               ? { endpoint: null, problem: `mcp/${name}.json is missing or not valid` }
               : resolveEndpoint(name, def.value, desired, ctx.home, relayTokenEnv);
@@ -385,12 +532,22 @@ export const McpArea = defineArea({
             const tokenEnv = endpoint?.type === "http" ? endpoint.tokenEnv : null;
             const token = tokenEnv === null ? undefined : (secrets[tokenEnv] ?? ctx.env[tokenEnv]);
             const live = endpoint?.type === "http" ? yield* liveCheck(endpoint.url, token) : null;
-            return { name, endpoint, problem, claude: fromClaude(name, tokenEnv, token), codex: fromCodex(name, tokenEnv), live };
+            return {
+              name,
+              endpoint,
+              problem,
+              claude: fromClaude(name, tokenEnv, token),
+              codex: fromCodex(name, tokenEnv),
+              live,
+            };
           }),
         { concurrency: 8 },
       );
       // Relay node with the hub: what the hub itself says about each server.
-      let hub: ReadonlyArray<{ name: string; state: string; detail: string | null }> | null | undefined;
+      let hub:
+        | ReadonlyArray<{ name: string; state: string; detail: string | null }>
+        | null
+        | undefined;
       if (desired?.hub === true && ctx.roles.includes("relay")) {
         const token = secrets[relayTokenEnv] ?? ctx.env[relayTokenEnv] ?? "";
         hub = yield* hubStates(ctx.relay?.port ?? 8399, token);
@@ -399,22 +556,40 @@ export const McpArea = defineArea({
       // Hub on: ToolHive workloads still serving what the hub serves.
       let toolhive: Array<string> | undefined;
       if (desired?.hub === true && (yield* has("thv"))) {
-        const listed = yield* exec({ command: "thv", args: ["list", "--format", "json"], env: ctx.env, timeout: Duration.seconds(15) });
+        const listed = yield* exec({
+          command: "thv",
+          args: ["list", "--format", "json"],
+          env: ctx.env,
+          timeout: Duration.seconds(15),
+        });
         const workloads = listed.code === 0 ? toolhiveWorkloads(listed.stdout) : [];
         toolhive = [];
         for (const w of workloads) {
-          const text = yield* fs.readFileString(path.join(ctx.checkout, "mcp", `${w}.json`)).pipe(Effect.option);
-          const kind = Option.isSome(text) ? Option.getOrUndefined(Schema.decodeOption(Schema.fromJsonString(Definition))(text.value))?.kind : undefined;
+          const text = yield* fs
+            .readFileString(path.join(ctx.checkout, "mcp", `${w}.json`))
+            .pipe(Effect.option);
+          const kind = Option.isSome(text)
+            ? Option.getOrUndefined(
+                Schema.decodeOption(Schema.fromJsonString(Definition))(text.value),
+              )?.kind
+            : undefined;
           if (kind !== undefined && isHosted(kind)) toolhive.push(w);
         }
       }
-      return { servers, clients, ...(hub === undefined ? {} : { hub }), ...(toolhive === undefined ? {} : { toolhive }) };
+      return {
+        servers,
+        clients,
+        ...(hub === undefined ? {} : { hub }),
+        ...(toolhive === undefined ? {} : { toolhive }),
+      };
     }),
   diagnose: ({ node, observed }) => {
     const out: Array<Finding> = [];
     const needsLogin = new Map<string, string | null>();
-    for (const h of observed.hub ?? []) if (h.state === NEEDS_LOGIN) needsLogin.set(h.name, h.detail);
-    for (const s of observed.servers) if (s.live === NEEDS_LOGIN && !needsLogin.has(s.name)) needsLogin.set(s.name, null);
+    for (const h of observed.hub ?? [])
+      if (h.state === NEEDS_LOGIN) needsLogin.set(h.name, h.detail);
+    for (const s of observed.servers)
+      if (s.live === NEEDS_LOGIN && !needsLogin.has(s.name)) needsLogin.set(s.name, null);
     for (const [name, detail] of needsLogin) {
       out.push({
         node,
@@ -433,27 +608,50 @@ export const McpArea = defineArea({
         key: "mcp-toolhive-left",
         severity: "warn",
         title: `ToolHive still runs ${names.join(", ")}, which the T3 Fleet hub serves now`,
-        detail: "stopping them leaves them in ToolHive (thv start brings one back); remove them with thv rm once the hub serves them",
-        fix: { command: `thv stop ${names.map(sh).join(" ")}`, safe: false, disrupts: `${names.join(", ")} through ToolHive on ${node}, until the hub serves them (sign in with t3-fleet mcp login where needed)` },
+        detail:
+          "stopping them leaves them in ToolHive (thv start brings one back); remove them with thv rm once the hub serves them",
+        fix: {
+          command: `thv stop ${names.map(sh).join(" ")}`,
+          safe: false,
+          disrupts: `${names.join(", ")} through ToolHive on ${node}, until the hub serves them (sign in with t3-fleet mcp login where needed)`,
+        },
       });
     }
     const loadSecrets = `set -a; secrets="${SH_CONFIG_DIR}/secrets.env"; [ -f "$secrets" ] && . "$secrets"; set +a`;
     for (const s of observed.servers) {
       const base = { node, area: "mcp" as const };
       if (s.endpoint === null) {
-        out.push({ ...base, key: `mcp-${s.name}-undefined`, severity: "error", title: `MCP server ${s.name}: ${s.problem ?? "cannot be resolved"}` });
+        out.push({
+          ...base,
+          key: `mcp-${s.name}-undefined`,
+          severity: "error",
+          title: `MCP server ${s.name}: ${s.problem ?? "cannot be resolved"}`,
+        });
         continue;
       }
       const e = s.endpoint;
-      const homeVar = (p: string) => p.replace(/^\/(Users|home)\/[^/]+\//, "$HOME/").replace(/^\/root\//, "$HOME/");
+      const homeVar = (p: string) =>
+        p.replace(/^\/(Users|home)\/[^/]+\//, "$HOME/").replace(/^\/root\//, "$HOME/");
       const claudeJson =
         e.type === "http"
-          ? JSON.stringify({ type: "http", url: e.url, ...(e.tokenEnv === null ? {} : { headers: { Authorization: `Bearer $${e.tokenEnv}` } }) })
-          : JSON.stringify({ type: "stdio", command: homeVar(e.command), args: e.args.map(homeVar) });
+          ? JSON.stringify({
+              type: "http",
+              url: e.url,
+              ...(e.tokenEnv === null
+                ? {}
+                : { headers: { Authorization: `Bearer $${e.tokenEnv}` } }),
+            })
+          : JSON.stringify({
+              type: "stdio",
+              command: homeVar(e.command),
+              args: e.args.map(homeVar),
+            });
       const fixes: Array<string> = [];
       if (observed.clients.claude && !sameEndpoint(e, s.claude)) {
         const secrets = e.type === "http" && e.tokenEnv !== null ? `${loadSecrets}; ` : "";
-        fixes.push(`${secrets}claude mcp remove -s user ${sh(s.name)} >/dev/null 2>&1; claude mcp add-json -s user ${sh(s.name)} ${dq(claudeJson)}`);
+        fixes.push(
+          `${secrets}claude mcp remove -s user ${sh(s.name)} >/dev/null 2>&1; claude mcp add-json -s user ${sh(s.name)} ${dq(claudeJson)}`,
+        );
       }
       if (observed.clients.codex && !sameEndpoint(e, s.codex)) {
         fixes.push(
@@ -465,8 +663,13 @@ export const McpArea = defineArea({
         );
       }
       if (fixes.length > 0) {
-        const redo = { claude: observed.clients.claude && !sameEndpoint(e, s.claude), codex: observed.clients.codex && !sameEndpoint(e, s.codex) };
-        const which = [redo.claude ? "Claude" : "", redo.codex ? "Codex" : ""].filter(Boolean).join(" and ");
+        const redo = {
+          claude: observed.clients.claude && !sameEndpoint(e, s.claude),
+          codex: observed.clients.codex && !sameEndpoint(e, s.codex),
+        };
+        const which = [redo.claude ? "Claude" : "", redo.codex ? "Codex" : ""]
+          .filter(Boolean)
+          .join(" and ");
         // Re-registering replaces the entry, so what only the old one had would be lost: a person decides.
         const dropped = [
           ...(redo.claude ? (s.claude?.kept ?? []).map((k) => `Claude's ${k}`) : []),
@@ -478,7 +681,10 @@ export const McpArea = defineArea({
           key: `mcp-${s.name}-unregistered`,
           severity: "warn",
           title: `MCP server ${s.name} is not registered as declared in ${which}`,
-          detail: dropped.length === 0 ? target : `${target}; re-registering drops ${dropped.join(", ")}, which the definition does not have`,
+          detail:
+            dropped.length === 0
+              ? target
+              : `${target}; re-registering drops ${dropped.join(", ")}, which the definition does not have`,
           fix: { command: fixes.join("\n"), safe: dropped.length === 0 },
         });
       }

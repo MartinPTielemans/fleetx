@@ -27,8 +27,10 @@ const buttonVariants = cva(
           "border-input bg-popover not-dark:bg-clip-padding text-destructive-foreground shadow-xs/5 dark:bg-input/32 disabled:shadow-none hover:border-destructive/32 hover:bg-destructive/4",
         outline:
           "[--control-icon-color:var(--muted-foreground)] border-input bg-popover not-dark:bg-clip-padding text-foreground shadow-xs/5 not-disabled:not-active:before:shadow-[0_1px_--theme(--color-black/4%)] dark:bg-input/32 dark:not-disabled:not-active:before:shadow-[0_-1px_--theme(--color-white/6%)] disabled:shadow-none hover:bg-accent/50 dark:hover:bg-input/64",
-        ghost: "[--control-icon-color:var(--muted-foreground)] border-transparent text-foreground hover:bg-accent",
-        "ghost-muted": "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
+        ghost:
+          "[--control-icon-color:var(--muted-foreground)] border-transparent text-foreground hover:bg-accent",
+        "ghost-muted":
+          "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground",
         "warning-outline":
           "border-warning/32 bg-warning-surface text-warning-foreground shadow-xs/5 disabled:shadow-none hover:border-warning/40 hover:bg-warning/16 dark:hover:bg-warning/24",
       },
@@ -45,7 +47,10 @@ export function Button({ className, variant, size, render, ...props }: ButtonPro
   return useRender({
     defaultTagName: "button",
     props: mergeProps<"button">(
-      { className: cn(buttonVariants({ className, size, variant })), type: render ? undefined : "button" },
+      {
+        className: cn(buttonVariants({ className, size, variant })),
+        type: render ? undefined : "button",
+      },
       props,
     ),
     render,

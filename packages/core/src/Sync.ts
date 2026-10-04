@@ -24,7 +24,17 @@ import * as Schema from "effect/Schema";
 import { loadConfigFrom, probeSettings, type Config, type Node } from "./Config.ts";
 import { diagnose, type Finding, type Fix } from "./Diagnose.ts";
 import { runFixes } from "./Fix.ts";
-import { addPaths, changedFiles, ensureGitConfig, git, literal, ok, out, pullBranch, why } from "./Git.ts";
+import {
+  addPaths,
+  changedFiles,
+  ensureGitConfig,
+  git,
+  literal,
+  ok,
+  out,
+  pullBranch,
+  why,
+} from "./Git.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
@@ -40,11 +50,23 @@ const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
 
 const DEFAULT_AUTO_COMMIT = ["skills"];
-const DEFAULT_APPLY = ["engine", "secrets", "dotfiles", "instructions", "skills", "mcp", "agents", "t3"];
+const DEFAULT_APPLY = [
+  "engine",
+  "secrets",
+  "dotfiles",
+  "instructions",
+  "skills",
+  "mcp",
+  "agents",
+  "t3",
+];
 const MAX_ALERTS = 50;
 
-const settingList = (config: Config, key: "auto_commit" | "apply" | "auto_approve", fallback: ReadonlyArray<string>) =>
-  config.settings.fleet?.[key] ?? fallback;
+const settingList = (
+  config: Config,
+  key: "auto_commit" | "apply" | "auto_approve",
+  fallback: ReadonlyArray<string>,
+) => config.settings.fleet?.[key] ?? fallback;
 
 /**
  * All nodes' published state, from their t3-fleet/state/<node> branches, and
@@ -54,8 +76,18 @@ const settingList = (config: Config, key: "auto_commit" | "apply" | "auto_approv
 export const readStates = (repo: string) =>
   Effect.gen(function* () {
     const prefixes = branchPrefixes("state");
-    yield* git(repo, ["fetch", "-q", "--prune", "origin", ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`)]);
-    const refs = yield* git(repo, ["for-each-ref", "--format=%(refname:strip=3)", ...prefixes.map((p) => `refs/remotes/origin/${p}`)]);
+    yield* git(repo, [
+      "fetch",
+      "-q",
+      "--prune",
+      "origin",
+      ...prefixes.map((p) => `+refs/heads/${p}*:refs/remotes/origin/${p}*`),
+    ]);
+    const refs = yield* git(repo, [
+      "for-each-ref",
+      "--format=%(refname:strip=3)",
+      ...prefixes.map((p) => `refs/remotes/origin/${p}`),
+    ]);
     const byNode = new Map<string, NodeState>();
     for (const ref of out(refs).split("\n").filter(Boolean)) {
       const show = yield* git(repo, ["show", `origin/${ref}:state.json`]);
@@ -73,7 +105,8 @@ const dropLegacyBranch = (repo: string, kind: "state" | "staging", node: string)
   Effect.gen(function* () {
     if (!repoRenamed(repo)) return;
     const ref = `refs/heads/${branchPrefixes(kind)[1]}${node}`;
-    if (ok(yield* git(repo, ["ls-remote", "--exit-code", "origin", ref]))) yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
+    if (ok(yield* git(repo, ["ls-remote", "--exit-code", "origin", ref])))
+      yield* git(repo, ["push", "-q", "origin", `:${ref}`]);
   });
 
 /** Publish this node's state as the single commit on its state branch. */
@@ -84,7 +117,13 @@ const publishState = (repo: string, state: NodeState) =>
     if (!ok(blob)) return yield* Effect.fail(`writing state: ${why(blob)}`);
     const tree = yield* git(repo, ["mktree"], { stdin: `100644 blob ${out(blob)}\tstate.json\n` });
     const commit = yield* git(repo, ["commit-tree", out(tree), "-m", `State of ${state.node}`]);
-    const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:refs/heads/${branchPrefix(repo, "state")}${state.node}`]);
+    const push = yield* git(repo, [
+      "push",
+      "-q",
+      "--force",
+      "origin",
+      `${out(commit)}:refs/heads/${branchPrefix(repo, "state")}${state.node}`,
+    ]);
     if (!ok(push)) return yield* Effect.fail(`publishing state: ${why(push)}`);
     yield* dropLegacyBranch(repo, "state", state.node);
   });
@@ -115,11 +154,19 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
     if (existing !== "" && ok(yield* git(repo, ["fetch", "-q", "origin", ref]))) {
       const [sameTree, sameBase] = [
         out(yield* git(repo, ["rev-parse", `${existing}^{tree}`])) === tree,
-        out(yield* git(repo, ["rev-parse", `${existing}^`])) === out(yield* git(repo, ["rev-parse", `origin/${branch}`])),
+        out(yield* git(repo, ["rev-parse", `${existing}^`])) ===
+          out(yield* git(repo, ["rev-parse", `origin/${branch}`])),
       ];
       if (sameTree && sameBase) return existing.slice(0, 7);
     }
-    const commit = yield* git(repo, ["commit-tree", tree, "-p", `origin/${branch}`, "-m", `Proposed by ${node}: ${files.length} file${files.length === 1 ? "" : "s"}\n\n${files.join("\n")}`]);
+    const commit = yield* git(repo, [
+      "commit-tree",
+      tree,
+      "-p",
+      `origin/${branch}`,
+      "-m",
+      `Proposed by ${node}: ${files.length} file${files.length === 1 ? "" : "s"}\n\n${files.join("\n")}`,
+    ]);
     const push = yield* git(repo, ["push", "-q", "--force", "origin", `${out(commit)}:${ref}`]);
     if (!ok(push)) return yield* Effect.fail(`proposing: ${why(push)}`);
     return out(commit).slice(0, 7);
@@ -130,7 +177,8 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
  * a title that counts something ("failed 4 times") changes every run, and is
  * still the same problem.
  */
-const healthOf = (findings: ReadonlyArray<Finding>) => new Map(findings.filter((f) => f.severity === "error").map((f) => [f.key, f.title] as const));
+const healthOf = (findings: ReadonlyArray<Finding>) =>
+  new Map(findings.filter((f) => f.severity === "error").map((f) => [f.key, f.title] as const));
 
 /** The streak in this node's own record of its last run, which a failed publish cannot lose. */
 const localStreak = (home: string) =>
@@ -160,18 +208,35 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     const autoCommit = settingList(config, "auto_commit", DEFAULT_AUTO_COMMIT);
     if (!self.roles.includes("authority")) {
       const settled = yield* settleRejection(repo, self.name, config.branch);
-      if (settled.length > 0) lines.push(`set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`);
+      if (settled.length > 0)
+        lines.push(
+          `set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`,
+        );
     }
     if (self.roles.includes("authority") && autoCommit.length > 0) {
       // Exactly the changed files: an auto_commit path that does not exist would fail the whole add.
       const changed = yield* changedFiles(repo, autoCommit);
       if (changed.length > 0) {
         const committed = yield* addPaths(repo, changed).pipe(
-          Effect.andThen(git(repo, ["commit", "-q", "-m", `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`, "--", ...changed], { env: literal })),
+          Effect.andThen(
+            git(
+              repo,
+              [
+                "commit",
+                "-q",
+                "-m",
+                `Sync ${self.name}: ${changed.length} changed file${changed.length === 1 ? "" : "s"} under ${autoCommit.join(", ")}`,
+                "--",
+                ...changed,
+              ],
+              { env: literal },
+            ),
+          ),
           Effect.flatMap((commit) => (ok(commit) ? Effect.void : Effect.fail(why(commit)))),
           Effect.result,
         );
-        if (committed._tag === "Success") lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
+        if (committed._tag === "Success")
+          lines.push(`committed ${changed.length} file${changed.length === 1 ? "" : "s"}`);
         else {
           failed = true;
           message = `committing ${changed.length} changed file${changed.length === 1 ? "" : "s"}: ${committed.failure}`;
@@ -184,7 +249,11 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     //    rebased along, as before, and named, since they reach no one.
     let how: "rebase" | "ff-only" = self.roles.includes("authority") ? "rebase" : "ff-only";
     if (how === "ff-only" && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
-      const local = out(yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`])).split("\n").filter(Boolean);
+      const local = out(
+        yield* git(repo, ["log", "--format=%h %s", `origin/${config.branch}..HEAD`]),
+      )
+        .split("\n")
+        .filter(Boolean);
       if (local.length > 0) {
         how = "rebase";
         const some = local.length === 1 ? "a commit" : `${local.length} commits`;
@@ -199,15 +268,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       }
     }
     const pulled = yield* pullBranch(repo, config.branch, how).pipe(
-      Effect.catch((e: string) => Effect.sync(() => {
-        failed = true;
-        message = message || e;
-        return 0;
-      })),
+      Effect.catch((e: string) =>
+        Effect.sync(() => {
+          failed = true;
+          message = message || e;
+          return 0;
+        }),
+      ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
     if (self.roles.includes("authority") && !failed) {
-      const ahead = Number(out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])));
+      const ahead = Number(
+        out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])),
+      );
       if (ahead > 0) {
         const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${config.branch}`]);
         if (ok(push)) lines.push(`pushed ${ahead} commit${ahead === 1 ? "" : "s"}`);
@@ -224,13 +297,18 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     if (!self.roles.includes("authority") && !failed) {
       const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
       const proposal = yield* propose(repo, self.name, config.branch, changed).pipe(
-        Effect.catch((e: string) => Effect.sync(() => {
-          failed = true;
-          message = message || e;
-          return null;
-        })),
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            failed = true;
+            message = message || e;
+            return null;
+          }),
+        ),
       );
-      if (proposal !== null) lines.push(`proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`);
+      if (proposal !== null)
+        lines.push(
+          `proposed ${changed.length} file${changed.length === 1 ? "" : "s"} for approval (${proposal})`,
+        );
     }
 
     // The pull may have changed the config; reload it.
@@ -245,11 +323,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       const prefixes = settingList(config, "auto_approve", []);
       for (const proposal of yield* listProposals(repo, config.branch)) {
         if (!autoApprovable(proposal, prefixes)) continue;
-        const rev = yield* approve(repo, config.branch, proposal, `${self.name}, automatically`, proposal.commit).pipe(
-          Effect.catch((e: string) => Effect.sync(() => {
-            lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
-            return null;
-          })),
+        const rev = yield* approve(
+          repo,
+          config.branch,
+          proposal,
+          `${self.name}, automatically`,
+          proposal.commit,
+        ).pipe(
+          Effect.catch((e: string) =>
+            Effect.sync(() => {
+              lines.push(`could not auto-approve ${proposal.node}'s proposal: ${e}`);
+              return null;
+            }),
+          ),
         );
         if (rev !== null) lines.push(`approved ${proposal.node}'s proposal (${rev})`);
       }
@@ -280,22 +366,51 @@ export interface Outcome {
  * counts on from that local record, so a node that cannot publish still knows
  * it is failing, and says so in the record the probe reads.
  */
-export const report = ({ config, node, now, previous, failed, message, lines, findings, applied, observation }: Outcome) =>
+export const report = ({
+  config,
+  node,
+  now,
+  previous,
+  failed,
+  message,
+  lines,
+  findings,
+  applied,
+  observation,
+}: Outcome) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
     const repo = config.repo;
-    const previousStreak = Option.getOrElse(yield* localStreak(home), () => Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }));
+    const previousStreak = Option.getOrElse(yield* localStreak(home), () =>
+      Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
+    );
     const stateOf = (fail: boolean, reason: string): NodeState => {
       const streak = fail ? previousStreak + 1 : 0;
-      const alerts: Array<Alert> = [...Option.match(previous, { onNone: () => [], onSome: (p) => p.alerts })];
-      const before = healthOf(Option.match(previous, { onNone: () => [] as Array<Finding>, onSome: (p) => p.findings as ReadonlyArray<Finding> }));
+      const alerts: Array<Alert> = [
+        ...Option.match(previous, { onNone: () => [], onSome: (p) => p.alerts }),
+      ];
+      const before = healthOf(
+        Option.match(previous, {
+          onNone: () => [] as Array<Finding>,
+          onSome: (p) => p.findings as ReadonlyArray<Finding>,
+        }),
+      );
       const after = healthOf(findings);
-      for (const [key, title] of after) if (!before.has(key)) alerts.push({ at: now, node, kind: "problem", message: title });
-      for (const [key, title] of before) if (!after.has(key)) alerts.push({ at: now, node, kind: "resolved", message: title });
+      for (const [key, title] of after)
+        if (!before.has(key)) alerts.push({ at: now, node, kind: "problem", message: title });
+      for (const [key, title] of before)
+        if (!after.has(key)) alerts.push({ at: now, node, kind: "resolved", message: title });
       const wasFailing = previousStreak >= config.alertAfter;
-      if (streak >= config.alertAfter && !wasFailing) alerts.push({ at: now, node, kind: "failing", message: `sync failed ${streak} times in a row: ${reason}` });
-      if (streak === 0 && wasFailing) alerts.push({ at: now, node, kind: "recovered", message: "sync works again" });
+      if (streak >= config.alertAfter && !wasFailing)
+        alerts.push({
+          at: now,
+          node,
+          kind: "failing",
+          message: `sync failed ${streak} times in a row: ${reason}`,
+        });
+      if (streak === 0 && wasFailing)
+        alerts.push({ at: now, node, kind: "recovered", message: "sync works again" });
       return {
         node,
         at: now,
@@ -304,16 +419,30 @@ export const report = ({ config, node, now, previous, failed, message, lines, fi
         message: reason || (lines.length === 0 ? "nothing to do" : lines.join("; ")),
         rev,
         observation,
-        findings: findings.map((f) => ({ node: f.node, key: f.key, severity: f.severity, area: f.area, title: f.title, ...(f.detail === undefined ? {} : { detail: f.detail }) })),
+        findings: findings.map((f) => ({
+          node: f.node,
+          key: f.key,
+          severity: f.severity,
+          area: f.area,
+          title: f.title,
+          ...(f.detail === undefined ? {} : { detail: f.detail }),
+        })),
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
       };
     };
     const record = (state: NodeState) =>
-      fs.makeDirectory(stateDir(home), { recursive: true }).pipe(
-        Effect.andThen(fs.writeFileString(lastSyncPath(home), `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`)),
-        Effect.ignore,
-      );
+      fs
+        .makeDirectory(stateDir(home), { recursive: true })
+        .pipe(
+          Effect.andThen(
+            fs.writeFileString(
+              lastSyncPath(home),
+              `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
+            ),
+          ),
+          Effect.ignore,
+        );
     const rev = out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
     const state = stateOf(failed, message);
     // Recorded only after publishing, so a run nobody else could see is never "ok" here.
@@ -322,7 +451,10 @@ export const report = ({ config, node, now, previous, failed, message, lines, fi
       Effect.result,
     );
     if (published._tag === "Failure") {
-      const unpublished = stateOf(true, message === "" ? published.failure : `${message}; ${published.failure}`);
+      const unpublished = stateOf(
+        true,
+        message === "" ? published.failure : `${message}; ${published.failure}`,
+      );
       yield* record(unpublished);
       yield* reportToRelay(config, unpublished).pipe(Effect.ignore);
       return yield* Effect.fail(published.failure);
@@ -337,7 +469,10 @@ export interface SyncResult {
   readonly lines: ReadonlyArray<string>;
 }
 
-export const syncRun = (startConfig: Config, options: { readonly apply: boolean } = { apply: true }) =>
+export const syncRun = (
+  startConfig: Config,
+  options: { readonly apply: boolean } = { apply: true },
+) =>
   Effect.gen(function* () {
     const repo = startConfig.repo;
     // Reassigned after the pull: everything from observing on must judge this
@@ -351,7 +486,9 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
 
     const run = Effect.gen(function* () {
       yield* ensureGitConfig;
-      const previous = Option.fromNullishOr((yield* readStates(repo)).find((s) => s.node === self.name));
+      const previous = Option.fromNullishOr(
+        (yield* readStates(repo)).find((s) => s.node === self.name),
+      );
       const exchanged = yield* exchange(config, self, lines);
       let { failed, message } = exchanged;
       config = exchanged.config;
@@ -368,19 +505,32 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
           .filter((s) => s.node !== self.name && s.observation !== null)
           .flatMap((s) => {
             const node = config.nodes.find((n) => n.name === s.node);
-            return node === undefined || s.observation === null ? [] : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
+            return node === undefined || s.observation === null
+              ? []
+              : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
           }),
       ];
       const versions = (r: ReadonlyArray<NodeResult>) =>
-        r.flatMap((x) => (x.ok ? [x.observation.t3.descriptor?.serverVersion ?? x.observation.t3.installedVersion ?? ""] : [])).filter(Boolean);
+        r
+          .flatMap((x) =>
+            x.ok
+              ? [
+                  x.observation.t3.descriptor?.serverVersion ??
+                    x.observation.t3.installedVersion ??
+                    "",
+                ]
+              : [],
+          )
+          .filter(Boolean);
       const findingsFor = (results: ReadonlyArray<NodeResult>) =>
         Effect.gen(function* () {
           const latest = yield* lookupLatest(versions(results));
           const { areas } = yield* loadAreas(repo, config.settings.plugins?.areas ?? []);
           // This node's findings, plus fixes other nodes need that must run here (an authority adding a node's key).
-          return applyAccepted(diagnose(results, latest, config.settings, config.nodes, areas), config.settings.accept).filter(
-            (f) => f.node === self.name || f.fix?.on === self.name,
-          );
+          return applyAccepted(
+            diagnose(results, latest, config.settings, config.nodes, areas),
+            config.settings.accept,
+          ).filter((f) => f.node === self.name || f.fix?.on === self.name);
         });
 
       let selfResult = yield* observeSelf;
@@ -388,13 +538,19 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
       const applyAreas = settingList(config, "apply", DEFAULT_APPLY);
       const applicable = findings.filter(
         (f): f is Finding & { readonly fix: Fix } =>
-          f.fix !== undefined && f.fix.safe && (f.fix.on ?? f.node) === self.name && applyAreas.includes(f.area),
+          f.fix !== undefined &&
+          f.fix.safe &&
+          (f.fix.on ?? f.node) === self.name &&
+          applyAreas.includes(f.area),
       );
       const applied: Array<{ title: string; ok: boolean; output: string }> = [];
       if (options.apply && applicable.length > 0) {
         const outcomes = yield* runFixes([{ ...self, ssh: null }], applicable, repo);
-        for (const o of outcomes) applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
-        lines.push(...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`));
+        for (const o of outcomes)
+          applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
+        lines.push(
+          ...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`),
+        );
         selfResult = yield* observeSelf;
         findings = yield* findingsFor(fleetResults(selfResult));
       }
@@ -420,7 +576,11 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
     });
 
     // The fixes it runs are part of the run: an authority's `t3-fleet secrets add-node` must not wait for it.
-    return yield* withSyncLock(run, Effect.succeed({ state: null, lines: ["another sync is running"] } as const), { children: true });
+    return yield* withSyncLock(
+      run,
+      Effect.succeed({ state: null, lines: ["another sync is running"] } as const),
+      { children: true },
+    );
   });
 
 /** Run `effect` holding sync's lock, so no sync proposes or pulls the repo halfway through an edit. */

@@ -4,7 +4,21 @@
  * Typed against Api.ts so it stays in step with the real server. Writes
  * succeed and change nothing.
  */
-import type { HubCall, HubServer, ModelProxyStats, ModelWindow, UiFixPlan, UiJob, UiJobKind, UiModels, UiProposal, UiSession, UiSkills, UiSkillsPreview, UiStatus } from "@t3-fleet/core/Api";
+import type {
+  HubCall,
+  HubServer,
+  ModelProxyStats,
+  ModelWindow,
+  UiFixPlan,
+  UiJob,
+  UiJobKind,
+  UiModels,
+  UiProposal,
+  UiSession,
+  UiSkills,
+  UiSkillsPreview,
+  UiStatus,
+} from "@t3-fleet/core/Api";
 
 const now = Date.now();
 const min = 60_000;
@@ -25,12 +39,25 @@ const stats = (busy: number, failed = 0): ModelProxyStats => ({
   version: "0.4.0",
   egress: "direct",
   upstreams: [
-    { upstream: "anthropic", m5: window(busy), h1: window(busy * 11, failed), h24: window(busy * 180, failed * 3), lastError: failed > 0 ? { at: now - 14 * min, class: "529", message: "overloaded_error" } : null },
+    {
+      upstream: "anthropic",
+      m5: window(busy),
+      h1: window(busy * 11, failed),
+      h24: window(busy * 180, failed * 3),
+      lastError:
+        failed > 0 ? { at: now - 14 * min, class: "529", message: "overloaded_error" } : null,
+    },
     { upstream: "openai", m5: window(1), h1: window(9), h24: window(140), lastError: null },
   ],
 });
 
-const session: UiSession = { version: "0.4.0", self: "laptop", authority: true, nodes: ["laptop", "server", "desktop"], relay: "https://server.tailnet.ts.net" };
+const session: UiSession = {
+  version: "0.4.0",
+  self: "laptop",
+  authority: true,
+  nodes: ["laptop", "server", "desktop"],
+  relay: "https://server.tailnet.ts.net",
+};
 
 const status: UiStatus = {
   checkedAt: now - 20_000,
@@ -48,13 +75,51 @@ const status: UiStatus = {
         { name: "codex", version: "0.160.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
-        { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.160.0", runs: "~/.local/bin/codex", viaModels: false },
+        {
+          instanceId: "claudeAgent",
+          label: "claude",
+          enabled: true,
+          startsInT3: true,
+          version: "2.1.288",
+          runs: "~/.local/bin/t3-fleet-claude",
+          viaModels: true,
+        },
+        {
+          instanceId: "codex",
+          label: "codex",
+          enabled: true,
+          startsInT3: true,
+          version: "0.160.0",
+          runs: "~/.local/bin/codex",
+          viaModels: false,
+        },
       ],
       sync: { at: now - 2 * min, result: "ok", streak: 0, message: "converged" },
       providerAuth: [
-        { instanceId: "claudeAgent", driver: "claudeAgent", enabled: true, auth: "authenticated", method: "setup-token", label: null, status: "ready", detail: "", checkedAt: now - 30_000, source: "t3" },
-        { instanceId: "codex", driver: "codex", enabled: true, auth: "authenticated", method: "chatgpt", label: "ChatGPT Pro", status: "ready", detail: "", checkedAt: now - 30_000, source: "t3" },
+        {
+          instanceId: "claudeAgent",
+          driver: "claudeAgent",
+          enabled: true,
+          auth: "authenticated",
+          method: "setup-token",
+          label: null,
+          status: "ready",
+          detail: "",
+          checkedAt: now - 30_000,
+          source: "t3",
+        },
+        {
+          instanceId: "codex",
+          driver: "codex",
+          enabled: true,
+          auth: "authenticated",
+          method: "chatgpt",
+          label: "ChatGPT Pro",
+          status: "ready",
+          detail: "",
+          checkedAt: now - 30_000,
+          source: "t3",
+        },
       ],
       models: stats(4),
     },
@@ -69,13 +134,51 @@ const status: UiStatus = {
         { name: "codex", version: "0.159.0", latest: "0.160.0" },
       ],
       providers: [
-        { instanceId: "claudeAgent", label: "claude", enabled: true, startsInT3: true, version: "2.1.288", runs: "~/.local/bin/t3-fleet-claude", viaModels: true },
-        { instanceId: "codex", label: "codex", enabled: true, startsInT3: true, version: "0.159.0", runs: "~/.local/bin/codex", viaModels: false },
+        {
+          instanceId: "claudeAgent",
+          label: "claude",
+          enabled: true,
+          startsInT3: true,
+          version: "2.1.288",
+          runs: "~/.local/bin/t3-fleet-claude",
+          viaModels: true,
+        },
+        {
+          instanceId: "codex",
+          label: "codex",
+          enabled: true,
+          startsInT3: true,
+          version: "0.159.0",
+          runs: "~/.local/bin/codex",
+          viaModels: false,
+        },
       ],
       sync: { at: now - 7 * min, result: "ok", streak: 0, message: "converged" },
       providerAuth: [
-        { instanceId: "claudeAgent", driver: "claudeAgent", enabled: true, auth: "unauthenticated", method: "claude.ai", label: null, status: "error", detail: "Not logged in", checkedAt: now - 30_000, source: "t3" },
-        { instanceId: "codex", driver: "codex", enabled: true, auth: "authenticated", method: "chatgpt", label: null, status: "ready", detail: "", checkedAt: now - 30_000, source: "t3" },
+        {
+          instanceId: "claudeAgent",
+          driver: "claudeAgent",
+          enabled: true,
+          auth: "unauthenticated",
+          method: "claude.ai",
+          label: null,
+          status: "error",
+          detail: "Not logged in",
+          checkedAt: now - 30_000,
+          source: "t3",
+        },
+        {
+          instanceId: "codex",
+          driver: "codex",
+          enabled: true,
+          auth: "authenticated",
+          method: "chatgpt",
+          label: null,
+          status: "ready",
+          detail: "",
+          checkedAt: now - 30_000,
+          source: "t3",
+        },
       ],
       models: stats(2, 7),
     },
@@ -88,30 +191,63 @@ const status: UiStatus = {
       t3: { version: null, channel: null, behind: null },
       agents: [],
       providers: [],
-      sync: { at: now - 4 * 60 * min, result: "fail", streak: 3, message: "pull failed: could not resolve host" },
+      sync: {
+        at: now - 4 * 60 * min,
+        result: "fail",
+        streak: 3,
+        message: "pull failed: could not resolve host",
+      },
       providerAuth: [],
       models: null,
     },
   ],
   findings: [
-    { id: "desktop:unreachable", node: "desktop", severity: "error", area: "reach", title: "unreachable over ssh", detail: "connect to host desktop port 22: Operation timed out" },
+    {
+      id: "desktop:unreachable",
+      node: "desktop",
+      severity: "error",
+      area: "reach",
+      title: "unreachable over ssh",
+      detail: "connect to host desktop port 22: Operation timed out",
+    },
     {
       id: "server:t3-behind",
       node: "server",
       severity: "warn",
       area: "t3",
       title: "T3 is 23 nightly releases behind (0.0.43 nightly 09-27 → 0.0.46 nightly 10-03)",
-      fix: { command: "~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes", safe: false, disrupts: "restarts the T3 server on server; threads running there stop" },
+      fix: {
+        command:
+          "~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes",
+        safe: false,
+        disrupts: "restarts the T3 server on server; threads running there stop",
+      },
     },
-    { id: "server:codex-behind", node: "server", severity: "warn", area: "agents", title: "codex 0.159.0 is behind 0.160.0", fix: { command: "npm i -g @openai/codex@0.160.0", safe: true } },
-    { id: "server:models-failing", node: "server", severity: "warn", area: "models", title: "6.4% of Anthropic requests failed in the last hour (529)" },
+    {
+      id: "server:codex-behind",
+      node: "server",
+      severity: "warn",
+      area: "agents",
+      title: "codex 0.159.0 is behind 0.160.0",
+      fix: { command: "npm i -g @openai/codex@0.160.0", safe: true },
+    },
+    {
+      id: "server:models-failing",
+      node: "server",
+      severity: "warn",
+      area: "models",
+      title: "6.4% of Anthropic requests failed in the last hour (529)",
+    },
     {
       id: "server:skills-unlinked",
       node: "server",
       severity: "warn",
       area: "skills",
       title: "1 skill is not linked into place: tdd",
-      fix: { command: 'mkdir -p ~/.claude/skills && ln -sfn ~/.agents/skills/tdd ~/.claude/skills/tdd', safe: true },
+      fix: {
+        command: "mkdir -p ~/.claude/skills && ln -sfn ~/.agents/skills/tdd ~/.claude/skills/tdd",
+        safe: true,
+      },
     },
     {
       id: "laptop:skill-stray-scratchpad",
@@ -119,7 +255,8 @@ const status: UiStatus = {
       severity: "warn",
       area: "skills",
       title: "skill scratchpad was installed in ~/.codex/skills outside T3 Fleet",
-      detail: "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
+      detail:
+        "proposing it puts it in the repo for an authority to approve; the original is moved aside, not deleted",
       fix: { command: "t3-fleet skills adopt scratchpad --from ~/.codex/skills", safe: true },
     },
     {
@@ -128,9 +265,20 @@ const status: UiStatus = {
       severity: "info",
       area: "t3",
       title: "T3 is 1 nightly release behind (0.0.46 nightly 10-02 → 0.0.46 nightly 10-03)",
-      fix: { command: "t3 update --channel nightly --yes", safe: false, disrupts: "restarts the T3 server on desktop; threads running there stop" },
+      fix: {
+        command: "t3 update --channel nightly --yes",
+        safe: false,
+        disrupts: "restarts the T3 server on desktop; threads running there stop",
+      },
     },
-    { id: "laptop:claude-other-copies", node: "laptop", severity: "info", area: "agents", title: "another claude on PATH", accepted: "the distribution ships its own package" },
+    {
+      id: "laptop:claude-other-copies",
+      node: "laptop",
+      severity: "info",
+      area: "agents",
+      title: "another claude on PATH",
+      accepted: "the distribution ships its own package",
+    },
   ],
 };
 
@@ -154,10 +302,18 @@ const link = (home: string, skill: string, client = true) => [
 
 const skills: UiSkills = {
   skills: [
-    { name: "code-review", description: "Review the changes since a fixed point along standards and spec.", source: { name: "skills", url: "https://github.com/acme/skills.git" } },
+    {
+      name: "code-review",
+      description: "Review the changes since a fixed point along standards and spec.",
+      source: { name: "skills", url: "https://github.com/acme/skills.git" },
+    },
     { name: "drafts", description: null, source: null },
     { name: "review", description: "Review a diff against the repo's standards.", source: null },
-    { name: "tdd", description: "Test-driven development: red, green, refactor.", source: { name: "skills", url: "https://github.com/acme/skills.git" } },
+    {
+      name: "tdd",
+      description: "Test-driven development: red, green, refactor.",
+      source: { name: "skills", url: "https://github.com/acme/skills.git" },
+    },
   ],
   nodes: [
     {
@@ -173,7 +329,12 @@ const skills: UiSkills = {
       node: "server",
       at: now - 20_000,
       store: "/home/u/.agents/skills",
-      links: [...link("/home/u", "code-review"), ...link("/home/u", "review"), ...link("/home/u", "tdd", false), { skill: "tdd", dir: "/home/u/.claude/skills", state: "missing" }],
+      links: [
+        ...link("/home/u", "code-review"),
+        ...link("/home/u", "review"),
+        ...link("/home/u", "tdd", false),
+        { skill: "tdd", dir: "/home/u/.claude/skills", state: "missing" },
+      ],
       strays: [],
       dangling: [],
       ignored: ["drafts"],
@@ -190,10 +351,50 @@ const skillsPreview: UiSkillsPreview = {
 };
 
 const hubServers: ReadonlyArray<HubServer> = [
-  { name: "linear", kind: "remote", upstream: "https://mcp.linear.app/mcp", state: "running", detail: null, auth: "oauth", expiresAt: now + 50 * min, tools: 23, lastCheckAt: now - 40_000 },
-  { name: "notion", kind: "remote", upstream: "https://mcp.notion.com/mcp", state: "needs-login", detail: "refresh token was revoked", auth: "oauth", expiresAt: null, tools: null, lastCheckAt: now - 40_000 },
-  { name: "playwright", kind: "container", upstream: "mcr.microsoft.com/playwright/mcp", state: "running", detail: null, auth: "none", expiresAt: null, tools: 21, lastCheckAt: now - 40_000 },
-  { name: "postgres", kind: "hosted-stdio", upstream: "npx -y @modelcontextprotocol/server-postgres", state: "error", detail: "exited with code 1: connection refused", auth: "bearer", expiresAt: null, tools: null, lastCheckAt: now - 40_000 },
+  {
+    name: "linear",
+    kind: "remote",
+    upstream: "https://mcp.linear.app/mcp",
+    state: "running",
+    detail: null,
+    auth: "oauth",
+    expiresAt: now + 50 * min,
+    tools: 23,
+    lastCheckAt: now - 40_000,
+  },
+  {
+    name: "notion",
+    kind: "remote",
+    upstream: "https://mcp.notion.com/mcp",
+    state: "needs-login",
+    detail: "refresh token was revoked",
+    auth: "oauth",
+    expiresAt: null,
+    tools: null,
+    lastCheckAt: now - 40_000,
+  },
+  {
+    name: "playwright",
+    kind: "container",
+    upstream: "mcr.microsoft.com/playwright/mcp",
+    state: "running",
+    detail: null,
+    auth: "none",
+    expiresAt: null,
+    tools: 21,
+    lastCheckAt: now - 40_000,
+  },
+  {
+    name: "postgres",
+    kind: "hosted-stdio",
+    upstream: "npx -y @modelcontextprotocol/server-postgres",
+    state: "error",
+    detail: "exited with code 1: connection refused",
+    auth: "bearer",
+    expiresAt: null,
+    tools: null,
+    lastCheckAt: now - 40_000,
+  },
 ];
 
 const hubCalls: ReadonlyArray<HubCall> = Array.from({ length: 14 }, (_, i) => ({
@@ -201,26 +402,42 @@ const hubCalls: ReadonlyArray<HubCall> = Array.from({ length: 14 }, (_, i) => ({
   server: ["linear", "playwright", "linear", "notion"][i % 4] ?? "linear",
   client: i % 3 === 0 ? "relay" : "laptop-claude",
   method: i % 5 === 0 ? "tools/list" : "tools/call",
-  tool: i % 5 === 0 ? null : (["list_issues", "browser_navigate", "create_issue", "search"][i % 4] ?? null),
+  tool:
+    i % 5 === 0
+      ? null
+      : (["list_issues", "browser_navigate", "create_issue", "search"][i % 4] ?? null),
   durationMs: 120 + ((i * 97) % 900),
   outcome: i % 4 === 3 ? "unauthorized" : i === 6 ? "error" : "ok",
   error: i % 4 === 3 ? "needs login" : i === 6 ? "timeout after 30s" : null,
 }));
 
 const models: UiModels = {
-  nodes: status.environments.map((e) => ({ node: e.name, at: e.reachable ? now - 20_000 : null, providerAuth: e.providerAuth, stats: e.models })),
+  nodes: status.environments.map((e) => ({
+    node: e.name,
+    at: e.reachable ? now - 20_000 : null,
+    providerAuth: e.providerAuth,
+    stats: e.models,
+  })),
 };
 
 const json = (value: unknown) => ({ status: 200, body: JSON.stringify(value) });
 
 /** Every fix in the fixtures, planned as the server would. */
 const plan: UiFixPlan = {
-  fixes: status.findings.flatMap((f) => (f.fix === undefined ? [] : [{ id: f.id, node: f.node, title: f.title, ...f.fix, digest: `fixture-${f.id}` }])),
+  fixes: status.findings.flatMap((f) =>
+    f.fix === undefined
+      ? []
+      : [{ id: f.id, node: f.node, title: f.title, ...f.fix, digest: `fixture-${f.id}` }],
+  ),
   notApplicable: [],
 };
 
 /** A job that is already over: fixtures change nothing. */
-const job = (kind: UiJobKind, title: string, result: Partial<Pick<UiJob, "applied" | "landed">> = {}): UiJob => ({
+const job = (
+  kind: UiJobKind,
+  title: string,
+  result: Partial<Pick<UiJob, "applied" | "landed">> = {},
+): UiJob => ({
   id: `fixture-${kind}`,
   kind,
   title,
@@ -237,23 +454,50 @@ const job = (kind: UiJobKind, title: string, result: Partial<Pick<UiJob, "applie
 /** What the event stream sends first: where things stand. */
 export const fixtureEvents = `: connected\n\nevent: check\ndata: ${JSON.stringify(status)}\n\n`;
 
-export const fixtureResponse = (method: string, path: string, body = ""): { status: number; body: string } | "events" => {
+export const fixtureResponse = (
+  method: string,
+  path: string,
+  body = "",
+): { status: number; body: string } | "events" => {
   if (path === "/api/events") return "events";
   if (method === "POST") {
     if (path === "/api/session") return json({ token: "fixture" });
     if (path === "/api/fixes/plan") {
-      const ids: ReadonlyArray<string> = body === "" ? [] : (JSON.parse(body) as { ids: ReadonlyArray<string> }).ids;
+      const ids: ReadonlyArray<string> =
+        body === "" ? [] : (JSON.parse(body) as { ids: ReadonlyArray<string> }).ids;
       return json({ fixes: plan.fixes.filter((f) => ids.includes(f.id)), notApplicable: [] });
     }
-    if (path === "/api/fixes") return json(job("fixes", "Apply fixes", { applied: { results: [], notApplied: [{ id: "*", reason: "fixtures change nothing" }] } }));
+    if (path === "/api/fixes")
+      return json(
+        job("fixes", "Apply fixes", {
+          applied: { results: [], notApplied: [{ id: "*", reason: "fixtures change nothing" }] },
+        }),
+      );
     if (path.endsWith("/approve")) return json(job("approve", "Approve server's proposal"));
     if (path.endsWith("/reject")) return json(job("reject", "Reject server's proposal"));
     if (path.endsWith("/login")) return json({ url: "https://example.com/oauth/authorize" });
-    if (path === "/api/skills/lookup") return json({ url: "https://github.com/acme/skills.git", skills: [{ name: "code-review", exists: true }, { name: "grilling", exists: false }, { name: "tdd", exists: true }] });
+    if (path === "/api/skills/lookup")
+      return json({
+        url: "https://github.com/acme/skills.git",
+        skills: [
+          { name: "code-review", exists: true },
+          { name: "grilling", exists: false },
+          { name: "tdd", exists: true },
+        ],
+      });
     if (path === "/api/skills/preview") return json(skillsPreview);
     if (path.startsWith("/api/skills/")) {
-      const kind = path === "/api/skills/add" ? "skills-add" : path === "/api/skills/update" ? "skills-update" : "skills-remove";
-      return json(job(kind, "Change skills", { landed: { paths: ["skills/tdd"], landed: "fixtures change nothing" } }));
+      const kind =
+        path === "/api/skills/add"
+          ? "skills-add"
+          : path === "/api/skills/update"
+            ? "skills-update"
+            : "skills-remove";
+      return json(
+        job(kind, "Change skills", {
+          landed: { paths: ["skills/tdd"], landed: "fixtures change nothing" },
+        }),
+      );
     }
     return { status: 204, body: "" };
   }
@@ -268,9 +512,24 @@ export const fixtureResponse = (method: string, path: string, body = ""): { stat
       return json(proposals);
     case "/api/alerts":
       return json([
-        { at: now - 4 * 60 * min, node: "desktop", kind: "failing", message: "sync failed 3 times in a row: pull failed" },
-        { at: now - 26 * 60 * min, node: "server", kind: "resolved", message: "codex starts in T3 again" },
-        { at: now - 27 * 60 * min, node: "server", kind: "problem", message: "codex does not start in T3" },
+        {
+          at: now - 4 * 60 * min,
+          node: "desktop",
+          kind: "failing",
+          message: "sync failed 3 times in a row: pull failed",
+        },
+        {
+          at: now - 26 * 60 * min,
+          node: "server",
+          kind: "resolved",
+          message: "codex starts in T3 again",
+        },
+        {
+          at: now - 27 * 60 * min,
+          node: "server",
+          kind: "problem",
+          message: "codex does not start in T3",
+        },
       ]);
     case "/api/models":
       return json(models);

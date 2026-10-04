@@ -15,7 +15,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { ModelFailureClass, ModelUpstream, type ModelProxyStats, type ModelUpstreamStats, type ModelWindow } from "../Api.ts";
+import {
+  ModelFailureClass,
+  ModelUpstream,
+  type ModelProxyStats,
+  type ModelUpstreamStats,
+  type ModelWindow,
+} from "../Api.ts";
 import { stateDir } from "../Names.ts";
 
 export const RequestRecord = Schema.Struct({
@@ -57,13 +63,21 @@ export const fallbackLogPath = (home: string) => `${stateDir(home)}/models-fallb
 export const percentile = (values: ReadonlyArray<number>, p: number): number | null => {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))] ?? null;
+  return (
+    sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))] ??
+    null
+  );
 };
 
-export const windowOf = (records: ReadonlyArray<RequestRecord>, fallbacks: ReadonlyArray<Fallback>, since: number): ModelWindow => {
+export const windowOf = (
+  records: ReadonlyArray<RequestRecord>,
+  fallbacks: ReadonlyArray<Fallback>,
+  since: number,
+): ModelWindow => {
   const inWindow = records.filter((r) => r.at >= since);
   const failures: Record<string, number> = {};
-  for (const r of inWindow) if (r.failure !== null) failures[r.failure] = (failures[r.failure] ?? 0) + 1;
+  for (const r of inWindow)
+    if (r.failure !== null) failures[r.failure] = (failures[r.failure] ?? 0) + 1;
   const ttfb = inWindow.flatMap((r) => (r.ttfbMs === null ? [] : [r.ttfbMs]));
   return {
     requests: inWindow.length,
@@ -83,14 +97,22 @@ export const upstreamStats = (
   now: number,
 ): ModelUpstreamStats => {
   const own = records.filter((r) => r.upstream === upstream && r.at >= now - WINDOWS.h24);
-  const ownFallbacks = fallbacks.filter((f) => f.upstream === upstream && f.at >= now - WINDOWS.h24);
-  const last = own.reduce<RequestRecord | undefined>((latest, r) => (r.failure !== null && (latest === undefined || r.at >= latest.at) ? r : latest), undefined);
+  const ownFallbacks = fallbacks.filter(
+    (f) => f.upstream === upstream && f.at >= now - WINDOWS.h24,
+  );
+  const last = own.reduce<RequestRecord | undefined>(
+    (latest, r) => (r.failure !== null && (latest === undefined || r.at >= latest.at) ? r : latest),
+    undefined,
+  );
   return {
     upstream,
     m5: windowOf(own, ownFallbacks, now - WINDOWS.m5),
     h1: windowOf(own, ownFallbacks, now - WINDOWS.h1),
     h24: windowOf(own, ownFallbacks, now - WINDOWS.h24),
-    lastError: last?.failure == null ? null : { at: last.at, class: last.failure, message: last.error ?? last.failure },
+    lastError:
+      last?.failure == null
+        ? null
+        : { at: last.at, class: last.failure, message: last.error ?? last.failure },
   };
 };
 
@@ -108,9 +130,13 @@ export const proxyStats = (input: {
   startedAt: input.startedAt,
   version: input.version,
   egress: input.egress,
-  upstreams: [...new Set([...input.names, ...input.records.map((r) => r.upstream), ...input.fallbacks.map((f) => f.upstream)])].map((u) =>
-    upstreamStats(u, input.records, input.fallbacks, input.now),
-  ),
+  upstreams: [
+    ...new Set([
+      ...input.names,
+      ...input.records.map((r) => r.upstream),
+      ...input.fallbacks.map((f) => f.upstream),
+    ]),
+  ].map((u) => upstreamStats(u, input.records, input.fallbacks, input.now)),
 });
 
 /** Launcher lines: `<epoch seconds>\t<upstream>\t<reason>`. Unreadable lines are skipped. */
@@ -118,7 +144,12 @@ export const parseFallbacks = (text: string): Array<Fallback> =>
   text.split("\n").flatMap((line) => {
     const [when, upstream] = line.split("\t");
     const at = Number(when) * 1000;
-    return Number.isFinite(at) && at > 0 && upstream !== undefined && /^[a-z0-9][a-z0-9-]*$/.test(upstream) ? [{ at, upstream }] : [];
+    return Number.isFinite(at) &&
+      at > 0 &&
+      upstream !== undefined &&
+      /^[a-z0-9][a-z0-9-]*$/.test(upstream)
+      ? [{ at, upstream }]
+      : [];
   });
 
 const decodeRecord = Schema.decodeUnknownOption(Schema.fromJsonString(RequestRecord));
@@ -137,13 +168,18 @@ export const loadRecords = (home: string, now: number) =>
     const fs = yield* FileSystem.FileSystem;
     const read = (file: string) => fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
     const since = now - WINDOWS.h24;
-    return [...parseRecords(yield* read(`${statsLogPath(home)}.1`), since), ...parseRecords(yield* read(statsLogPath(home)), since)].slice(-MAX_RECORDS);
+    return [
+      ...parseRecords(yield* read(`${statsLogPath(home)}.1`), since),
+      ...parseRecords(yield* read(statsLogPath(home)), since),
+    ].slice(-MAX_RECORDS);
   });
 
 export const loadFallbacks = (home: string, now: number) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const text = yield* fs.readFileString(fallbackLogPath(home)).pipe(Effect.orElseSucceed(() => ""));
+    const text = yield* fs
+      .readFileString(fallbackLogPath(home))
+      .pipe(Effect.orElseSucceed(() => ""));
     return parseFallbacks(text).filter((f) => f.at >= now - WINDOWS.h24);
   });
 

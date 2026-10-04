@@ -37,7 +37,9 @@ const names = { http: `fxtest-http-${suffix}`, stdio: `fxtest-stdio-${suffix}` }
 
 const containerId = (name: string) => {
   try {
-    return execFileSync("docker", ["inspect", "--format", "{{.Id}}", name], { encoding: "utf8" }).trim();
+    return execFileSync("docker", ["inspect", "--format", "{{.Id}}", name], {
+      encoding: "utf8",
+    }).trim();
   } catch {
     return "";
   }
@@ -54,8 +56,15 @@ afterAll(() => {
   }
 });
 
-const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope | NodeServices.NodeServices | HttpClient.HttpClient>) =>
-  Effect.runPromise(effect.pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))));
+const run = <A, E>(
+  effect: Effect.Effect<A, E, Scope.Scope | NodeServices.NodeServices | HttpClient.HttpClient>,
+) =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+    ),
+  );
 
 const waitFor = (hub: Hub, name: string, state: HubServer["state"], seconds: number) =>
   Effect.gen(function* () {
@@ -64,23 +73,44 @@ const waitFor = (hub: Hub, name: string, state: HubServer["state"], seconds: num
       if (s?.state === state) return s;
       yield* Effect.sleep(Duration.millis(250));
     }
-    return yield* Effect.die(new Error(`${name} never reached ${state}: ${toJson((yield* hub.servers).find((x) => x.name === name))}`));
+    return yield* Effect.die(
+      new Error(
+        `${name} never reached ${state}: ${toJson((yield* hub.servers).find((x) => x.name === name))}`,
+      ),
+    );
   });
 
 const call = (hub: Hub, name: string) =>
   Effect.gen(function* () {
-    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const headers = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    };
     const init = yield* hub.gateway(name, "Bearer t", {
       method: "POST",
       headers,
-      body: toJson({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
+      body: toJson({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "t", version: "1" },
+        },
+      }),
     });
     yield* readBody(init);
     const session = init.headers["mcp-session-id"];
     const response = yield* hub.gateway(name, "Bearer t", {
       method: "POST",
       headers: { ...headers, ...(session === undefined ? {} : { "mcp-session-id": session }) },
-      body: toJson({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "hello", arguments: {} } }),
+      body: toJson({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "hello", arguments: {} },
+      }),
     });
     return messagesInBody(response.headers["content-type"], yield* readBody(response))[0]?.result;
   });
@@ -89,8 +119,26 @@ describe.skipIf(!available)("hub Docker runner", () => {
   it("runs HTTP and stdio images hardened on loopback, adopts a running container after a restart, and restarts one that dies", async () => {
     const dir = mkdtempSync(join(tmpdir(), "t3-fleet-hub-docker-"));
     mkdirSync(join(dir, "repo/mcp"), { recursive: true });
-    writeFileSync(join(dir, "repo/mcp", `${names.http}.json`), toJson({ kind: "container", image: IMAGE, transport: "streamable-http", args: ["python", "-c", code, "http"], env: { GREETING: "$GREETING" } }));
-    writeFileSync(join(dir, "repo/mcp", `${names.stdio}.json`), toJson({ kind: "registry", image: IMAGE, transport: "stdio", network: "none", args: ["python", "-u", "-c", code, "stdio"] }));
+    writeFileSync(
+      join(dir, "repo/mcp", `${names.http}.json`),
+      toJson({
+        kind: "container",
+        image: IMAGE,
+        transport: "streamable-http",
+        args: ["python", "-c", code, "http"],
+        env: { GREETING: "$GREETING" },
+      }),
+    );
+    writeFileSync(
+      join(dir, "repo/mcp", `${names.stdio}.json`),
+      toJson({
+        kind: "registry",
+        image: IMAGE,
+        transport: "stdio",
+        network: "none",
+        args: ["python", "-u", "-c", code, "stdio"],
+      }),
+    );
     const identity = await generateX25519Identity();
     const start = makeHub(
       {
@@ -115,22 +163,35 @@ describe.skipIf(!available)("hub Docker runner", () => {
         const hub = yield* start;
         const http = yield* waitFor(hub, names.http, "running", 60);
         expect(http.tools).toBe(1);
-        expect(yield* call(hub, names.http)).toMatchObject({ content: [{ text: "hello from docker" }] });
+        expect(yield* call(hub, names.http)).toMatchObject({
+          content: [{ text: "hello from docker" }],
+        });
         const stdio = yield* waitFor(hub, names.stdio, "running", 60);
         expect(stdio.tools).toBe(1);
-        expect(yield* call(hub, names.stdio)).toMatchObject({ content: [{ text: "hello from docker" }] });
+        expect(yield* call(hub, names.stdio)).toMatchObject({
+          content: [{ text: "hello from docker" }],
+        });
 
-        const inspected = JSON.parse(execFileSync("docker", ["inspect", containerName(names.http)], { encoding: "utf8" }))[0];
+        const inspected = JSON.parse(
+          execFileSync("docker", ["inspect", containerName(names.http)], { encoding: "utf8" }),
+        )[0];
         expect(inspected.HostConfig.CapDrop).toEqual(["ALL"]);
         expect(inspected.HostConfig.SecurityOpt).toContain("no-new-privileges");
-        const binding = Object.values(inspected.HostConfig.PortBindings as Record<string, Array<{ HostIp: string; HostPort: string }>>)[0]?.[0];
+        const binding = Object.values(
+          inspected.HostConfig.PortBindings as Record<
+            string,
+            Array<{ HostIp: string; HostPort: string }>
+          >,
+        )[0]?.[0];
         expect(binding?.HostIp).toBe("127.0.0.1");
         expect(Number(binding?.HostPort)).toBeGreaterThanOrEqual(PORT_RANGE.first);
         expect(Number(binding?.HostPort)).toBeLessThanOrEqual(PORT_RANGE.last);
         // The secret reaches the container's environment, never its command line.
         expect(inspected.Config.Env).toContain("GREETING=secret-greeting");
         expect(JSON.stringify(inspected.Args)).not.toContain("secret-greeting");
-        const stdioInspected = JSON.parse(execFileSync("docker", ["inspect", containerName(names.stdio)], { encoding: "utf8" }))[0];
+        const stdioInspected = JSON.parse(
+          execFileSync("docker", ["inspect", containerName(names.stdio)], { encoding: "utf8" }),
+        )[0];
         expect(stdioInspected.HostConfig.NetworkMode).toBe("none");
         firstId = containerId(containerName(names.http));
       }),
@@ -147,7 +208,9 @@ describe.skipIf(!available)("hub Docker runner", () => {
         execFileSync("docker", ["rm", "-f", containerName(names.http)], { stdio: "ignore" });
         yield* waitFor(hub, names.http, "error", 30);
         yield* waitFor(hub, names.http, "running", 60);
-        expect(yield* call(hub, names.http)).toMatchObject({ content: [{ text: "hello from docker" }] });
+        expect(yield* call(hub, names.http)).toMatchObject({
+          content: [{ text: "hello from docker" }],
+        });
       }),
     );
   }, 180_000);

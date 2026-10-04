@@ -11,5 +11,9 @@ applyTheme(storedTheme());
 const root = createRoot(document.getElementById("root")!);
 // The app needs a token before its first request; getting one is quick.
 void startSession().then((started) =>
-  root.render(<StrictMode>{started.ok ? <App /> : <NoSession title={started.title} message={started.message} />}</StrictMode>),
+  root.render(
+    <StrictMode>
+      {started.ok ? <App /> : <NoSession title={started.title} message={started.message} />}
+    </StrictMode>,
+  ),
 );

@@ -14,20 +14,34 @@ import { beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { proposalFrom, proposalsOf } from "./ui.ts";
 
-const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
-const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
-const git = (cwd: string, args: ReadonlyArray<string>, env: Readonly<Record<string, string>> = {}) =>
-  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } }).trim();
+const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
+const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+  Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
+const git = (
+  cwd: string,
+  args: ReadonlyArray<string>,
+  env: Readonly<Record<string, string>> = {},
+) =>
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  }).trim();
 
 describe("deciding a proposal", () => {
   const root = mkdtempSync(join(tmpdir(), "t3-fleet-ui-"));
   const fleet = join(root, "fleet");
   const box = join(root, "box");
-  const skill = (dir: string, text: string) => writeFileSync(join(dir, "skills", "review", "SKILL.md"), `${text}\n`);
+  const skill = (dir: string, text: string) =>
+    writeFileSync(join(dir, "skills", "review", "SKILL.md"), `${text}\n`);
   // What the parts of Config these read need; the rest is never touched.
   const config = {
     self: "laptop",
-    nodes: [{ name: "laptop", roles: ["authority"] }, { name: "box", roles: ["member"] }],
+    nodes: [
+      { name: "laptop", roles: ["authority"] },
+      { name: "box", roles: ["member"] },
+    ],
     repo: fleet,
     branch: "main",
     settings: { table: {} },
@@ -42,7 +56,10 @@ describe("deciding a proposal", () => {
     const tree = git(box, ["write-tree"]);
     // A fresh timestamp each time, as a real sync makes: a new commit for the same change.
     const date = `${1_700_000_000 + ++syncs * 60} +0000`;
-    const commit = git(box, ["commit-tree", tree, "-p", "origin/main", "-m", "Proposed by box"], { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date });
+    const commit = git(box, ["commit-tree", tree, "-p", "origin/main", "-m", "Proposed by box"], {
+      GIT_COMMITTER_DATE: date,
+      GIT_AUTHOR_DATE: date,
+    });
     git(box, ["push", "-q", "--force", "origin", `${commit}:refs/heads/t3-fleet/staging/box`]);
     git(box, ["reset", "-q", "--hard", "origin/main"]);
     return commit;
@@ -74,7 +91,9 @@ describe("deciding a proposal", () => {
   it("refuses a change nobody reviewed", async () => {
     const [shown] = await run(proposalsOf(config));
     propose("v3, which nobody saw");
-    expect(await fails(proposalFrom(config, "box", shown!.change))).toBe("box's proposal changed since you reviewed it; review it again");
+    expect(await fails(proposalFrom(config, "box", shown!.change))).toBe(
+      "box's proposal changed since you reviewed it; review it again",
+    );
   });
 
   it("refuses when the branch moved under one of the proposed files", async () => {
@@ -82,6 +101,8 @@ describe("deciding a proposal", () => {
     skill(fleet, "v1, edited on the branch");
     git(fleet, ["commit", "-qam", "edit"]);
     git(fleet, ["push", "-q", "origin", "main"]);
-    expect(await fails(proposalFrom(config, "box", shown!.change))).toBe("box's proposal changed since you reviewed it; review it again");
+    expect(await fails(proposalFrom(config, "box", shown!.change))).toBe(
+      "box's proposal changed since you reviewed it; review it again",
+    );
   });
 });

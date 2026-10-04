@@ -6,7 +6,16 @@
  * through the same dialog as on the Findings view.
  */
 import type { UiSkill, UiSkillsNode } from "@t3-fleet/core/Api";
-import { CheckCircle2Icon, DownloadIcon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, Trash2Icon, WrenchIcon } from "lucide-react";
+import {
+  CheckCircle2Icon,
+  DownloadIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  SparklesIcon,
+  Trash2Icon,
+  WrenchIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { ErrorState, LoadingRows, Page, SeverityIcon } from "../components/common";
@@ -30,10 +39,12 @@ import { api, type UiJobT, type UiSkillsLandedT } from "../lib/api";
 import { useAction, useEvent, useResource, useStore } from "../lib/store";
 import { plural } from "../lib/utils";
 
-const tilde = (dir: string) => dir.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
+const tilde = (dir: string) =>
+  dir.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
 
 /** owner/repo for a GitHub URL, else the URL. */
-const sourceLabel = (url: string) => /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? url;
+const sourceLabel = (url: string) =>
+  /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? url;
 
 type Dialog =
   | { readonly kind: "add" }
@@ -48,7 +59,10 @@ export function SkillsView() {
   useEvent("check", () => void skills.reload());
   useEvent("pull", () => void skills.reload());
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  const attention = useMemo(() => (status?.findings ?? []).filter((f) => f.area === "skills" && f.accepted === undefined), [status]);
+  const attention = useMemo(
+    () => (status?.findings ?? []).filter((f) => f.area === "skills" && f.accepted === undefined),
+    [status],
+  );
   const fixes = attention.filter(fixable);
   const sourced = (skills.data?.skills ?? []).filter((s) => s.source !== null);
   const changed = () => {
@@ -62,11 +76,21 @@ export function SkillsView() {
       description="Skills in the config repo, and how each machine has them linked"
       actions={
         <>
-          <Button size="sm" variant="outline" disabled={checking || skills.loading} onClick={() => void recheck()}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={checking || skills.loading}
+            onClick={() => void recheck()}
+          >
             {checking ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
             Check machines
           </Button>
-          <Button size="sm" variant="outline" disabled={sourced.length === 0} onClick={() => setDialog({ kind: "update", skills: [] })}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={sourced.length === 0}
+            onClick={() => setDialog({ kind: "update", skills: [] })}
+          >
             <DownloadIcon />
             Check for updates
           </Button>
@@ -82,7 +106,12 @@ export function SkillsView() {
           <GroupLabel className="flex items-center gap-2">
             <span>Needs attention</span>
             {fixes.length > 1 ? (
-              <Button size="xs" variant="outline" className="ml-auto" onClick={() => setDialog({ kind: "fix", ids: fixes.map((f) => f.id) })}>
+              <Button
+                size="xs"
+                variant="outline"
+                className="ml-auto"
+                onClick={() => setDialog({ kind: "fix", ids: fixes.map((f) => f.id) })}
+              >
                 <WrenchIcon />
                 Fix all {fixes.length}
               </Button>
@@ -96,10 +125,16 @@ export function SkillsView() {
                   <div className="text-sm">
                     <span className="font-medium">{f.node}</span> <span>{f.title}</span>
                   </div>
-                  {f.detail === undefined ? null : <div className="text-muted-foreground text-xs">{f.detail}</div>}
+                  {f.detail === undefined ? null : (
+                    <div className="text-muted-foreground text-xs">{f.detail}</div>
+                  )}
                 </div>
                 {fixable(f) ? (
-                  <Button size="xs" variant="outline" onClick={() => setDialog({ kind: "fix", ids: [f.id] })}>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setDialog({ kind: "fix", ids: [f.id] })}
+                  >
                     <WrenchIcon />
                     {f.fix.command.startsWith("t3-fleet skills adopt") ? "Adopt" : "Fix"}
                   </Button>
@@ -111,11 +146,18 @@ export function SkillsView() {
       )}
 
       {skills.data === null ? (
-        <Group>{skills.error === null ? <LoadingRows rows={5} /> : <ErrorState error={skills.error} what="skills" onRetry={() => void skills.reload()} />}</Group>
+        <Group>
+          {skills.error === null ? (
+            <LoadingRows rows={5} />
+          ) : (
+            <ErrorState error={skills.error} what="skills" onRetry={() => void skills.reload()} />
+          )}
+        </Group>
       ) : skills.data.skills.length === 0 ? (
         <Group>
           <Empty icon={<SparklesIcon />} title="No skills in the config repo yet">
-            Add skills from a git repository, or adopt ones a machine installed outside T3 Fleet; every machine links them on its next sync.
+            Add skills from a git repository, or adopt ones a machine installed outside T3 Fleet;
+            every machine links them on its next sync.
           </Empty>
         </Group>
       ) : (
@@ -136,10 +178,26 @@ export function SkillsView() {
         </p>
       )}
 
-      <AddDialog open={dialog?.kind === "add"} onClose={() => setDialog(null)} onChanged={changed} />
-      <UpdateDialog skills={dialog?.kind === "update" ? dialog.skills : null} onClose={() => setDialog(null)} onChanged={changed} />
-      <RemoveDialog skill={dialog?.kind === "remove" ? dialog.skill : null} onClose={() => setDialog(null)} onChanged={changed} />
-      <ApplyDialog ids={dialog?.kind === "fix" ? dialog.ids : null} onClose={() => setDialog(null)} onApplied={changed} />
+      <AddDialog
+        open={dialog?.kind === "add"}
+        onClose={() => setDialog(null)}
+        onChanged={changed}
+      />
+      <UpdateDialog
+        skills={dialog?.kind === "update" ? dialog.skills : null}
+        onClose={() => setDialog(null)}
+        onChanged={changed}
+      />
+      <RemoveDialog
+        skill={dialog?.kind === "remove" ? dialog.skill : null}
+        onClose={() => setDialog(null)}
+        onChanged={changed}
+      />
+      <ApplyDialog
+        ids={dialog?.kind === "fix" ? dialog.ids : null}
+        onClose={() => setDialog(null)}
+        onApplied={changed}
+      />
     </Page>
   );
 }
@@ -165,9 +223,15 @@ function SkillsTable({
             <tr className="text-left text-muted-foreground text-xs">
               <th className="px-4 py-2 font-medium">Skill</th>
               {nodes.map((n) => (
-                <th key={n.node} className="px-3 py-2 text-center font-medium" title={n.store === null ? undefined : `store ${tilde(n.store)}`}>
+                <th
+                  key={n.node}
+                  className="px-3 py-2 text-center font-medium"
+                  title={n.store === null ? undefined : `store ${tilde(n.store)}`}
+                >
                   {n.node}
-                  {n.node === self ? <span className="block font-normal text-2xs">this machine</span> : null}
+                  {n.node === self ? (
+                    <span className="block font-normal text-2xs">this machine</span>
+                  ) : null}
                 </th>
               ))}
               <th className="px-4 py-2" />
@@ -187,7 +251,11 @@ function SkillsTable({
                       </Badge>
                     )}
                   </div>
-                  {s.description === null ? null : <div className="mt-0.5 line-clamp-2 text-muted-foreground text-xs">{s.description}</div>}
+                  {s.description === null ? null : (
+                    <div className="mt-0.5 line-clamp-2 text-muted-foreground text-xs">
+                      {s.description}
+                    </div>
+                  )}
                 </td>
                 {nodes.map((n) => (
                   <td key={n.node} className="px-3 py-2.5 text-center">
@@ -197,11 +265,23 @@ function SkillsTable({
                 <td className="px-4 py-2">
                   <div className="flex justify-end gap-1">
                     {s.source === null ? null : (
-                      <Button size="icon-xs" variant="ghost" title={`Check ${s.name} for updates`} aria-label={`Check ${s.name} for updates`} onClick={() => onUpdate(s.name)}>
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        title={`Check ${s.name} for updates`}
+                        aria-label={`Check ${s.name} for updates`}
+                        onClick={() => onUpdate(s.name)}
+                      >
                         <DownloadIcon />
                       </Button>
                     )}
-                    <Button size="icon-xs" variant="ghost" title={`Remove ${s.name}`} aria-label={`Remove ${s.name}`} onClick={() => onRemove(s.name)}>
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      title={`Remove ${s.name}`}
+                      aria-label={`Remove ${s.name}`}
+                      onClick={() => onRemove(s.name)}
+                    >
                       <Trash2Icon />
                     </Button>
                   </div>
@@ -215,7 +295,12 @@ function SkillsTable({
   );
 }
 
-const STATE_TEXT = { ok: "linked", missing: "not linked", wrong: "links elsewhere", "real-dir": "a copy is in the way" } as const;
+const STATE_TEXT = {
+  ok: "linked",
+  missing: "not linked",
+  wrong: "links elsewhere",
+  "real-dir": "a copy is in the way",
+} as const;
 
 /** One skill on one machine: linked everywhere, something to fix, ignored, or not known. */
 function LinkCell({ skill, node: n }: { skill: string; node: UiSkillsNode }) {
@@ -225,10 +310,12 @@ function LinkCell({ skill, node: n }: { skill: string; node: UiSkillsNode }) {
     </span>
   );
   if (n.at === null) return quiet("—", "not reached in the last check");
-  if (n.ignored.includes(skill)) return quiet("ignored", "listed in this machine's [skills] ignore");
+  if (n.ignored.includes(skill))
+    return quiet("ignored", "listed in this machine's [skills] ignore");
   if (n.store === null) return quiet("—", "this machine reports no skills");
   const links = n.links.filter((l) => l.skill === skill);
-  if (links.length === 0) return quiet("not yet", "not in this machine's checkout yet; it arrives with the next sync");
+  if (links.length === 0)
+    return quiet("not yet", "not in this machine's checkout yet; it arrives with the next sync");
   const broken = links.filter((l) => l.state !== "ok");
   const each = links.map((l) => `${tilde(l.dir)}: ${STATE_TEXT[l.state]}`);
   return (
@@ -247,7 +334,9 @@ function LinkCell({ skill, node: n }: { skill: string; node: UiSkillsNode }) {
 // ── dialogs ─────────────────────────────────────────────────────────────
 
 function Landed({ landed, verb }: { landed: UiSkillsLandedT; verb: string }) {
-  const names = landed.paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.replace(/^skills\//, ""));
+  const names = landed.paths
+    .filter((p) => p !== "skills/SOURCES.json")
+    .map((p) => p.replace(/^skills\//, ""));
   return (
     <div className="flex items-start gap-2 text-sm">
       <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-success" />
@@ -255,7 +344,9 @@ function Landed({ landed, verb }: { landed: UiSkillsLandedT; verb: string }) {
         <div>
           {verb} {names.join(", ")}: {landed.landed}.
         </div>
-        <div className="text-muted-foreground text-xs">Every machine links the change on its next sync.</div>
+        <div className="text-muted-foreground text-xs">
+          Every machine links the change on its next sync.
+        </div>
       </div>
     </div>
   );
@@ -264,7 +355,15 @@ function Landed({ landed, verb }: { landed: UiSkillsLandedT; verb: string }) {
 /** What a skills job changed; a job always carries it when it is done. */
 const landedOf = (job: UiJobT): UiSkillsLandedT => job.landed ?? { paths: [], landed: "done" };
 
-function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () => void; onChanged: () => void }) {
+function AddDialog({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const { runJob } = useStore();
   const [source, setSource] = useState("");
   const [chosen, setChosen] = useState<ReadonlySet<string>>(new Set());
@@ -272,14 +371,24 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
   const lookup = useAction(async (from: string) => {
     const result = await api.skillsLookup(from);
     const fresh = result.skills.filter((s) => !s.exists);
-    setChosen(new Set(result.skills.length === 1 ? result.skills.map((s) => s.name) : fresh.length === 1 ? fresh.map((s) => s.name) : []));
+    setChosen(
+      new Set(
+        result.skills.length === 1
+          ? result.skills.map((s) => s.name)
+          : fresh.length === 1
+            ? fresh.map((s) => s.name)
+            : [],
+      ),
+    );
     return result;
   });
-  const add = useAction(async (from: string, names: ReadonlyArray<string>, rename: string | undefined) => {
-    const job = await runJob(() => api.skillsAdd(from, names, rename));
-    onChanged();
-    return landedOf(job);
-  });
+  const add = useAction(
+    async (from: string, names: ReadonlyArray<string>, rename: string | undefined) => {
+      const job = await runJob(() => api.skillsAdd(from, names, rename));
+      onChanged();
+      return landedOf(job);
+    },
+  );
   const found = lookup.result;
   const landed = add.result;
   const busy = lookup.running || add.running;
@@ -305,7 +414,8 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
       <AlertDialogHeader>
         <AlertDialogTitle>Add skills from a git repository</AlertDialogTitle>
         <AlertDialogDescription>
-          The skills are copied into the config repo with a note of where they came from, so they work offline and can be updated later.
+          The skills are copied into the config repo with a note of where they came from, so they
+          work offline and can be updated later.
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogBody className="flex flex-col gap-3">
@@ -346,10 +456,22 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
                 </div>
                 <div className="max-h-64 overflow-y-auto rounded-lg border">
                   {found.skills.map((s) => (
-                    <label key={s.name} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent/50">
-                      <input type="checkbox" checked={chosen.has(s.name)} onChange={() => toggle(s.name)} className="size-3.5" />
+                    <label
+                      key={s.name}
+                      className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent/50"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={chosen.has(s.name)}
+                        onChange={() => toggle(s.name)}
+                        className="size-3.5"
+                      />
                       <span className="font-medium">{s.name}</span>
-                      {s.exists ? <span className="ml-auto text-muted-foreground text-xs">already in the repo</span> : null}
+                      {s.exists ? (
+                        <span className="ml-auto text-muted-foreground text-xs">
+                          already in the repo
+                        </span>
+                      ) : null}
                     </label>
                   ))}
                 </div>
@@ -375,10 +497,18 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
           <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
         ) : (
           <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={add.running} />}>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="ghost" disabled={add.running} />}>
+              Cancel
+            </AlertDialogClose>
             <Button
               disabled={found === null || chosen.size === 0 || busy}
-              onClick={() => void add.start(source.trim(), [...chosen], chosen.size === 1 && as.trim() !== "" ? as.trim() : undefined)}
+              onClick={() =>
+                void add.start(
+                  source.trim(),
+                  [...chosen],
+                  chosen.size === 1 && as.trim() !== "" ? as.trim() : undefined,
+                )
+              }
             >
               {add.running ? <Spinner className="size-3.5" /> : <PlusIcon />}
               {chosen.size === 0 ? "Add" : `Add ${plural(chosen.size, "skill")}`}
@@ -391,7 +521,15 @@ function AddDialog({ open, onClose, onChanged }: { open: boolean; onClose: () =>
 }
 
 /** Preview what upstream changed (the repo is left as it was), then keep it. */
-function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<string> | null; onClose: () => void; onChanged: () => void }) {
+function UpdateDialog({
+  skills,
+  onClose,
+  onChanged,
+}: {
+  skills: ReadonlyArray<string> | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const { runJob } = useStore();
   const preview = useAction((names: ReadonlyArray<string>) => api.skillsPreview(names));
   const keep = useAction(async (names: ReadonlyArray<string>, digest: string) => {
@@ -400,7 +538,8 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
     return landedOf(job);
   });
   const open = skills !== null;
-  const which = skills === null || skills.length === 0 ? "every skill with a source" : skills.join(", ");
+  const which =
+    skills === null || skills.length === 0 ? "every skill with a source" : skills.join(", ");
   const startPreview = preview.start;
   const resetPreview = preview.reset;
   const resetKeep = keep.reset;
@@ -418,7 +557,9 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
     <ActionDialog open={open} busy={keep.running} onClose={onClose} className="max-w-3xl">
       <AlertDialogHeader>
         <AlertDialogTitle>Update {which}</AlertDialogTitle>
-        <AlertDialogDescription>T3 Fleet pulls from upstream and shows the change; nothing is kept until you say so.</AlertDialogDescription>
+        <AlertDialogDescription>
+          T3 Fleet pulls from upstream and shows the change; nothing is kept until you say so.
+        </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogBody className="flex flex-col gap-3">
         {landed !== null ? (
@@ -435,7 +576,9 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
           </div>
         ) : shown === null ? null : (
           <>
-            <pre className="overflow-x-auto font-mono text-muted-foreground text-xs">{shown.stat}</pre>
+            <pre className="overflow-x-auto font-mono text-muted-foreground text-xs">
+              {shown.stat}
+            </pre>
             <div className="overflow-hidden rounded-lg border">
               <Diff text={shown.diff} />
             </div>
@@ -448,8 +591,15 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
           <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
         ) : (
           <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={keep.running} />}>Cancel</AlertDialogClose>
-            <Button disabled={skills === null || shown === null || preview.running || keep.running} onClick={() => skills !== null && shown !== null && void keep.start(skills, shown.digest)}>
+            <AlertDialogClose render={<Button variant="ghost" disabled={keep.running} />}>
+              Cancel
+            </AlertDialogClose>
+            <Button
+              disabled={skills === null || shown === null || preview.running || keep.running}
+              onClick={() =>
+                skills !== null && shown !== null && void keep.start(skills, shown.digest)
+              }
+            >
               {keep.running ? <Spinner className="size-3.5" /> : <DownloadIcon />}
               Keep the update
             </Button>
@@ -460,7 +610,15 @@ function UpdateDialog({ skills, onClose, onChanged }: { skills: ReadonlyArray<st
   );
 }
 
-function RemoveDialog({ skill, onClose, onChanged }: { skill: string | null; onClose: () => void; onChanged: () => void }) {
+function RemoveDialog({
+  skill,
+  onClose,
+  onChanged,
+}: {
+  skill: string | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const { runJob } = useStore();
   // Kept while the dialog closes, so its title does not go blank.
   const [shown, setShown] = useState(skill);

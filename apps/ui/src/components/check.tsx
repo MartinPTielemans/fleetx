@@ -34,8 +34,13 @@ export function CheckFailed() {
   const { status, statusError } = useStore();
   if (status === null || statusError === null) return null;
   return (
-    <div role="alert" className="rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs">
-      The last check failed: {statusError instanceof Error ? statusError.message : String(statusError)}. Showing the one before.
+    <div
+      role="alert"
+      className="rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs"
+    >
+      The last check failed:{" "}
+      {statusError instanceof Error ? statusError.message : String(statusError)}. Showing the one
+      before.
     </div>
   );
 }

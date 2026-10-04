@@ -41,11 +41,20 @@ export const SecretsArea = defineArea({
       const fs = yield* FileSystem.FileSystem;
       const read = (p: string) => fs.readFileString(p).pipe(Effect.option);
       const keyText = yield* read(keyPath(ctx.home));
-      const identity = Option.isSome(keyText) ? keyText.value.split("\n").find((l) => l.startsWith("AGE-SECRET-KEY-")) ?? null : null;
-      const recipient = identity === null ? null : yield* Effect.tryPromise(() => identityToRecipient(identity)).pipe(Effect.orElseSucceed(() => null));
+      const identity = Option.isSome(keyText)
+        ? (keyText.value.split("\n").find((l) => l.startsWith("AGE-SECRET-KEY-")) ?? null)
+        : null;
+      const recipient =
+        identity === null
+          ? null
+          : yield* Effect.tryPromise(() => identityToRecipient(identity)).pipe(
+              Effect.orElseSucceed(() => null),
+            );
       const recipientsText = yield* read(recipientsPath(ctx.checkout));
       const listedMap: Record<string, unknown> = Option.isSome(recipientsText)
-        ? yield* Effect.try(() => parseToml(recipientsText.value) as Record<string, unknown>).pipe(Effect.orElseSucceed(() => ({})))
+        ? yield* Effect.try(() => parseToml(recipientsText.value) as Record<string, unknown>).pipe(
+            Effect.orElseSucceed(() => ({})),
+          )
         : {};
       const listed = Object.keys(listedMap).sort();
       const isRecipient = recipient !== null && Object.values(listedMap).includes(recipient);
@@ -71,7 +80,13 @@ export const SecretsArea = defineArea({
     const base = { node, area: "secrets" as const };
     if (!observed.encrypted) return out;
     if (observed.recipient === null) {
-      out.push({ ...base, key: "secrets-no-key", severity: "warn", title: "this machine has no key for the fleet's secrets", fix: { command: "t3-fleet secrets init", safe: true } });
+      out.push({
+        ...base,
+        key: "secrets-no-key",
+        severity: "warn",
+        title: "this machine has no key for the fleet's secrets",
+        fix: { command: "t3-fleet secrets init", safe: true },
+      });
       return out;
     }
     if (!observed.isRecipient) {
@@ -82,16 +97,30 @@ export const SecretsArea = defineArea({
         severity: "warn",
         title: "this machine's key is not among the secrets' recipients, so it cannot read them",
         ...(authority === null
-          ? { detail: `no node has the authority role to add it: t3-fleet secrets add-node ${node} ${observed.recipient}` }
-          : { fix: { command: `t3-fleet secrets add-node ${sh(node)} ${sh(observed.recipient)}`, safe: true, on: authority } }),
+          ? {
+              detail: `no node has the authority role to add it: t3-fleet secrets add-node ${node} ${observed.recipient}`,
+            }
+          : {
+              fix: {
+                command: `t3-fleet secrets add-node ${sh(node)} ${sh(observed.recipient)}`,
+                safe: true,
+                on: authority,
+              },
+            }),
       });
       return out;
     }
-    if (observed.error !== null) out.push({ ...base, key: "secrets-unreadable", severity: "error", title: observed.error });
+    if (observed.error !== null)
+      out.push({ ...base, key: "secrets-unreadable", severity: "error", title: observed.error });
     else if (observed.current === false) {
-      out.push({ ...base, key: "secrets-stale", severity: "warn", title: "this machine's installed secrets are out of date", fix: { command: "t3-fleet secrets install", safe: true } });
+      out.push({
+        ...base,
+        key: "secrets-stale",
+        severity: "warn",
+        title: "this machine's installed secrets are out of date",
+        fix: { command: "t3-fleet secrets install", safe: true },
+      });
     }
     return out;
   },
 });
-

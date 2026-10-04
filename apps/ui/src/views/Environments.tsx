@@ -4,7 +4,15 @@ import { ChevronRightIcon, ServerIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
 
 import { CheckButton, CheckedLine, CheckFailed } from "../components/check";
-import { Code, ErrorState, LoadingRows, Page, SeverityIcon, worst, type Severity } from "../components/common";
+import {
+  Code,
+  ErrorState,
+  LoadingRows,
+  Page,
+  SeverityIcon,
+  worst,
+  type Severity,
+} from "../components/common";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Empty } from "../components/ui/empty";
@@ -18,7 +26,9 @@ export function EnvironmentsView({ open }: { open: string }) {
   const { status, statusError, recheck } = useStore();
   const [showText, setShowText] = useState(false);
   // Agent CLI columns come from what the machines report, as the CLI's table does.
-  const agentNames = [...new Set((status?.environments ?? []).flatMap((e) => e.agents.map((a) => a.name)))];
+  const agentNames = [
+    ...new Set((status?.environments ?? []).flatMap((e) => e.agents.map((a) => a.name))),
+  ];
   return (
     <Page
       wide
@@ -26,7 +36,12 @@ export function EnvironmentsView({ open }: { open: string }) {
       description={<CheckedLine />}
       actions={
         <>
-          <Button size="sm" variant="ghost-muted" onClick={() => setShowText((v) => !v)} aria-pressed={showText}>
+          <Button
+            size="sm"
+            variant="ghost-muted"
+            onClick={() => setShowText((v) => !v)}
+            aria-pressed={showText}
+          >
             <TerminalIcon />
             <span className="max-sm:hidden">As text</span>
           </Button>
@@ -93,12 +108,28 @@ export function EnvironmentsView({ open }: { open: string }) {
   );
 }
 
-const areaSeverity = (findings: ReadonlyArray<UiFinding>, test: (f: UiFinding) => boolean): Severity =>
+const areaSeverity = (
+  findings: ReadonlyArray<UiFinding>,
+  test: (f: UiFinding) => boolean,
+): Severity =>
   worst(findings.filter((f) => f.severity !== "info" && test(f)).map((f) => f.severity));
 
-function Cell({ severity, children, muted = false }: { severity: Severity | null; children: React.ReactNode; muted?: boolean }) {
+function Cell({
+  severity,
+  children,
+  muted = false,
+}: {
+  severity: Severity | null;
+  children: React.ReactNode;
+  muted?: boolean;
+}) {
   return (
-    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", muted && "text-muted-foreground")}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 whitespace-nowrap",
+        muted && "text-muted-foreground",
+      )}
+    >
       {severity === null ? null : <SeverityIcon severity={severity} className="size-3.5" />}
       {children}
     </span>
@@ -147,9 +178,20 @@ function EnvironmentRow({
   return (
     <>
       {/* The whole row opens it for the mouse; the machine's name is the link for everyone else. */}
-      <tr className={cn("cursor-pointer border-b transition-colors last:border-0 hover:bg-muted/60", open && "bg-muted/60")} onClick={() => navigate(href)}>
+      <tr
+        className={cn(
+          "cursor-pointer border-b transition-colors last:border-0 hover:bg-muted/60",
+          open && "bg-muted/60",
+        )}
+        onClick={() => navigate(href)}
+      >
         <td className="py-2.5 pl-3">
-          <ChevronRightIcon className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")} />
+          <ChevronRightIcon
+            className={cn(
+              "size-3.5 text-muted-foreground transition-transform",
+              open && "rotate-90",
+            )}
+          />
         </td>
         <td className="px-2 py-2.5">
           <span className="flex items-center gap-2 whitespace-nowrap">
@@ -194,7 +236,12 @@ function EnvironmentRow({
                       key={p.instanceId}
                       severity={
                         p.startsInT3
-                          ? areaSeverity(findings, (f) => (f.area === "providers" || f.area === "parity") && f.title.includes(p.label))
+                          ? areaSeverity(
+                              findings,
+                              (f) =>
+                                (f.area === "providers" || f.area === "parity") &&
+                                f.title.includes(p.label),
+                            )
                           : "error"
                       }
                     >
@@ -217,7 +264,13 @@ function EnvironmentRow({
           {env.sync === null ? (
             <span className="text-muted-foreground">—</span>
           ) : (
-            <Cell severity={env.sync.result === "ok" && env.sync.streak === 0 ? areaSeverity(findings, (f) => f.area === "sync") : "error"}>
+            <Cell
+              severity={
+                env.sync.result === "ok" && env.sync.streak === 0
+                  ? areaSeverity(findings, (f) => f.area === "sync")
+                  : "error"
+              }
+            >
               <span className="text-xs">{ago(env.sync.at, now)}</span>
             </Cell>
           )}
@@ -243,7 +296,13 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: ReadonlyArray<UiFinding> }) {
+function EnvironmentDetail({
+  env,
+  findings,
+}: {
+  env: UiEnvironment;
+  findings: ReadonlyArray<UiFinding>;
+}) {
   const { now } = useStore();
   const shown = findings.filter((f) => f.severity !== "info");
   const notes = findings.length - shown.length;
@@ -256,14 +315,22 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
           <Fact label="Platform">{env.platform ?? "—"}</Fact>
           <Fact label="Roles">{env.roles.join(", ")}</Fact>
           <Fact label="T3 server">
-            {env.t3.version === null ? "not running" : <span className="font-mono">{env.t3.version}</span>}
+            {env.t3.version === null ? (
+              "not running"
+            ) : (
+              <span className="font-mono">{env.t3.version}</span>
+            )}
             {env.t3.channel === null ? "" : ` · ${env.t3.channel}`}
-            {env.t3.behind === null || env.t3.behind === 0 ? "" : ` · ${plural(env.t3.behind, "release")} behind`}
+            {env.t3.behind === null || env.t3.behind === 0
+              ? ""
+              : ` · ${plural(env.t3.behind, "release")} behind`}
           </Fact>
           {env.agents.map((a) => (
             <Fact key={a.name} label={`${a.name.charAt(0).toUpperCase()}${a.name.slice(1)} CLI`}>
               <span className="font-mono">{a.version ?? "missing"}</span>
-              {a.latest !== null && a.latest !== a.version ? <span className="text-muted-foreground"> · latest {a.latest}</span> : null}
+              {a.latest !== null && a.latest !== a.version ? (
+                <span className="text-muted-foreground"> · latest {a.latest}</span>
+              ) : null}
             </Fact>
           ))}
           <Fact label="Sync">
@@ -271,8 +338,10 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
               "no sync has reported"
             ) : (
               <span title={env.sync.message}>
-                {env.sync.result === "ok" ? "ok" : `failing${env.sync.streak > 1 ? ` (${env.sync.streak} in a row)` : ""}`} · {ago(env.sync.at, now)} ·{" "}
-                {env.sync.message}
+                {env.sync.result === "ok"
+                  ? "ok"
+                  : `failing${env.sync.streak > 1 ? ` (${env.sync.streak} in a row)` : ""}`}{" "}
+                · {ago(env.sync.at, now)} · {env.sync.message}
               </span>
             )}
           </Fact>
@@ -281,7 +350,12 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
               "not reported"
             ) : (
               <a href="/models" onClick={follow} className="underline-offset-2 hover:underline">
-                {env.models.version} · {env.models.egress} · {plural(env.models.upstreams.reduce((n, u) => n + u.h1.requests, 0), "request")} in the last hour
+                {env.models.version} · {env.models.egress} ·{" "}
+                {plural(
+                  env.models.upstreams.reduce((n, u) => n + u.h1.requests, 0),
+                  "request",
+                )}{" "}
+                in the last hour
               </a>
             )}
           </Fact>
@@ -291,7 +365,9 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
         <GroupLabel>Providers in T3</GroupLabel>
         {env.providers.length === 0 ? (
           <Group>
-            <div className="px-3 py-3 text-muted-foreground text-xs">{env.reachable ? "T3 lists no providers here." : "Not reachable."}</div>
+            <div className="px-3 py-3 text-muted-foreground text-xs">
+              {env.reachable ? "T3 lists no providers here." : "Not reachable."}
+            </div>
           </Group>
         ) : (
           <Group>
@@ -300,19 +376,43 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
               return (
                 <div key={p.instanceId} className="flex flex-col gap-0.5 px-3 py-2 text-xs">
                   <div className="flex items-center gap-2">
-                    <SeverityIcon severity={!p.enabled ? "info" : !p.startsInT3 || login?.status === "unauthenticated" ? "error" : "ok"} className="size-3.5" />
+                    <SeverityIcon
+                      severity={
+                        !p.enabled
+                          ? "info"
+                          : !p.startsInT3 || login?.status === "unauthenticated"
+                            ? "error"
+                            : "ok"
+                      }
+                      className="size-3.5"
+                    />
                     <span className="font-medium">{p.label}</span>
                     {!p.enabled ? <Badge variant="secondary">disabled</Badge> : null}
                     {login === undefined ? null : (
-                      <Badge variant={login.status === "authenticated" ? "success" : login.status === "unauthenticated" ? "error" : "secondary"} title={login.detail}>
+                      <Badge
+                        variant={
+                          login.status === "authenticated"
+                            ? "success"
+                            : login.status === "unauthenticated"
+                              ? "error"
+                              : "secondary"
+                        }
+                        title={login.detail}
+                      >
                         {statusText[login.status]}
                         {login.method === null ? "" : ` · ${login.method}`}
                       </Badge>
                     )}
                     {p.viaModels ? <Badge variant="info">via t3-fleet models</Badge> : null}
-                    <span className="ml-auto font-mono text-muted-foreground">{p.version ?? ""}</span>
+                    <span className="ml-auto font-mono text-muted-foreground">
+                      {p.version ?? ""}
+                    </span>
                   </div>
-                  {p.runs === null ? null : <div className="truncate pl-5.5 font-mono text-muted-foreground" title={p.runs}>{p.runs}</div>}
+                  {p.runs === null ? null : (
+                    <div className="truncate pl-5.5 font-mono text-muted-foreground" title={p.runs}>
+                      {p.runs}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -327,14 +427,23 @@ function EnvironmentDetail({ env, findings }: { env: UiEnvironment; findings: Re
             </div>
           ) : (
             shown.map((f) => (
-              <a key={f.id} href="/findings" onClick={follow} className="flex items-start gap-2 px-3 py-2 text-xs hover:bg-muted/60">
+              <a
+                key={f.id}
+                href="/findings"
+                onClick={follow}
+                className="flex items-start gap-2 px-3 py-2 text-xs hover:bg-muted/60"
+              >
                 <SeverityIcon severity={f.severity} className="mt-px size-3.5" />
                 <span className="min-w-0 flex-1">{f.title}</span>
                 <Badge variant="outline">{f.area}</Badge>
               </a>
             ))
           )}
-          {notes > 0 ? <div className="px-3 py-2 text-muted-foreground text-xs">{plural(notes, "note")} on the Findings page</div> : null}
+          {notes > 0 ? (
+            <div className="px-3 py-2 text-muted-foreground text-xs">
+              {plural(notes, "note")} on the Findings page
+            </div>
+          ) : null}
         </Group>
       </section>
     </div>

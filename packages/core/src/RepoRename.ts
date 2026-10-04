@@ -19,16 +19,28 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import { ensureGitConfig, git, literal, nulList, ok, out, pullBranch, why } from "./Git.ts";
-import { FLEET_FILE, LEGACY_FLEET_FILE, LEGACY_SECRET_PREFIX, repoRenamed, SECRET_PREFIX } from "./Names.ts";
+import {
+  FLEET_FILE,
+  LEGACY_FLEET_FILE,
+  LEGACY_SECRET_PREFIX,
+  repoRenamed,
+  SECRET_PREFIX,
+} from "./Names.ts";
 import { encryptedPath, installSecrets, readSecrets, writeSecrets } from "./Secrets.ts";
 
 /** Every FLEETX_ secret also under its T3_FLEET_ name, with the same value; the names added. */
 export const addRenamedSecrets = (text: string) => {
   const lines = text.split("\n");
-  const has = new Set(lines.map((l) => /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=/.exec(l)?.[1]).filter((k) => k !== undefined));
+  const has = new Set(
+    lines
+      .map((l) => /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=/.exec(l)?.[1])
+      .filter((k) => k !== undefined),
+  );
   const added: Array<string> = [];
   for (const line of lines) {
-    const m = new RegExp(`^\\s*(?:export\\s+)?${LEGACY_SECRET_PREFIX}([A-Z0-9_]+)=(.*)$`).exec(line);
+    const m = new RegExp(`^\\s*(?:export\\s+)?${LEGACY_SECRET_PREFIX}([A-Z0-9_]+)=(.*)$`).exec(
+      line,
+    );
     if (m === null) continue;
     const name = `${SECRET_PREFIX}${m[1]}`;
     if (has.has(name)) continue;
@@ -49,8 +61,12 @@ export const renameRepo = (repo: string, branch: string) =>
     yield* ensureGitConfig;
     // Other local edits are fine, staged or not: they are set aside for the pull and never committed.
     const touched = [LEGACY_FLEET_FILE, FLEET_FILE, encryptedPath(repo).slice(repo.length + 1)];
-    if (out(yield* git(repo, ["status", "--porcelain", "--", ...touched], { env: literal })) !== "") {
-      return yield* Effect.fail(`${repo} has uncommitted changes to ${touched.join(" or ")}; commit or stash them first`);
+    if (
+      out(yield* git(repo, ["status", "--porcelain", "--", ...touched], { env: literal })) !== ""
+    ) {
+      return yield* Effect.fail(
+        `${repo} has uncommitted changes to ${touched.join(" or ")}; commit or stash them first`,
+      );
     }
     yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
     const done: Array<string> = [];
@@ -67,20 +83,41 @@ export const renameRepo = (repo: string, branch: string) =>
         yield* writeSecrets(repo, text);
         yield* installSecrets(repo);
         yield* git(repo, ["add", "--", encryptedPath(repo).slice(repo.length + 1)]);
-        done.push(`secrets added: ${added.join(", ")} (the ${LEGACY_SECRET_PREFIX} names stay until 1.0)`);
+        done.push(
+          `secrets added: ${added.join(", ")} (the ${LEGACY_SECRET_PREFIX} names stay until 1.0)`,
+        );
       }
     }
 
-    const staged = nulList((yield* git(repo, ["diff", "--cached", "--name-only", "-z", "--no-renames", "--", ...touched], { env: literal })).stdout);
+    const staged = nulList(
+      (yield* git(
+        repo,
+        ["diff", "--cached", "--name-only", "-z", "--no-renames", "--", ...touched],
+        { env: literal },
+      )).stdout,
+    );
     if (staged.length > 0) {
-      const commit = yield* git(repo, ["commit", "-q", "-m", "Rename the config repo's names to T3 Fleet's\n\nt3-fleet.toml, and every FLEETX_ secret also as T3_FLEET_.", "--", ...staged], { env: literal });
+      const commit = yield* git(
+        repo,
+        [
+          "commit",
+          "-q",
+          "-m",
+          "Rename the config repo's names to T3 Fleet's\n\nt3-fleet.toml, and every FLEETX_ secret also as T3_FLEET_.",
+          "--",
+          ...staged,
+        ],
+        { env: literal },
+      );
       if (!ok(commit)) return yield* Effect.fail(`commit failed: ${why(commit)}`);
       const push = yield* git(repo, ["push", "-q", "origin", `HEAD:${branch}`]);
       if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
       done.push(`committed and pushed ${out(yield* git(repo, ["rev-parse", "--short", "HEAD"]))}`);
     }
 
-    const remote = out(yield* git(repo, ["ls-remote", "origin", "refs/heads/fleetx/*", "refs/heads/t3-fleet/*"]))
+    const remote = out(
+      yield* git(repo, ["ls-remote", "origin", "refs/heads/fleetx/*", "refs/heads/t3-fleet/*"]),
+    )
       .split("\n")
       .filter(Boolean)
       .map((l) => l.split(/\s+/) as [string, string]);
@@ -96,7 +133,12 @@ export const renameRepo = (repo: string, branch: string) =>
       done.push(`${ref.slice("refs/heads/".length)} → ${target.slice("refs/heads/".length)}`);
     }
     if (specs.length > 0) {
-      const fetch = yield* git(repo, ["fetch", "-q", "origin", "+refs/heads/fleetx/*:refs/remotes/origin/fleetx/*"]);
+      const fetch = yield* git(repo, [
+        "fetch",
+        "-q",
+        "origin",
+        "+refs/heads/fleetx/*:refs/remotes/origin/fleetx/*",
+      ]);
       if (!ok(fetch)) return yield* Effect.fail(`fetching the fleetx/ branches: ${why(fetch)}`);
       const push = yield* git(repo, ["push", "-q", "--force", "origin", ...specs]);
       if (!ok(push)) return yield* Effect.fail(`moving the branches: ${why(push)}`);

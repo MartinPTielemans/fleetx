@@ -1,34 +1,34 @@
 {
   "name": "t3-fleet",
-  "private": false,
-  "type": "module",
-  "bin": {
-    "t3-fleet": "./dist/bin.mjs",
-    "fleetx": "./dist/bin.mjs"
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "vp build ../ui && vp pack",
-    "test": "vp test run --config ../../vite.config.ts --dir src"
-  },
-  "devDependencies": {
-    "@effect/vitest": "catalog:",
-    "@types/node": "catalog:",
-    "vite-plus": "catalog:",
-    "@t3-fleet/core": "workspace:*",
-    "effect": "catalog:",
-    "@effect/platform-node": "catalog:"
-  },
   "version": "0.7.1",
+  "private": false,
   "description": "Keep every machine you run T3 Code on equivalent.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MartinPTielemans/fleetx.git"
   },
+  "bin": {
+    "fleetx": "./dist/bin.mjs",
+    "t3-fleet": "./dist/bin.mjs"
+  },
   "files": [
     "dist"
   ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "vp build ../ui && vp pack",
+    "test": "vp test run --config ../../vite.config.ts --dir src"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@t3-fleet/core": "workspace:*",
+    "@types/node": "catalog:",
+    "effect": "catalog:",
+    "vite-plus": "catalog:"
+  },
   "engines": {
     "node": ">=24"
   }

@@ -44,7 +44,8 @@ const isRealDir = (path: string) => {
   }
 };
 
-const dataDir = (home: string, now: string, was: string) => (isRealDir(`${home}/${was}`) ? `${home}/${was}` : `${home}/${now}`);
+const dataDir = (home: string, now: string, was: string) =>
+  isRealDir(`${home}/${was}`) ? `${home}/${was}` : `${home}/${now}`;
 
 export const CONFIG_DIR = ".config/t3-fleet";
 export const LEGACY_CONFIG_DIR = ".config/fleetx";
@@ -76,7 +77,8 @@ export const legacySystemdUnit = (role: string) => `fleetx-${role}`;
 export const LAUNCHER_PREFIX = "t3-fleet-";
 export const LEGACY_LAUNCHER_PREFIX = "fleetx-";
 /** Whether a binary is one of the models area's launchers, under either name. */
-export const isLauncher = (file: string) => file.startsWith(LAUNCHER_PREFIX) || file.startsWith(LEGACY_LAUNCHER_PREFIX);
+export const isLauncher = (file: string) =>
+  file.startsWith(LAUNCHER_PREFIX) || file.startsWith(LEGACY_LAUNCHER_PREFIX);
 
 export const CONTAINER_PREFIX = "t3-fleet-mcp-";
 export const LEGACY_CONTAINER_PREFIX = "fleetx-mcp-";
@@ -87,7 +89,8 @@ export const LEGACY_CONTAINER_LABEL = "dev.fleetx";
 export const header = (name: string) => `x-t3-fleet-${name}`;
 export const legacyHeader = (name: string) => `x-fleetx-${name}`;
 /** A header's value under its name, or else its old name. */
-export const readHeader = (headers: Readonly<Record<string, string | undefined>>, name: string) => headers[header(name)] ?? headers[legacyHeader(name)];
+export const readHeader = (headers: Readonly<Record<string, string | undefined>>, name: string) =>
+  headers[header(name)] ?? headers[legacyHeader(name)];
 
 export const FLEET_FILE = "t3-fleet.toml";
 export const LEGACY_FLEET_FILE = "fleetx.toml";
@@ -101,13 +104,19 @@ export const repoRenamed = (repo: string) => existsSync(`${repo}/${FLEET_FILE}`)
 
 export type BranchKind = "state" | "staging" | "rejected";
 /** The prefix this repo's branches of one kind are written under: "t3-fleet/state/". */
-export const branchPrefix = (repo: string, kind: BranchKind) => `${repoRenamed(repo) ? "t3-fleet" : "fleetx"}/${kind}/`;
+export const branchPrefix = (repo: string, kind: BranchKind) =>
+  `${repoRenamed(repo) ? "t3-fleet" : "fleetx"}/${kind}/`;
 /** Every prefix branches of one kind are read from, the current one first. Until 1.0. */
-export const branchPrefixes = (kind: BranchKind) => [`t3-fleet/${kind}/`, `fleetx/${kind}/`] as const;
+export const branchPrefixes = (kind: BranchKind) =>
+  [`t3-fleet/${kind}/`, `fleetx/${kind}/`] as const;
 
 export const SECRET_PREFIX = "T3_FLEET_";
 export const LEGACY_SECRET_PREFIX = "FLEETX_";
 /** A fleet secret's name in this repo: T3_FLEET_RELAY_TOKEN, or FLEETX_RELAY_TOKEN before the rename. */
-export const secretName = (repo: string, name: string) => `${repoRenamed(repo) ? SECRET_PREFIX : LEGACY_SECRET_PREFIX}${name}`;
+export const secretName = (repo: string, name: string) =>
+  `${repoRenamed(repo) ? SECRET_PREFIX : LEGACY_SECRET_PREFIX}${name}`;
 /** The fleetx name of a T3_FLEET_ secret, read when the new one is not set; null for any other name. Until 1.0. */
-export const legacySecretName = (name: string) => (name.startsWith(SECRET_PREFIX) ? `${LEGACY_SECRET_PREFIX}${name.slice(SECRET_PREFIX.length)}` : null);
+export const legacySecretName = (name: string) =>
+  name.startsWith(SECRET_PREFIX)
+    ? `${LEGACY_SECRET_PREFIX}${name.slice(SECRET_PREFIX.length)}`
+    : null;

@@ -25,7 +25,9 @@ const latest: Latest = {
   },
 };
 
-const provider = (over: Partial<ProviderObservation> & { instanceId: string }): ProviderObservation => ({
+const provider = (
+  over: Partial<ProviderObservation> & { instanceId: string },
+): ProviderObservation => ({
   driver: over.instanceId,
   enabled: true,
   binaryPath: `/home/u/.local/bin/fleet-${over.instanceId === "claudeAgent" ? "claude" : over.instanceId}`,
@@ -34,7 +36,10 @@ const provider = (over: Partial<ProviderObservation> & { instanceId: string }): 
   ...over,
 });
 
-const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObservation["t3"]> = {}): MachineObservation => ({
+const machine = (
+  over: Partial<MachineObservation> = {},
+  t3: Partial<MachineObservation["t3"]> = {},
+): MachineObservation => ({
   protocol: 5,
   hostname: "h",
   platform: "linux",
@@ -42,11 +47,27 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
   user: "u",
   observedAt: 1_791_000_000_000,
   agents: [
-    { name: "claude", managedPath: "/home/u/.local/bin/claude", managedVersion: "2.1.288", onPath: ["/home/u/.local/bin/claude"] },
-    { name: "codex", managedPath: "/home/u/.local/bin/codex", managedVersion: "0.160.0", onPath: ["/home/u/.local/bin/codex"] },
+    {
+      name: "claude",
+      managedPath: "/home/u/.local/bin/claude",
+      managedVersion: "2.1.288",
+      onPath: ["/home/u/.local/bin/claude"],
+    },
+    {
+      name: "codex",
+      managedPath: "/home/u/.local/bin/codex",
+      managedVersion: "0.160.0",
+      onPath: ["/home/u/.local/bin/codex"],
+    },
   ],
   t3: {
-    runtime: { pid: 1, origin: "http://127.0.0.1:3773", serviceManaged: true, alive: true, startedAt: null },
+    runtime: {
+      pid: 1,
+      origin: "http://127.0.0.1:3773",
+      serviceManaged: true,
+      alive: true,
+      startedAt: null,
+    },
     descriptor: { environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2632" },
     installedVersion: "0.0.46-nightly.20261003.2632",
     runtimeBinary: "/home/u/.t3/runtime/versions/0.0.46-nightly.20261003.2632/t3",
@@ -58,7 +79,10 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
   },
   providerAuth: [],
   proxy: {
-    launchers: { claudeAgent: "/home/u/.local/bin/fleet-claude", codex: "/home/u/.local/bin/fleet-codex" },
+    launchers: {
+      claudeAgent: "/home/u/.local/bin/fleet-claude",
+      codex: "/home/u/.local/bin/fleet-codex",
+    },
     credentials: true,
     key: "accepted",
   },
@@ -68,7 +92,14 @@ const machine = (over: Partial<MachineObservation> = {}, t3: Partial<MachineObse
 });
 
 const ok = (name: string, observation: MachineObservation): NodeResult => ({
-  node: { name, ssh: name, roles: ["member"], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } },
+  node: {
+    name,
+    ssh: name,
+    roles: ["member"],
+    profiles: [],
+    tailnet: null,
+    settings: { table: {}, provenance: new Map() },
+  },
   ok: true,
   observation,
   ms: 1,
@@ -85,7 +116,9 @@ const settings: FleetSettings = {
 };
 
 const titles = (findings: ReadonlyArray<Finding>, severity?: Finding["severity"]) =>
-  findings.filter((f) => severity === undefined || f.severity === severity).map((f) => `${f.node}: ${f.title}`);
+  findings
+    .filter((f) => severity === undefined || f.severity === severity)
+    .map((f) => `${f.node}: ${f.title}`);
 
 describe("diagnose", () => {
   it("is quiet when every machine matches and is current", () => {
@@ -93,20 +126,33 @@ describe("diagnose", () => {
   });
 
   it("warns on a T3 server days behind, with a disruptive update fix", () => {
-    const old = machine({}, {
-      descriptor: { environmentId: "e", label: "l", serverVersion: "0.0.43-nightly.20260927.2344" },
-      runtimeBinary: "/home/u/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3",
-    });
+    const old = machine(
+      {},
+      {
+        descriptor: {
+          environmentId: "e",
+          label: "l",
+          serverVersion: "0.0.43-nightly.20260927.2344",
+        },
+        runtimeBinary: "/home/u/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3",
+      },
+    );
     const [finding] = diagnose([ok("server", old)], latest, settings);
     expect(finding?.severity).toBe("warn");
     expect(finding?.title).toContain("6 nightly releases behind");
-    expect(finding?.fix?.command).toBe("~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes");
+    expect(finding?.fix?.command).toBe(
+      "~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes",
+    );
     expect(finding?.fix?.safe).toBe(false);
     expect(finding?.fix?.disrupts).toContain("server");
   });
 
   it("says when the newest releases could not be looked up, instead of leaving t3-behind out", () => {
-    const unknown: Latest = { agents: { claude: null, codex: "0.160.0" }, t3: {}, failed: { claude: "no answer from registry.npmjs.org", t3: "GitHub's limit is used up" } };
+    const unknown: Latest = {
+      agents: { claude: null, codex: "0.160.0" },
+      t3: {},
+      failed: { claude: "no answer from registry.npmjs.org", t3: "GitHub's limit is used up" },
+    };
     const findings = diagnose([ok("a", machine())], unknown, settings);
     expect(findings.map((f) => [f.key, f.severity, f.detail])).toEqual([
       ["claude-latest-unknown", "info", "no answer from registry.npmjs.org"],
@@ -115,49 +161,102 @@ describe("diagnose", () => {
   });
 
   it("warns when machines speak different T3 client protocols", () => {
-    const descriptor = (protocol: number) => ({ environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2632", protocol });
-    const findings = diagnose([ok("a", machine({}, { descriptor: descriptor(2) })), ok("b", machine({}, { descriptor: descriptor(1) }))], latest, settings);
+    const descriptor = (protocol: number) => ({
+      environmentId: "e",
+      label: "l",
+      serverVersion: "0.0.46-nightly.20261003.2632",
+      protocol,
+    });
+    const findings = diagnose(
+      [
+        ok("a", machine({}, { descriptor: descriptor(2) })),
+        ok("b", machine({}, { descriptor: descriptor(1) })),
+      ],
+      latest,
+      settings,
+    );
     expect(titles(findings)).toEqual(["b: T3 here speaks client protocol 1; a speak 2"]);
   });
 
   it("only notes a nightly from the same day", () => {
-    const recent = machine({}, { descriptor: { environmentId: "e", label: "l", serverVersion: "0.0.46-nightly.20261003.2623" } });
+    const recent = machine(
+      {},
+      {
+        descriptor: {
+          environmentId: "e",
+          label: "l",
+          serverVersion: "0.0.46-nightly.20261003.2623",
+        },
+      },
+    );
     expect(titles(diagnose([ok("laptop", recent)], latest, settings), "warn")).toEqual([]);
     expect(titles(diagnose([ok("laptop", recent)], latest, settings), "info")).toHaveLength(1);
   });
 
   it("flags a provider that will not start under the T3 server's environment", () => {
-    const broken = machine({}, {
-      providers: [
-        provider({ instanceId: "codex", resolved: null, launch: { ok: false, version: null, detail: "codex is not on the T3 server's PATH" } }),
-        provider({ instanceId: "claudeAgent" }),
-      ],
-    });
-    const errors = diagnose([ok("server", broken)], latest, settings).filter((f) => f.severity === "error");
+    const broken = machine(
+      {},
+      {
+        providers: [
+          provider({
+            instanceId: "codex",
+            resolved: null,
+            launch: { ok: false, version: null, detail: "codex is not on the T3 server's PATH" },
+          }),
+          provider({ instanceId: "claudeAgent" }),
+        ],
+      },
+    );
+    const errors = diagnose([ok("server", broken)], latest, settings).filter(
+      (f) => f.severity === "error",
+    );
     expect(errors.map((f) => f.title)).toEqual(["codex will not start in T3"]);
     expect(errors[0]?.detail).toContain("not on the T3 server's PATH");
   });
 
   it("notices T3 running a different copy than the managed one", () => {
-    const shim = machine({}, {
-      providers: [
-        provider({ instanceId: "codex", binaryPath: "codex", resolved: "/home/u/.local/share/mise/shims/codex" }),
-        provider({ instanceId: "claudeAgent", binaryPath: "claude", resolved: "/home/u/.local/bin/claude" }),
-      ],
-    });
+    const shim = machine(
+      {},
+      {
+        providers: [
+          provider({
+            instanceId: "codex",
+            binaryPath: "codex",
+            resolved: "/home/u/.local/share/mise/shims/codex",
+          }),
+          provider({
+            instanceId: "claudeAgent",
+            binaryPath: "claude",
+            resolved: "/home/u/.local/bin/claude",
+          }),
+        ],
+      },
+    );
     expect(titles(diagnose([ok("desktop", shim)], latest, settings), "warn")).toEqual([
       "desktop: T3 runs codex from ~/.local/share/mise/shims/codex, not the managed codex",
     ]);
   });
 
   it("compares machines: a provider on everywhere but one, or launched differently", () => {
-    const direct = machine({}, {
-      providers: [
-        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/codex", resolved: "/home/u/.local/bin/codex" }),
-        provider({ instanceId: "claudeAgent", enabled: false }),
-      ],
-    });
-    expect(titles(diagnose([ok("a", machine()), ok("b", machine()), ok("c", direct)], latest, settings), "warn")).toEqual([
+    const direct = machine(
+      {},
+      {
+        providers: [
+          provider({
+            instanceId: "codex",
+            binaryPath: "/home/u/.local/bin/codex",
+            resolved: "/home/u/.local/bin/codex",
+          }),
+          provider({ instanceId: "claudeAgent", enabled: false }),
+        ],
+      },
+    );
+    expect(
+      titles(
+        diagnose([ok("a", machine()), ok("b", machine()), ok("c", direct)], latest, settings),
+        "warn",
+      ),
+    ).toEqual([
       "c: claude is off here but on in a, b",
       "c: codex starts directly here, but through the proxy launcher in a, b",
     ]);
@@ -166,16 +265,28 @@ describe("diagnose", () => {
   it("switches a provider to the launcher only once the proxy accepts the key", () => {
     const direct = (key: string | null, credentials = true) =>
       machine(
-        { proxy: { launchers: { claudeAgent: "/l/fleet-claude", codex: "/l/fleet-codex" }, credentials, key } },
+        {
+          proxy: {
+            launchers: { claudeAgent: "/l/fleet-claude", codex: "/l/fleet-codex" },
+            credentials,
+            key,
+          },
+        },
         {
           providers: [
-            provider({ instanceId: "codex", binaryPath: "codex", resolved: "/home/u/.local/bin/codex" }),
+            provider({
+              instanceId: "codex",
+              binaryPath: "codex",
+              resolved: "/home/u/.local/bin/codex",
+            }),
             provider({ instanceId: "claudeAgent" }),
           ],
         },
       );
     const switchFor = (obs: MachineObservation) =>
-      diagnose([ok("a", machine()), ok("c", obs)], latest, settings).find((f) => f.key === "codex-skips-launcher");
+      diagnose([ok("a", machine()), ok("c", obs)], latest, settings).find(
+        (f) => f.key === "codex-skips-launcher",
+      );
     expect(switchFor(direct("accepted"))?.fix?.command).toBe("set-launcher codex");
     expect(switchFor(direct("rejected"))?.fix).toBeUndefined();
     expect(switchFor(direct("rejected"))?.detail).toContain("restart the proxy");
@@ -183,7 +294,13 @@ describe("diagnose", () => {
   });
 
   it("is an error when T3 goes through the proxy with a refused key", () => {
-    const refused = machine({ proxy: { launchers: { claudeAgent: "/l/fleet-claude", codex: "/l/fleet-codex" }, credentials: true, key: "rejected" } });
+    const refused = machine({
+      proxy: {
+        launchers: { claudeAgent: "/l/fleet-claude", codex: "/l/fleet-codex" },
+        credentials: true,
+        key: "rejected",
+      },
+    });
     expect(titles(diagnose([ok("server", refused)], latest, settings), "error")).toEqual([
       "server: claude and codex in T3 cannot reach any model: the proxy rejects this machine's key",
     ]);
@@ -192,39 +309,89 @@ describe("diagnose", () => {
   it("offers a safe upgrade for a stale agent and warns when PATH prefers another copy", () => {
     const stale = machine({
       agents: [
-        { name: "claude", managedPath: "/home/u/.local/bin/claude", managedVersion: "2.1.281", onPath: ["/home/u/.local/bin/claude"] },
-        { name: "codex", managedPath: "/home/u/.local/bin/codex", managedVersion: "0.160.0", onPath: ["/home/u/.vite-plus/bin/codex", "/home/u/.local/bin/codex"] },
+        {
+          name: "claude",
+          managedPath: "/home/u/.local/bin/claude",
+          managedVersion: "2.1.281",
+          onPath: ["/home/u/.local/bin/claude"],
+        },
+        {
+          name: "codex",
+          managedPath: "/home/u/.local/bin/codex",
+          managedVersion: "0.160.0",
+          onPath: ["/home/u/.vite-plus/bin/codex", "/home/u/.local/bin/codex"],
+        },
       ],
     });
     const findings = diagnose([ok("desktop", stale)], latest, settings);
     const upgrade = findings.find((f) => f.title === "claude 2.1.281 is behind 2.1.288");
     expect(upgrade?.fix).toEqual({ command: "~/.local/bin/claude update", safe: true });
-    expect(titles(findings, "warn")).toContain("desktop: your shell runs ~/.vite-plus/bin/codex, not the managed codex");
+    expect(titles(findings, "warn")).toContain(
+      "desktop: your shell runs ~/.vite-plus/bin/codex, not the managed codex",
+    );
   });
 
   it("ignores session wrappers in the temp directory", () => {
     const shimmed = machine({
       agents: [
-        { name: "claude", managedPath: "/home/u/.local/bin/claude", managedVersion: "2.1.288", onPath: ["/var/folders/g1/x/T/cmux-cli-shims/1/claude", "/home/u/.local/bin/claude"] },
-        { name: "codex", managedPath: "/home/u/.local/bin/codex", managedVersion: "0.160.0", onPath: ["/home/u/.local/bin/codex", "/tmp/cmux-cli-shims/1/codex"] },
+        {
+          name: "claude",
+          managedPath: "/home/u/.local/bin/claude",
+          managedVersion: "2.1.288",
+          onPath: ["/var/folders/g1/x/T/cmux-cli-shims/1/claude", "/home/u/.local/bin/claude"],
+        },
+        {
+          name: "codex",
+          managedPath: "/home/u/.local/bin/codex",
+          managedVersion: "0.160.0",
+          onPath: ["/home/u/.local/bin/codex", "/tmp/cmux-cli-shims/1/codex"],
+        },
       ],
     });
     expect(diagnose([ok("laptop", shimmed)], latest, settings)).toEqual([]);
   });
 
   it("counts a t3-fleet models launcher as the managed CLI", () => {
-    const routed = machine({}, {
-      providers: [
-        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/t3-fleet-claude", resolved: "/home/u/.local/bin/t3-fleet-claude" }),
-        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/t3-fleet-codex", resolved: "/home/u/.local/bin/t3-fleet-codex" }),
-      ],
-    });
-    expect(diagnose([ok("laptop", routed)], latest, {}).filter((f) => f.area === "providers")).toEqual([]);
+    const routed = machine(
+      {},
+      {
+        providers: [
+          provider({
+            instanceId: "claudeAgent",
+            binaryPath: "/home/u/.local/bin/t3-fleet-claude",
+            resolved: "/home/u/.local/bin/t3-fleet-claude",
+          }),
+          provider({
+            instanceId: "codex",
+            binaryPath: "/home/u/.local/bin/t3-fleet-codex",
+            resolved: "/home/u/.local/bin/t3-fleet-codex",
+          }),
+        ],
+      },
+    );
+    expect(
+      diagnose([ok("laptop", routed)], latest, {}).filter((f) => f.area === "providers"),
+    ).toEqual([]);
   });
 
   it("reports a machine it could not reach without dropping the others", () => {
     const findings = diagnose(
-      [ok("a", machine()), { node: { name: "b", ssh: "b", roles: ["member"], profiles: [], tailnet: null, settings: { table: {}, provenance: new Map() } }, ok: false, error: "ssh b failed: timeout", ms: 1 }],
+      [
+        ok("a", machine()),
+        {
+          node: {
+            name: "b",
+            ssh: "b",
+            roles: ["member"],
+            profiles: [],
+            tailnet: null,
+            settings: { table: {}, provenance: new Map() },
+          },
+          ok: false,
+          error: "ssh b failed: timeout",
+          ms: 1,
+        },
+      ],
       latest,
       settings,
     );
@@ -257,7 +424,11 @@ describe("providerPlans", () => {
     const plans = providerPlans({
       providers: { codex: { binaryPath: "/legacy/codex" }, grok: { enabled: true } },
       providerInstances: {
-        claudeAgent: { driver: "claudeAgent", enabled: true, config: { binaryPath: "/x/fleet-claude" } },
+        claudeAgent: {
+          driver: "claudeAgent",
+          enabled: true,
+          config: { binaryPath: "/x/fleet-claude" },
+        },
       } as never,
     });
     const byId = Object.fromEntries(plans.map((p) => [p.instanceId, p]));
@@ -269,36 +440,77 @@ describe("providerPlans", () => {
 
 describe("without a proxy in the config", () => {
   it("does not compare launchers at all", () => {
-    const direct = machine({}, {
-      providers: [
-        provider({ instanceId: "codex", binaryPath: "/home/u/.local/bin/codex", resolved: "/home/u/.local/bin/codex" }),
-        provider({ instanceId: "claudeAgent", binaryPath: "/home/u/.local/bin/claude", resolved: "/home/u/.local/bin/claude" }),
-      ],
-    });
+    const direct = machine(
+      {},
+      {
+        providers: [
+          provider({
+            instanceId: "codex",
+            binaryPath: "/home/u/.local/bin/codex",
+            resolved: "/home/u/.local/bin/codex",
+          }),
+          provider({
+            instanceId: "claudeAgent",
+            binaryPath: "/home/u/.local/bin/claude",
+            resolved: "/home/u/.local/bin/claude",
+          }),
+        ],
+      },
+    );
     expect(diagnose([ok("a", direct), ok("c", direct)], latest)).toEqual([]);
   });
 });
 
 describe("finding ids that stay put", () => {
-  const keys = (obs: MachineObservation) => diagnose([ok("a", obs)], latest).filter((f) => f.area === "t3").map((f) => f.key);
+  const keys = (obs: MachineObservation) =>
+    diagnose([ok("a", obs)], latest)
+      .filter((f) => f.area === "t3")
+      .map((f) => f.key);
 
   it("names each T3 problem by its kind, not its place in the list", () => {
     const notRunning = { kind: "not-running", title: "T3 server (pid 9) is not running" };
-    const noEnv = { kind: "env-unreadable", title: "could not read the T3 server's environment; providers checked with the login PATH" };
+    const noEnv = {
+      kind: "env-unreadable",
+      title: "could not read the T3 server's environment; providers checked with the login PATH",
+    };
     expect(keys(machine({}, { problems: [noEnv] }))).toEqual(["t3-env-unreadable"]);
-    expect(keys(machine({}, { problems: [notRunning, noEnv] }))).toEqual(["t3-not-running", "t3-env-unreadable"]);
-  });
-
-  it("reads the kind from the text an older probe sent", () => {
-    expect(keys(machine({}, { problems: ["T3 server (pid 9) is not running", "server at http://x did not answer /.well-known/t3/environment"] }))).toEqual([
+    expect(keys(machine({}, { problems: [notRunning, noEnv] }))).toEqual([
       "t3-not-running",
-      "t3-no-descriptor",
+      "t3-env-unreadable",
     ]);
   });
 
+  it("reads the kind from the text an older probe sent", () => {
+    expect(
+      keys(
+        machine(
+          {},
+          {
+            problems: [
+              "T3 server (pid 9) is not running",
+              "server at http://x did not answer /.well-known/t3/environment",
+            ],
+          },
+        ),
+      ),
+    ).toEqual(["t3-not-running", "t3-no-descriptor"]);
+  });
+
   it("names a plugin that failed by its path", () => {
-    const failed = machine({ areas: { _plugins: { problems: [{ plugin: "plugins/brew.mjs", title: "plugin plugins/brew.mjs cannot load: x" }] } } });
-    expect(diagnose([ok("a", failed)], latest).filter((f) => f.area === "plugins").map((f) => f.key)).toEqual(["plugin-failed-plugins/brew.mjs"]);
+    const failed = machine({
+      areas: {
+        _plugins: {
+          problems: [
+            { plugin: "plugins/brew.mjs", title: "plugin plugins/brew.mjs cannot load: x" },
+          ],
+        },
+      },
+    });
+    expect(
+      diagnose([ok("a", failed)], latest)
+        .filter((f) => f.area === "plugins")
+        .map((f) => f.key),
+    ).toEqual(["plugin-failed-plugins/brew.mjs"]);
   });
 });
 
@@ -309,11 +521,19 @@ describe("sync-stale", () => {
     roles: ["member" as const],
     profiles: [],
     tailnet: null,
-    settings: { table: interval === undefined ? {} : { engine: { interval } }, provenance: new Map() },
+    settings: {
+      table: interval === undefined ? {} : { engine: { interval } },
+      provenance: new Map(),
+    },
   });
-  const ageMinutes = (minutes: number) => machine({ lastSync: { when: 1_791_000_000 - minutes * 60, result: "ok", message: "", streak: 0 } });
+  const ageMinutes = (minutes: number) =>
+    machine({
+      lastSync: { when: 1_791_000_000 - minutes * 60, result: "ok", message: "", streak: 0 },
+    });
   const stale = (minutes: number, interval?: number) =>
-    diagnose([ok("a", ageMinutes(minutes))], latest, {}, [node(interval)]).some((f) => f.key === "sync-stale");
+    diagnose([ok("a", ageMinutes(minutes))], latest, {}, [node(interval)]).some(
+      (f) => f.key === "sync-stale",
+    );
 
   it("waits four runs of the node's own interval", () => {
     expect(stale(50)).toBe(false);
@@ -326,21 +546,50 @@ describe("sync-stale", () => {
 
 describe("t3-access", () => {
   const now = 1_791_000_000_000;
-  const access = (state: "expiring" | "rejected" | "none", expiresAt: number | null, detail = "", lastAttempt?: number) =>
-    diagnose([ok("a", machine({}, { access: { state, expiresAt, detail, cli: true, ...(lastAttempt === undefined ? {} : { lastAttempt }) } }))], latest).find(
-      (f) => f.key === "t3-access",
-    );
+  const access = (
+    state: "expiring" | "rejected" | "none",
+    expiresAt: number | null,
+    detail = "",
+    lastAttempt?: number,
+  ) =>
+    diagnose(
+      [
+        ok(
+          "a",
+          machine(
+            {},
+            {
+              access: {
+                state,
+                expiresAt,
+                detail,
+                cli: true,
+                ...(lastAttempt === undefined ? {} : { lastAttempt }),
+              },
+            },
+          ),
+        ),
+      ],
+      latest,
+    ).find((f) => f.key === "t3-access");
 
   it("lets sync renew a token that is running out or has run out", () => {
-    expect(access("expiring", now + 86_400_000)?.fix).toEqual({ command: "t3-fleet t3 connect", safe: true });
+    expect(access("expiring", now + 86_400_000)?.fix).toEqual({
+      command: "t3-fleet t3 connect",
+      safe: true,
+    });
     expect(access("rejected", now - 1000, "T3 Fleet's T3 token has expired")?.fix?.safe).toBe(true);
   });
 
   it("leaves a first connection, or a token T3 refused before it ran out, to a person", () => {
     expect(access("none", null)?.fix?.safe).toBe(false);
-    expect(access("rejected", now + 20 * 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(false);
+    expect(
+      access("rejected", now + 20 * 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe,
+    ).toBe(false);
     // Revoked in its last three days: still a person's call.
-    expect(access("rejected", now + 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(false);
+    expect(access("rejected", now + 86_400_000, "T3 refused T3 Fleet's token")?.fix?.safe).toBe(
+      false,
+    );
   });
 
   it("tries at most once a day", () => {

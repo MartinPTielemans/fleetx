@@ -36,7 +36,13 @@ import {
   type ProxyObservation,
   type T3Observation,
 } from "./Observation.ts";
-import { readAccess, readProviderSnapshot, RENEW_WITHIN_MS, t3AccessAttemptPath, t3CliFromCommandLine } from "./T3Access.ts";
+import {
+  readAccess,
+  readProviderSnapshot,
+  RENEW_WITHIN_MS,
+  t3AccessAttemptPath,
+  t3CliFromCommandLine,
+} from "./T3Access.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
 import { stateDir } from "./Names.ts";
@@ -92,7 +98,13 @@ const observeAgent = (name: "claude" | "codex", home: string, loginPath: string 
     const managedPath = `${home}/.local/bin/${name}`;
     const managed = yield* isExecutableFile(managedPath);
     const version = managed
-      ? parseVersion((yield* exec({ command: managedPath, args: ["--version"], timeout: Duration.seconds(20) })).stdout) ?? null
+      ? (parseVersion(
+          (yield* exec({
+            command: managedPath,
+            args: ["--version"],
+            timeout: Duration.seconds(20),
+          })).stdout,
+        ) ?? null)
       : null;
     return {
       name,
@@ -115,9 +127,11 @@ const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
   Schema.decodeEffect(Schema.fromJsonString(schema))(text).pipe(Effect.option);
 
 const isAlive = (pid: number) =>
-  exec({ command: "ps", args: ["-p", String(pid), "-o", "pid="], timeout: Duration.seconds(5) }).pipe(
-    Effect.map((r) => r.code === 0 && r.stdout.trim() !== ""),
-  );
+  exec({
+    command: "ps",
+    args: ["-p", String(pid), "-o", "pid="],
+    timeout: Duration.seconds(5),
+  }).pipe(Effect.map((r) => r.code === 0 && r.stdout.trim() !== ""));
 
 /**
  * The running server's environment. Linux exposes it in /proc; macOS prints
@@ -137,7 +151,11 @@ const serverEnvironment = (pid: number) =>
       }
       return Option.some<Env>(env);
     }
-    const ps = yield* exec({ command: "ps", args: ["-wwE", "-p", String(pid), "-o", "command="], timeout: Duration.seconds(5) });
+    const ps = yield* exec({
+      command: "ps",
+      args: ["-wwE", "-p", String(pid), "-o", "command="],
+      timeout: Duration.seconds(5),
+    });
     if (ps.code !== 0) return Option.none<Env>();
     const env: Record<string, string> = {};
     for (const m of ps.stdout.matchAll(/(?:^|\s)([A-Z_][A-Z0-9_]*)=(\S*)/g)) {
@@ -152,39 +170,71 @@ const serverEnvironment = (pid: number) =>
  */
 const runtimeFromCommandLine = (pid: number) =>
   Effect.gen(function* () {
-    const ps = yield* exec({ command: "ps", args: ["-ww", "-p", String(pid), "-o", "command="], timeout: Duration.seconds(5) });
+    const ps = yield* exec({
+      command: "ps",
+      args: ["-ww", "-p", String(pid), "-o", "command="],
+      timeout: Duration.seconds(5),
+    });
     const match = /(\S*\/versions\/([0-9][^/\s]*)\/t3)\b/.exec(ps.stdout);
-    return { binary: match?.[1] ?? null, version: match?.[2] ?? null, cli: t3CliFromCommandLine(ps.stdout) !== null };
+    return {
+      binary: match?.[1] ?? null,
+      version: match?.[2] ?? null,
+      cli: t3CliFromCommandLine(ps.stdout) !== null,
+    };
   });
 
 const fetchDescriptor = (origin: string) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    const text = yield* client.execute(HttpClientRequest.get(`${origin}/.well-known/t3/environment`)).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((r) => r.text),
-      Effect.timeout(Duration.seconds(4)),
-      Effect.option,
-    );
+    const text = yield* client
+      .execute(HttpClientRequest.get(`${origin}/.well-known/t3/environment`))
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((r) => r.text),
+        Effect.timeout(Duration.seconds(4)),
+        Effect.option,
+      );
     if (Option.isNone(text)) return Option.none<ExecutionEnvironmentDescriptor>();
     return yield* decodeJson(ExecutionEnvironmentDescriptor, text.value);
   });
 
 const observeProvider = (plan: ProviderPlan, env: Env) =>
   Effect.gen(function* () {
-    const base = { instanceId: plan.instanceId, driver: plan.driver, enabled: plan.enabled, binaryPath: plan.binaryPath };
+    const base = {
+      instanceId: plan.instanceId,
+      driver: plan.driver,
+      enabled: plan.enabled,
+      binaryPath: plan.binaryPath,
+    };
     if (!plan.enabled || plan.binaryPath === null) {
-      return { ...base, resolved: null, launch: { ok: true, version: null, detail: plan.enabled ? "no binary (SDK provider)" : "disabled" } };
+      return {
+        ...base,
+        resolved: null,
+        launch: {
+          ok: true,
+          version: null,
+          detail: plan.enabled ? "no binary (SDK provider)" : "disabled",
+        },
+      };
     }
     const resolved = (yield* resolveAll(plan.binaryPath, env["PATH"]))[0] ?? null;
     if (resolved === null) {
       return {
         ...base,
         resolved,
-        launch: { ok: false, version: null, detail: `${plan.binaryPath} is not on the T3 server's PATH` },
+        launch: {
+          ok: false,
+          version: null,
+          detail: `${plan.binaryPath} is not on the T3 server's PATH`,
+        },
       };
     }
-    const run = yield* exec({ command: resolved, args: ["--version"], env, timeout: Duration.seconds(20) });
+    const run = yield* exec({
+      command: resolved,
+      args: ["--version"],
+      env,
+      timeout: Duration.seconds(20),
+    });
     const output = `${run.stdout}\n${run.stderr}`.trim();
     const version = parseVersion(run.stdout) ?? null;
     const ok = run.code === 0 && version !== null;
@@ -203,7 +253,9 @@ const observeT3 = (home: string, loginEnv: Env) =>
     const problems: Array<{ kind: string; title: string }> = [];
     const problem = (kind: string, title: string) => problems.push({ kind, title });
     const runtimeText = yield* readText(`${home}/.t3/userdata/server-runtime.json`);
-    const runtimeFile = Option.isSome(runtimeText) ? yield* decodeJson(RuntimeFile, runtimeText.value) : Option.none();
+    const runtimeFile = Option.isSome(runtimeText)
+      ? yield* decodeJson(RuntimeFile, runtimeText.value)
+      : Option.none();
 
     let runtime: T3Observation["runtime"] = null;
     let descriptor: T3Observation["descriptor"] = null;
@@ -215,7 +267,13 @@ const observeT3 = (home: string, loginEnv: Env) =>
     if (Option.isSome(runtimeFile)) {
       const r = runtimeFile.value;
       const alive = yield* isAlive(r.pid);
-      runtime = { pid: r.pid, origin: r.origin, serviceManaged: r.serviceManaged ?? false, alive, startedAt: r.startedAt ?? null };
+      runtime = {
+        pid: r.pid,
+        origin: r.origin,
+        serviceManaged: r.serviceManaged ?? false,
+        alive,
+        startedAt: r.startedAt ?? null,
+      };
       if (alive) {
         const d = yield* fetchDescriptor(r.origin);
         if (Option.isSome(d)) {
@@ -226,14 +284,21 @@ const observeT3 = (home: string, loginEnv: Env) =>
             protocol: d.value.orchestrationProtocolVersion ?? 1,
           };
         } else {
-          problem("no-descriptor", `server at ${r.origin} did not answer /.well-known/t3/environment`);
+          problem(
+            "no-descriptor",
+            `server at ${r.origin} did not answer /.well-known/t3/environment`,
+          );
         }
         const fromCommandLine = yield* runtimeFromCommandLine(r.pid);
         runtimeBinary = fromCommandLine.binary;
         cli = fromCommandLine.cli;
         installedVersion = descriptor?.serverVersion ?? fromCommandLine.version;
         serverEnv = Option.getOrNull(yield* serverEnvironment(r.pid));
-        if (serverEnv === null) problem("env-unreadable", "could not read the T3 server's environment; providers checked with the login PATH");
+        if (serverEnv === null)
+          problem(
+            "env-unreadable",
+            "could not read the T3 server's environment; providers checked with the login PATH",
+          );
       } else {
         problem("not-running", `T3 server (pid ${r.pid}) is not running`);
       }
@@ -250,9 +315,16 @@ const observeT3 = (home: string, loginEnv: Env) =>
     if (Option.isSome(settingsText)) {
       const settings = yield* decodeJson(T3SettingsFile, settingsText.value);
       if (Option.isNone(settings)) {
-        problem("settings-unrecognized", "settings.json did not match the provider settings T3 Fleet understands");
+        problem(
+          "settings-unrecognized",
+          "settings.json did not match the provider settings T3 Fleet understands",
+        );
       } else {
-        providers = yield* Effect.forEach(providerPlans(settings.value), (p) => observeProvider(p, serverEnv ?? loginEnv), { concurrency: 4 });
+        providers = yield* Effect.forEach(
+          providerPlans(settings.value),
+          (p) => observeProvider(p, serverEnv ?? loginEnv),
+          { concurrency: 4 },
+        );
       }
     }
 
@@ -262,18 +334,40 @@ const observeT3 = (home: string, loginEnv: Env) =>
     if (runtime?.alive === true) {
       const now = yield* Clock.currentTimeMillis;
       const token = yield* readAccess(home);
-      const attempted = Number(Option.getOrElse(yield* readText(t3AccessAttemptPath(home)), () => "").trim());
+      const attempted = Number(
+        Option.getOrElse(yield* readText(t3AccessAttemptPath(home)), () => "").trim(),
+      );
       const attempt = attempted > 0 ? { lastAttempt: attempted } : {};
       if (Option.isNone(token) || token.value.origin !== runtime.origin) {
-        access = { state: "none", expiresAt: null, detail: Option.isNone(token) ? "T3 Fleet has no T3 token here" : `T3 Fleet's token is for ${token.value.origin}`, cli, ...attempt };
+        access = {
+          state: "none",
+          expiresAt: null,
+          detail: Option.isNone(token)
+            ? "T3 Fleet has no T3 token here"
+            : `T3 Fleet's token is for ${token.value.origin}`,
+          cli,
+          ...attempt,
+        };
       } else if (token.value.expiresAt <= now) {
-        access = { state: "rejected", expiresAt: token.value.expiresAt, detail: "T3 Fleet's T3 token has expired", cli, ...attempt };
+        access = {
+          state: "rejected",
+          expiresAt: token.value.expiresAt,
+          detail: "T3 Fleet's T3 token has expired",
+          cli,
+          ...attempt,
+        };
       } else {
         const snapshot = yield* readProviderSnapshot(runtime.origin, token.value.token);
         const expiring = token.value.expiresAt - now < RENEW_WITHIN_MS;
         if (snapshot._tag === "ok") {
           providerAuth = [...snapshot.providers];
-          access = { state: expiring ? "expiring" : "ok", expiresAt: token.value.expiresAt, detail: "read from T3", cli, ...attempt };
+          access = {
+            state: expiring ? "expiring" : "ok",
+            expiresAt: token.value.expiresAt,
+            detail: "read from T3",
+            cli,
+            ...attempt,
+          };
         } else {
           access = {
             state: snapshot._tag === "rejected" ? "rejected" : "failed",
@@ -289,7 +383,9 @@ const observeT3 = (home: string, loginEnv: Env) =>
       const env = serverEnv ?? loginEnv;
       const checks = providers.flatMap((p) => {
         const check = cliLogin(p.driver);
-        return p.enabled && p.launch.ok && p.resolved !== null && check !== null ? [{ p, run: check(p.resolved, env) }] : [];
+        return p.enabled && p.launch.ok && p.resolved !== null && check !== null
+          ? [{ p, run: check(p.resolved, env) }]
+          : [];
       });
       providerAuth = yield* Effect.forEach(
         checks,
@@ -334,8 +430,11 @@ const observeProxy = (home: string, settings: ProbeSettings["proxy"]) =>
       launchers[instanceId] = (yield* isExecutableFile(path)) ? path : null;
     }
     const text = yield* readText(expandHome(settings.credentials, home));
-    const creds = Option.isSome(text) ? yield* decodeJson(ProxyCredentials, text.value) : Option.none();
-    if (Option.isNone(creds)) return { launchers, credentials: false, key: null } satisfies ProxyObservation;
+    const creds = Option.isSome(text)
+      ? yield* decodeJson(ProxyCredentials, text.value)
+      : Option.none();
+    if (Option.isNone(creds))
+      return { launchers, credentials: false, key: null } satisfies ProxyObservation;
     const client = yield* HttpClient.HttpClient;
     const status = yield* client
       .execute(
@@ -350,7 +449,12 @@ const observeProxy = (home: string, settings: ProbeSettings["proxy"]) =>
       );
     const key = Option.match(status, {
       onNone: () => "proxy unreachable",
-      onSome: (code) => (code >= 200 && code < 300 ? "accepted" : code === 401 || code === 403 ? "rejected" : `HTTP ${code}`),
+      onSome: (code) =>
+        code >= 200 && code < 300
+          ? "accepted"
+          : code === 401 || code === 403
+            ? "rejected"
+            : `HTTP ${code}`,
     });
     return { launchers, credentials: true, key } satisfies ProxyObservation;
   });
@@ -366,7 +470,12 @@ const observeLastSync = (home: string) =>
     const own = yield* readText(lastSyncPath(home));
     if (Option.isNone(own)) return null;
     const [when, result, streak, ...message] = own.value.trim().split("\t");
-    return { when: Number(when) || 0, result: result ?? "unknown", message: message.join("\t"), streak: Number(streak) || 0 } satisfies SyncObservation;
+    return {
+      when: Number(when) || 0,
+      result: result ?? "unknown",
+      message: message.join("\t"),
+      streak: Number(streak) || 0,
+    } satisfies SyncObservation;
   });
 
 // ---- areas ------------------------------------------------------------------
@@ -377,7 +486,10 @@ const observeLastSync = (home: string) =>
  * most of all, is recorded as unreadable and the others still observe.
  */
 export const observeAreas = (
-  loaded: { readonly areas: ReadonlyArray<AnyArea>; readonly problems: ReadonlyArray<PluginProblem> },
+  loaded: {
+    readonly areas: ReadonlyArray<AnyArea>;
+    readonly problems: ReadonlyArray<PluginProblem>;
+  },
   settings: ProbeSettings,
   base: { readonly home: string; readonly checkout: string; readonly env: Env },
 ) =>
@@ -388,7 +500,9 @@ export const observeAreas = (
       loaded.areas,
       (area) =>
         Effect.gen(function* () {
-          const desired = yield* Schema.decodeUnknownEffect(area.desired)(settings.areas?.[area.id]).pipe(Effect.option);
+          const desired = yield* Schema.decodeUnknownEffect(area.desired)(
+            settings.areas?.[area.id],
+          ).pipe(Effect.option);
           if (Option.isNone(desired)) {
             areas[area.id] = { invalidSettings: true };
             return;
@@ -420,33 +534,43 @@ export const observeAreas = (
 
 // ---- machine --------------------------------------------------------------
 
-export const probeMachine = (settings: ProbeSettings = {}) => Effect.gen(function* () {
-  const env: Env = process.env;
-  const home = env["HOME"] ?? "";
-  const hostname = (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim();
-  const [agents, { t3, providerAuth }, proxy, lastSync] = yield* Effect.all(
-    [
-      Effect.forEach(["claude", "codex"] as const, (a) => observeAgent(a, home, env["PATH"]), { concurrency: 2 }),
-      observeT3(home, env),
-      observeProxy(home, settings.proxy),
-      observeLastSync(home),
-    ],
-    { concurrency: "unbounded" },
-  );
-  const checkout = expandHome(settings.checkout ?? "~/fleet", home);
-  const areas = yield* observeAreas(yield* loadAreas(checkout, settings.plugins ?? []), settings, { home, checkout, env });
-  return {
-    protocol: PROBE_PROTOCOL,
-    hostname,
-    platform: process.platform,
-    arch: process.arch,
-    user: env["USER"] ?? env["LOGNAME"] ?? "",
-    observedAt: yield* Clock.currentTimeMillis,
-    agents,
-    t3,
-    providerAuth,
-    proxy,
-    areas,
-    lastSync,
-  } satisfies MachineObservation;
-});
+export const probeMachine = (settings: ProbeSettings = {}) =>
+  Effect.gen(function* () {
+    const env: Env = process.env;
+    const home = env["HOME"] ?? "";
+    const hostname = (yield* exec({
+      command: "hostname",
+      timeout: Duration.seconds(5),
+    })).stdout.trim();
+    const [agents, { t3, providerAuth }, proxy, lastSync] = yield* Effect.all(
+      [
+        Effect.forEach(["claude", "codex"] as const, (a) => observeAgent(a, home, env["PATH"]), {
+          concurrency: 2,
+        }),
+        observeT3(home, env),
+        observeProxy(home, settings.proxy),
+        observeLastSync(home),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const checkout = expandHome(settings.checkout ?? "~/fleet", home);
+    const areas = yield* observeAreas(
+      yield* loadAreas(checkout, settings.plugins ?? []),
+      settings,
+      { home, checkout, env },
+    );
+    return {
+      protocol: PROBE_PROTOCOL,
+      hostname,
+      platform: process.platform,
+      arch: process.arch,
+      user: env["USER"] ?? env["LOGNAME"] ?? "",
+      observedAt: yield* Clock.currentTimeMillis,
+      agents,
+      t3,
+      providerAuth,
+      proxy,
+      areas,
+      lastSync,
+    } satisfies MachineObservation;
+  });

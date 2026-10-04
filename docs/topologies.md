@@ -2,11 +2,11 @@
 
 Topology is configuration. Every node has one or more roles:
 
-| role | does |
-|---|---|
+| role        | does                                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
 | `authority` | approves proposals, changes secrets; its own changes under `auto_commit` paths are committed directly |
-| `relay` | runs `t3-fleet relay serve`: events, published state, the MCP hub (optional) |
-| `member` | converges, reports, proposes |
+| `relay`     | runs `t3-fleet relay serve`: events, published state, the MCP hub (optional)                          |
+| `member`    | converges, reports, proposes                                                                          |
 
 Git is always the hub. A relay only makes things faster.
 

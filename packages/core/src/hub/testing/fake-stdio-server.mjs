@@ -20,27 +20,53 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line);
   if (m.method === "notifications/cancelled") cancelled.push(m.params.requestId);
   if (m.id === "srv-ping" && m.method === undefined && pinging !== null) {
-    send({ jsonrpc: "2.0", id: pinging, result: { content: [{ type: "text", text: `pong ${JSON.stringify(m.result ?? m.error)}` }] } });
+    send({
+      jsonrpc: "2.0",
+      id: pinging,
+      result: { content: [{ type: "text", text: `pong ${JSON.stringify(m.result ?? m.error)}` }] },
+    });
     pinging = null;
     return;
   }
   if (m.id === undefined) return;
   if (m.method === "initialize") {
     initializeCount++;
-    return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "fake", version: "1" } } });
+    return send({
+      jsonrpc: "2.0",
+      id: m.id,
+      result: {
+        protocolVersion: "2025-06-18",
+        capabilities: { tools: { listChanged: true } },
+        serverInfo: { name: "fake", version: "1" },
+      },
+    });
   }
   if (m.method === "ping") return send({ jsonrpc: "2.0", id: m.id, result: {} });
   if (m.method === "tools/list") {
     if (process.argv.includes("--silent-tools")) return;
-    if (process.argv.includes("--null-tools")) return send({ jsonrpc: "2.0", id: m.id, result: { tools: null } });
-    return send({ jsonrpc: "2.0", id: m.id, result: { tools: ["echo", "notify", "crash", "delete_all"].map((name) => ({ name, inputSchema: { type: "object" } })) } });
+    if (process.argv.includes("--null-tools"))
+      return send({ jsonrpc: "2.0", id: m.id, result: { tools: null } });
+    return send({
+      jsonrpc: "2.0",
+      id: m.id,
+      result: {
+        tools: ["echo", "notify", "crash", "delete_all"].map((name) => ({
+          name,
+          inputSchema: { type: "object" },
+        })),
+      },
+    });
   }
   if (m.method === "tools/call") {
     const { name, arguments: args = {} } = m.params;
     if (name === "crash") process.exit(3);
     if (name === "notify") {
       send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
-      return send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: "notified" }] } });
+      return send({
+        jsonrpc: "2.0",
+        id: m.id,
+        result: { content: [{ type: "text", text: "notified" }] },
+      });
     }
     if (name === "ping_me") {
       pinging = m.id;
@@ -49,18 +75,44 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (name === "block") {
       const until = Date.now() + (args.ms ?? 0);
       while (Date.now() < until);
-      return send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: "blocked" }] } });
+      return send({
+        jsonrpc: "2.0",
+        id: m.id,
+        result: { content: [{ type: "text", text: "blocked" }] },
+      });
     }
-    if (name === "cancelled") return send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: JSON.stringify(cancelled) }] } });
+    if (name === "cancelled")
+      return send({
+        jsonrpc: "2.0",
+        id: m.id,
+        result: { content: [{ type: "text", text: JSON.stringify(cancelled) }] },
+      });
     const token = m.params._meta?.progressToken;
     let progress = 0;
-    const report = () => send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: ++progress } });
+    const report = () =>
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progressToken: token, progress: ++progress },
+      });
     if (token !== undefined) report();
-    const reporting = token !== undefined && args.progressEveryMs !== undefined ? setInterval(report, args.progressEveryMs) : undefined;
-    if (args.log) send({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: `working on ${args.text}` } });
+    const reporting =
+      token !== undefined && args.progressEveryMs !== undefined
+        ? setInterval(report, args.progressEveryMs)
+        : undefined;
+    if (args.log)
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: `working on ${args.text}` },
+      });
     setTimeout(() => {
       clearInterval(reporting);
-      send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: `${args.text} (init ${initializeCount})` }] } });
+      send({
+        jsonrpc: "2.0",
+        id: m.id,
+        result: { content: [{ type: "text", text: `${args.text} (init ${initializeCount})` }] },
+      });
     }, args.delayMs ?? 0);
     return;
   }

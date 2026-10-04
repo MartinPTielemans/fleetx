@@ -18,7 +18,10 @@ import { Button, type ButtonProps } from "./ui/button";
 export function Failure({ error }: { error: unknown }) {
   if (error === null) return null;
   return (
-    <div role="alert" className="whitespace-pre-wrap break-words rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs">
+    <div
+      role="alert"
+      className="whitespace-pre-wrap break-words rounded-lg border border-destructive/30 bg-error-surface px-3 py-2 text-destructive-foreground text-xs"
+    >
       {error instanceof Error ? error.message : String(error)}
     </div>
   );
@@ -114,8 +117,14 @@ export function ConfirmDialog<T>({
           <AlertDialogClose render={<Button />}>Done</AlertDialogClose>
         ) : (
           <>
-            <AlertDialogClose render={<Button variant="ghost" disabled={action.running} />}>Cancel</AlertDialogClose>
-            <Button variant={variant} disabled={action.running || disabled} onClick={() => void run()}>
+            <AlertDialogClose render={<Button variant="ghost" disabled={action.running} />}>
+              Cancel
+            </AlertDialogClose>
+            <Button
+              variant={variant}
+              disabled={action.running || disabled}
+              onClick={() => void run()}
+            >
               {action.running ? <Spinner className="size-3.5" /> : icon}
               {confirm}
             </Button>
@@ -125,4 +134,3 @@ export function ConfirmDialog<T>({
     </ActionDialog>
   );
 }
-

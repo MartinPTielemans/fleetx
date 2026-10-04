@@ -23,11 +23,10 @@ export const ownBundle = Effect.gen(function* () {
   const path = yield* Path.Path;
   const self = yield* path.fromFileUrl(new URL(import.meta.url));
   const bundle = self.endsWith(".mjs") ? self : path.join(path.dirname(self), "../dist/bin.mjs");
-  return yield* fs.readFileString(bundle).pipe(
-    Effect.mapError(() => `no bundle at ${bundle}; run \`pnpm build\` first`),
-  );
+  return yield* fs
+    .readFileString(bundle)
+    .pipe(Effect.mapError(() => `no bundle at ${bundle}; run \`pnpm build\` first`));
 });
-
 
 export const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -48,7 +47,11 @@ export const liveController = Effect.gen(function* () {
       return { config, bundle, stale: false };
     }
     const now = yield* ownBundle.pipe(Effect.option);
-    return { config, bundle: started.value, stale: Option.isSome(now) && now.value !== started.value };
+    return {
+      config,
+      bundle: started.value,
+      stale: Option.isSome(now) && now.value !== started.value,
+    };
   });
 });
 
@@ -56,13 +59,18 @@ const staleDetail = (command: string) =>
   `a newer T3 Fleet build was installed after \`t3-fleet ${command}\` started; restart it to install builds from here`;
 
 /** A stale controller's report: its build installs become notes on restarting it. */
-export const withoutStaleInstalls = (report: CheckReport, stale: boolean, command: string): CheckReport =>
+export const withoutStaleInstalls = (
+  report: CheckReport,
+  stale: boolean,
+  command: string,
+): CheckReport =>
   !stale
     ? report
     : {
         ...report,
         findings: report.findings.map((f): Finding => {
-          if (f.area !== "engine" || (f.key !== "engine-outdated" && f.key !== "engine-newer-here")) return f;
+          if (f.area !== "engine" || (f.key !== "engine-outdated" && f.key !== "engine-newer-here"))
+            return f;
           const { fix: _fix, ...rest } = f;
           return { ...rest, detail: staleDetail(command) };
         }),
@@ -74,18 +82,39 @@ export const withoutStaleInstalls = (report: CheckReport, stale: boolean, comman
  * does every fix when the config cannot be read.
  */
 export const applyLive = <E, R>(
-  current: Effect.Effect<{ readonly config: Config; readonly bundle: string; readonly stale: boolean }, E, R>,
+  current: Effect.Effect<
+    { readonly config: Config; readonly bundle: string; readonly stale: boolean },
+    E,
+    R
+  >,
   fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
   command: string,
 ) =>
   current.pipe(
     Effect.flatMap(({ config, bundle, stale }) => {
       const refused = stale ? fixes.filter((f) => f.fix.command === ENGINE_INSTALL) : [];
-      return runFixes(config.nodes, fixes.filter((f) => !refused.includes(f)), config.checkout, bundle, config.repo).pipe(
-        Effect.map((outcomes) => [...refused.map((finding): FixOutcome => ({ finding, ok: false, summary: staleDetail(command) })), ...outcomes]),
+      return runFixes(
+        config.nodes,
+        fixes.filter((f) => !refused.includes(f)),
+        config.checkout,
+        bundle,
+        config.repo,
+      ).pipe(
+        Effect.map((outcomes) => [
+          ...refused.map((finding): FixOutcome => ({
+            finding,
+            ok: false,
+            summary: staleDetail(command),
+          })),
+          ...outcomes,
+        ]),
       );
     }),
-    Effect.catch((e) => Effect.succeed(fixes.map((finding): FixOutcome => ({ finding, ok: false, summary: userMessage(e) })))),
+    Effect.catch((e) =>
+      Effect.succeed(
+        fixes.map((finding): FixOutcome => ({ finding, ok: false, summary: userMessage(e) })),
+      ),
+    ),
   );
 
 /**
@@ -97,7 +126,9 @@ export const prepare = (only: ReadonlyArray<string>) =>
     const config = yield* loadConfig;
     const unknown = only.filter((name) => !config.nodes.some((n) => n.name === name));
     if (unknown.length > 0) {
-      return yield* Effect.fail(`unknown machine: ${unknown.join(", ")} (known: ${config.nodes.map((n) => n.name).join(", ")})`);
+      return yield* Effect.fail(
+        `unknown machine: ${unknown.join(", ")} (known: ${config.nodes.map((n) => n.name).join(", ")})`,
+      );
     }
     const bundle = config.nodes.some((n) => n.ssh !== null) ? yield* ownBundle : "";
     const shown = (name: string) => only.length === 0 || only.includes(name);
@@ -112,21 +143,32 @@ export const narrow = (report: CheckReport, shown: (name: string) => boolean): C
 });
 
 /** A failure meant for the user rather than a bug: a sentence, or a typed config error. */
-export const isUserError = (error: unknown): error is string | { readonly _tag: "ConfigError" | "SecretsError"; readonly message: string } =>
+export const isUserError = (
+  error: unknown,
+): error is string | { readonly _tag: "ConfigError" | "SecretsError"; readonly message: string } =>
   typeof error === "string" ||
-  (typeof error === "object" && error !== null && "_tag" in error && (error._tag === "ConfigError" || error._tag === "SecretsError"));
+  (typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    (error._tag === "ConfigError" || error._tag === "SecretsError"));
 
 export const userMessage = (error: unknown): string =>
-  typeof error === "string" ? error : isUserError(error) && typeof error !== "string" ? error.message : String(error);
+  typeof error === "string"
+    ? error
+    : isUserError(error) && typeof error !== "string"
+      ? error.message
+      : String(error);
 
 /** User errors print one line and exit 1; anything else is a bug and keeps its trace. */
 export const reportUserErrors = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.catchIf(isUserError, (error) =>
       Console.error(`T3 Fleet: ${userMessage(error)}`).pipe(
-        Effect.andThen(Effect.sync(() => {
-          process.exitCode = 1;
-        })),
+        Effect.andThen(
+          Effect.sync(() => {
+            process.exitCode = 1;
+          }),
+        ),
       ),
     ),
   );
@@ -144,7 +186,10 @@ export const nodeFlag = Flag.String("node").pipe(
  * listening, and its unit would never start the new build. With `drain`, the
  * service keeps running once the new build is seen until `drain` completes.
  */
-export const untilNewBuild = <A, E, R, R2 = never>(service: Effect.Effect<A, E, R>, options: { readonly drain?: Effect.Effect<unknown, never, R2> } = {}) =>
+export const untilNewBuild = <A, E, R, R2 = never>(
+  service: Effect.Effect<A, E, R>,
+  options: { readonly drain?: Effect.Effect<unknown, never, R2> } = {},
+) =>
   untilReplaced(service, newBuild(process.argv[1] ?? ""), {
     ...(options.drain === undefined ? {} : { drain: options.drain }),
     // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.

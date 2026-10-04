@@ -30,36 +30,121 @@ describe("hub definitions", () => {
         proxy_path: "/",
       }),
     );
-    expect(remote).toMatchObject({ kind: "remote", runner: { type: "remote", url: "https://mcp.example.com/mcp" }, auth: { type: "oauth", scopes: ["openid", "query:read"], client: null } });
-    expect(parseDefinition("fetch", JSON.stringify({ kind: "container", image: "ghcr.io/example/fetch:1", transport: "streamable-http" }))).toMatchObject({
-      runner: { type: "docker-http", image: "ghcr.io/example/fetch:1", targetPort: 8080, path: "/mcp" },
+    expect(remote).toMatchObject({
+      kind: "remote",
+      runner: { type: "remote", url: "https://mcp.example.com/mcp" },
+      auth: { type: "oauth", scopes: ["openid", "query:read"], client: null },
+    });
+    expect(
+      parseDefinition(
+        "fetch",
+        JSON.stringify({
+          kind: "container",
+          image: "ghcr.io/example/fetch:1",
+          transport: "streamable-http",
+        }),
+      ),
+    ).toMatchObject({
+      runner: {
+        type: "docker-http",
+        image: "ghcr.io/example/fetch:1",
+        targetPort: 8080,
+        path: "/mcp",
+      },
       auth: { type: "none" },
     });
-    expect(parseDefinition("docs", JSON.stringify({ kind: "registry", image: "ghcr.io/example/docs:1", transport: "stdio", network: "none", env: { KEY: "$DOCS_KEY" } }))).toMatchObject({
+    expect(
+      parseDefinition(
+        "docs",
+        JSON.stringify({
+          kind: "registry",
+          image: "ghcr.io/example/docs:1",
+          transport: "stdio",
+          network: "none",
+          env: { KEY: "$DOCS_KEY" },
+        }),
+      ),
+    ).toMatchObject({
       runner: { type: "docker-stdio", network: "none", env: { KEY: "$DOCS_KEY" } },
     });
     expect(
-      parseDefinition("s", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc", client_secret_env: "S_SECRET", issuer: "https://auth.s" }, tools: { deny: ["delete_*"] } })),
-    ).toMatchObject({ auth: { type: "oauth", client: { clientId: "abc", clientSecretEnv: "S_SECRET", issuer: "https://auth.s" } }, deny: ["delete_*"] });
-    expect(parseDefinition("b", JSON.stringify({ kind: "remote", url: "https://b/mcp", auth: { type: "bearer", token_env: "B_TOKEN" } }))).toMatchObject({ auth: { type: "bearer", tokenEnv: "B_TOKEN" } });
+      parseDefinition(
+        "s",
+        JSON.stringify({
+          kind: "remote",
+          url: "https://s/mcp",
+          oauth: { client_id: "abc", client_secret_env: "S_SECRET", issuer: "https://auth.s" },
+          tools: { deny: ["delete_*"] },
+        }),
+      ),
+    ).toMatchObject({
+      auth: {
+        type: "oauth",
+        client: { clientId: "abc", clientSecretEnv: "S_SECRET", issuer: "https://auth.s" },
+      },
+      deny: ["delete_*"],
+    });
+    expect(
+      parseDefinition(
+        "b",
+        JSON.stringify({
+          kind: "remote",
+          url: "https://b/mcp",
+          auth: { type: "bearer", token_env: "B_TOKEN" },
+        }),
+      ),
+    ).toMatchObject({ auth: { type: "bearer", tokenEnv: "B_TOKEN" } });
   });
 
   it("explains what it cannot serve", () => {
-    expect(parseDefinition("x", JSON.stringify({ kind: "stdio", command: "x" }))).toEqual({ problem: "kind stdio is not hosted" });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote" }))).toEqual({ problem: "remote definition has no url" });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "file:///etc/passwd" }))).toMatchObject({ problem: expect.stringMatching(/http/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "i", network: "none" }))).toMatchObject({ problem: expect.stringMatching(/stdio/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://mcp.example.com/mcp" }))).toMatchObject({ problem: expect.stringMatching(/https/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://127.0.0.1:9/mcp" }))).toMatchObject({ runner: { type: "remote" } });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }))).toMatchObject({ problem: expect.stringMatching(/https/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc" } }))).toMatchObject({ problem: expect.stringMatching(/issuer/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "container", image: "--privileged" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });
-    expect(parseDefinition("x", JSON.stringify({ kind: "registry", image: "-v/:/host", transport: "stdio" }))).toMatchObject({ problem: expect.stringMatching(/not an image/) });
-    expect(parseDefinition("Bad Name", "{}")).toMatchObject({ problem: expect.stringMatching(/not a valid server name/) });
+    expect(parseDefinition("x", JSON.stringify({ kind: "stdio", command: "x" }))).toEqual({
+      problem: "kind stdio is not hosted",
+    });
+    expect(parseDefinition("x", JSON.stringify({ kind: "remote" }))).toEqual({
+      problem: "remote definition has no url",
+    });
+    expect(
+      parseDefinition("x", JSON.stringify({ kind: "remote", url: "file:///etc/passwd" })),
+    ).toMatchObject({ problem: expect.stringMatching(/http/) });
+    expect(
+      parseDefinition("x", JSON.stringify({ kind: "container", image: "i", network: "none" })),
+    ).toMatchObject({ problem: expect.stringMatching(/stdio/) });
+    expect(
+      parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://mcp.example.com/mcp" })),
+    ).toMatchObject({ problem: expect.stringMatching(/https/) });
+    expect(
+      parseDefinition("x", JSON.stringify({ kind: "remote", url: "http://127.0.0.1:9/mcp" })),
+    ).toMatchObject({ runner: { type: "remote" } });
+    expect(
+      parseDefinition(
+        "x",
+        JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }),
+      ),
+    ).toMatchObject({ problem: expect.stringMatching(/https/) });
+    expect(
+      parseDefinition(
+        "x",
+        JSON.stringify({ kind: "remote", url: "https://s/mcp", oauth: { client_id: "abc" } }),
+      ),
+    ).toMatchObject({ problem: expect.stringMatching(/issuer/) });
+    expect(
+      parseDefinition("x", JSON.stringify({ kind: "container", image: "--privileged" })),
+    ).toMatchObject({ problem: expect.stringMatching(/not an image/) });
+    expect(
+      parseDefinition(
+        "x",
+        JSON.stringify({ kind: "registry", image: "-v/:/host", transport: "stdio" }),
+      ),
+    ).toMatchObject({ problem: expect.stringMatching(/not an image/) });
+    expect(parseDefinition("Bad Name", "{}")).toMatchObject({
+      problem: expect.stringMatching(/not a valid server name/),
+    });
   });
 
   it("fills environments from the fleet's secrets", () => {
-    expect(expandSecrets("Bearer $A and ${B}, not $c", { A: "1", B: "2" })).toBe("Bearer 1 and 2, not $c");
+    expect(expandSecrets("Bearer $A and ${B}, not $c", { A: "1", B: "2" })).toBe(
+      "Bearer 1 and 2, not $c",
+    );
   });
 });
 
@@ -71,7 +156,12 @@ describe("hub container env", () => {
           Effect.gen(function* () {
             const args = yield* envFile({ B: "two words", A: "1" });
             const file = args[1] ?? "";
-            return { args, file, mode: statSync(file).mode & 0o777, text: readFileSync(file, "utf8") };
+            return {
+              args,
+              file,
+              mode: statSync(file).mode & 0o777,
+              text: readFileSync(file, "utf8"),
+            };
           }),
         );
         return { ...inside, exists: existsSync(inside.file) };
@@ -81,7 +171,9 @@ describe("hub container env", () => {
     expect(mode).toBe(0o600);
     expect(text).toBe("A=1\nB=two words\n");
     expect(exists).toBe(false);
-    const refused = await Effect.runPromise(Effect.scoped(envFile({ A: "x\ny" })).pipe(Effect.flip, Effect.provide(NodeServices.layer)));
+    const refused = await Effect.runPromise(
+      Effect.scoped(envFile({ A: "x\ny" })).pipe(Effect.flip, Effect.provide(NodeServices.layer)),
+    );
     expect(refused).toMatch(/line break/);
   });
 });
@@ -105,23 +197,65 @@ describe("hub policy", () => {
   });
 
   it("finds keys that differ only in case from the ones the policy reads", () => {
-    expect(caseVariantKey({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "a", arguments: { Name: "fine" } } })).toBeNull();
-    expect(caseVariantKey({ method: "tools/call", params: { name: "a", NAME: "b" } } as never)).toBe("params.NAME");
+    expect(
+      caseVariantKey({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "a", arguments: { Name: "fine" } },
+      }),
+    ).toBeNull();
+    expect(
+      caseVariantKey({ method: "tools/call", params: { name: "a", NAME: "b" } } as never),
+    ).toBe("params.NAME");
     expect(caseVariantKey({ method: "ping", Method: "tools/call" } as never)).toBe("Method");
     expect(caseVariantKey({ method: "ping", PARAMS: {} } as never)).toBe("PARAMS");
     // Go folds these four non-ASCII letters to ASCII ones: paramſ is params, ıd and İd are id.
-    expect(caseVariantKey({ method: "tools/call", params: { name: "echo" }, "param\u017f": { name: "delete_all" } } as never)).toBe("param\u017f");
+    expect(
+      caseVariantKey({
+        method: "tools/call",
+        params: { name: "echo" },
+        "param\u017f": { name: "delete_all" },
+      } as never),
+    ).toBe("param\u017f");
     expect(caseVariantKey({ method: "ping", "\u0131d": 2 } as never)).toBe("\u0131d");
     expect(caseVariantKey({ method: "ping", "\u0130d": 2 } as never)).toBe("\u0130d");
-    expect(caseVariantKey({ method: "ping", "jsonrpc": "2.0", "j\u017fonrpc": "1.0" } as never)).toBe("j\u017fonrpc");
+    expect(caseVariantKey({ method: "ping", jsonrpc: "2.0", "j\u017fonrpc": "1.0" } as never)).toBe(
+      "j\u017fonrpc",
+    );
   });
 
   it("rebuilds a message from its JSON-RPC fields alone", () => {
-    const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo" }, "param\u017f": { name: "delete_all" }, result: 1, extra: true };
-    expect(rebuildMessage(request as never)).toEqual({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo" } });
-    expect(rebuildMessage({ method: "notifications/initialized" })).toEqual({ method: "notifications/initialized" });
-    expect(rebuildMessage({ jsonrpc: "2.0", id: 3, result: { ok: true }, method: undefined, extra: 1 } as never)).toEqual({ jsonrpc: "2.0", id: 3, result: { ok: true } });
-    expect(rebuildMessage({ jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } })).toEqual({ jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } });
+    const request = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "echo" },
+      "param\u017f": { name: "delete_all" },
+      result: 1,
+      extra: true,
+    };
+    expect(rebuildMessage(request as never)).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "echo" },
+    });
+    expect(rebuildMessage({ method: "notifications/initialized" })).toEqual({
+      method: "notifications/initialized",
+    });
+    expect(
+      rebuildMessage({
+        jsonrpc: "2.0",
+        id: 3,
+        result: { ok: true },
+        method: undefined,
+        extra: 1,
+      } as never),
+    ).toEqual({ jsonrpc: "2.0", id: 3, result: { ok: true } });
+    expect(rebuildMessage({ jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } })).toEqual(
+      { jsonrpc: "2.0", id: null, error: { code: -1, message: "x" } },
+    );
   });
 
   it("compares tokens in constant time without false positives", () => {
@@ -132,7 +266,7 @@ describe("hub policy", () => {
 
   it("parses SSE split across chunks", () => {
     const parse = makeSseParser();
-    expect(parse("event: message\ndata: {\"a\"")).toEqual([]);
+    expect(parse('event: message\ndata: {"a"')).toEqual([]);
     expect(parse(":1}\n\n: comment\n\ndata: x\r\ndata: y\r\n\r\n")).toEqual([
       { event: "message", id: null, data: '{"a":1}' },
       { event: null, id: null, data: "x\ny" },
@@ -143,7 +277,16 @@ describe("hub policy", () => {
 describe("hub call log", () => {
   it("keeps a ring of recent calls and a bounded private file that survives a restart", async () => {
     const file = join(mkdtempSync(join(tmpdir(), "t3-fleet-calls-")), "hub/calls.jsonl");
-    const call = (i: number) => ({ at: i, server: i % 2 === 0 ? "a" : "b", client: "relay", method: "tools/call", tool: "t", durationMs: 1, outcome: "ok" as const, error: null });
+    const call = (i: number) => ({
+      at: i,
+      server: i % 2 === 0 ? "a" : "b",
+      client: "relay",
+      method: "tools/call",
+      tool: "t",
+      durationMs: 1,
+      outcome: "ok" as const,
+      error: null,
+    });
     const recent = await Effect.runPromise(
       Effect.gen(function* () {
         const log = yield* makeCallLog(file, { capacity: 10, maxBytes: 2000 });
@@ -164,7 +307,12 @@ describe("hub call log", () => {
     const clipped = await Effect.runPromise(
       Effect.gen(function* () {
         const log = yield* makeCallLog(null);
-        yield* log.record({ ...call(1), method: "m".repeat(5000), tool: "t".repeat(5000), error: "e".repeat(5000) });
+        yield* log.record({
+          ...call(1),
+          method: "m".repeat(5000),
+          tool: "t".repeat(5000),
+          error: "e".repeat(5000),
+        });
         return (yield* log.list({}))[0];
       }).pipe(Effect.provide(NodeServices.layer)),
     );

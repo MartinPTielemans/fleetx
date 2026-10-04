@@ -49,14 +49,23 @@ export interface Finding {
 }
 
 /** Which agent CLI a T3 provider driver runs. */
-const DRIVER_AGENT: Readonly<Record<string, "claude" | "codex">> = { claudeAgent: "claude", codex: "codex" };
+const DRIVER_AGENT: Readonly<Record<string, "claude" | "codex">> = {
+  claudeAgent: "claude",
+  codex: "codex",
+};
 
 const basename = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
 /** Whether T3 starts this provider through the proxy launcher the config declares for it. */
-const viaLauncher = (proxy: ProxySettings | undefined, instanceId: string, binaryPath: string | null) => {
+const viaLauncher = (
+  proxy: ProxySettings | undefined,
+  instanceId: string,
+  binaryPath: string | null,
+) => {
   const launcher = proxy?.launchers[instanceId];
-  return launcher !== undefined && binaryPath !== null && basename(binaryPath) === basename(launcher);
+  return (
+    launcher !== undefined && binaryPath !== null && basename(binaryPath) === basename(launcher)
+  );
 };
 
 /** "0.0.46-nightly.20261003.2623" → "0.0.46 nightly 10-03". */
@@ -76,9 +85,11 @@ const versionPair = (from: string, to: string) =>
   shortT3(from) === shortT3(to) ? `${from} → ${to}` : `${shortT3(from)} → ${shortT3(to)}`;
 
 /** What people call a provider instance: "claude", not "claudeAgent". */
-export const providerLabel = (instanceId: string) => (instanceId === "claudeAgent" ? "claude" : instanceId);
+export const providerLabel = (instanceId: string) =>
+  instanceId === "claudeAgent" ? "claude" : instanceId;
 
-const tilde = (path: string) => path.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
+const tilde = (path: string) =>
+  path.replace(/^\/(Users|home)\/[^/]+\//, "~/").replace(/^\/root\//, "~/");
 
 const AGENT_INSTALL: Readonly<Record<"claude" | "codex", { install: string; upgrade: string }>> = {
   claude: {
@@ -103,12 +114,18 @@ const isSessionShim = (path: string) => /^(\/private)?\/(var\/folders|tmp)\//.te
  * policy`: "track" (the latest release, the default), "pin:<version>", or
  * "manual" (installed, but its version is left alone).
  */
-type Policy = { readonly kind: "track" } | { readonly kind: "pin"; readonly version: string } | { readonly kind: "manual" };
+type Policy =
+  | { readonly kind: "track" }
+  | { readonly kind: "pin"; readonly version: string }
+  | { readonly kind: "manual" };
 
 const policyOf = (settings: unknown, agent: string): Policy => {
-  const raw = (settings as { agents?: Record<string, { policy?: unknown }> } | undefined)?.agents?.[agent]?.policy;
+  const raw = (settings as { agents?: Record<string, { policy?: unknown }> } | undefined)?.agents?.[
+    agent
+  ]?.policy;
   if (raw === "manual") return { kind: "manual" };
-  if (typeof raw === "string" && raw.startsWith("pin:")) return { kind: "pin", version: raw.slice(4) };
+  if (typeof raw === "string" && raw.startsWith("pin:"))
+    return { kind: "pin", version: raw.slice(4) };
   return { kind: "track" };
 };
 
@@ -117,7 +134,12 @@ const pinCommand = (agent: "claude" | "codex", version: string) =>
     ? `curl -fsSL https://claude.ai/install.sh | bash -s ${version}`
     : `npm install -g --prefix ~/.local @openai/codex@${version}`;
 
-const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest, policy: Policy = { kind: "track" }): Array<Finding> => {
+const agentFindings = (
+  node: string,
+  rawAgent: AgentObservation,
+  latest: Latest,
+  policy: Policy = { kind: "track" },
+): Array<Finding> => {
   const agent = { ...rawAgent, onPath: rawAgent.onPath.filter((p) => !isSessionShim(p)) };
   const out: Array<Finding> = [];
   const how = AGENT_INSTALL[agent.name];
@@ -127,7 +149,7 @@ const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest,
       severity: "error",
       area: "agents",
       key: `${agent.name}-missing`,
-        title: `${agent.name} is not installed at ${tilde(agent.managedPath)}`,
+      title: `${agent.name} is not installed at ${tilde(agent.managedPath)}`,
       fix: { command: how.install, safe: true },
     });
     return out;
@@ -160,7 +182,7 @@ const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest,
       severity: "warn",
       area: "agents",
       key: `${agent.name}-behind`,
-        title: `${agent.name} ${agent.managedVersion} is behind ${newest}`,
+      title: `${agent.name} ${agent.managedVersion} is behind ${newest}`,
       fix: { command: how.upgrade, safe: true },
     });
   }
@@ -171,7 +193,7 @@ const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest,
       severity: "warn",
       area: "agents",
       key: `${agent.name}-shell-copy`,
-        title: `your shell runs ${tilde(first)}, not the managed ${agent.name}`,
+      title: `your shell runs ${tilde(first)}, not the managed ${agent.name}`,
       detail: `${tilde(first)} comes before ${tilde(agent.managedPath)} on PATH; upgrades of the managed copy will not reach it`,
     });
   }
@@ -182,13 +204,17 @@ const agentFindings = (node: string, rawAgent: AgentObservation, latest: Latest,
       severity: "info",
       area: "agents",
       key: `${agent.name}-other-copies`,
-        title: `other ${agent.name} copies: ${extra.map(tilde).join(", ")}`,
+      title: `other ${agent.name} copies: ${extra.map(tilde).join(", ")}`,
     });
   }
   return out;
 };
 
-const providerFindings = (node: string, obs: MachineObservation, proxy: ProxySettings | undefined): Array<Finding> => {
+const providerFindings = (
+  node: string,
+  obs: MachineObservation,
+  proxy: ProxySettings | undefined,
+): Array<Finding> => {
   const out: Array<Finding> = [];
   const serverOnPath = obs.t3.serverPath !== null;
   for (const p of obs.t3.providers) {
@@ -209,7 +235,13 @@ const providerFindings = (node: string, obs: MachineObservation, proxy: ProxySet
     const agent = obs.agents.find((a) => a.name === agentName);
     // A t3-fleet models launcher (t3-fleet-claude, t3-fleet-codex, …) runs the managed CLI itself.
     const viaModels = p.resolved !== null && isLauncher(basename(p.resolved));
-    if (agent !== undefined && p.resolved !== null && !viaLauncher(proxy, p.instanceId, p.resolved) && !viaModels && p.resolved !== agent.managedPath) {
+    if (
+      agent !== undefined &&
+      p.resolved !== null &&
+      !viaLauncher(proxy, p.instanceId, p.resolved) &&
+      !viaModels &&
+      p.resolved !== agent.managedPath
+    ) {
       out.push({
         node,
         severity: "warn",
@@ -249,11 +281,22 @@ const legacyProblem = (title: string): { kind: string; title: string } => ({
   title,
 });
 
-const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantChannel: string | null = null): Array<Finding> => {
+const t3Findings = (
+  node: string,
+  obs: MachineObservation,
+  latest: Latest,
+  wantChannel: string | null = null,
+): Array<Finding> => {
   const out: Array<Finding> = [];
   const t3 = obs.t3;
   if (t3.runtime === null && t3.problems.length === 0) {
-    out.push({ node, key: "t3-not-installed", severity: "info", area: "t3", title: "T3 Code has never run here" });
+    out.push({
+      node,
+      key: "t3-not-installed",
+      severity: "info",
+      area: "t3",
+      title: "T3 Code has never run here",
+    });
     return out;
   }
   for (const problem of t3.problems) {
@@ -261,14 +304,24 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
     out.push({ node, key: `t3-${kind}`, severity: "warn", area: "t3", title });
   }
   // A CLI-installed server not under its service manager stops with the session that started it.
-  if (t3.runtime !== null && t3.runtime.alive && t3.runtimeBinary !== null && !t3.runtime.serviceManaged) {
+  if (
+    t3.runtime !== null &&
+    t3.runtime.alive &&
+    t3.runtimeBinary !== null &&
+    !t3.runtime.serviceManaged
+  ) {
     out.push({
       node,
       key: "t3-not-a-service",
       severity: "warn",
       area: "t3",
-      title: "the T3 server is not running as a background service; it stops with the session that started it",
-      fix: { command: `${tilde(t3.runtimeBinary)} service install`, safe: false, disrupts: `restarts the T3 server on ${node}` },
+      title:
+        "the T3 server is not running as a background service; it stops with the session that started it",
+      fix: {
+        command: `${tilde(t3.runtimeBinary)} service install`,
+        safe: false,
+        disrupts: `restarts the T3 server on ${node}`,
+      },
     });
   }
   const version = t3.descriptor?.serverVersion ?? t3.installedVersion;
@@ -306,27 +359,34 @@ const t3Findings = (node: string, obs: MachineObservation, latest: Latest, wantC
     if (newest !== null && newest !== version) {
       // Nightlies ship several times a day; a build from yesterday is current
       // enough. Lag becomes a warning at two days or five releases.
-      const days = releaseDay(newest) !== null && releaseDay(version) !== null
-        ? ((releaseDay(newest) ?? 0) - (releaseDay(version) ?? 0)) / 86_400_000
-        : null;
-      const severity: Severity = (behind !== null && behind >= 5) || (days !== null && days >= 2) || (behind === null && days === null)
-        ? "warn"
-        : "info";
+      const days =
+        releaseDay(newest) !== null && releaseDay(version) !== null
+          ? ((releaseDay(newest) ?? 0) - (releaseDay(version) ?? 0)) / 86_400_000
+          : null;
+      const severity: Severity =
+        (behind !== null && behind >= 5) ||
+        (days !== null && days >= 2) ||
+        (behind === null && days === null)
+          ? "warn"
+          : "info";
       const channel = cliReleaseChannelOf(version);
-      const how = t3.runtimeBinary !== null
-        ? {
-            command: `${tilde(t3.runtimeBinary)} update --channel ${channel} --yes`,
-            safe: false,
-            disrupts: `restarts the T3 server on ${node}; threads running there stop`,
-          }
-        : undefined;
+      const how =
+        t3.runtimeBinary !== null
+          ? {
+              command: `${tilde(t3.runtimeBinary)} update --channel ${channel} --yes`,
+              safe: false,
+              disrupts: `restarts the T3 server on ${node}; threads running there stop`,
+            }
+          : undefined;
       out.push({
         node,
         key: "t3-behind",
         severity,
         area: "t3",
         title: `T3 is ${behind === null ? "behind" : `${behind} ${channel} release${behind === 1 ? "" : "s"} behind`} (${versionPair(version, newest)})`,
-        ...(how === undefined ? { detail: "the desktop app updates itself; restart it to apply a downloaded update" } : { fix: how }),
+        ...(how === undefined
+          ? { detail: "the desktop app updates itself; restart it to apply a downloaded update" }
+          : { fix: how }),
       });
     }
   }
@@ -345,14 +405,38 @@ const syncFindings = (node: string, obs: MachineObservation, interval = 900): Ar
   if (sync === null) return [];
   const out: Array<Finding> = [];
   if (sync.streak >= 3) {
-    out.push({ node, key: "sync-failing", severity: "error", area: "sync", title: `fleet sync failed ${sync.streak} times in a row`, detail: sync.message });
+    out.push({
+      node,
+      key: "sync-failing",
+      severity: "error",
+      area: "sync",
+      title: `fleet sync failed ${sync.streak} times in a row`,
+      detail: sync.message,
+    });
   } else if (sync.result !== "ok") {
-    out.push({ node, key: "sync-failed", severity: "warn", area: "sync", title: "last fleet sync failed", detail: sync.message });
+    out.push({
+      node,
+      key: "sync-failed",
+      severity: "warn",
+      area: "sync",
+      title: "last fleet sync failed",
+      detail: sync.message,
+    });
   }
   const ageMinutes = Math.round((obs.observedAt / 1000 - sync.when) / 60);
   if (ageMinutes > (4 * interval) / 60) {
-    const every = interval % 60 === 0 ? `${interval / 60} minute${interval === 60 ? "" : "s"}` : `${interval} seconds`;
-    out.push({ node, key: "sync-stale", severity: "warn", area: "sync", title: `no fleet sync for ${ageMinutes} minutes`, detail: `it should run every ${every}; is the sync timer running?` });
+    const every =
+      interval % 60 === 0
+        ? `${interval / 60} minute${interval === 60 ? "" : "s"}`
+        : `${interval} seconds`;
+    out.push({
+      node,
+      key: "sync-stale",
+      severity: "warn",
+      area: "sync",
+      title: `no fleet sync for ${ageMinutes} minutes`,
+      detail: `it should run every ${every}; is the sync timer running?`,
+    });
   }
   return out;
 };
@@ -371,7 +455,11 @@ const parityFindings = (
   // T3's apps (desktop, web, phone) speak one client protocol and refuse a server
   // on another, showing "Client not supported". Machines on different protocols
   // cannot all be reached from the same app.
-  const protocols = observed.flatMap((o) => (o.obs.t3.descriptor?.protocol === undefined ? [] : [{ name: o.name, protocol: o.obs.t3.descriptor.protocol }]));
+  const protocols = observed.flatMap((o) =>
+    o.obs.t3.descriptor?.protocol === undefined
+      ? []
+      : [{ name: o.name, protocol: o.obs.t3.descriptor.protocol }],
+  );
   const newest = Math.max(...protocols.map((p) => p.protocol));
   const onNewest = protocols.filter((p) => p.protocol === newest).map((p) => p.name);
   for (const p of protocols.filter((x) => x.protocol < newest)) {
@@ -381,12 +469,18 @@ const parityFindings = (
       area: "parity",
       key: "t3-protocol-behind",
       title: `T3 here speaks client protocol ${p.protocol}; ${onNewest.join(", ")} speak ${newest}`,
-      detail: "an app that connects to one side shows the other as \"Client not supported\"; update T3 here, or update the apps",
+      detail:
+        'an app that connects to one side shows the other as "Client not supported"; update T3 here, or update the apps',
     });
   }
-  const instanceIds = [...new Set(observed.flatMap((o) => o.obs.t3.providers.map((p) => p.instanceId)))].sort();
+  const instanceIds = [
+    ...new Set(observed.flatMap((o) => o.obs.t3.providers.map((p) => p.instanceId))),
+  ].sort();
   for (const id of instanceIds) {
-    const per = observed.map((o) => ({ name: o.name, p: o.obs.t3.providers.find((x) => x.instanceId === id) }));
+    const per = observed.map((o) => ({
+      name: o.name,
+      p: o.obs.t3.providers.find((x) => x.instanceId === id),
+    }));
     const enabled = per.filter((x) => x.p?.enabled).map((x) => x.name);
     const disabled = per.filter((x) => x.p !== undefined && !x.p.enabled).map((x) => x.name);
     if (enabled.length > 0 && disabled.length > 0) {
@@ -402,7 +496,11 @@ const parityFindings = (
     }
     if (proxy?.launchers[id] === undefined) continue;
     const launcherStyle = (p: ProviderObservation | undefined) =>
-      p === undefined || !p.enabled || p.binaryPath === null ? null : viaLauncher(proxy, id, p.binaryPath) ? "launcher" : "direct";
+      p === undefined || !p.enabled || p.binaryPath === null
+        ? null
+        : viaLauncher(proxy, id, p.binaryPath)
+          ? "launcher"
+          : "direct";
     const routed = per.filter((x) => launcherStyle(x.p) === "launcher").map((x) => x.name);
     const direct = per.filter((x) => launcherStyle(x.p) === "direct").map((x) => x.name);
     if (routed.length > 0 && direct.length > 0) {
@@ -429,14 +527,20 @@ const parityFindings = (
  * key: pointing T3 at a launcher whose key is rejected would turn a working
  * provider into a broken one. Commands and hints come from the user's config.
  */
-const launcherSwitch = (instanceId: string, obs: MachineObservation, proxy: ProxySettings): { detail: string; fix?: Fix } => {
+const launcherSwitch = (
+  instanceId: string,
+  obs: MachineObservation,
+  proxy: ProxySettings,
+): { detail: string; fix?: Fix } => {
   const seen = obs.proxy;
   const launcher = proxy.launchers[instanceId] ?? "";
   if (seen === null || (seen.launchers[instanceId] ?? null) === null) {
     return { detail: `the launcher ${launcher} is not installed on this machine` };
   }
   if (!seen.credentials) {
-    return { detail: `this machine has no proxy key at ${proxy.credentials}${proxy.missing_key_hint ? `: ${proxy.missing_key_hint}` : ""}` };
+    return {
+      detail: `this machine has no proxy key at ${proxy.credentials}${proxy.missing_key_hint ? `: ${proxy.missing_key_hint}` : ""}`,
+    };
   }
   if (seen.key !== "accepted") {
     return {
@@ -446,15 +550,22 @@ const launcherSwitch = (instanceId: string, obs: MachineObservation, proxy: Prox
           : `the proxy check failed: ${seen.key}`,
     };
   }
-  const detail = "the launcher is installed and the proxy accepts this machine's key; sessions already running keep their launcher";
+  const detail =
+    "the launcher is installed and the proxy accepts this machine's key; sessions already running keep their launcher";
   return proxy.enable === undefined
     ? { detail: `${detail}. Set T3's ${providerLabel(instanceId)} binary path to ${launcher}` }
     : { detail, fix: { command: proxy.enable.replaceAll("{provider}", instanceId), safe: false } };
 };
 
 /** A machine whose T3 goes through the proxy, with a key the proxy refuses: every model call fails there. */
-const proxyFindings = (node: string, obs: MachineObservation, proxy: ProxySettings | undefined): Array<Finding> => {
-  const routed = obs.t3.providers.filter((p) => p.enabled && viaLauncher(proxy, p.instanceId, p.binaryPath));
+const proxyFindings = (
+  node: string,
+  obs: MachineObservation,
+  proxy: ProxySettings | undefined,
+): Array<Finding> => {
+  const routed = obs.t3.providers.filter(
+    (p) => p.enabled && viaLauncher(proxy, p.instanceId, p.binaryPath),
+  );
   if (routed.length === 0 || obs.proxy?.key === "accepted") return [];
   const names = routed.map((p) => providerLabel(p.instanceId)).join(" and ");
   const why = !obs.proxy?.credentials
@@ -469,7 +580,9 @@ const proxyFindings = (node: string, obs: MachineObservation, proxy: ProxySettin
       severity: "error",
       area: "providers",
       title: `${names} in T3 cannot reach any model: ${why}`,
-      ...(obs.proxy?.key === "rejected" && proxy?.rejected_hint ? { detail: proxy.rejected_hint } : {}),
+      ...(obs.proxy?.key === "rejected" && proxy?.rejected_hint
+        ? { detail: proxy.rejected_hint }
+        : {}),
     },
   ];
 };
@@ -493,7 +606,9 @@ const providerAuthFindings = (node: string, obs: MachineObservation): Array<Find
   for (const p of obs.providerAuth) {
     if (!p.enabled) continue;
     const label = providerLabel(p.instanceId);
-    const launchFailed = obs.t3.providers.some((x) => x.instanceId === p.instanceId && x.enabled && !x.launch.ok);
+    const launchFailed = obs.t3.providers.some(
+      (x) => x.instanceId === p.instanceId && x.enabled && !x.launch.ok,
+    );
     if (p.auth === "unauthenticated") {
       out.push({
         node,
@@ -528,9 +643,14 @@ const t3AccessFindings = (node: string, obs: MachineObservation): Array<Finding>
   // sync may do it, at most once a day (each attempt adds a client in T3). A token T3 refused before then waits for a person.
   const renewal =
     access.expiresAt !== null &&
-    (access.state === "expiring" ? access.expiresAt - obs.observedAt < RENEW_WITHIN_MS : access.state === "rejected" && access.expiresAt <= obs.observedAt);
-  const recent = access.lastAttempt !== undefined && obs.observedAt - access.lastAttempt < 86_400_000;
-  const fix: Fix | undefined = access.cli ? { command: "t3-fleet t3 connect", safe: renewal && !recent } : undefined;
+    (access.state === "expiring"
+      ? access.expiresAt - obs.observedAt < RENEW_WITHIN_MS
+      : access.state === "rejected" && access.expiresAt <= obs.observedAt);
+  const recent =
+    access.lastAttempt !== undefined && obs.observedAt - access.lastAttempt < 86_400_000;
+  const fix: Fix | undefined = access.cli
+    ? { command: "t3-fleet t3 connect", safe: renewal && !recent }
+    : undefined;
   const how =
     fix === undefined
       ? "; T3's CLI was not found on this machine to issue one"
@@ -568,11 +688,20 @@ const areaFindings = (
 ): Array<Finding> => {
   const out: Array<Finding> = [];
   for (const o of observed) {
-    const plugins = o.obs.areas["_plugins"] as { problems?: ReadonlyArray<string | { plugin: string; title: string }> } | undefined;
+    const plugins = o.obs.areas["_plugins"] as
+      | { problems?: ReadonlyArray<string | { plugin: string; title: string }> }
+      | undefined;
     for (const [i, problem] of (plugins?.problems ?? []).entries()) {
       // Older probes sent the text alone, without the plugin's path.
-      const { plugin, title } = typeof problem === "string" ? { plugin: String(i + 1), title: problem } : problem;
-      out.push({ node: o.name, key: `plugin-failed-${plugin}`, severity: "error", area: "plugins", title });
+      const { plugin, title } =
+        typeof problem === "string" ? { plugin: String(i + 1), title: problem } : problem;
+      out.push({
+        node: o.name,
+        key: `plugin-failed-${plugin}`,
+        severity: "error",
+        area: "plugins",
+        title,
+      });
     }
   }
   for (const area of areas) {
@@ -591,7 +720,13 @@ const areaFindings = (
       if (raw === undefined) continue;
       const settings = nodes.find((n) => n.name === o.name)?.settings.table[area.id];
       if (raw !== null && typeof raw === "object" && "invalidSettings" in raw) {
-        out.push({ node: o.name, key: `${area.id}-settings-invalid`, severity: "error", area: area.id, title: `the [${area.id}] settings for this machine are not valid` });
+        out.push({
+          node: o.name,
+          key: `${area.id}-settings-invalid`,
+          severity: "error",
+          area: area.id,
+          title: `the [${area.id}] settings for this machine are not valid`,
+        });
         continue;
       }
       if (raw !== null && typeof raw === "object" && "unreadable" in raw) {
@@ -605,7 +740,11 @@ const areaFindings = (
         out.push(
           raw === null
             ? unreadable(o.name, "what it observed could not be recorded")
-            : unreadable(o.name, "what it observed is not in a form this build reads; does T3 Fleet there run another build?", "warn"),
+            : unreadable(
+                o.name,
+                "what it observed is not in a form this build reads; does T3 Fleet there run another build?",
+                "warn",
+              ),
         );
         continue;
       }
@@ -614,7 +753,16 @@ const areaFindings = (
     const authority = nodes.find((n) => n.roles.includes("authority"))?.name ?? null;
     for (const entry of fleet) {
       try {
-        out.push(...area.diagnose({ node: entry.node, desired: entry.desired, observed: entry.observed, fleet, authority, nodes: nodes.map((n) => n.name) }));
+        out.push(
+          ...area.diagnose({
+            node: entry.node,
+            desired: entry.desired,
+            observed: entry.observed,
+            fleet,
+            authority,
+            nodes: nodes.map((n) => n.name),
+          }),
+        );
       } catch (error) {
         out.push(unreadable(entry.node, `its diagnosis failed: ${why(error)}`));
       }
@@ -635,13 +783,22 @@ export const diagnose = (
   const observed: Array<{ name: string; obs: MachineObservation }> = [];
   for (const r of results) {
     if (!r.ok) {
-      findings.push({ node: r.node.name, key: "unreachable", severity: "error", area: "reach", title: "could not observe this machine", detail: r.error });
+      findings.push({
+        node: r.node.name,
+        key: "unreachable",
+        severity: "error",
+        area: "reach",
+        title: "could not observe this machine",
+        detail: r.error,
+      });
       continue;
     }
     observed.push({ name: r.node.name, obs: r.observation });
     const nodeSettings = nodes.find((n) => n.name === r.node.name)?.settings.table;
     for (const agent of r.observation.agents) {
-      findings.push(...agentFindings(r.node.name, agent, latest, policyOf(nodeSettings, agent.name)));
+      findings.push(
+        ...agentFindings(r.node.name, agent, latest, policyOf(nodeSettings, agent.name)),
+      );
     }
     findings.push(...t3Findings(r.node.name, r.observation, latest, channelOf(nodeSettings)));
     findings.push(...providerFindings(r.node.name, r.observation, proxy));
@@ -652,5 +809,7 @@ export const diagnose = (
   }
   findings.push(...parityFindings(observed, proxy));
   findings.push(...areaFindings(observed, nodes, areas));
-  return findings.sort((a, b) => RANK[a.severity] - RANK[b.severity] || a.node.localeCompare(b.node));
+  return findings.sort(
+    (a, b) => RANK[a.severity] - RANK[b.severity] || a.node.localeCompare(b.node),
+  );
 };

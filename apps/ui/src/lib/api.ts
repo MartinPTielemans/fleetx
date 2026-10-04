@@ -45,7 +45,12 @@ const askOtherTabs = () =>
     if (channel === null) return resolve("");
     const answer = (event: MessageEvent<unknown>) => {
       const data = event.data;
-      if (typeof data === "object" && data !== null && "token" in data && typeof data.token === "string") {
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "token" in data &&
+        typeof data.token === "string"
+      ) {
         channel.removeEventListener("message", answer);
         resolve(data.token);
       }
@@ -59,23 +64,38 @@ const askOtherTabs = () =>
   });
 
 /** Why this tab has no token, or null when it has one. */
-export type SessionStart = { readonly ok: true } | { readonly ok: false; readonly title: string; readonly message: string };
+export type SessionStart =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly title: string; readonly message: string };
 
 /** Trade the link's ticket for a token, or find the one this tab (or another) already has. */
 export async function startSession(): Promise<SessionStart> {
   const ticket = /(?:^#|&)ticket=([0-9a-f]+)/.exec(window.location.hash)?.[1];
   if (ticket !== undefined) {
     // Gone from the address bar (and history) before anything else can read it.
-    window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + window.location.search,
+    );
     let response: Response;
     try {
-      response = await fetch("/api/session", { method: "POST", headers: { "x-t3-fleet-ticket": ticket } });
+      response = await fetch("/api/session", {
+        method: "POST",
+        headers: { "x-t3-fleet-ticket": ticket },
+      });
     } catch {
       return { ok: false, title: "t3-fleet ui is not answering", message: "Is it still running?" };
     }
     const text = await response.text();
-    if (response.status === 410) return { ok: false, title: "This link was already used", message: text.trim() };
-    if (!response.ok) return { ok: false, title: "This link is not from this run of t3-fleet ui", message: text.trim() };
+    if (response.status === 410)
+      return { ok: false, title: "This link was already used", message: text.trim() };
+    if (!response.ok)
+      return {
+        ok: false,
+        title: "This link is not from this run of t3-fleet ui",
+        message: text.trim(),
+      };
     window.sessionStorage.setItem(TOKEN_KEY, decoder(UiSessionGrant)("/api/session", text).token);
     return { ok: true };
   }
@@ -85,7 +105,11 @@ export async function startSession(): Promise<SessionStart> {
     window.sessionStorage.setItem(TOKEN_KEY, shared);
     return { ok: true };
   }
-  return { ok: false, title: "Open the link t3-fleet ui printed", message: "Each link works once; t3-fleet ui prints a new one for another tab." };
+  return {
+    ok: false,
+    title: "Open the link t3-fleet ui printed",
+    message: "Each link works once; t3-fleet ui prints a new one for another tab.",
+  };
 }
 
 export class ApiError extends Error {
@@ -97,7 +121,8 @@ export class ApiError extends Error {
 }
 
 /** The hub or the models part is not there (yet): no relay, no hub on it, or no answer. */
-export const isUnavailable = (error: unknown) => error instanceof ApiError && [404, 502, 503].includes(error.status);
+export const isUnavailable = (error: unknown) =>
+  error instanceof ApiError && [404, 502, 503].includes(error.status);
 export const isUnauthorized = (error: unknown) => error instanceof ApiError && error.status === 401;
 
 async function request(method: "GET" | "POST", path: string, body?: unknown): Promise<string> {
@@ -105,14 +130,18 @@ async function request(method: "GET" | "POST", path: string, body?: unknown): Pr
   try {
     response = await fetch(path, {
       method,
-      headers: { "x-t3-fleet-token": token(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      headers: {
+        "x-t3-fleet-token": token(),
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {
     throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
   }
   const text = await response.text();
-  if (!response.ok) throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
+  if (!response.ok)
+    throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
   return text;
 }
 
@@ -122,7 +151,10 @@ function decoder<S extends Schema.Top & { readonly DecodingServices: never }>(sc
     try {
       return decode(text);
     } catch (error) {
-      throw new ApiError(-1, `${path} answered in a shape this page does not understand: ${String(error).split("\n")[0]}`);
+      throw new ApiError(
+        -1,
+        `${path} answered in a shape this page does not understand: ${String(error).split("\n")[0]}`,
+      );
     }
   };
 }
@@ -146,7 +178,8 @@ const decodeLogin = decoder(HubLoginStart);
 
 const post = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) => {
   const decode = decoder(schema);
-  return async (path: string, body: unknown): Promise<S["Type"]> => decode(path, await request("POST", path, body));
+  return async (path: string, body: unknown): Promise<S["Type"]> =>
+    decode(path, await request("POST", path, body));
 };
 const postPlan = post(UiFixPlan);
 const postLookup = post(UiSkillsLookup);
@@ -163,23 +196,31 @@ export const api = {
   status: (fresh = false) => getStatus(fresh ? "/api/status?fresh=1" : "/api/status"),
   /** The fixes as they would run now, each with the digest that applying them sends back. */
   planFixes: (ids: ReadonlyArray<string>) => postPlan("/api/fixes/plan", { ids }),
-  applyFixes: (fixes: ReadonlyArray<{ readonly id: string; readonly digest: string }>, acknowledged: ReadonlyArray<string>) =>
-    postJob("/api/fixes", { fixes, acknowledged }),
+  applyFixes: (
+    fixes: ReadonlyArray<{ readonly id: string; readonly digest: string }>,
+    acknowledged: ReadonlyArray<string>,
+  ) => postJob("/api/fixes", { fixes, acknowledged }),
   jobs: () => getJobs("/api/jobs"),
   proposals: () => getProposals("/api/proposals"),
-  approve: (node: string, commit: string) => postJob(`/api/proposals/${encodeURIComponent(node)}/approve`, { commit }),
-  reject: (node: string, commit: string) => postJob(`/api/proposals/${encodeURIComponent(node)}/reject`, { commit }),
+  approve: (node: string, commit: string) =>
+    postJob(`/api/proposals/${encodeURIComponent(node)}/approve`, { commit }),
+  reject: (node: string, commit: string) =>
+    postJob(`/api/proposals/${encodeURIComponent(node)}/reject`, { commit }),
   alerts: () => getAlerts("/api/alerts"),
   models: () => getModels("/api/models"),
   hubServers: () => getHubServers("/api/hub/servers"),
   hubCalls: (server: string | null, limit = 200) =>
-    getHubCalls(`/api/hub/calls?limit=${limit}${server === null ? "" : `&server=${encodeURIComponent(server)}`}`),
+    getHubCalls(
+      `/api/hub/calls?limit=${limit}${server === null ? "" : `&server=${encodeURIComponent(server)}`}`,
+    ),
   hubLogin: async (name: string) => {
     const path = `/api/hub/servers/${encodeURIComponent(name)}/login`;
     return decodeLogin(path, await request("POST", path));
   },
-  hubLogout: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/logout`).then(() => undefined),
-  hubRestart: (name: string) => request("POST", `/api/hub/servers/${encodeURIComponent(name)}/restart`).then(() => undefined),
+  hubLogout: (name: string) =>
+    request("POST", `/api/hub/servers/${encodeURIComponent(name)}/logout`).then(() => undefined),
+  hubRestart: (name: string) =>
+    request("POST", `/api/hub/servers/${encodeURIComponent(name)}/restart`).then(() => undefined),
   config: (node: string) => getConfig(`/api/config/${encodeURIComponent(node)}`),
   skills: () => getSkills("/api/skills"),
   skillsLookup: (source: string) => postLookup("/api/skills/lookup", { source }),
@@ -187,7 +228,8 @@ export const api = {
     postJob("/api/skills/add", { source, skills, ...(as === undefined ? {} : { as }) }),
   /** Every skill with a source when `skills` is empty. */
   skillsPreview: (skills: ReadonlyArray<string>) => postPreview("/api/skills/preview", { skills }),
-  skillsUpdate: (skills: ReadonlyArray<string>, digest: string) => postJob("/api/skills/update", { skills, digest }),
+  skillsUpdate: (skills: ReadonlyArray<string>, digest: string) =>
+    postJob("/api/skills/update", { skills, digest }),
   skillsRemove: (skills: ReadonlyArray<string>) => postJob("/api/skills/remove", { skills }),
   /** EventSource cannot send headers; the token goes in the query instead, which only this endpoint accepts. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,

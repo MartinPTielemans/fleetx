@@ -12,16 +12,30 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 
-import { addSkills, keepUpdate, listSkills, previewUpdate, skillDescription } from "./SkillSources.ts";
+import {
+  addSkills,
+  keepUpdate,
+  listSkills,
+  previewUpdate,
+  skillDescription,
+} from "./SkillSources.ts";
 import { underSyncLock } from "./Sync.ts";
 
-const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
-const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
-const git = (cwd: string, ...args: Array<string>) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, encoding: "utf8" });
+const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
+const fails = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+  Effect.runPromise(effect.pipe(Effect.flip, Effect.provide(NodeServices.layer)));
+const git = (cwd: string, ...args: Array<string>) =>
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+    cwd,
+    encoding: "utf8",
+  });
 
 describe("skillDescription", () => {
   it("reads a one-line description from the front matter", () => {
-    expect(skillDescription("---\nname: a\ndescription: Reviews a diff\n---\nbody")).toBe("Reviews a diff");
+    expect(skillDescription("---\nname: a\ndescription: Reviews a diff\n---\nbody")).toBe(
+      "Reviews a diff",
+    );
     expect(skillDescription('---\ndescription: "Quoted: yes"\n---\n')).toBe("Quoted: yes");
     expect(skillDescription("---\ndescription: >\n  folded\n---\n")).toBeNull();
     expect(skillDescription("no front matter\ndescription: nope")).toBeNull();
@@ -32,7 +46,8 @@ describe("updating vendored skills", () => {
   const root = mkdtempSync(join(tmpdir(), "t3-fleet-skills-"));
   const source = join(root, "upstream");
   const repo = join(root, "fleet");
-  const skill = (text: string) => writeFileSync(join(source, "review", "SKILL.md"), `---\ndescription: Reviews\n---\n${text}\n`);
+  const skill = (text: string) =>
+    writeFileSync(join(source, "review", "SKILL.md"), `---\ndescription: Reviews\n---\n${text}\n`);
 
   beforeAll(async () => {
     // The scratch clone lives under $HOME.
@@ -50,7 +65,9 @@ describe("updating vendored skills", () => {
   });
 
   it("lists the repo's skills with their source", async () => {
-    expect(await run(listSkills(repo))).toEqual([{ name: "review", description: "Reviews", source: { name: "upstream", url: source } }]);
+    expect(await run(listSkills(repo))).toEqual([
+      { name: "review", description: "Reviews", source: { name: "upstream", url: source } },
+    ]);
   });
 
   it("previews an upstream change and leaves the repo as it was", async () => {
@@ -66,7 +83,9 @@ describe("updating vendored skills", () => {
     expect(preview.diff).toContain("NEW.md");
     expect(git(repo, "status", "--porcelain")).toBe("");
 
-    expect(await fails(keepUpdate(repo, ["review"], "not-the-digest"))).toBe("upstream changed since the preview; preview again");
+    expect(await fails(keepUpdate(repo, ["review"], "not-the-digest"))).toBe(
+      "upstream changed since the preview; preview again",
+    );
     expect(git(repo, "status", "--porcelain")).toBe("");
 
     expect(await run(keepUpdate(repo, ["review"], preview.digest))).toEqual(["skills/review"]);
@@ -76,7 +95,9 @@ describe("updating vendored skills", () => {
   });
 
   it("refuses to preview over edits of the skill's own", async () => {
-    expect(await fails(previewUpdate(repo, ["review"]))).toContain("changes not yet committed or proposed");
+    expect(await fails(previewUpdate(repo, ["review"]))).toContain(
+      "changes not yet committed or proposed",
+    );
     expect(readFileSync(join(repo, "skills", "review", "SKILL.md"), "utf8")).toContain("v2");
   });
 });
@@ -110,11 +131,13 @@ describe("the sync lock", () => {
     process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
     const hold = underSyncLock(Effect.sleep(Duration.millis(200)).pipe(Effect.as("ran")));
     const results = await Effect.runPromise(
-      Effect.all([hold, hold, hold].map((e) => Effect.result(e)), { concurrency: "unbounded" }).pipe(Effect.provide(NodeServices.layer)),
+      Effect.all(
+        [hold, hold, hold].map((e) => Effect.result(e)),
+        { concurrency: "unbounded" },
+      ).pipe(Effect.provide(NodeServices.layer)),
     );
     expect(results.filter((r) => r._tag === "Success")).toHaveLength(1);
     // Released afterwards.
     expect(await run(hold)).toBe("ran");
   });
 });
-

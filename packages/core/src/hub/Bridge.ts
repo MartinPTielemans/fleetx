@@ -59,7 +59,12 @@ import {
   type JsonRpcMessage,
 } from "./JsonRpc.ts";
 import { randomSecret } from "./Policy.ts";
-import { textResponse, type ForwardRequest, type Upstream, type UpstreamResponse } from "./Upstream.ts";
+import {
+  textResponse,
+  type ForwardRequest,
+  type Upstream,
+  type UpstreamResponse,
+} from "./Upstream.ts";
 
 /** A running stdio process: lines in, lines out. */
 export interface StdioProcess {
@@ -93,10 +98,14 @@ interface Session {
 }
 
 /** Notifications every client may see: they say the server changed, not what a client asked. */
-const isBroadcast = (method: string | undefined) => method !== undefined && (method.endsWith("/list_changed") || method === "notifications/resources/updated");
+const isBroadcast = (method: string | undefined) =>
+  method !== undefined &&
+  (method.endsWith("/list_changed") || method === "notifications/resources/updated");
 
 /** The part of an initialize result the bridge relies on. */
-const decodeInitializeResult = Schema.decodeUnknownOption(Schema.Struct({ protocolVersion: Schema.String }));
+const decodeInitializeResult = Schema.decodeUnknownOption(
+  Schema.Struct({ protocolVersion: Schema.String }),
+);
 
 const BACKOFF_MIN = 1_000;
 const BACKOFF_MAX = 5 * 60_000;
@@ -144,10 +153,15 @@ export const makeBridge = (options: {
     const progress = new Map<string, string>(); // bridge token → pending key
     const sessions = new Map<string, Session>();
     let current: StdioProcess | null = null;
-    let initialized: Deferred.Deferred<JsonRpcMessage, string> = yield* Deferred.make<JsonRpcMessage, string>();
+    let initialized: Deferred.Deferred<JsonRpcMessage, string> = yield* Deferred.make<
+      JsonRpcMessage,
+      string
+    >();
     let kill: Deferred.Deferred<void> = yield* Deferred.make<void>();
     let stopped = false;
-    const sessionIdle = Duration.toMillis(Duration.fromInputUnsafe(options.sessionIdle ?? SESSION_IDLE));
+    const sessionIdle = Duration.toMillis(
+      Duration.fromInputUnsafe(options.sessionIdle ?? SESSION_IDLE),
+    );
     const requestTimeout = Duration.fromInputUnsafe(options.requestTimeout ?? REQUEST_TIMEOUT);
 
     const forget = (key: string) => {
@@ -162,7 +176,9 @@ export const makeBridge = (options: {
         [...pending.keys()],
         (key) => {
           const p = forget(key);
-          return p === undefined ? Effect.void : p.deliver(errorMessage(p.clientId, -32603, reason));
+          return p === undefined
+            ? Effect.void
+            : p.deliver(errorMessage(p.clientId, -32603, reason));
         },
         { discard: true },
       );
@@ -182,7 +198,13 @@ export const makeBridge = (options: {
             yield* p.deliver(errorMessage(p.clientId, -32603, `${options.name}: ${reason}`));
             if (current === null || p.method === "initialize") return;
             const requestId = Number(key.slice(key.indexOf(":") + 1));
-            yield* current.write(toJson({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId, reason } }));
+            yield* current.write(
+              toJson({
+                jsonrpc: "2.0",
+                method: "notifications/cancelled",
+                params: { requestId, reason },
+              }),
+            );
           }),
         { discard: true },
       );
@@ -201,7 +223,12 @@ export const makeBridge = (options: {
     const broadcast = (message: JsonRpcMessage) =>
       Effect.forEach(
         [...sessions.values()],
-        (s) => (s.stream === null ? Effect.void : Queue.offer(s.stream, sseFrame(toJson(message), { event: "message" })).pipe(Effect.asVoid)),
+        (s) =>
+          s.stream === null
+            ? Effect.void
+            : Queue.offer(s.stream, sseFrame(toJson(message), { event: "message" })).pipe(
+                Effect.asVoid,
+              ),
         { discard: true },
       );
 
@@ -220,14 +247,29 @@ export const makeBridge = (options: {
           } else if (isRequest(message) && message.method === "ping") {
             yield* process.write(toJson({ jsonrpc: "2.0", id: message.id ?? null, result: {} }));
           } else if (isRequest(message)) {
-            yield* process.write(toJson(errorMessage(message.id ?? null, -32601, `the T3 Fleet hub does not offer ${message.method ?? "this method"} to servers`)));
+            yield* process.write(
+              toJson(
+                errorMessage(
+                  message.id ?? null,
+                  -32601,
+                  `the T3 Fleet hub does not offer ${message.method ?? "this method"} to servers`,
+                ),
+              ),
+            );
           } else if (isNotification(message)) {
             const params = message.params as { progressToken?: unknown } | undefined;
-            if (message.method === "notifications/progress" && params?.progressToken !== undefined) {
+            if (
+              message.method === "notifications/progress" &&
+              params?.progressToken !== undefined
+            ) {
               const key = progress.get(String(params.progressToken));
               const p = key === undefined ? undefined : pending.get(key);
               if (p !== undefined) p.lastHeard = yield* Clock.currentTimeMillis;
-              if (p?.progressToken != null) yield* p.deliver({ ...message, params: { ...params, progressToken: p.progressToken.client } });
+              if (p?.progressToken != null)
+                yield* p.deliver({
+                  ...message,
+                  params: { ...params, progressToken: p.progressToken.client },
+                });
             } else if (isBroadcast(message.method)) {
               yield* broadcast(message);
             } else {
@@ -243,7 +285,10 @@ export const makeBridge = (options: {
       });
 
     /** Write a message to the process; a request is remembered under the returned key until answered. */
-    const send = (message: JsonRpcMessage, entry: Omit<Pending, "progressToken" | "method" | "lastHeard"> | null) =>
+    const send = (
+      message: JsonRpcMessage,
+      entry: Omit<Pending, "progressToken" | "method" | "lastHeard"> | null,
+    ) =>
       Effect.gen(function* () {
         if (stopped) return yield* Effect.fail("the hub stopped serving it");
         const process = current;
@@ -258,12 +303,22 @@ export const makeBridge = (options: {
         const meta = (params as { _meta?: { progressToken?: unknown } } | undefined)?._meta;
         if (meta?.progressToken !== undefined) {
           progressToken = { bridge: `fxp-${bridgeId}`, client: meta.progressToken };
-          params = { ...(params as object), _meta: { ...meta, progressToken: progressToken.bridge } };
+          params = {
+            ...(params as object),
+            _meta: { ...meta, progressToken: progressToken.bridge },
+          };
           progress.set(progressToken.bridge, idKey(bridgeId));
         }
         const key = idKey(bridgeId);
-        pending.set(key, { ...entry, progressToken, method: message.method ?? "", lastHeard: yield* Clock.currentTimeMillis });
-        yield* process.write(toJson({ ...message, id: bridgeId, ...(params === undefined ? {} : { params }) }));
+        pending.set(key, {
+          ...entry,
+          progressToken,
+          method: message.method ?? "",
+          lastHeard: yield* Clock.currentTimeMillis,
+        });
+        yield* process.write(
+          toJson({ ...message, id: bridgeId, ...(params === undefined ? {} : { params }) }),
+        );
         return key;
       });
 
@@ -273,45 +328,65 @@ export const makeBridge = (options: {
         const done = yield* Deferred.make<JsonRpcMessage>();
         const key = yield* send(
           { jsonrpc: "2.0", id: 0, method, ...(params === undefined ? {} : { params }) },
-          { session: null, clientId: 0, deliver: (m) => Deferred.succeed(done, m).pipe(Effect.asVoid) },
+          {
+            session: null,
+            clientId: 0,
+            deliver: (m) => Deferred.succeed(done, m).pipe(Effect.asVoid),
+          },
         );
         return yield* Deferred.await(done).pipe(
           Effect.timeoutOption(Duration.seconds(30)),
-          Effect.flatMap((o) => (o._tag === "Some" ? Effect.succeed(o.value) : Effect.fail(`${method} got no answer within 30s`))),
+          Effect.flatMap((o) =>
+            o._tag === "Some"
+              ? Effect.succeed(o.value)
+              : Effect.fail(`${method} got no answer within 30s`),
+          ),
           Effect.ensuring(abandon(key === null ? [] : [key], `${method} timed out`)),
         );
       });
 
     // The supervisor: start, initialize, read until exit, back off, again.
-    const runOnce: Effect.Effect<{ readonly why: string; readonly startedAt: number }, string> = Effect.scoped(
-      Effect.gen(function* () {
-        yield* setStatus({ state: "starting", detail: status.state === "error" ? status.detail : null });
-        const process = yield* options.spawn;
-        current = process;
-        const reader = yield* process.lines.pipe(
-          Stream.runForEach((line) => dispatch(line, process)),
-          Effect.forkScoped,
-        );
-        const early: Effect.Effect<never, string> = process.exited.pipe(Effect.flatMap((why) => Effect.fail(`exited before answering initialize: ${why}`)));
-        const init = yield* Effect.raceFirst(
-          ownRequest("initialize", {
-            protocolVersion: PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: { name: "t3-fleet-hub", version: options.version ?? "1" },
-          }),
-          early,
-        );
-        if (init.error != null) return yield* Effect.fail(`initialize failed: ${String((init.error as { message?: unknown }).message).slice(0, 200)}`);
-        if (Option.isNone(decodeInitializeResult(init.result))) return yield* Effect.fail("initialize answered without a protocol version");
-        yield* process.write(toJson({ jsonrpc: "2.0", method: "notifications/initialized" }));
-        yield* Deferred.succeed(initialized, init);
-        yield* setStatus({ state: "running", detail: null });
-        const startedAt = yield* Clock.currentTimeMillis;
-        const why = yield* process.exited.pipe(Effect.raceFirst(Deferred.await(kill).pipe(Effect.as("restarted"))));
-        yield* Fiber.interrupt(reader);
-        return { why, startedAt };
-      }),
-    );
+    const runOnce: Effect.Effect<{ readonly why: string; readonly startedAt: number }, string> =
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* setStatus({
+            state: "starting",
+            detail: status.state === "error" ? status.detail : null,
+          });
+          const process = yield* options.spawn;
+          current = process;
+          const reader = yield* process.lines.pipe(
+            Stream.runForEach((line) => dispatch(line, process)),
+            Effect.forkScoped,
+          );
+          const early: Effect.Effect<never, string> = process.exited.pipe(
+            Effect.flatMap((why) => Effect.fail(`exited before answering initialize: ${why}`)),
+          );
+          const init = yield* Effect.raceFirst(
+            ownRequest("initialize", {
+              protocolVersion: PROTOCOL_VERSION,
+              capabilities: {},
+              clientInfo: { name: "t3-fleet-hub", version: options.version ?? "1" },
+            }),
+            early,
+          );
+          if (init.error != null)
+            return yield* Effect.fail(
+              `initialize failed: ${String((init.error as { message?: unknown }).message).slice(0, 200)}`,
+            );
+          if (Option.isNone(decodeInitializeResult(init.result)))
+            return yield* Effect.fail("initialize answered without a protocol version");
+          yield* process.write(toJson({ jsonrpc: "2.0", method: "notifications/initialized" }));
+          yield* Deferred.succeed(initialized, init);
+          yield* setStatus({ state: "running", detail: null });
+          const startedAt = yield* Clock.currentTimeMillis;
+          const why = yield* process.exited.pipe(
+            Effect.raceFirst(Deferred.await(kill).pipe(Effect.as("restarted"))),
+          );
+          yield* Fiber.interrupt(reader);
+          return { why, startedAt };
+        }),
+      );
 
     yield* Effect.gen(function* () {
       let backoff = BACKOFF_MIN;
@@ -322,15 +397,23 @@ export const makeBridge = (options: {
           Effect.result,
         );
         current = null;
-        const reason = result._tag === "Success" ? `exited (${result.success.why})` : result.failure;
-        const stayedUp = result._tag === "Success" && (yield* Clock.currentTimeMillis) - result.success.startedAt > 60_000;
+        const reason =
+          result._tag === "Success" ? `exited (${result.success.why})` : result.failure;
+        const stayedUp =
+          result._tag === "Success" &&
+          (yield* Clock.currentTimeMillis) - result.success.startedAt > 60_000;
         const killed = result._tag === "Success" && result.success.why === "restarted";
         yield* failAll(`${options.name} stopped: ${reason}`);
         initialized = yield* Deferred.make<JsonRpcMessage, string>();
         kill = yield* Deferred.make<void>();
         if (killed || stayedUp) backoff = BACKOFF_MIN;
-        yield* setStatus(killed ? { state: "starting", detail: null } : { state: "error", detail: reason });
-        if (!killed) yield* Effect.logWarning(`hub: ${options.name} ${reason}; restarting in ${Math.round(backoff / 1000)}s`);
+        yield* setStatus(
+          killed ? { state: "starting", detail: null } : { state: "error", detail: reason },
+        );
+        if (!killed)
+          yield* Effect.logWarning(
+            `hub: ${options.name} ${reason}; restarting in ${Math.round(backoff / 1000)}s`,
+          );
         yield* Effect.sleep(killed ? 0 : backoff);
         backoff = Math.min(backoff * 2, BACKOFF_MAX);
       }
@@ -348,7 +431,8 @@ export const makeBridge = (options: {
     );
 
     /** Unused for a day, with no open stream and nothing in flight. */
-    const expired = (s: Session, now: number, busy: ReadonlySet<string | null>) => s.stream === null && !busy.has(s.id) && now - s.lastSeen > sessionIdle;
+    const expired = (s: Session, now: number, busy: ReadonlySet<string | null>) =>
+      s.stream === null && !busy.has(s.id) && now - s.lastSeen > sessionIdle;
 
     const expire = (now: number) =>
       Effect.gen(function* () {
@@ -378,9 +462,15 @@ export const makeBridge = (options: {
     yield* Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       yield* expire(now);
-      const stale = [...pending.entries()].filter(([, p]) => now - p.lastHeard > Duration.toMillis(requestTimeout)).map(([key]) => key);
+      const stale = [...pending.entries()]
+        .filter(([, p]) => now - p.lastHeard > Duration.toMillis(requestTimeout))
+        .map(([key]) => key);
       yield* abandon(stale, `no answer within ${Duration.format(requestTimeout)}`);
-    }).pipe(Effect.delay(Duration.min(Duration.minutes(1), Duration.divideUnsafe(requestTimeout, 2))), Effect.forever, Effect.forkScoped);
+    }).pipe(
+      Effect.delay(Duration.min(Duration.minutes(1), Duration.divideUnsafe(requestTimeout, 2))),
+      Effect.forever,
+      Effect.forkScoped,
+    );
 
     const sessionOf = (request: ForwardRequest) =>
       Effect.gen(function* () {
@@ -395,27 +485,45 @@ export const makeBridge = (options: {
       });
 
     const notFound = textResponse(404, toJson(errorMessage(null, -32001, "Session not found")));
-    const badRequest = (message: string) => textResponse(400, toJson(errorMessage(null, -32600, message)));
+    const badRequest = (message: string) =>
+      textResponse(400, toJson(errorMessage(null, -32600, message)));
 
     const post = (request: ForwardRequest): Effect.Effect<UpstreamResponse> =>
       Effect.gen(function* () {
         const parsed = parseMessages(request.body);
-        if (parsed === null) return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
+        if (parsed === null)
+          return textResponse(400, toJson(errorMessage(null, -32700, "Parse error")));
         const now = yield* Clock.currentTimeMillis;
         const init = parsed.messages.find((m) => m.method === "initialize" && isRequest(m));
         if (init !== undefined) {
           if (parsed.messages.length > 1) return badRequest("initialize must be sent alone");
-          const result = yield* Deferred.await(initialized).pipe(Effect.timeoutOption(Duration.seconds(30)), Effect.result);
+          const result = yield* Deferred.await(initialized).pipe(
+            Effect.timeoutOption(Duration.seconds(30)),
+            Effect.result,
+          );
           if (result._tag === "Failure" || result.success._tag === "None") {
-            return textResponse(200, toJson(errorMessage(init.id ?? null, -32603, `${options.name} is not ready: ${status.detail ?? "starting"}`)));
+            return textResponse(
+              200,
+              toJson(
+                errorMessage(
+                  init.id ?? null,
+                  -32603,
+                  `${options.name} is not ready: ${status.detail ?? "starting"}`,
+                ),
+              ),
+            );
           }
           yield* makeRoom(now);
           const id = randomSecret();
           sessions.set(id, { id, stream: null, lastSeen: now });
           const { id: _, ...rest } = result.success.value;
-          return textResponse(200, toJson({ ...rest, id: init.id ?? null }), { "mcp-session-id": id, "mcp-protocol-version": PROTOCOL_VERSION });
+          return textResponse(200, toJson({ ...rest, id: init.id ?? null }), {
+            "mcp-session-id": id,
+            "mcp-protocol-version": PROTOCOL_VERSION,
+          });
         }
-        if (request.headers["mcp-session-id"] === undefined) return badRequest("Mcp-Session-Id header is required");
+        if (request.headers["mcp-session-id"] === undefined)
+          return badRequest("Mcp-Session-Id header is required");
         const session = yield* sessionOf(request);
         if (session === undefined) return notFound;
         session.lastSeen = now;
@@ -427,10 +535,18 @@ export const makeBridge = (options: {
           if (m.method === "notifications/initialized") continue;
           if (m.method === "notifications/cancelled") {
             const target = (m.params as { requestId?: JsonRpcId } | undefined)?.requestId;
-            const match = [...pending.entries()].find(([, p]) => p.session === sessionId && target !== undefined && idKey(p.clientId) === idKey(target));
+            const match = [...pending.entries()].find(
+              ([, p]) =>
+                p.session === sessionId &&
+                target !== undefined &&
+                idKey(p.clientId) === idKey(target),
+            );
             if (match === undefined) continue;
             const bridgeId = Number(match[0].slice(match[0].indexOf(":") + 1));
-            yield* send({ ...m, params: { ...(m.params as object), requestId: bridgeId } }, null).pipe(Effect.ignore);
+            yield* send(
+              { ...m, params: { ...(m.params as object), requestId: bridgeId } },
+              null,
+            ).pipe(Effect.ignore);
             continue;
           }
           yield* send(m, null).pipe(Effect.ignore);
@@ -446,12 +562,20 @@ export const makeBridge = (options: {
           });
         const keys: Array<string> = [];
         for (const m of requests) {
-          const sent = yield* send(m, { session: sessionId, clientId: m.id as JsonRpcId, deliver }).pipe(Effect.result);
-          if (sent._tag === "Failure") yield* deliver(errorMessage(m.id ?? null, -32603, `${options.name}: ${sent.failure}`));
+          const sent = yield* send(m, {
+            session: sessionId,
+            clientId: m.id as JsonRpcId,
+            deliver,
+          }).pipe(Effect.result);
+          if (sent._tag === "Failure")
+            yield* deliver(errorMessage(m.id ?? null, -32603, `${options.name}: ${sent.failure}`));
           else if (sent.success !== null) keys.push(sent.success);
         }
         // However the response ends (answered, timed out, or its client gone), nothing stays pending.
-        const messages = Stream.fromQueue(out).pipe(Stream.timeout(requestTimeout), Stream.ensuring(abandon(keys, "the client stopped waiting")));
+        const messages = Stream.fromQueue(out).pipe(
+          Stream.timeout(requestTimeout),
+          Stream.ensuring(abandon(keys, "the client stopped waiting")),
+        );
         const wantsSse = (request.headers["accept"] ?? "").includes("text/event-stream");
         if (wantsSse) {
           return {
@@ -464,19 +588,27 @@ export const makeBridge = (options: {
           };
         }
         const responses = (yield* Stream.runCollect(messages)).filter(isResponse);
-        const body = parsed.batch ? toJson(responses) : toJson(responses[0] ?? errorMessage(requests[0]?.id ?? null, -32603, "no response"));
+        const body = parsed.batch
+          ? toJson(responses)
+          : toJson(responses[0] ?? errorMessage(requests[0]?.id ?? null, -32603, "no response"));
         return textResponse(200, body);
       });
 
     const get = (request: ForwardRequest): Effect.Effect<UpstreamResponse> =>
       Effect.gen(function* () {
-        if (request.headers["mcp-session-id"] === undefined) return badRequest("Mcp-Session-Id header is required");
+        if (request.headers["mcp-session-id"] === undefined)
+          return badRequest("Mcp-Session-Id header is required");
         const session = yield* sessionOf(request);
         if (session === undefined) return notFound;
         if (session.stream !== null) yield* Queue.end(session.stream);
-        const stream = yield* Queue.make<string, Cause.Done>({ capacity: 256, strategy: "sliding" });
+        const stream = yield* Queue.make<string, Cause.Done>({
+          capacity: 256,
+          strategy: "sliding",
+        });
         session.stream = stream;
-        const keepalive = Stream.tick(Duration.seconds(25)).pipe(Stream.map(() => ": keepalive\n\n"));
+        const keepalive = Stream.tick(Duration.seconds(25)).pipe(
+          Stream.map(() => ": keepalive\n\n"),
+        );
         return {
           status: 200,
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
@@ -508,11 +640,17 @@ export const makeBridge = (options: {
               }),
       status: Effect.sync(() => status),
       restart: Effect.suspend(() => Deferred.succeed(kill, undefined)).pipe(Effect.asVoid),
-      clientRequests: Effect.sync(() => [...pending.values()].filter((p) => p.session !== null).length),
+      clientRequests: Effect.sync(
+        () => [...pending.values()].filter((p) => p.session !== null).length,
+      ),
       request: (method, params) =>
         Deferred.await(initialized).pipe(
           Effect.timeoutOption(Duration.seconds(30)),
-          Effect.flatMap((o) => (o._tag === "Some" ? ownRequest(method, params) : Effect.fail(`${options.name} is not ready`))),
+          Effect.flatMap((o) =>
+            o._tag === "Some"
+              ? ownRequest(method, params)
+              : Effect.fail(`${options.name} is not ready`),
+          ),
         ),
     };
     return bridge;

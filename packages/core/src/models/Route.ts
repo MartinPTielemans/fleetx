@@ -26,10 +26,13 @@ import * as Schema from "effect/Schema";
 import { T3_DRIVERS, t3SettingsPath } from "../T3Settings.ts";
 import { own } from "./Recipes.ts";
 
-export class RouteError extends Schema.TaggedError<RouteError>()("RouteError", { message: Schema.String }) {}
+export class RouteError extends Schema.TaggedError<RouteError>()("RouteError", {
+  message: Schema.String,
+}) {}
 
 type Json = Record<string, unknown>;
-const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+const isObject = (v: unknown): v is Json =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
@@ -37,17 +40,24 @@ const prettyJson = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 const parse = (text: string, what: string) =>
   decodeJson(text).pipe(
     Effect.mapError(() => new RouteError({ message: `${what} is not valid JSON` })),
-    Effect.filterOrFail(isObject, () => new RouteError({ message: `${what} is not a JSON object` })),
+    Effect.filterOrFail(
+      isObject,
+      () => new RouteError({ message: `${what} is not a JSON object` }),
+    ),
   );
 
 /** Where an instance's binaryPath lives in settings.json; null when T3 has no such instance. */
-const locate = (settings: Json, instanceId: string): { readonly holder: () => Json; readonly current: string | null } | null => {
+const locate = (
+  settings: Json,
+  instanceId: string,
+): { readonly holder: () => Json; readonly current: string | null } | null => {
   const instances = settings["providerInstances"];
   const explicit = isObject(instances) ? instances[instanceId] : undefined;
   if (isObject(explicit)) {
     const config = explicit["config"];
     return {
-      current: isObject(config) && typeof config["binaryPath"] === "string" ? config["binaryPath"] : null,
+      current:
+        isObject(config) && typeof config["binaryPath"] === "string" ? config["binaryPath"] : null,
       holder: () => {
         if (!isObject(explicit["config"])) explicit["config"] = {};
         return explicit["config"] as Json;
@@ -58,7 +68,8 @@ const locate = (settings: Json, instanceId: string): { readonly holder: () => Js
   const providers = settings["providers"];
   const legacy = isObject(providers) ? providers[instanceId] : undefined;
   return {
-    current: isObject(legacy) && typeof legacy["binaryPath"] === "string" ? legacy["binaryPath"] : null,
+    current:
+      isObject(legacy) && typeof legacy["binaryPath"] === "string" ? legacy["binaryPath"] : null,
     holder: () => {
       if (!isObject(settings["providers"])) settings["providers"] = {};
       const all = settings["providers"] as Json;
@@ -73,23 +84,36 @@ export const withBinaryPath = (text: string, instanceId: string, binaryPath: str
   Effect.gen(function* () {
     const settings = yield* parse(text, "settings.json");
     const at = locate(settings, instanceId);
-    if (at === null) return yield* new RouteError({ message: `T3 has no provider instance named ${instanceId}` });
+    if (at === null)
+      return yield* new RouteError({ message: `T3 has no provider instance named ${instanceId}` });
     const holder = at.holder();
     if (binaryPath === null) delete holder["binaryPath"];
     else holder["binaryPath"] = binaryPath;
     return { text: prettyJson(settings), previous: at.current };
   });
 
-export const routeProvider = (home: string, instanceId: string, launcher: string | null, options: { readonly undo?: boolean } = {}) =>
+export const routeProvider = (
+  home: string,
+  instanceId: string,
+  launcher: string | null,
+  options: { readonly undo?: boolean } = {},
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const file = t3SettingsPath(home);
     const backup = `${file}.t3-fleet-models-backup`;
-    const text = yield* fs.readFileString(file).pipe(Effect.mapError(() => new RouteError({ message: `${file} does not exist; has T3 run here?` })));
+    const text = yield* fs
+      .readFileString(file)
+      .pipe(
+        Effect.mapError(
+          () => new RouteError({ message: `${file} does not exist; has T3 run here?` }),
+        ),
+      );
     let want = launcher;
     if (options.undo === true) {
       const saved = yield* fs.readFileString(backup).pipe(Effect.option);
-      if (Option.isNone(saved)) return yield* new RouteError({ message: `no ${backup} to undo from` });
+      if (Option.isNone(saved))
+        return yield* new RouteError({ message: `no ${backup} to undo from` });
       const original = locate(yield* parse(saved.value, backup), instanceId);
       want = original?.current ?? null;
     }

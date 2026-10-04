@@ -96,7 +96,10 @@ export const makeTokenStore = (options: { readonly file: string; readonly identi
       const plain = yield* decryptWith(options.identity, armored.value).pipe(Effect.option);
       const decoded = Option.flatMap(plain, decodeStore);
       if (Option.isSome(decoded)) current = decoded.value;
-      else yield* Effect.logWarning(`hub: ${options.file} cannot be read with this node's key; starting with no stored logins`);
+      else
+        yield* Effect.logWarning(
+          `hub: ${options.file} cannot be read with this node's key; starting with no stored logins`,
+        );
     }
     const lock = yield* Semaphore.make(1);
 
@@ -104,7 +107,9 @@ export const makeTokenStore = (options: { readonly file: string; readonly identi
       Effect.gen(function* () {
         const text = yield* encodeStore(store);
         const sealed = yield* encryptFor([recipient], text);
-        yield* fs.makeDirectory(path.dirname(options.file), { recursive: true, mode: 0o700 }).pipe(Effect.ignore);
+        yield* fs
+          .makeDirectory(path.dirname(options.file), { recursive: true, mode: 0o700 })
+          .pipe(Effect.ignore);
         const temp = `${options.file}.tmp`;
         yield* fs.writeFileString(temp, sealed, { mode: 0o600 });
         yield* fs.chmod(temp, 0o600);
@@ -118,7 +123,12 @@ export const makeTokenStore = (options: { readonly file: string; readonly identi
           lock,
           Effect.gen(function* () {
             const [result, next] = f(current);
-            yield* write(next).pipe(Effect.tapError((e) => Effect.logError(`hub: writing ${options.file} failed: ${String(e)}`)), Effect.ignore);
+            yield* write(next).pipe(
+              Effect.tapError((e) =>
+                Effect.logError(`hub: writing ${options.file} failed: ${String(e)}`),
+              ),
+              Effect.ignore,
+            );
             current = next;
             return result;
           }),

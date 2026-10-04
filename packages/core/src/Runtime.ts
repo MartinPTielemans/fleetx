@@ -15,16 +15,36 @@ import * as FileSystem from "effect/FileSystem";
 
 import { exec } from "./Exec.ts";
 import { sha256 } from "./Hash.ts";
-import { BUNDLE_FILE, CLI, LEGACY_BUNDLE_FILE, LEGACY_CLI, LEGACY_SHARE_DIR, legacyLaunchdLabel, legacySystemdUnit, SHARE_DIR } from "./Names.ts";
+import {
+  BUNDLE_FILE,
+  CLI,
+  LEGACY_BUNDLE_FILE,
+  LEGACY_CLI,
+  LEGACY_SHARE_DIR,
+  legacyLaunchdLabel,
+  legacySystemdUnit,
+  SHARE_DIR,
+} from "./Names.ts";
 
 export const MIN_NODE_MAJOR = 24;
 
 export const stableNode = (home: string) =>
   Effect.gen(function* () {
-    const candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node", `${home}/.nix-profile/bin/node`, "/run/current-system/sw/bin/node"];
+    const candidates = [
+      "/opt/homebrew/bin/node",
+      "/usr/local/bin/node",
+      "/usr/bin/node",
+      `${home}/.nix-profile/bin/node`,
+      "/run/current-system/sw/bin/node",
+    ];
     for (const candidate of candidates) {
-      const version = yield* exec({ command: candidate, args: ["-p", "process.versions.node"], timeout: Duration.seconds(5) });
-      if (version.code === 0 && Number(version.stdout.trim().split(".")[0]) >= MIN_NODE_MAJOR) return candidate;
+      const version = yield* exec({
+        command: candidate,
+        args: ["-p", "process.versions.node"],
+        timeout: Duration.seconds(5),
+      });
+      if (version.code === 0 && Number(version.stdout.trim().split(".")[0]) >= MIN_NODE_MAJOR)
+        return candidate;
     }
     return process.execPath;
   });
@@ -36,7 +56,8 @@ export const stableNode = (home: string) =>
  * puts back the fleetx units the rename just retired. Until 1.0.
  */
 export const currentBundlePath = (home: string, bundle: string) =>
-  bundle === `${home}/${LEGACY_SHARE_DIR}/${LEGACY_BUNDLE_FILE}` || bundle === `${home}/${SHARE_DIR}/${LEGACY_BUNDLE_FILE}`
+  bundle === `${home}/${LEGACY_SHARE_DIR}/${LEGACY_BUNDLE_FILE}` ||
+  bundle === `${home}/${SHARE_DIR}/${LEGACY_BUNDLE_FILE}`
     ? `${home}/${SHARE_DIR}/${BUNDLE_FILE}`
     : bundle;
 
@@ -97,7 +118,11 @@ export const LAUNCHD_DEFAULT_EXIT_TIMEOUT = 20;
  * ExitTimeOut of the plist being replaced, after which launchd kills it)
  * plus a margin, and only then bootstraps.
  */
-export const launchdReload = (label: string, plist: string, exitTimeout: number = LAUNCHD_DEFAULT_EXIT_TIMEOUT) => {
+export const launchdReload = (
+  label: string,
+  plist: string,
+  exitTimeout: number = LAUNCHD_DEFAULT_EXIT_TIMEOUT,
+) => {
   const job = `"gui/$(id -u)/${label}"`;
   return [
     `launchctl bootout ${job} 2>/dev/null`,
@@ -158,8 +183,12 @@ export const untilReplaced = <A, E, R, R2, R3 = never>(
       replaced.pipe(
         Effect.andThen(
           drain === undefined
-            ? Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it").pipe(Effect.andThen(Effect.sync(options.exit)))
-            : Console.log("a new T3 Fleet build is installed; exiting once the requests in flight are done").pipe(
+            ? Console.log(
+                "a new T3 Fleet build is installed; exiting so the service restarts on it",
+              ).pipe(Effect.andThen(Effect.sync(options.exit)))
+            : Console.log(
+                "a new T3 Fleet build is installed; exiting once the requests in flight are done",
+              ).pipe(
                 Effect.andThen(drain),
                 Effect.andThen(Console.log("exiting so the service restarts on the new build")),
                 Effect.andThen(

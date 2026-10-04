@@ -1,11 +1,8 @@
 {
   "name": "@t3-fleet/monorepo",
   "private": true,
+  "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@11.10.0",
-  "engines": {
-    "node": "^24.13.1"
-  },
   "scripts": {
     "prepare": "effect-tsgo patch",
     "t3-fleet": "node apps/cli/src/bin.ts",
@@ -22,5 +19,8 @@
     "typescript": "catalog:",
     "vite-plus": "catalog:"
   },
-  "license": "MIT"
+  "engines": {
+    "node": "^24.13.1"
+  },
+  "packageManager": "pnpm@11.10.0"
 }

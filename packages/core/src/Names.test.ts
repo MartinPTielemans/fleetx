@@ -1,8 +1,17 @@
 // Plain tests on temp directories: the migration is a shell script, run here with bash as a fix would.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync } from "node:child_process";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+  // @effect-diagnostics-next-line nodeBuiltinImport:off
+} from "node:fs";
 import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
@@ -20,7 +29,11 @@ const put = (path: string, text: string) => {
   writeFileSync(path, text);
 };
 const migrate = (h: string, legacy: ReadonlyArray<"config" | "state" | "share">) =>
-  execFileSync("bash", ["-s"], { input: migrateDirs(legacy), env: { ...process.env, HOME: h }, encoding: "utf8" });
+  execFileSync("bash", ["-s"], {
+    input: migrateDirs(legacy),
+    env: { ...process.env, HOME: h },
+    encoding: "utf8",
+  });
 const isLink = (path: string) => lstatSync(path).isSymbolicLink();
 
 describe("data directories", () => {
@@ -39,7 +52,11 @@ describe("data directories", () => {
 
   it("resolve the same way in shell", () => {
     const h = home();
-    const resolve = () => execFileSync("sh", ["-c", `echo "${SH_CONFIG_DIR}"`], { env: { ...process.env, HOME: h }, encoding: "utf8" }).trim();
+    const resolve = () =>
+      execFileSync("sh", ["-c", `echo "${SH_CONFIG_DIR}"`], {
+        env: { ...process.env, HOME: h },
+        encoding: "utf8",
+      }).trim();
     expect(resolve()).toBe(`${h}/.config/t3-fleet`);
     mkdirSync(`${h}/.config/fleetx`, { recursive: true });
     expect(resolve()).toBe(`${h}/.config/fleetx`);
@@ -110,16 +127,28 @@ describe("the migration", () => {
 describe("headers between machines", () => {
   it("are read under either name, and neither is forwarded upstream", () => {
     expect(readHeader({ "x-fleetx-relay-token": "old" }, "relay-token")).toBe("old");
-    expect(readHeader({ "x-t3-fleet-relay-token": "new", "x-fleetx-relay-token": "old" }, "relay-token")).toBe("new");
-    expect(requestHeaders({ "x-t3-fleet-relay-token": "a", "x-fleetx-egress-base": "b", accept: "*/*" })).toEqual({ accept: "*/*" });
+    expect(
+      readHeader({ "x-t3-fleet-relay-token": "new", "x-fleetx-relay-token": "old" }, "relay-token"),
+    ).toBe("new");
+    expect(
+      requestHeaders({ "x-t3-fleet-relay-token": "a", "x-fleetx-egress-base": "b", accept: "*/*" }),
+    ).toEqual({ accept: "*/*" });
   });
 });
 
 describe("accepted differences from before the rename", () => {
   it("still match the engine's renamed keys", () => {
-    const finding = { node: "box", key: "engine-outdated", severity: "warn" as const, area: "engine", title: "different build" };
-    const [noted] = applyAccepted([finding], [{ id: "box:fleetx-outdated", reason: "pinned on purpose" }]);
+    const finding = {
+      node: "box",
+      key: "engine-outdated",
+      severity: "warn" as const,
+      area: "engine",
+      title: "different build",
+    };
+    const [noted] = applyAccepted(
+      [finding],
+      [{ id: "box:fleetx-outdated", reason: "pinned on purpose" }],
+    );
     expect(noted).toMatchObject({ severity: "info", detail: "accepted: pinned on purpose" });
   });
 });
-

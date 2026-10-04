@@ -33,7 +33,9 @@ export interface ExecResult {
 const collect = <E>(stream: Stream.Stream<Uint8Array, E>) =>
   stream.pipe(Stream.decodeText(), Stream.mkString);
 
-export const exec = (input: ExecInput): Effect.Effect<ExecResult, never, ChildProcessSpawner.ChildProcessSpawner> =>
+export const exec = (
+  input: ExecInput,
+): Effect.Effect<ExecResult, never, ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const command = ChildProcess.make(input.command, [...(input.args ?? [])], {
@@ -53,9 +55,18 @@ export const exec = (input: ExecInput): Effect.Effect<ExecResult, never, ChildPr
         return { stdout, stderr, code: Number(code), timedOut: false } satisfies ExecResult;
       }),
     );
-    const timed = yield* run.pipe(Effect.timeoutOption(input.timeout ?? Duration.seconds(30)), Effect.result);
+    const timed = yield* run.pipe(
+      Effect.timeoutOption(input.timeout ?? Duration.seconds(30)),
+      Effect.result,
+    );
     if (timed._tag === "Failure") {
-      return { stdout: "", stderr: "", code: null, timedOut: false, spawnError: String(timed.failure) };
+      return {
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: false,
+        spawnError: String(timed.failure),
+      };
     }
     return Option.getOrElse(timed.success, (): ExecResult => ({
       stdout: "",

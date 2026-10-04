@@ -24,14 +24,28 @@ export interface SpawnInput {
   readonly env: Readonly<Record<string, string>>;
 }
 
-export const spawnStdio = (input: SpawnInput): Effect.Effect<StdioProcess, string, Scope.Scope | ChildProcessSpawner.ChildProcessSpawner> =>
+export const spawnStdio = (
+  input: SpawnInput,
+): Effect.Effect<StdioProcess, string, Scope.Scope | ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const child = yield* spawner
-      .spawn(ChildProcess.make(input.command, [...input.args], { env: { ...input.env }, extendEnv: true, stdin: "pipe", forceKillAfter: "3 seconds" }))
+      .spawn(
+        ChildProcess.make(input.command, [...input.args], {
+          env: { ...input.env },
+          extendEnv: true,
+          stdin: "pipe",
+          forceKillAfter: "3 seconds",
+        }),
+      )
       .pipe(Effect.mapError((e) => `cannot start ${input.command}: ${e.message}`));
     const stdin = yield* Queue.make<string, Cause.Done>();
-    yield* Stream.fromQueue(stdin).pipe(Stream.encodeText, Stream.run(child.stdin), Effect.ignore, Effect.forkScoped);
+    yield* Stream.fromQueue(stdin).pipe(
+      Stream.encodeText,
+      Stream.run(child.stdin),
+      Effect.ignore,
+      Effect.forkScoped,
+    );
     let tail: Array<string> = [];
     yield* child.stderr.pipe(
       Stream.decodeText(),
@@ -48,12 +62,18 @@ export const spawnStdio = (input: SpawnInput): Effect.Effect<StdioProcess, strin
     yield* child.exitCode.pipe(
       Effect.map((code) => `code ${Number(code)}`),
       Effect.orElseSucceed(() => "unknown exit"),
-      Effect.flatMap((why) => Deferred.succeed(exited, tail.length === 0 ? why : `${why}: ${tail.join(" | ")}`)),
+      Effect.flatMap((why) =>
+        Deferred.succeed(exited, tail.length === 0 ? why : `${why}: ${tail.join(" | ")}`),
+      ),
       Effect.forkScoped,
     );
     const process: StdioProcess = {
       write: (line) => Queue.offer(stdin, `${line}\n`).pipe(Effect.asVoid),
-      lines: child.stdout.pipe(Stream.decodeText(), Stream.splitLines, Stream.ignore({ log: false })),
+      lines: child.stdout.pipe(
+        Stream.decodeText(),
+        Stream.splitLines,
+        Stream.ignore({ log: false }),
+      ),
       exited: Deferred.await(exited),
     };
     return process;

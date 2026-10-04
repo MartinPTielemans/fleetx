@@ -5,9 +5,18 @@ import { describeMerged, mergeLayers } from "./Settings.ts";
 
 describe("mergeLayers", () => {
   const merged = mergeLayers([
-    { source: "defaults", table: { t3: { channel: "stable" }, skills: { ignore: ["a", "b"], store: "~/s" } } },
-    { source: "profile workstation", table: { t3: { channel: "nightly" }, skills: { "ignore.add": ["c", "a"] } } },
-    { source: "node laptop", table: { skills: { "ignore.remove": ["b"] }, dotfiles: [{ src: "x", dest: "~/.x" }] } },
+    {
+      source: "defaults",
+      table: { t3: { channel: "stable" }, skills: { ignore: ["a", "b"], store: "~/s" } },
+    },
+    {
+      source: "profile workstation",
+      table: { t3: { channel: "nightly" }, skills: { "ignore.add": ["c", "a"] } },
+    },
+    {
+      source: "node laptop",
+      table: { skills: { "ignore.remove": ["b"] }, dotfiles: [{ src: "x", dest: "~/.x" }] },
+    },
   ]);
 
   it("merges tables key by key, later layers winning", () => {
@@ -37,7 +46,10 @@ describe("mergeLayers", () => {
   it("adds to an empty list when no lower layer has the table", () => {
     const added = mergeLayers([
       { source: "defaults", table: {} },
-      { source: "node laptop", table: { skills: { "ignore.add": ["synced"], "watch.remove": ["x"] } } },
+      {
+        source: "node laptop",
+        table: { skills: { "ignore.add": ["synced"], "watch.remove": ["x"] } },
+      },
     ]);
     expect(added.table).toEqual({ skills: { ignore: ["synced"], watch: [] } });
     const rows = Object.fromEntries(describeMerged(added).map((r) => [r.path, r.source]));
@@ -46,9 +58,20 @@ describe("mergeLayers", () => {
 });
 
 describe("dotfiles", () => {
-  const entry = (state: string, target: string | null = null) => ({ src: "zshrc", dest: "~/.zshrc", state, target });
+  const entry = (state: string, target: string | null = null) => ({
+    src: "zshrc",
+    dest: "~/.zshrc",
+    state,
+    target,
+  });
   const diagnose = (state: string, target: string | null = null) =>
-    DotfilesArea.diagnose({ node: "laptop", desired: undefined, observed: [entry(state, target)], fleet: [], authority: null });
+    DotfilesArea.diagnose({
+      node: "laptop",
+      desired: undefined,
+      observed: [entry(state, target)],
+      fleet: [],
+      authority: null,
+    });
 
   it("is quiet when linked", () => {
     expect(diagnose("linked")).toEqual([]);
@@ -58,7 +81,9 @@ describe("dotfiles", () => {
     expect(diagnose("missing")[0]?.fix?.command).toBe(
       'mkdir -p "$(dirname "$HOME"/.zshrc)" && ln -sfn "$T3_FLEET_CHECKOUT/dotfiles/zshrc" "$HOME"/.zshrc',
     );
-    expect(diagnose("file-differs")[0]?.fix?.command).toMatch(/^mv "\$HOME"\/\.zshrc "\$HOME"\/\.zshrc\.t3-fleet-backup\.\$\(date/);
+    expect(diagnose("file-differs")[0]?.fix?.command).toMatch(
+      /^mv "\$HOME"\/\.zshrc "\$HOME"\/\.zshrc\.t3-fleet-backup\.\$\(date/,
+    );
   });
 
   it("cannot fix a source missing from the repo", () => {

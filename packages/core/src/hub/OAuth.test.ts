@@ -16,7 +16,12 @@ import { beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { isProblem, parseDefinition, type HubDefinition } from "./Definitions.ts";
 import { makeOAuthManager, type NeedsLogin, type OAuthError, type OAuthManager } from "./OAuth.ts";
-import { fakeAuthServer, fakeProtectedMcp, type FakeAuthServer, type FakeMcpServer } from "./testing/fakes.ts";
+import {
+  fakeAuthServer,
+  fakeProtectedMcp,
+  type FakeAuthServer,
+  type FakeMcpServer,
+} from "./testing/fakes.ts";
 import { makeTokenStore, type TokenStore } from "./TokenStore.ts";
 
 const BACKOFF = 200;
@@ -39,25 +44,65 @@ interface World {
 
 /** A fresh authorization server, a server it protects, and an OAuth manager with its own token store. */
 // Effect.flip turns an unexpected success (a token) into the failure: string.
-const withWorld = async (test: (world: World) => Effect.Effect<void, OAuthError | NeedsLogin | string, Scope.Scope | NodeServices.NodeServices | HttpClient.HttpClient>) => {
+const withWorld = async (
+  test: (
+    world: World,
+  ) => Effect.Effect<
+    void,
+    OAuthError | NeedsLogin | string,
+    Scope.Scope | NodeServices.NodeServices | HttpClient.HttpClient
+  >,
+) => {
   let mcp: FakeMcpServer | null = null;
-  const as = await fakeAuthServer({ openIdOnly: false, expectedResource: () => `${mcp?.url ?? ""}/mcp` });
-  mcp = await fakeProtectedMcp(() => as.url, (t) => as.isValid(t));
+  const as = await fakeAuthServer({
+    openIdOnly: false,
+    expectedResource: () => `${mcp?.url ?? ""}/mcp`,
+  });
+  mcp = await fakeProtectedMcp(
+    () => as.url,
+    (t) => as.isValid(t),
+  );
   const target = `${mcp.url}/mcp`;
-  const parsed = parseDefinition("svc", JSON.stringify({ kind: "remote", url: target, remote_auth: true }));
+  const parsed = parseDefinition(
+    "svc",
+    JSON.stringify({ kind: "remote", url: target, remote_auth: true }),
+  );
   if (isProblem(parsed)) throw new Error(parsed.problem);
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const store = yield* makeTokenStore({ file: join(mkdtempSync(join(tmpdir(), "t3-fleet-oauth-")), "tokens.age"), identity });
-        const manager = yield* makeOAuthManager({ store, redirectUri: "https://relay.example.test/oauth/callback", secrets: Effect.succeed({}), allowLoopbackHttp: true, refreshBackoff: BACKOFF });
+        const store = yield* makeTokenStore({
+          file: join(mkdtempSync(join(tmpdir(), "t3-fleet-oauth-")), "tokens.age"),
+          identity,
+        });
+        const manager = yield* makeOAuthManager({
+          store,
+          redirectUri: "https://relay.example.test/oauth/callback",
+          secrets: Effect.succeed({}),
+          allowLoopbackHttp: true,
+          refreshBackoff: BACKOFF,
+        });
         const signIn = Effect.gen(function* () {
           const url = yield* manager.start(parsed, target, null);
-          yield* manager.finish({ code: as.approve(url), state: new URL(url).searchParams.get("state") ?? "" });
+          yield* manager.finish({
+            code: as.approve(url),
+            state: new URL(url).searchParams.get("state") ?? "",
+          });
           return yield* manager.accessToken("svc", target);
         });
-        yield* test({ as, mcp: mcp as FakeMcpServer, target, store, manager, definition: parsed, signIn });
-      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))),
+        yield* test({
+          as,
+          mcp: mcp as FakeMcpServer,
+          target,
+          store,
+          manager,
+          definition: parsed,
+          signIn,
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+      ),
     );
   } finally {
     await as.close();
@@ -78,7 +123,9 @@ describe("hub OAuth refresh", () => {
 
         // Within the backoff nobody asks the authorization server again.
         as.failRefresh(null);
-        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe("OAuthError");
+        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe(
+          "OAuthError",
+        );
         expect(as.refreshes()).toBe(1);
 
         yield* Effect.sleep(Duration.millis(BACKOFF + 50));
@@ -93,7 +140,9 @@ describe("hub OAuth refresh", () => {
       Effect.gen(function* () {
         let token = yield* signIn;
         as.refuseRefresh(true);
-        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe("NeedsLogin");
+        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe(
+          "NeedsLogin",
+        );
         expect((yield* store.get).servers["svc"]?.client?.clientId).toBe("client-1");
         expect(yield* manager.hasTokens("svc")).toBe(false);
         as.refuseRefresh(false);
@@ -104,7 +153,9 @@ describe("hub OAuth refresh", () => {
 
         // …and forgotten once it says it does not.
         as.forgetClients();
-        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe("NeedsLogin");
+        expect((yield* manager.afterRejection("svc", target, token).pipe(Effect.flip))._tag).toBe(
+          "NeedsLogin",
+        );
         expect((yield* store.get).servers["svc"]).toBeUndefined();
         yield* manager.start(definition, target, null);
         expect(as.registrations()).toBe(2);
@@ -119,7 +170,9 @@ describe("hub OAuth refresh", () => {
 
         // Refused at the authorization endpoint (a policy, a scope): nothing changes.
         const refused = yield* manager.start(definition, target, null);
-        yield* manager.finish({ state: stateOf(refused), error: "unauthorized_client" }).pipe(Effect.flip);
+        yield* manager
+          .finish({ state: stateOf(refused), error: "unauthorized_client" })
+          .pipe(Effect.flip);
         expect((yield* store.get).servers["svc"]?.client?.clientId).toBe("client-1");
         expect(yield* manager.accessToken("svc", target)).toBe(token);
 
@@ -154,9 +207,13 @@ describe("hub OAuth refresh", () => {
         as.setExpiresIn(3600);
         yield* Effect.sleep(Duration.millis(1100));
         as.failRefresh({ status: 400, body: "<html>Bad Request</html>" });
-        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe(
+          "OAuthError",
+        );
         yield* Effect.sleep(Duration.millis(BACKOFF + 50));
-        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe(
+          "OAuthError",
+        );
         yield* Effect.sleep(Duration.millis(2 * BACKOFF + 50));
         const lost = yield* manager.accessToken("svc", target).pipe(Effect.flip);
         expect(lost).toMatchObject({ _tag: "NeedsLogin" });
@@ -175,7 +232,9 @@ describe("hub OAuth refresh", () => {
         yield* Effect.sleep(Duration.millis(1100));
         as.failRefresh({ status: 429, body: "" });
         for (let i = 0; i < 3; i++) {
-          expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+          expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe(
+            "OAuthError",
+          );
           yield* Effect.sleep(Duration.millis(BACKOFF * 2 ** i + 50));
         }
         expect(yield* manager.hasTokens("svc")).toBe(true);
@@ -201,7 +260,9 @@ describe("hub OAuth refresh", () => {
 
         // Expired, and the authorization server still failing: the request fails, the login stays.
         yield* Effect.sleep(Duration.millis(1000));
-        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe("OAuthError");
+        expect((yield* manager.accessToken("svc", target).pipe(Effect.flip))._tag).toBe(
+          "OAuthError",
+        );
         expect(yield* manager.hasTokens("svc")).toBe(true);
 
         as.failRefresh(null);
@@ -236,7 +297,9 @@ describe("hub OAuth refresh", () => {
         yield* signIn;
         expect(yield* manager.hasTokens("svc", target)).toBe(true);
         expect(yield* manager.hasTokens("svc", "https://elsewhere.example/mcp")).toBe(false);
-        const moved = yield* manager.accessToken("svc", "https://elsewhere.example/mcp").pipe(Effect.flip);
+        const moved = yield* manager
+          .accessToken("svc", "https://elsewhere.example/mcp")
+          .pipe(Effect.flip);
         expect(moved).toMatchObject({ _tag: "NeedsLogin" });
         expect(moved.message).toMatch(/sign in again/);
         // A container on this machine takes the server's login whatever its port…
@@ -244,7 +307,21 @@ describe("hub OAuth refresh", () => {
         // …but never a login for another machine, as when a remote definition became a container.
         yield* store.update((s) => {
           const e = s.servers["svc"];
-          return [undefined, e?.endpoints === undefined ? s : { ...s, servers: { ...s.servers, svc: { ...e, endpoints: { ...e.endpoints, resource: "https://remote.example/mcp" } } } }];
+          return [
+            undefined,
+            e?.endpoints === undefined
+              ? s
+              : {
+                  ...s,
+                  servers: {
+                    ...s.servers,
+                    svc: {
+                      ...e,
+                      endpoints: { ...e.endpoints, resource: "https://remote.example/mcp" },
+                    },
+                  },
+                },
+          ];
         });
         expect(yield* manager.hasTokens("svc", null)).toBe(false);
         expect((yield* manager.accessToken("svc", null).pipe(Effect.flip))._tag).toBe("NeedsLogin");
@@ -256,15 +333,31 @@ describe("hub OAuth refresh", () => {
       Effect.gen(function* () {
         const url = yield* manager.start(definition, target, null);
         const state = new URL(url).searchParams.get("state") ?? "";
-        expect(yield* manager.loginStatus(state)).toEqual({ status: "pending", server: "svc", detail: null });
-        expect(yield* manager.loginStatus("forged")).toEqual({ status: "unknown", server: null, detail: null });
+        expect(yield* manager.loginStatus(state)).toEqual({
+          status: "pending",
+          server: "svc",
+          detail: null,
+        });
+        expect(yield* manager.loginStatus("forged")).toEqual({
+          status: "unknown",
+          server: null,
+          detail: null,
+        });
         yield* manager.finish({ code: as.approve(url), state });
-        expect(yield* manager.loginStatus(state)).toEqual({ status: "done", server: "svc", detail: null });
+        expect(yield* manager.loginStatus(state)).toEqual({
+          status: "done",
+          server: "svc",
+          detail: null,
+        });
 
         const refused = yield* manager.start(definition, target, null);
         const refusedState = new URL(refused).searchParams.get("state") ?? "";
         yield* manager.finish({ state: refusedState, error: "access_denied" }).pipe(Effect.flip);
-        expect(yield* manager.loginStatus(refusedState)).toMatchObject({ status: "failed", server: "svc", detail: expect.stringMatching(/access_denied/) });
+        expect(yield* manager.loginStatus(refusedState)).toMatchObject({
+          status: "failed",
+          server: "svc",
+          detail: expect.stringMatching(/access_denied/),
+        });
       }),
     ));
 });

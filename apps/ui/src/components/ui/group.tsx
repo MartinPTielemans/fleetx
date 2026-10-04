@@ -3,7 +3,11 @@ import type * as React from "react";
 
 import { cn } from "../../lib/utils";
 
-export function Group({ className, divided = true, ...props }: React.ComponentProps<"div"> & { divided?: boolean }) {
+export function Group({
+  className,
+  divided = true,
+  ...props
+}: React.ComponentProps<"div"> & { divided?: boolean }) {
   return (
     <div
       className={cn(
@@ -18,5 +22,10 @@ export function Group({ className, divided = true, ...props }: React.ComponentPr
 
 /** A section title above a group, in T3's settings style. */
 export function GroupLabel({ className, ...props }: React.ComponentProps<"h2">) {
-  return <h2 className={cn("mb-2 px-1 font-medium text-muted-foreground text-xs", className)} {...props} />;
+  return (
+    <h2
+      className={cn("mb-2 px-1 font-medium text-muted-foreground text-xs", className)}
+      {...props}
+    />
+  );
 }

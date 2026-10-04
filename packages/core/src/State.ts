@@ -31,9 +31,10 @@ export const NodeState = Schema.Struct({
   rev: Schema.String,
   observation: Schema.NullOr(MachineObservation),
   findings: Schema.Array(FindingRecord),
-  applied: Schema.Array(Schema.Struct({ title: Schema.String, ok: Schema.Boolean, output: Schema.String })),
+  applied: Schema.Array(
+    Schema.Struct({ title: Schema.String, ok: Schema.Boolean, output: Schema.String }),
+  ),
   /** Newest last; bounded. */
   alerts: Schema.Array(Alert),
 });
 export type NodeState = typeof NodeState.Type;
-

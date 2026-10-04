@@ -26,7 +26,12 @@ import { sha256 } from "../Hash.ts";
 const MAX_RECORDS = 10_000;
 const IDLE = 24 * 60 * 60_000;
 
-const Owner = Schema.Struct({ server: Schema.String, session: Schema.String, client: Schema.String, lastSeen: Schema.Number });
+const Owner = Schema.Struct({
+  server: Schema.String,
+  session: Schema.String,
+  client: Schema.String,
+  lastSeen: Schema.Number,
+});
 const OwnersFile = Schema.fromJsonString(Schema.Array(Owner));
 const decodeFile = Schema.decodeUnknownOption(OwnersFile);
 const encodeFile = Schema.encodeUnknownOption(OwnersFile);
@@ -45,7 +50,12 @@ export interface SessionOwners {
   /** Whether `client` opened this session; a yes counts as a use. */
   readonly owns: (server: string, session: string, client: string) => Effect.Effect<boolean>;
   /** A session the upstream just opened; a session already recorded keeps its owner. */
-  readonly record: (server: string, session: string, client: string, options: { readonly expires: boolean }) => Effect.Effect<void>;
+  readonly record: (
+    server: string,
+    session: string,
+    client: string,
+    options: { readonly expires: boolean },
+  ) => Effect.Effect<void>;
   readonly end: (server: string, session: string) => Effect.Effect<void>;
   /** Drop records unused for a day. */
   readonly prune: Effect.Effect<void>;
@@ -61,23 +71,33 @@ export const makeSessionOwners = (file: string) =>
     const hashOf = (session: string) => Effect.promise(() => sha256(session));
     let dirty = false;
 
-    const loaded = Option.getOrElse(decodeFile(yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => "[]"))), () => []);
+    const loaded = Option.getOrElse(
+      decodeFile(yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => "[]"))),
+      () => [],
+    );
     const now = yield* Clock.currentTimeMillis;
     for (const o of [...loaded].sort((a, b) => a.lastSeen - b.lastSeen)) {
-      if (now - o.lastSeen <= IDLE) records.set(keyOf(o.server, o.session), { ...o, expires: true });
+      if (now - o.lastSeen <= IDLE)
+        records.set(keyOf(o.server, o.session), { ...o, expires: true });
     }
 
     const save = Effect.gen(function* () {
       if (!dirty) return;
       dirty = false;
-      const kept = [...records.values()].filter((r) => r.expires).map(({ server, session, client, lastSeen }) => ({ server, session, client, lastSeen }));
+      const kept = [...records.values()]
+        .filter((r) => r.expires)
+        .map(({ server, session, client, lastSeen }) => ({ server, session, client, lastSeen }));
       const text = Option.getOrNull(encodeFile(kept));
       if (text === null) return;
       const temp = `${file}.tmp`;
       yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 });
       yield* fs.writeFileString(temp, text, { mode: 0o600 });
       yield* fs.rename(temp, file);
-    }).pipe(Effect.catchCause((cause) => Effect.logWarning(`hub: cannot save session owners: ${String(cause)}`)));
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning(`hub: cannot save session owners: ${String(cause)}`),
+      ),
+    );
     yield* save.pipe(Effect.delay(Duration.seconds(10)), Effect.forever, Effect.forkScoped);
     yield* Effect.addFinalizer(() => save);
 
@@ -108,7 +128,13 @@ export const makeSessionOwners = (file: string) =>
             if (records.size < MAX_RECORDS) break;
             records.delete(oldest);
           }
-          records.set(key, { server, session: hash, client, lastSeen: yield* Clock.currentTimeMillis, expires: options.expires });
+          records.set(key, {
+            server,
+            session: hash,
+            client,
+            lastSeen: yield* Clock.currentTimeMillis,
+            expires: options.expires,
+          });
           if (options.expires) dirty = true;
         }),
       end: (server, session) =>

@@ -31,7 +31,11 @@ import { LoginStatus } from "./OAuth.ts";
 import { bearerMatches } from "./Policy.ts";
 import type { ForwardRequest, UpstreamResponse } from "./Upstream.ts";
 
-export const ClientToken = Schema.Struct({ client: Schema.String, servers: Schema.NullOr(Schema.Array(Schema.String)), createdAt: Schema.Number });
+export const ClientToken = Schema.Struct({
+  client: Schema.String,
+  servers: Schema.NullOr(Schema.Array(Schema.String)),
+  createdAt: Schema.Number,
+});
 export const CreatedToken = Schema.Struct({ token: Schema.String });
 
 const encodeServers = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(HubServer)));
@@ -41,8 +45,10 @@ const encodeTokens = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Clie
 const encodeCreated = Schema.encodeEffect(Schema.fromJsonString(CreatedToken));
 const encodeLoginStatus = Schema.encodeEffect(Schema.fromJsonString(LoginStatus));
 
-const json = (text: string, status = 200) => HttpServerResponse.text(text, { status, contentType: "application/json" });
-const problem = (message: string, status: number) => HttpServerResponse.text(message, { status, contentType: "text/plain" });
+const json = (text: string, status = 200) =>
+  HttpServerResponse.text(text, { status, contentType: "application/json" });
+const problem = (message: string, status: number) =>
+  HttpServerResponse.text(message, { status, contentType: "text/plain" });
 
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
@@ -50,11 +56,20 @@ const page = (title: string, message: string, status: number) =>
   HttpServerResponse.text(
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(title)}</title>` +
       `<body style="font:15px system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem"><h1 style="font-size:1.2rem">${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></body>`,
-    { status, contentType: "text/html; charset=utf-8", headers: { "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" } },
+    {
+      status,
+      contentType: "text/html; charset=utf-8",
+      headers: {
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+      },
+    },
   );
 
 /** The segment after `prefix` in the path: /hub/servers/<name>/login → name. */
-const segment = (url: string, index: number) => decodeURIComponent(new URL(url, "http://relay").pathname.split("/")[index] ?? "");
+const segment = (url: string, index: number) =>
+  decodeURIComponent(new URL(url, "http://relay").pathname.split("/")[index] ?? "");
 
 /** The largest request body the gateway reads. */
 export const MAX_BODY = 4 * 1024 * 1024;
@@ -87,7 +102,11 @@ const readCapped = (request: HttpServerRequest.HttpServerRequest) =>
 
 const toServerResponse = (response: UpstreamResponse) => {
   const { "content-type": contentType, ...rest } = response.headers;
-  return HttpServerResponse.stream(response.body, { status: response.status, ...(contentType === undefined ? {} : { contentType }), headers: rest });
+  return HttpServerResponse.stream(response.body, {
+    status: response.status,
+    ...(contentType === undefined ? {} : { contentType }),
+    headers: rest,
+  });
 };
 
 export const hubRoutes = (hub: Hub, relayToken: string) => {
@@ -112,17 +131,26 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
           const name = segment(request.url, 3);
           if (verb === "login") {
             const url = yield* hub.login(name).pipe(Effect.result);
-            if (url._tag === "Failure") return problem(url.failure, url.failure.startsWith("no hosted") ? 404 : 409);
+            if (url._tag === "Failure")
+              return problem(url.failure, url.failure.startsWith("no hosted") ? 404 : 409);
             return json(yield* encodeLogin({ url: url.success }));
           }
-          const done = yield* (verb === "logout" ? hub.logout(name) : hub.restart(name)).pipe(Effect.result);
-          return done._tag === "Failure" ? problem(done.failure, 404) : HttpServerResponse.empty({ status: 204 });
+          const done = yield* (verb === "logout" ? hub.logout(name) : hub.restart(name)).pipe(
+            Effect.result,
+          );
+          return done._tag === "Failure"
+            ? problem(done.failure, 404)
+            : HttpServerResponse.empty({ status: 204 });
         }),
       ),
     );
 
   return Layer.mergeAll(
-    HttpRouter.add("GET", "/hub/servers", guarded(Effect.flatMap(hub.servers, encodeServers).pipe(Effect.map((t) => json(t))))),
+    HttpRouter.add(
+      "GET",
+      "/hub/servers",
+      guarded(Effect.flatMap(hub.servers, encodeServers).pipe(Effect.map((t) => json(t)))),
+    ),
     action("login"),
     HttpRouter.add(
       "GET",
@@ -131,7 +159,10 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const status = yield* hub.loginStatus(segment(request.url, 3));
-          return HttpServerResponse.text(yield* encodeLoginStatus(status), { contentType: "application/json", headers: { "cache-control": "no-store" } });
+          return HttpServerResponse.text(yield* encodeLoginStatus(status), {
+            contentType: "application/json",
+            headers: { "cache-control": "no-store" },
+          });
         }),
       ),
     ),
@@ -145,12 +176,19 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const url = new URL(request.url, "http://relay");
           const limit = Number(url.searchParams.get("limit") ?? "100");
-          const calls = yield* hub.calls({ server: url.searchParams.get("server") ?? undefined, limit: Number.isFinite(limit) ? limit : 100 });
+          const calls = yield* hub.calls({
+            server: url.searchParams.get("server") ?? undefined,
+            limit: Number.isFinite(limit) ? limit : 100,
+          });
           return json(yield* encodeCalls(calls));
         }),
       ),
     ),
-    HttpRouter.add("GET", "/hub/tokens", guarded(Effect.flatMap(hub.listTokens, encodeTokens).pipe(Effect.map((t) => json(t))))),
+    HttpRouter.add(
+      "GET",
+      "/hub/tokens",
+      guarded(Effect.flatMap(hub.listTokens, encodeTokens).pipe(Effect.map((t) => json(t)))),
+    ),
     HttpRouter.add(
       "POST",
       "/hub/tokens/:client",
@@ -158,10 +196,20 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const body = parseJson(yield* request.text) as { servers?: unknown } | undefined;
-          const servers = Array.isArray(body?.servers) && body.servers.every((s) => typeof s === "string") && body.servers.length > 0 ? (body.servers as Array<string>) : null;
-          const token = yield* hub.createToken(segment(request.url, 3), servers).pipe(Effect.result);
+          const servers =
+            Array.isArray(body?.servers) &&
+            body.servers.every((s) => typeof s === "string") &&
+            body.servers.length > 0
+              ? (body.servers as Array<string>)
+              : null;
+          const token = yield* hub
+            .createToken(segment(request.url, 3), servers)
+            .pipe(Effect.result);
           if (token._tag === "Failure") return problem(token.failure, 400);
-          return HttpServerResponse.text(yield* encodeCreated({ token: token.success }), { contentType: "application/json", headers: { "cache-control": "no-store" } });
+          return HttpServerResponse.text(yield* encodeCreated({ token: token.success }), {
+            contentType: "application/json",
+            headers: { "cache-control": "no-store" },
+          });
         }),
       ),
     ),
@@ -171,7 +219,9 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
       guarded(
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          return (yield* hub.revokeToken(segment(request.url, 3))) ? HttpServerResponse.empty({ status: 204 }) : problem("no such client token", 404);
+          return (yield* hub.revokeToken(segment(request.url, 3)))
+            ? HttpServerResponse.empty({ status: 204 })
+            : problem("no such client token", 404);
         }),
       ),
     ),
@@ -183,9 +233,17 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
         const query = Object.fromEntries(new URL(request.url, "http://relay").searchParams);
         const result = yield* hub.finishLogin(query).pipe(Effect.result);
         return result._tag === "Success"
-          ? page(`Signed in to ${result.success}`, "The T3 Fleet hub holds the login now. You can close this tab.", 200)
+          ? page(
+              `Signed in to ${result.success}`,
+              "The T3 Fleet hub holds the login now. You can close this tab.",
+              200,
+            )
           : page("Sign-in failed", result.failure, 400);
-      }).pipe(Effect.catchCause(() => Effect.succeed(page("Sign-in failed", "Something went wrong on the relay.", 500)))),
+      }).pipe(
+        Effect.catchCause(() =>
+          Effect.succeed(page("Sign-in failed", "Something went wrong on the relay.", 500)),
+        ),
+      ),
     ),
     HttpRouter.add(
       "*",
@@ -193,13 +251,19 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const name = segment(request.url, 2);
-        const method = request.method === "GET" || request.method === "DELETE" ? request.method : request.method === "POST" ? "POST" : null;
+        const method =
+          request.method === "GET" || request.method === "DELETE"
+            ? request.method
+            : request.method === "POST"
+              ? "POST"
+              : null;
         if (method === null) return problem("Method Not Allowed", 405);
         // The token first: nothing of an unauthenticated request is read.
         const access = yield* hub.authorize(name, request.headers["authorization"], method);
         if ("rejected" in access) return toServerResponse(access.rejected);
         const headers: Record<string, string> = {};
-        for (const [k, v] of Object.entries(request.headers)) if (typeof v === "string") headers[k] = v;
+        for (const [k, v] of Object.entries(request.headers))
+          if (typeof v === "string") headers[k] = v;
         let body = "";
         if (method === "POST") {
           const read = yield* readCapped(request);
@@ -215,9 +279,13 @@ export const hubRoutes = (hub: Hub, relayToken: string) => {
 };
 
 /** Decoders for clients of these routes (the CLI, the UI server). */
-export const decodeServers = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(HubServer)));
+export const decodeServers = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(HubServer)),
+);
 export const decodeCalls = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(HubCall)));
 export const decodeLogin = Schema.decodeUnknownEffect(Schema.fromJsonString(HubLoginStart));
-export const decodeTokens = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(ClientToken)));
+export const decodeTokens = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(ClientToken)),
+);
 export const decodeCreated = Schema.decodeUnknownEffect(Schema.fromJsonString(CreatedToken));
 export const decodeLoginStatus = Schema.decodeUnknownEffect(Schema.fromJsonString(LoginStatus));

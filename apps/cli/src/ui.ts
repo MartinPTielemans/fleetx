@@ -34,9 +34,23 @@ import { exec } from "@t3-fleet/core/Exec";
 import { git } from "@t3-fleet/core/Git";
 import { fleetFromRelay, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { describeMerged } from "@t3-fleet/core/Settings";
-import { addSkills, keepUpdate, land, listSkills, lookupSource, previewUpdate, removeSkills } from "@t3-fleet/core/SkillSources";
+import {
+  addSkills,
+  keepUpdate,
+  land,
+  listSkills,
+  lookupSource,
+  previewUpdate,
+  removeSkills,
+} from "@t3-fleet/core/SkillSources";
 import { sha256 } from "@t3-fleet/core/Hash";
-import { approve, autoApprovable, listProposals, reject, type Proposal } from "@t3-fleet/core/Staging";
+import {
+  approve,
+  autoApprovable,
+  listProposals,
+  reject,
+  type Proposal,
+} from "@t3-fleet/core/Staging";
 import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
 import { uiLayer, type UiAsset, type UiServerOptions } from "@t3-fleet/core/UiServer";
 
@@ -46,11 +60,17 @@ import { applyLive, liveController, reportUserErrors, withoutStaleInstalls } fro
 /** The built app, gzipped and base64-encoded per file, put here by `vp pack` (vite.config.ts). */
 declare const __T3_FLEET_UI_ASSETS__: string | undefined;
 
-const EmbeddedAssets = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Struct({ type: Schema.String, gz: Schema.String })));
+const EmbeddedAssets = Schema.fromJsonString(
+  Schema.Record(Schema.String, Schema.Struct({ type: Schema.String, gz: Schema.String })),
+);
 
 const gunzip = (bytes: Uint8Array) =>
   Effect.promise(() =>
-    new Response(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer(),
+    new Response(
+      new Blob([bytes as Uint8Array<ArrayBuffer>])
+        .stream()
+        .pipeThrough(new DecompressionStream("gzip")),
+    ).arrayBuffer(),
   ).pipe(Effect.map((buffer) => new Uint8Array(buffer)));
 
 const MIME: Readonly<Record<string, string>> = {
@@ -65,7 +85,8 @@ const MIME: Readonly<Record<string, string>> = {
   txt: "text/plain; charset=utf-8",
 };
 
-export const mimeOf = (file: string) => MIME[file.slice(file.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
+export const mimeOf = (file: string) =>
+  MIME[file.slice(file.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
 
 /** The app this build carries, or the last `vp build` of apps/ui when running from source. */
 const loadAssets = Effect.gen(function* () {
@@ -82,16 +103,22 @@ const loadAssets = Effect.gen(function* () {
   const path = yield* Path.Path;
   const self = yield* path.fromFileUrl(new URL(import.meta.url));
   const dist = path.join(path.dirname(self), "../../ui/dist");
-  const files = yield* fs.readDirectory(dist, { recursive: true }).pipe(Effect.orElseSucceed(() => []));
+  const files = yield* fs
+    .readDirectory(dist, { recursive: true })
+    .pipe(Effect.orElseSucceed(() => []));
   for (const file of files) {
     const full = path.join(dist, file);
     if ((yield* fs.stat(full)).type !== "File") continue;
-    assets.set(`/${file.split(path.sep).join("/")}`, { type: mimeOf(file), body: yield* fs.readFile(full) });
+    assets.set(`/${file.split(path.sep).join("/")}`, {
+      type: mimeOf(file),
+      body: yield* fs.readFile(full),
+    });
   }
   return assets;
 });
 
-const isAuthority = (config: Config) => config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
+const isAuthority = (config: Config) =>
+  config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
 
 /** Every node's published state: the relay's when it answers, else the config repo's. */
 const statesOf = (config: Config) =>
@@ -108,12 +135,21 @@ const statesOf = (config: Config) =>
  * there now is what was reviewed; this can, and it also changes when the
  * branch moves under one of the files.
  */
-export const proposalChange = (repo: string, branch: string, proposal: Pick<Proposal, "commit" | "files">) =>
+export const proposalChange = (
+  repo: string,
+  branch: string,
+  proposal: Pick<Proposal, "commit" | "files">,
+) =>
   Effect.gen(function* () {
-    const blobs = (ref: string) => git(repo, ["ls-tree", "-r", ref, "--", ...proposal.files]).pipe(Effect.map((r) => r.stdout.trim()));
+    const blobs = (ref: string) =>
+      git(repo, ["ls-tree", "-r", ref, "--", ...proposal.files]).pipe(
+        Effect.map((r) => r.stdout.trim()),
+      );
     const before = yield* blobs(`origin/${branch}`);
     const after = yield* blobs(proposal.commit);
-    return yield* Effect.promise(() => sha256([proposal.files.join("\n"), before, after].join("\n\n")));
+    return yield* Effect.promise(() =>
+      sha256([proposal.files.join("\n"), before, after].join("\n\n")),
+    );
   });
 
 export const proposalsOf = (config: Config) =>
@@ -122,7 +158,13 @@ export const proposalsOf = (config: Config) =>
     const prefixes = config.settings.fleet?.auto_approve ?? [];
     return yield* Effect.forEach(proposals, (p) =>
       Effect.gen(function* () {
-        const diff = yield* git(config.repo, ["diff", `origin/${config.branch}`, p.commit, "--", ...p.files]);
+        const diff = yield* git(config.repo, [
+          "diff",
+          `origin/${config.branch}`,
+          p.commit,
+          "--",
+          ...p.files,
+        ]);
         return {
           node: p.node,
           branch: p.branch,
@@ -144,11 +186,18 @@ export const proposalsOf = (config: Config) =>
  */
 export const proposalFrom = (config: Config, node: string, reviewed: string) =>
   Effect.gen(function* () {
-    if (!isAuthority(config)) return yield* Effect.fail(`${config.self} is not an authority; review proposals on a node with the authority role`);
-    const proposal = (yield* listProposals(config.repo, config.branch)).find((p) => p.node === node);
+    if (!isAuthority(config))
+      return yield* Effect.fail(
+        `${config.self} is not an authority; review proposals on a node with the authority role`,
+      );
+    const proposal = (yield* listProposals(config.repo, config.branch)).find(
+      (p) => p.node === node,
+    );
     if (proposal === undefined) return yield* Effect.fail(`no proposal from ${node}`);
     if ((yield* proposalChange(config.repo, config.branch, proposal)) !== reviewed) {
-      return yield* Effect.fail(`${node}'s proposal changed since you reviewed it; review it again`);
+      return yield* Effect.fail(
+        `${node}'s proposal changed since you reviewed it; review it again`,
+      );
     }
     return proposal;
   });
@@ -164,7 +213,12 @@ const alertsOf = (config: Config) =>
       if (state === undefined) continue;
       const age = (now - state.at) / 1000;
       if (age > config.interval * config.alertAfter) {
-        alerts.push({ at: now, node: node.name, kind: "failing", message: `last reported ${Math.round(age / 60)} minutes ago; is its timer running?` });
+        alerts.push({
+          at: now,
+          node: node.name,
+          kind: "failing",
+          message: `last reported ${Math.round(age / 60)} minutes ago; is its timer running?`,
+        });
       }
     }
     return alerts.sort((a, b) => b.at - a.at);
@@ -186,30 +240,54 @@ const openBrowser = (url: string) =>
 const RANDOM_PORTS = { from: 49152, count: 16384 };
 
 export const uiCommand = Command.make("ui", {
-  port: Flag.Int("port").pipe(Flag.withDescription("Port on 127.0.0.1; a random one when not given."), Flag.optional),
-  noOpen: Flag.Boolean("no-open").pipe(Flag.withDescription("Print the address instead of opening a browser."), Flag.withDefault(false)),
+  port: Flag.Int("port").pipe(
+    Flag.withDescription("Port on 127.0.0.1; a random one when not given."),
+    Flag.optional,
+  ),
+  noOpen: Flag.Boolean("no-open").pipe(
+    Flag.withDescription("Print the address instead of opening a browser."),
+    Flag.withDefault(false),
+  ),
 }).pipe(
-  Command.withDescription("Open T3 Fleet in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config."),
+  Command.withDescription(
+    "Open T3 Fleet in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config.",
+  ),
   Command.withHandler(({ port: asked, noOpen }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
       // Every action reads the config again, and checks and fixes notice a newer build installed meanwhile.
       const current = yield* liveController;
-      const assets = yield* loadAssets.pipe(Effect.mapError(() => "the UI bundled in this build could not be read"));
-      if (assets.size === 0) yield* Console.error("T3 Fleet: this build has no UI; run `pnpm --filter t3-fleet build` (the API still works)");
+      const assets = yield* loadAssets.pipe(
+        Effect.mapError(() => "the UI bundled in this build could not be read"),
+      );
+      if (assets.size === 0)
+        yield* Console.error(
+          "T3 Fleet: this build has no UI; run `pnpm --filter t3-fleet build` (the API still works)",
+        );
       const crypto = yield* Crypto.Crypto;
       const ticket = Encoding.encodeHex(yield* crypto.randomBytes(24));
       const relayUrl = config.settings.relay?.url?.replace(/\/+$/, "") ?? null;
       const relayToken = relayUrl === null ? "" : yield* secretVar(RELAY_TOKEN);
       const services = yield* Effect.context<NodeServices.NodeServices | HttpClient.HttpClient>();
-      const closed = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>) =>
+      const closed = <A, E>(
+        effect: Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>,
+      ) =>
         effect.pipe(
           Effect.provide(services),
-          Effect.mapError((e) => (typeof e === "string" ? e : typeof e === "object" && e !== null && "message" in e ? String(e.message) : String(e))),
+          Effect.mapError((e) =>
+            typeof e === "string"
+              ? e
+              : typeof e === "object" && e !== null && "message" in e
+                ? String(e.message)
+                : String(e),
+          ),
         );
       /** An action run against the config as it is now, not as it was at start. */
-      const live = <A, E>(action: (config: Config) => Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>) =>
-        closed(current.pipe(Effect.flatMap(({ config }) => action(config))));
+      const live = <A, E>(
+        action: (
+          config: Config,
+        ) => Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>,
+      ) => closed(current.pipe(Effect.flatMap(({ config }) => action(config))));
 
       const options = {
         ticket,
@@ -226,20 +304,39 @@ export const uiCommand = Command.make("ui", {
           check: closed(
             Effect.gen(function* () {
               const { config, bundle, stale } = yield* current;
-              const [report, states] = yield* Effect.all([checkNodes(config, bundle), statesOf(config)], { concurrency: "unbounded" });
-              return { report: withoutStaleInstalls(report, stale, "ui"), states, accepted: config.settings.accept ?? [] };
+              const [report, states] = yield* Effect.all(
+                [checkNodes(config, bundle), statesOf(config)],
+                { concurrency: "unbounded" },
+              );
+              return {
+                report: withoutStaleInstalls(report, stale, "ui"),
+                states,
+                accepted: config.settings.accept ?? [],
+              };
             }),
           ),
           apply: (fixes) => applyLive(current, fixes, "ui").pipe(Effect.provide(services)),
           proposals: live(proposalsOf),
           approve: (node, change) =>
-            live((config) => proposalFrom(config, node, change).pipe(Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)), Effect.asVoid)),
-          reject: (node, change) => live((config) => proposalFrom(config, node, change).pipe(Effect.flatMap((p) => reject(config.repo, p)))),
+            live((config) =>
+              proposalFrom(config, node, change).pipe(
+                Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)),
+                Effect.asVoid,
+              ),
+            ),
+          reject: (node, change) =>
+            live((config) =>
+              proposalFrom(config, node, change).pipe(
+                Effect.flatMap((p) => reject(config.repo, p)),
+              ),
+            ),
           alerts: live(alertsOf),
           config: (node) =>
             live((config) => {
               const found = config.nodes.find((n) => n.name === node);
-              return found === undefined ? Effect.fail(`unknown machine: ${node}`) : Effect.succeed(describeMerged(found.settings));
+              return found === undefined
+                ? Effect.fail(`unknown machine: ${node}`)
+                : Effect.succeed(describeMerged(found.settings));
             }),
           skills: {
             list: live((config) => listSkills(config.repo)),
@@ -249,8 +346,17 @@ export const uiCommand = Command.make("ui", {
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* addSkills(config.repo, source, names, as);
-                    const added = paths.filter((p) => p !== "skills/SOURCES.json").map((p) => p.slice("skills/".length));
-                    return { paths, landed: yield* land(config, paths, `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`) };
+                    const added = paths
+                      .filter((p) => p !== "skills/SOURCES.json")
+                      .map((p) => p.slice("skills/".length));
+                    return {
+                      paths,
+                      landed: yield* land(
+                        config,
+                        paths,
+                        `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`,
+                      ),
+                    };
                   }),
                 ),
               ),
@@ -260,7 +366,14 @@ export const uiCommand = Command.make("ui", {
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* keepUpdate(config.repo, names, digest);
-                    return { paths, landed: yield* land(config, paths, `Update skill${paths.length === 1 ? "" : "s"} from upstream`) };
+                    return {
+                      paths,
+                      landed: yield* land(
+                        config,
+                        paths,
+                        `Update skill${paths.length === 1 ? "" : "s"} from upstream`,
+                      ),
+                    };
                   }),
                 ),
               ),
@@ -269,7 +382,14 @@ export const uiCommand = Command.make("ui", {
                 underSyncLock(
                   Effect.gen(function* () {
                     const paths = yield* removeSkills(config.repo, names);
-                    return { paths, landed: yield* land(config, paths, `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`) };
+                    return {
+                      paths,
+                      landed: yield* land(
+                        config,
+                        paths,
+                        `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`,
+                      ),
+                    };
                   }),
                 ),
               ),
@@ -279,24 +399,43 @@ export const uiCommand = Command.make("ui", {
 
       const link = (port: number, ticket: string) => `http://127.0.0.1:${port}/#ticket=${ticket}`;
       // The link works once; whoever opens it next needs the next one.
-      const onTicketUsed = (port: number) => (next: string) => Console.log(`a browser opened the link; another tab can use ${link(port, next)}`);
+      const onTicketUsed = (port: number) => (next: string) =>
+        Console.log(`a browser opened the link; another tab can use ${link(port, next)}`);
       // Ctrl-C waits for running jobs, so no machine is left half-fixed; a second one stops them anyway.
       const onDrain = (running: ReadonlyArray<string>) =>
         Effect.sync(() => process.once("SIGINT", () => process.exit(130))).pipe(
-          Effect.andThen(Console.log(`waiting for ${running.length === 1 ? "a job" : `${running.length} jobs`} to finish (${running.join("; ")}); Ctrl-C again stops ${running.length === 1 ? "it" : "them"} now`)),
+          Effect.andThen(
+            Console.log(
+              `waiting for ${running.length === 1 ? "a job" : `${running.length} jobs`} to finish (${running.join("; ")}); Ctrl-C again stops ${running.length === 1 ? "it" : "them"} now`,
+            ),
+          ),
         );
 
       const listen = (port: number) =>
         Layer.build(
-          HttpRouter.serve(uiLayer({ ...options, port, onTicketUsed: onTicketUsed(port), onDrain }), { disableLogger: true, disableListenLog: true }).pipe(
+          HttpRouter.serve(
+            uiLayer({ ...options, port, onTicketUsed: onTicketUsed(port), onDrain }),
+            { disableLogger: true, disableListenLog: true },
+          ).pipe(
             Layer.provide(FetchHttpClient.layer),
-            Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
+            Layer.provide(
+              NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port }),
+            ),
           ),
         ).pipe(Effect.as(port));
-      const randomPort = crypto.randomBytes(2).pipe(Effect.map(([hi = 0, lo = 0]) => RANDOM_PORTS.from + (((hi << 8) | lo) % RANDOM_PORTS.count)));
+      const randomPort = crypto
+        .randomBytes(2)
+        .pipe(
+          Effect.map(
+            ([hi = 0, lo = 0]) => RANDOM_PORTS.from + (((hi << 8) | lo) % RANDOM_PORTS.count),
+          ),
+        );
       const port = Option.isSome(asked)
         ? yield* listen(asked.value).pipe(
-            Effect.mapError(() => `could not listen on 127.0.0.1:${asked.value}; is another t3-fleet ui running? (--port picks another)`),
+            Effect.mapError(
+              () =>
+                `could not listen on 127.0.0.1:${asked.value}; is another t3-fleet ui running? (--port picks another)`,
+            ),
           )
         : yield* randomPort.pipe(
             Effect.flatMap(listen),
@@ -306,10 +445,13 @@ export const uiCommand = Command.make("ui", {
 
       // The ticket travels in the fragment, which browsers never send to a server, and works once.
       const url = link(port, ticket);
-      yield* Console.log(`t3-fleet ui on ${url}\nthe link works once; checks every minute while a tab is open; Ctrl-C stops it`);
+      yield* Console.log(
+        `t3-fleet ui on ${url}\nthe link works once; checks every minute while a tab is open; Ctrl-C stops it`,
+      );
       if (!noOpen) {
         const opened = yield* openBrowser(url);
-        if (opened.code !== 0) yield* Console.log("could not open a browser; open the address above");
+        if (opened.code !== 0)
+          yield* Console.log("could not open a browser; open the address above");
       }
       return yield* Effect.never;
     }).pipe(reportUserErrors),

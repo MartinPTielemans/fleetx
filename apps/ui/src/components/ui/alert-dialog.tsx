@@ -35,16 +35,32 @@ export function AlertDialogBody({ className, ...props }: React.ComponentProps<"d
 export function AlertDialogFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
-      className={cn("flex flex-col-reverse gap-2 rounded-b-[calc(var(--radius-2xl)-1px)] border-t bg-muted/72 px-6 py-4 sm:flex-row sm:justify-end", className)}
+      className={cn(
+        "flex flex-col-reverse gap-2 rounded-b-[calc(var(--radius-2xl)-1px)] border-t bg-muted/72 px-6 py-4 sm:flex-row sm:justify-end",
+        className,
+      )}
       {...props}
     />
   );
 }
 
 export function AlertDialogTitle({ className, ...props }: AlertDialogPrimitive.Title.Props) {
-  return <AlertDialogPrimitive.Title className={cn("font-semibold text-lg leading-none", className)} {...props} />;
+  return (
+    <AlertDialogPrimitive.Title
+      className={cn("font-semibold text-lg leading-none", className)}
+      {...props}
+    />
+  );
 }
 
-export function AlertDialogDescription({ className, ...props }: AlertDialogPrimitive.Description.Props) {
-  return <AlertDialogPrimitive.Description className={cn("text-muted-foreground text-sm", className)} {...props} />;
+export function AlertDialogDescription({
+  className,
+  ...props
+}: AlertDialogPrimitive.Description.Props) {
+  return (
+    <AlertDialogPrimitive.Description
+      className={cn("text-muted-foreground text-sm", className)}
+      {...props}
+    />
+  );
 }

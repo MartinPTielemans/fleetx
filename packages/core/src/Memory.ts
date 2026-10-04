@@ -21,17 +21,23 @@ export const findingId = (f: Finding) => `${f.node}:${f.key}`;
 
 const Remembered = Schema.Struct({
   checkedAt: Schema.Number,
-  findings: Schema.Array(Schema.Struct({ id: Schema.String, severity: Schema.String, title: Schema.String })),
+  findings: Schema.Array(
+    Schema.Struct({ id: Schema.String, severity: Schema.String, title: Schema.String }),
+  ),
 });
 type Remembered = typeof Remembered.Type;
 
 const statePath = () => `${stateDir(process.env["HOME"] ?? "")}/last-check.json`;
 
 /** An [[accept]] id written before the rename: the engine's keys were fleetx-*. Until 1.0. */
-const renamedId = (id: string) => id.replace(/:fleetx-(outdated|local-config|timer|timer-unwanted)$/, ":engine-$1");
+const renamedId = (id: string) =>
+  id.replace(/:fleetx-(outdated|local-config|timer|timer-unwanted)$/, ":engine-$1");
 
 /** Findings with accepted differences (t3-fleet.toml `[[accept]]`) turned into notes. */
-export const applyAccepted = (findings: ReadonlyArray<Finding>, accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }> = []) => {
+export const applyAccepted = (
+  findings: ReadonlyArray<Finding>,
+  accepted: ReadonlyArray<{ readonly id: string; readonly reason: string }> = [],
+) => {
   const reasons = new Map(accepted.map((a) => [renamedId(a.id), a.reason]));
   return findings.map((f): Finding => {
     const reason = reasons.get(findingId(f));
@@ -61,19 +67,27 @@ export const compareWithLast = (findings: ReadonlyArray<Finding>) =>
     const path = yield* Path.Path;
     const text = yield* fs.readFileString(statePath()).pipe(Effect.option);
     const previous: Option.Option<Remembered> = Option.isSome(text)
-      ? yield* Schema.decodeEffect(Schema.fromJsonString(Remembered))(text.value).pipe(Effect.option)
+      ? yield* Schema.decodeEffect(Schema.fromJsonString(Remembered))(text.value).pipe(
+          Effect.option,
+        )
       : Option.none();
     const current = findings.filter((f) => f.severity !== "info");
-    const before = new Map(Option.match(previous, { onNone: () => [], onSome: (p) => p.findings }).map((f) => [f.id, f]));
+    const before = new Map(
+      Option.match(previous, { onNone: () => [], onSome: (p) => p.findings }).map((f) => [f.id, f]),
+    );
     const now = new Set(current.map(findingId));
     const changes: Changes = {
       since: Option.match(previous, { onNone: () => null, onSome: (p) => p.checkedAt }),
-      appeared: Option.isNone(previous) ? current : current.filter((f) => !before.has(findingId(f))),
+      appeared: Option.isNone(previous)
+        ? current
+        : current.filter((f) => !before.has(findingId(f))),
       worsened: current.filter((f) => {
         const was = before.get(findingId(f));
         return was !== undefined && (RANK[f.severity] ?? 2) < (RANK[was.severity] ?? 2);
       }),
-      resolved: [...before.values()].filter((f) => !now.has(f.id)).map((f) => ({ id: f.id, title: f.title })),
+      resolved: [...before.values()]
+        .filter((f) => !now.has(f.id))
+        .map((f) => ({ id: f.id, title: f.title })),
     };
     const remembered: Remembered = {
       checkedAt: yield* Clock.currentTimeMillis,
@@ -87,4 +101,5 @@ export const compareWithLast = (findings: ReadonlyArray<Finding>) =>
     return changes;
   });
 
-export const hasChanges = (c: Changes) => c.appeared.length + c.resolved.length + c.worsened.length > 0;
+export const hasChanges = (c: Changes) =>
+  c.appeared.length + c.resolved.length + c.worsened.length > 0;

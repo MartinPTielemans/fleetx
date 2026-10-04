@@ -49,7 +49,9 @@ const encodeOwner = Schema.encodeEffect(Schema.fromJsonString(Owner));
 const heldHere = new Set<string>();
 
 /** True inside a run that holds the lock. */
-const HoldsSyncLock = Context.Reference<boolean>("t3-fleet/HoldsSyncLock", { defaultValue: () => false });
+const HoldsSyncLock = Context.Reference<boolean>("t3-fleet/HoldsSyncLock", {
+  defaultValue: () => false,
+});
 
 export const syncLockPath = (home: string) => `${stateDir(home)}/sync.lock`;
 export const SYNC_LOCK_ENV = "T3_FLEET_SYNC_LOCK";
@@ -73,11 +75,20 @@ const alive = (pid: number) =>
 const bootId = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   if (process.platform === "darwin") {
-    const sysctl = yield* exec({ command: "sysctl", args: ["-n", "kern.bootsessionuuid"], timeout: Duration.seconds(5) });
-    return sysctl.code === 0 && sysctl.stdout.trim() !== "" ? Option.some(sysctl.stdout.trim()) : Option.none<string>();
+    const sysctl = yield* exec({
+      command: "sysctl",
+      args: ["-n", "kern.bootsessionuuid"],
+      timeout: Duration.seconds(5),
+    });
+    return sysctl.code === 0 && sysctl.stdout.trim() !== ""
+      ? Option.some(sysctl.stdout.trim())
+      : Option.none<string>();
   }
   const id = yield* fs.readFileString("/proc/sys/kernel/random/boot_id").pipe(Effect.option);
-  return Option.filter(Option.map(id, (t) => t.trim()), (t) => t !== "");
+  return Option.filter(
+    Option.map(id, (t) => t.trim()),
+    (t) => t !== "",
+  );
 });
 
 /**
@@ -95,7 +106,13 @@ export const processIdentity = (pid: number) =>
       const ticks = stat.value.slice(stat.value.lastIndexOf(")") + 2).split(" ")[19];
       return ticks === undefined ? Option.none<string>() : Option.some(`ticks ${ticks}`);
     }
-    const ps = yield* exec({ command: "ps", args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, extendEnv: true, timeout: Duration.seconds(5) });
+    const ps = yield* exec({
+      command: "ps",
+      args: ["-o", "lstart=", "-p", String(pid)],
+      env: { LC_ALL: "C" },
+      extendEnv: true,
+      timeout: Duration.seconds(5),
+    });
     const start = ps.stdout.trim().replace(/\s+/g, " ");
     return ps.code === 0 && start !== "" ? Option.some(start) : Option.none<string>();
   });
@@ -107,13 +124,19 @@ const ownerRuns = (owner: Owner) =>
     const boot = yield* bootId;
     if (owner.boot !== undefined && Option.isSome(boot) && owner.boot !== boot.value) return false;
     const started = yield* processIdentity(owner.pid);
-    return !(owner.process !== undefined && Option.isSome(started) && owner.process !== started.value);
+    return !(
+      owner.process !== undefined &&
+      Option.isSome(started) &&
+      owner.process !== started.value
+    );
   });
 
 const readOwner = (lock: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    return yield* fs.readFileString(ownerPath(lock)).pipe(Effect.flatMap(decodeOwner), Effect.option);
+    return yield* fs
+      .readFileString(ownerPath(lock))
+      .pipe(Effect.flatMap(decodeOwner), Effect.option);
   });
 
 /** Written aside and renamed in, so a reader never sees half an owner. */
@@ -130,7 +153,9 @@ const ageOf = (path: string, now: number) =>
     const fs = yield* FileSystem.FileSystem;
     const stat = yield* fs.stat(path).pipe(Effect.option);
     if (Option.isNone(stat)) return Option.none<number>();
-    return Option.some(Option.match(stat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() }));
+    return Option.some(
+      Option.match(stat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() }),
+    );
   });
 
 /** Free, held by a live run, or left behind by a dead one. */
@@ -151,7 +176,9 @@ const lockState = (lock: string, now: number) =>
 export const takeSyncLock = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const lock = syncLockPath(process.env["HOME"] ?? "");
-  yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
+  yield* fs
+    .makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true })
+    .pipe(Effect.ignore);
   const now = yield* Clock.currentTimeMillis;
   const boot = yield* bootId;
   const started = yield* processIdentity(process.pid);
@@ -170,7 +197,9 @@ export const takeSyncLock = Effect.gen(function* () {
       made
         ? writeOwner(lock, owner).pipe(
             Effect.as(true),
-            Effect.catch(() => fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false))),
+            Effect.catch(() =>
+              fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false)),
+            ),
           )
         : Effect.succeed(false),
     ),
@@ -186,16 +215,25 @@ export const takeSyncLock = Effect.gen(function* () {
   // the guard, so two takers never both win. The guard is held for
   // milliseconds; one older than a minute was left by a taker that died.
   const guard = `${lock}.takeover`;
-  if (!(yield* fs.makeDirectory(guard).pipe(Effect.as(true), Effect.orElseSucceed(() => false)))) {
+  if (
+    !(yield* fs.makeDirectory(guard).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    ))
+  ) {
     const age = yield* ageOf(guard, now);
-    if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS) yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
+    if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS)
+      yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
     return null;
   }
   const taken = yield* Effect.gen(function* () {
     const state = yield* lockState(lock, now);
     if (state === "free") return yield* create;
     if (state === "held") return false;
-    return yield* writeOwner(lock, owner).pipe(Effect.as(true), Effect.orElseSucceed(() => false));
+    return yield* writeOwner(lock, owner).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
   }).pipe(Effect.ensuring(fs.remove(guard, { recursive: true }).pipe(Effect.ignore)));
   return taken ? yield* mine : null;
 });
@@ -206,7 +244,8 @@ export const releaseSyncLock = (token: string) =>
     const fs = yield* FileSystem.FileSystem;
     const lock = syncLockPath(process.env["HOME"] ?? "");
     const owner = yield* readOwner(lock);
-    if (Option.isSome(owner) && owner.value.token === token) yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
+    if (Option.isSome(owner) && owner.value.token === token)
+      yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
     heldHere.delete(token);
   });
 
@@ -222,9 +261,14 @@ const startedByHolder = Effect.gen(function* () {
  * Run `effect` holding the lock, or `busy` when another run holds it. With
  * `children`, processes it starts are part of the run (sync's fixes).
  */
-export const withSyncLock = <A, E, R, A2, E2, R2>(effect: Effect.Effect<A, E, R>, busy: Effect.Effect<A2, E2, R2>, options: { readonly children?: boolean } = {}) =>
+export const withSyncLock = <A, E, R, A2, E2, R2>(
+  effect: Effect.Effect<A, E, R>,
+  busy: Effect.Effect<A2, E2, R2>,
+  options: { readonly children?: boolean } = {},
+) =>
   Effect.gen(function* () {
-    if ((yield* HoldsSyncLock) || (yield* startedByHolder)) return yield* effect.pipe(Effect.provideService(HoldsSyncLock, true));
+    if ((yield* HoldsSyncLock) || (yield* startedByHolder))
+      return yield* effect.pipe(Effect.provideService(HoldsSyncLock, true));
     const token = yield* takeSyncLock;
     if (token === null) return yield* busy;
     const share = options.children === true;

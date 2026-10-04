@@ -27,7 +27,12 @@ import * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { sha256 } from "../Hash.ts";
-import { CONTAINER_LABEL, CONTAINER_PREFIX, LEGACY_CONTAINER_LABEL, LEGACY_CONTAINER_PREFIX } from "../Names.ts";
+import {
+  CONTAINER_LABEL,
+  CONTAINER_PREFIX,
+  LEGACY_CONTAINER_LABEL,
+  LEGACY_CONTAINER_PREFIX,
+} from "../Names.ts";
 import type { StdioProcess } from "./Bridge.ts";
 import { exec } from "../Exec.ts";
 import { IMAGE_PATTERN } from "./Definitions.ts";
@@ -40,7 +45,12 @@ export const PORT_RANGE = { first: 18200, last: 18299 } as const;
 export const containerName = (server: string) => `${CONTAINER_PREFIX}${server}`;
 const legacyContainerName = (server: string) => `${LEGACY_CONTAINER_PREFIX}${server}`;
 
-export const HARDENING: ReadonlyArray<string> = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"];
+export const HARDENING: ReadonlyArray<string> = [
+  "--cap-drop",
+  "ALL",
+  "--security-opt",
+  "no-new-privileges",
+];
 
 export interface ContainerSpec {
   readonly server: string;
@@ -51,16 +61,39 @@ export interface ContainerSpec {
 }
 
 /** A digest of everything that should restart the container when it changes, secret values included. */
-export const specDigest = (spec: ContainerSpec & { readonly targetPort?: number; readonly network?: string | null }) =>
+export const specDigest = (
+  spec: ContainerSpec & { readonly targetPort?: number; readonly network?: string | null },
+) =>
   Effect.promise(() =>
-    sha256(toJson([spec.image, spec.args, Object.entries(spec.env).sort(([a], [b]) => a.localeCompare(b)), spec.targetPort ?? null, spec.network ?? null])),
+    sha256(
+      toJson([
+        spec.image,
+        spec.args,
+        Object.entries(spec.env).sort(([a], [b]) => a.localeCompare(b)),
+        spec.targetPort ?? null,
+        spec.network ?? null,
+      ]),
+    ),
   ).pipe(Effect.map((d) => d.slice(0, 24)));
 
-const docker = (args: ReadonlyArray<string>, env: Readonly<Record<string, string>> = {}, timeout: Duration.Input = Duration.seconds(60)) =>
-  exec({ command: "docker", args, env: { ...process.env, ...env }, timeout });
+const docker = (
+  args: ReadonlyArray<string>,
+  env: Readonly<Record<string, string>> = {},
+  timeout: Duration.Input = Duration.seconds(60),
+) => exec({ command: "docker", args, env: { ...process.env, ...env }, timeout });
 
-const failure = (r: { readonly stdout: string; readonly stderr: string; readonly code: number | null; readonly timedOut: boolean; readonly spawnError?: string }) =>
-  r.spawnError !== undefined ? `docker is not available: ${r.spawnError}` : r.timedOut ? "docker timed out" : (r.stderr.trim() || r.stdout.trim()).split("\n").slice(-2).join(" ").slice(0, 300);
+const failure = (r: {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly code: number | null;
+  readonly timedOut: boolean;
+  readonly spawnError?: string;
+}) =>
+  r.spawnError !== undefined
+    ? `docker is not available: ${r.spawnError}`
+    : r.timedOut
+      ? "docker timed out"
+      : (r.stderr.trim() || r.stdout.trim()).split("\n").slice(-2).join(" ").slice(0, 300);
 
 /**
  * Write the environment to a private env file for `--env-file`, in a
@@ -71,11 +104,15 @@ export const envFile = (env: Readonly<Record<string, string>>) =>
     const keys = Object.keys(env).sort();
     if (keys.length === 0) return [] as Array<string>;
     for (const key of keys) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return yield* Effect.fail(`env name ${key} is not valid`);
-      if (/[\r\n\0]/.test(env[key] ?? "")) return yield* Effect.fail(`env ${key} has a line break, which an env file cannot carry`);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+        return yield* Effect.fail(`env name ${key} is not valid`);
+      if (/[\r\n\0]/.test(env[key] ?? ""))
+        return yield* Effect.fail(`env ${key} has a line break, which an env file cannot carry`);
     }
     const fs = yield* FileSystem.FileSystem;
-    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-hub-" }).pipe(Effect.mapError(() => "cannot create a private temporary directory"));
+    const dir = yield* fs
+      .makeTempDirectoryScoped({ prefix: "t3-fleet-hub-" })
+      .pipe(Effect.mapError(() => "cannot create a private temporary directory"));
     yield* fs.chmod(dir, 0o700).pipe(Effect.ignore);
     const file = `${dir}/env`;
     yield* fs
@@ -84,7 +121,8 @@ export const envFile = (env: Readonly<Record<string, string>>) =>
     return ["--env-file", file];
   });
 
-const checkImage = (image: string) => (IMAGE_PATTERN.test(image) ? Effect.void : Effect.fail(`not an image reference: ${image}`));
+const checkImage = (image: string) =>
+  IMAGE_PATTERN.test(image) ? Effect.void : Effect.fail(`not an image reference: ${image}`);
 
 export interface Inspected {
   readonly running: boolean;
@@ -104,7 +142,9 @@ export const inspect = (name: string) =>
       | Array<{
           State?: { Running?: boolean; Status?: string };
           Config?: { Labels?: Record<string, string> };
-          HostConfig?: { PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> };
+          HostConfig?: {
+            PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null>;
+          };
         }>
       | undefined;
     const c = value?.[0];
@@ -113,18 +153,31 @@ export const inspect = (name: string) =>
     return {
       running: c.State?.Running === true,
       status: c.State?.Status ?? "unknown",
-      digest: c.Config?.Labels?.[`${CONTAINER_LABEL}.digest`] ?? c.Config?.Labels?.[`${LEGACY_CONTAINER_LABEL}.digest`] ?? null,
+      digest:
+        c.Config?.Labels?.[`${CONTAINER_LABEL}.digest`] ??
+        c.Config?.Labels?.[`${LEGACY_CONTAINER_LABEL}.digest`] ??
+        null,
       port: binding?.HostPort === undefined ? null : Number(binding.HostPort),
       run: c.Config?.Labels?.[`${CONTAINER_LABEL}.run`] ?? null,
     } satisfies Inspected;
   });
 
-export const removeContainer = (name: string) => docker(["rm", "-f", name], {}, Duration.seconds(30)).pipe(Effect.asVoid);
+export const removeContainer = (name: string) =>
+  docker(["rm", "-f", name], {}, Duration.seconds(30)).pipe(Effect.asVoid);
 
 /** Ports held by every t3-fleet-mcp-* (or fleetx-mcp-*) container, running or not. */
 const portsInUse = Effect.gen(function* () {
   const r = yield* docker(
-    ["ps", "-a", "--filter", `name=^${CONTAINER_PREFIX}`, "--filter", `name=^${LEGACY_CONTAINER_PREFIX}`, "--format", "{{.Names}}"],
+    [
+      "ps",
+      "-a",
+      "--filter",
+      `name=^${CONTAINER_PREFIX}`,
+      "--filter",
+      `name=^${LEGACY_CONTAINER_PREFIX}`,
+      "--format",
+      "{{.Names}}",
+    ],
     {},
     Duration.seconds(15),
   );
@@ -141,12 +194,18 @@ const portsInUse = Effect.gen(function* () {
  * Ensure an HTTP container runs with this spec: adopt a matching one,
  * otherwise (re)create it. Returns the local port.
  */
-export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort: number }, reserved: ReadonlySet<number>) =>
+export const ensureHttpContainer = (
+  spec: ContainerSpec & { readonly targetPort: number },
+  reserved: ReadonlySet<number>,
+) =>
   Effect.gen(function* () {
     const name = containerName(spec.server);
     const digest = yield* specDigest(spec);
     // A container from before the rename takes the new name, keeping whatever it runs. Until 1.0.
-    if ((yield* inspect(name)) === null && (yield* inspect(legacyContainerName(spec.server))) !== null) {
+    if (
+      (yield* inspect(name)) === null &&
+      (yield* inspect(legacyContainerName(spec.server))) !== null
+    ) {
       yield* docker(["rename", legacyContainerName(spec.server), name], {}, Duration.seconds(15));
     }
     const existing = yield* inspect(name);
@@ -166,26 +225,26 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
         Effect.gen(function* () {
           const envArgs = yield* envFile(spec.env);
           return yield* docker(
-        [
-          "run",
-          "-d",
-          "--name",
-          name,
-          "--label",
-          `${CONTAINER_LABEL}.hub=${spec.server}`,
-          "--label",
-          `${CONTAINER_LABEL}.digest=${digest}`,
-          "--label",
-          `${CONTAINER_LABEL}.run=${run}`,
-          ...HARDENING,
-          "-p",
-          `127.0.0.1:${port}:${spec.targetPort}`,
-          ...envArgs,
-          spec.image,
-          ...spec.args,
-        ],
-        {},
-        Duration.minutes(10),
+            [
+              "run",
+              "-d",
+              "--name",
+              name,
+              "--label",
+              `${CONTAINER_LABEL}.hub=${spec.server}`,
+              "--label",
+              `${CONTAINER_LABEL}.digest=${digest}`,
+              "--label",
+              `${CONTAINER_LABEL}.run=${run}`,
+              ...HARDENING,
+              "-p",
+              `127.0.0.1:${port}:${spec.targetPort}`,
+              ...envArgs,
+              spec.image,
+              ...spec.args,
+            ],
+            {},
+            Duration.minutes(10),
           );
         }),
       );
@@ -201,7 +260,11 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
 /** `docker run -i --rm` for a stdio image, as a process the bridge supervises. */
 export const spawnStdioContainer = (
   spec: ContainerSpec & { readonly network: "none" | null },
-): Effect.Effect<StdioProcess, string, Scope.Scope | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> =>
+): Effect.Effect<
+  StdioProcess,
+  string,
+  Scope.Scope | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
+> =>
   Effect.gen(function* () {
     const name = containerName(spec.server);
     yield* checkImage(spec.image);
@@ -210,7 +273,10 @@ export const spawnStdioContainer = (
     // The env file lives in its own scope: removed seconds after docker has read it, or when the process stops.
     const fileScope = yield* Scope.fork(yield* Effect.scope);
     const envArgs = yield* envFile(spec.env).pipe(Effect.provideService(Scope.Scope, fileScope));
-    yield* Scope.close(fileScope, Exit.void).pipe(Effect.delay(Duration.seconds(10)), Effect.forkScoped);
+    yield* Scope.close(fileScope, Exit.void).pipe(
+      Effect.delay(Duration.seconds(10)),
+      Effect.forkScoped,
+    );
     return yield* spawnStdio({
       command: "docker",
       args: [
@@ -232,4 +298,8 @@ export const spawnStdioContainer = (
   });
 
 /** Whether the docker CLI reaches a daemon. */
-export const dockerAvailable = docker(["version", "--format", "{{.Server.Version}}"], {}, Duration.seconds(10)).pipe(Effect.map((r) => r.code === 0));
+export const dockerAvailable = docker(
+  ["version", "--format", "{{.Server.Version}}"],
+  {},
+  Duration.seconds(10),
+).pipe(Effect.map((r) => r.code === 0));

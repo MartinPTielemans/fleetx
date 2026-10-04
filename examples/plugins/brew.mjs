@@ -19,7 +19,12 @@ export default ({ defineArea, Effect, Schema, Duration, exec, sh }) =>
     observe: (wanted, ctx) =>
       Effect.gen(function* () {
         if ((wanted ?? []).length === 0) return { brew: false, installed: [] };
-        const list = yield* exec({ command: "brew", args: ["list", "--formula", "-1"], env: ctx.env, timeout: Duration.seconds(30) });
+        const list = yield* exec({
+          command: "brew",
+          args: ["list", "--formula", "-1"],
+          env: ctx.env,
+          timeout: Duration.seconds(30),
+        });
         return { brew: list.code === 0, installed: list.stdout.split("\n").filter(Boolean) };
       }),
     diagnose: ({ node, desired, observed }) => {

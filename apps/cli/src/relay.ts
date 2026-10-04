@@ -30,20 +30,34 @@ import packageJson from "../package.json" with { type: "json" };
 import { reportUserErrors, untilNewBuild } from "./shared.ts";
 
 /** Every upstream base some node's [models] declares: where /egress may forward. */
-const egressBasesOf = (config: Config) =>
-  [...new Set(config.nodes.flatMap((n) => upstreamBases(upstreamsOf(decodeModelsSettings(n.settings.table["models"])))))];
+const egressBasesOf = (config: Config) => [
+  ...new Set(
+    config.nodes.flatMap((n) =>
+      upstreamBases(upstreamsOf(decodeModelsSettings(n.settings.table["models"]))),
+    ),
+  ),
+];
 
 const serve = Command.make("serve").pipe(
-  Command.withDescription("Run the relay on 127.0.0.1:[relay] port. Publish it to the tailnet, never the internet."),
+  Command.withDescription(
+    "Run the relay on 127.0.0.1:[relay] port. Publish it to the tailnet, never the internet.",
+  ),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
       const self = config.nodes.find((n) => n.name === config.self);
-      if (!self?.roles.includes("relay")) return yield* Effect.fail(`${config.self} does not have the relay role`);
+      if (!self?.roles.includes("relay"))
+        return yield* Effect.fail(`${config.self} does not have the relay role`);
       const token = yield* secretVar(RELAY_TOKEN);
-      if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets (t3-fleet secrets set ${RELAY_TOKEN}=… on an authority)`);
+      if (token === "")
+        return yield* Effect.fail(
+          `no ${RELAY_TOKEN} in this node's secrets (t3-fleet secrets set ${RELAY_TOKEN}=… on an authority)`,
+        );
       const port = config.settings.relay?.port ?? 8399;
-      const mcp = (self.settings.table["mcp"] ?? {}) as { ports?: Record<string, number>; hub?: boolean };
+      const mcp = (self.settings.table["mcp"] ?? {}) as {
+        ports?: Record<string, number>;
+        hub?: boolean;
+      };
       const { identity } = yield* ensureIdentity;
       // Followed as sync updates the config repo; a read that fails keeps the last good set.
       let egressBases = egressBasesOf(config);
@@ -78,7 +92,9 @@ const serve = Command.make("serve").pipe(
         Layer.launch(
           HttpRouter.serve(routes).pipe(
             Layer.provide(FetchHttpClient.layer),
-            Layer.provide(NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port })),
+            Layer.provide(
+              NodeHttpServer.layer(() => NodeHttp.createServer(), { host: "127.0.0.1", port }),
+            ),
           ),
         ),
       );
@@ -92,11 +108,16 @@ export const relayCommand = Command.make("relay").pipe(
 );
 
 export const listenCommand = Command.make("listen").pipe(
-  Command.withDescription("Follow the relay; sync as soon as the config branch moves. Runs until stopped."),
+  Command.withDescription(
+    "Follow the relay; sync as soon as the config branch moves. Runs until stopped.",
+  ),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const log = (line: string) => DateTime.now.pipe(Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)));
+      const log = (line: string) =>
+        DateTime.now.pipe(
+          Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)),
+        );
       return yield* untilNewBuild(
         listen(
           config,
@@ -107,10 +128,18 @@ export const listenCommand = Command.make("listen").pipe(
               yield* log(`branch moved to ${rev}; syncing`);
               // A sync already running may have started before the branch moved: wait for it, then sync again.
               const result = yield* syncRun(config, { apply: true }).pipe(
-                Effect.repeat({ while: (r) => r.state === null, schedule: Schedule.spaced(Duration.seconds(20)), times: 45 }),
+                Effect.repeat({
+                  while: (r) => r.state === null,
+                  schedule: Schedule.spaced(Duration.seconds(20)),
+                  times: 45,
+                }),
                 Effect.result,
               );
-              yield* log(result._tag === "Success" ? (result.success.state?.message ?? (result.success.lines.join("; ") || "done")) : `sync failed: ${String(result.failure)}`);
+              yield* log(
+                result._tag === "Success"
+                  ? (result.success.state?.message ?? (result.success.lines.join("; ") || "done"))
+                  : `sync failed: ${String(result.failure)}`,
+              );
             }),
           log,
         ),

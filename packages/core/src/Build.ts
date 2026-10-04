@@ -23,20 +23,28 @@ declare const __T3_FLEET_BUILD__: string | undefined;
 const MARKER = "t3-fleet-build";
 
 /** The marker text for a build: `t3-fleet-build:0.6.1:1759579200000:abc1234`. */
-export const buildMarker = (build: BuildId) => `${MARKER}:${build.version}:${build.builtAt}:${build.commit ?? ""}`;
+export const buildMarker = (build: BuildId) =>
+  `${MARKER}:${build.version}:${build.builtAt}:${build.commit ?? ""}`;
 
 // Assembled at run time, so the bundle's copy of this pattern never matches itself.
-const PATTERN = new RegExp(`${MARKER}:(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?):(\\d+):([0-9a-f]*(?:-dirty)?)(?![0-9A-Za-z-])`);
+const PATTERN = new RegExp(
+  `${MARKER}:(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?):(\\d+):([0-9a-f]*(?:-dirty)?)(?![0-9A-Za-z-])`,
+);
 
 /** The identity written into a bundle; null for a build from before identities existed. */
 export const buildOf = (bundle: string): BuildId | null => {
   const m = PATTERN.exec(bundle);
   if (m === null) return null;
-  return { version: m[1] ?? "", builtAt: Number(m[2]), commit: m[3] === "" || m[3] === undefined ? null : m[3] };
+  return {
+    version: m[1] ?? "",
+    builtAt: Number(m[2]),
+    commit: m[3] === "" || m[3] === undefined ? null : m[3],
+  };
 };
 
 /** This running build's identity; null when running from source. */
-export const runningBuild = (): BuildId | null => (typeof __T3_FLEET_BUILD__ === "string" ? buildOf(__T3_FLEET_BUILD__) : null);
+export const runningBuild = (): BuildId | null =>
+  typeof __T3_FLEET_BUILD__ === "string" ? buildOf(__T3_FLEET_BUILD__) : null;
 
 const parts = (version: string) => {
   const [core = "", pre] = version.split("-", 2);

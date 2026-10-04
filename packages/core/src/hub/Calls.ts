@@ -19,18 +19,25 @@ import { HubCall } from "../Api.ts";
 
 /** Every field a client controls is cut short before it is kept. */
 export const MAX_FIELD = 128;
-const clip = (text: string | null, max: number) => (text === null ? null : text.length > max ? `${text.slice(0, max - 1)}…` : text);
+const clip = (text: string | null, max: number) =>
+  text === null ? null : text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
 export interface CallLog {
   readonly record: (call: HubCall) => Effect.Effect<void>;
-  readonly list: (filter: { readonly server?: string | undefined; readonly limit?: number | undefined }) => Effect.Effect<ReadonlyArray<HubCall>>;
+  readonly list: (filter: {
+    readonly server?: string | undefined;
+    readonly limit?: number | undefined;
+  }) => Effect.Effect<ReadonlyArray<HubCall>>;
 }
 
 const decodeLine = Schema.decodeUnknownOption(Schema.fromJsonString(HubCall));
 const encodeLine = Schema.encodeUnknownOption(Schema.fromJsonString(HubCall));
 
 /** `file` null keeps the log in memory only. */
-export const makeCallLog = (file: string | null, options?: { readonly capacity?: number; readonly maxBytes?: number }) =>
+export const makeCallLog = (
+  file: string | null,
+  options?: { readonly capacity?: number; readonly maxBytes?: number },
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -56,7 +63,9 @@ export const makeCallLog = (file: string | null, options?: { readonly capacity?:
         const line = Option.getOrNull(encodeLine(call));
         if (line === null) return;
         if (bytes + line.length + 1 > maxBytes) {
-          const all = ring.map((c) => Option.getOrElse(encodeLine(c), () => "")).filter((l) => l !== "");
+          const all = ring
+            .map((c) => Option.getOrElse(encodeLine(c), () => ""))
+            .filter((l) => l !== "");
           const text = all.length === 0 ? "" : `${all.join("\n")}\n`;
           yield* fs.writeFileString(file, text, { mode: 0o600 });
           bytes = text.length;
@@ -69,14 +78,22 @@ export const makeCallLog = (file: string | null, options?: { readonly capacity?:
     const log: CallLog = {
       record: (raw) =>
         Effect.suspend(() => {
-          const call: HubCall = { ...raw, server: clip(raw.server, MAX_FIELD) ?? "", client: clip(raw.client, MAX_FIELD) ?? "", method: clip(raw.method, MAX_FIELD) ?? "", tool: clip(raw.tool, MAX_FIELD), error: clip(raw.error, 200) };
+          const call: HubCall = {
+            ...raw,
+            server: clip(raw.server, MAX_FIELD) ?? "",
+            client: clip(raw.client, MAX_FIELD) ?? "",
+            method: clip(raw.method, MAX_FIELD) ?? "",
+            tool: clip(raw.tool, MAX_FIELD),
+            error: clip(raw.error, 200),
+          };
           ring.push(call);
           if (ring.length > capacity) ring = ring.slice(-capacity);
           return write(call);
         }),
       list: ({ server, limit }) =>
         Effect.sync(() => {
-          const matching = server === undefined || server === "" ? ring : ring.filter((c) => c.server === server);
+          const matching =
+            server === undefined || server === "" ? ring : ring.filter((c) => c.server === server);
           const n = Math.max(1, Math.min(limit ?? 100, capacity));
           return matching.slice(-n).reverse();
         }),

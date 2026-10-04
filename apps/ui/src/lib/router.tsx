@@ -1,7 +1,16 @@
 /** Eight views, one path each; the server answers every path with the app. */
 import { useEffect, useState, type MouseEvent } from "react";
 
-export const VIEWS = ["environments", "findings", "proposals", "alerts", "skills", "mcp", "models", "config"] as const;
+export const VIEWS = [
+  "environments",
+  "findings",
+  "proposals",
+  "alerts",
+  "skills",
+  "mcp",
+  "models",
+  "config",
+] as const;
 export type View = (typeof VIEWS)[number];
 
 /** A path segment as text; a malformed escape ("/config/%") stays as typed rather than breaking the page. */

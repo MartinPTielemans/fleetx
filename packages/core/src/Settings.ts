@@ -13,7 +13,13 @@
  * so a node can say "everything the workstation profile has, minus one".
  */
 
-export type Value = string | number | boolean | null | ReadonlyArray<Value> | { readonly [key: string]: Value };
+export type Value =
+  | string
+  | number
+  | boolean
+  | null
+  | ReadonlyArray<Value>
+  | { readonly [key: string]: Value };
 export type Table = { readonly [key: string]: Value };
 
 export interface Layer {
@@ -28,7 +34,8 @@ export interface Merged {
   readonly provenance: ReadonlyMap<string, string>;
 }
 
-const isTable = (v: Value | undefined): v is Table => typeof v === "object" && v !== null && !Array.isArray(v);
+const isTable = (v: Value | undefined): v is Table =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
 const mergeInto = (
   base: Record<string, Value>,
@@ -68,7 +75,8 @@ const mergeInto = (
 
 const markAll = (value: Value, source: string, path: string, provenance: Map<string, string>) => {
   provenance.set(path, source);
-  if (isTable(value)) for (const [k, v] of Object.entries(value)) markAll(v, source, `${path}.${k}`, provenance);
+  if (isTable(value))
+    for (const [k, v] of Object.entries(value)) markAll(v, source, `${path}.${k}`, provenance);
 };
 
 export const mergeLayers = (layers: ReadonlyArray<Layer>): Merged => {
@@ -79,7 +87,9 @@ export const mergeLayers = (layers: ReadonlyArray<Layer>): Merged => {
 };
 
 /** Flattened `path = value  # source` lines, for `t3-fleet config show`. */
-export const describeMerged = (merged: Merged): Array<{ path: string; value: string; source: string }> => {
+export const describeMerged = (
+  merged: Merged,
+): Array<{ path: string; value: string; source: string }> => {
   const out: Array<{ path: string; value: string; source: string }> = [];
   const walk = (value: Value, path: string) => {
     if (isTable(value) && Object.keys(value).length > 0) {

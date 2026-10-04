@@ -11,9 +11,28 @@
  * A hidden tab closes its stream after a while, so the server stops checking
  * for nobody, and opens it again when it is shown.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
-import { ApiError, api, decodeCheckFailedEvent, decodeJobEvent, decodeStatusEvent, isUnauthorized, type UiJobT, type UiSession, type UiStatus } from "./api";
+import {
+  ApiError,
+  api,
+  decodeCheckFailedEvent,
+  decodeJobEvent,
+  decodeStatusEvent,
+  isUnauthorized,
+  type UiJobT,
+  type UiSession,
+  type UiStatus,
+} from "./api";
 import { finished, JobBook } from "./jobs";
 
 /** "paused": closed while the tab is hidden; "stale": this page's token is from an earlier run. */
@@ -40,7 +59,10 @@ interface Store {
   readonly recheck: () => Promise<void>;
   readonly subscribe: (type: string, listener: (data: string) => void) => () => void;
   /** Start a job and settle with it, rejected with its error if it failed; `started` hears its id first. */
-  readonly runJob: (start: () => Promise<UiJobT>, started?: (id: string) => void) => Promise<UiJobT>;
+  readonly runJob: (
+    start: () => Promise<UiJobT>,
+    started?: (id: string) => void,
+  ) => Promise<UiJobT>;
 }
 
 const StoreContext = createContext<Store | null>(null);
@@ -61,13 +83,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     api.session().then(setSession, setSessionError);
-    api.status().then(
-      (s) => {
-        setStatus(s);
-        setStatusError(null);
-      },
-      setStatusError,
-    );
+    api.status().then((s) => {
+      setStatus(s);
+      setStatusError(null);
+    }, setStatusError);
     const tick = window.setInterval(() => setNow(Date.now()), 5000);
     return () => window.clearInterval(tick);
   }, []);
@@ -126,7 +145,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
       current.addEventListener("check-failed", (event) => {
         try {
-          setStatusError(new ApiError(500, decodeCheckFailedEvent("/api/events", (event as MessageEvent<string>).data).message));
+          setStatusError(
+            new ApiError(
+              500,
+              decodeCheckFailedEvent("/api/events", (event as MessageEvent<string>).data).message,
+            ),
+          );
         } catch (error) {
           setStatusError(error);
         }
@@ -138,7 +162,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // A job this page cannot read stays out of the tray; the next event replaces it.
         }
       });
-      for (const type of RELAY_EVENTS) current.addEventListener(type, (event) => dispatch(type, (event as MessageEvent<string>).data));
+      for (const type of RELAY_EVENTS)
+        current.addEventListener(type, (event) =>
+          dispatch(type, (event as MessageEvent<string>).data),
+        );
     };
     const visibility = () => {
       if (document.visibilityState === "visible") {
@@ -209,10 +236,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [book],
   );
 
-  const jobList = useMemo(() => [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt), [jobs]);
+  const jobList = useMemo(
+    () => [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt),
+    [jobs],
+  );
   const value = useMemo(
-    () => ({ session, sessionError, status, statusError, checking, connection, now, jobs: jobList, watched, recheck, subscribe, runJob }),
-    [session, sessionError, status, statusError, checking, connection, now, jobList, watched, recheck, subscribe, runJob],
+    () => ({
+      session,
+      sessionError,
+      status,
+      statusError,
+      checking,
+      connection,
+      now,
+      jobs: jobList,
+      watched,
+      recheck,
+      subscribe,
+      runJob,
+    }),
+    [
+      session,
+      sessionError,
+      status,
+      statusError,
+      checking,
+      connection,
+      now,
+      jobList,
+      watched,
+      recheck,
+      subscribe,
+      runJob,
+    ],
   );
   return <StoreContext value={value}>{children}</StoreContext>;
 }

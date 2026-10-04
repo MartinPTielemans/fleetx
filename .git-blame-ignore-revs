@@ -1,0 +1,4 @@
+# Commits that only reformat code; `git blame` skips them with
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# Format with T3 Code's settings
+d71067db93d33b6593b7d5141ce12ce981af3f6a

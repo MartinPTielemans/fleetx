@@ -15,7 +15,12 @@ import { describe, expect, it } from "vite-plus/test";
 import { SkillsArea } from "./Skills.ts";
 
 /** The skills area reads only files; any request it made would fail here. */
-const services = Layer.mergeAll(NodeServices.layer, Layer.succeed(HttpClient.HttpClient)(HttpClient.make(() => Effect.die("no network in this test"))));
+const services = Layer.mergeAll(
+  NodeServices.layer,
+  Layer.succeed(HttpClient.HttpClient)(
+    HttpClient.make(() => Effect.die("no network in this test")),
+  ),
+);
 
 const skill = (dir: string, text: string) => {
   mkdirSync(dir, { recursive: true });
@@ -31,15 +36,28 @@ describe("skills", () => {
     skill(join(home, ".claude/skills/foo"), "local copy");
     skill(join(home, ".claude/skills/bar.t3-fleet-backup.20261001120000"), "old backup");
     const desired = { store: "~/.agents/skills", clients: ["~/.claude/skills"] };
-    const ctx = { home, checkout, env: { ...process.env, HOME: home }, engine: null, engineBuild: null, node: "laptop", roles: [], relay: null };
+    const ctx = {
+      home,
+      checkout,
+      env: { ...process.env, HOME: home },
+      engine: null,
+      engineBuild: null,
+      node: "laptop",
+      roles: [],
+      relay: null,
+    };
     const round = async () => {
-      const observed = await Effect.runPromise(SkillsArea.observe(desired, ctx).pipe(Effect.provide(services)));
+      const observed = await Effect.runPromise(
+        SkillsArea.observe(desired, ctx).pipe(Effect.provide(services)),
+      );
       return SkillsArea.diagnose({ node: "laptop", desired, observed, fleet: [], authority: null });
     };
 
     const first = await round();
     expect(first.map((f) => f.key)).toEqual(["skills-unlinked"]);
-    execFileSync("bash", ["-c", first[0]?.fix?.command ?? ""], { env: { ...process.env, HOME: home, T3_FLEET_CHECKOUT: checkout } });
+    execFileSync("bash", ["-c", first[0]?.fix?.command ?? ""], {
+      env: { ...process.env, HOME: home, T3_FLEET_CHECKOUT: checkout },
+    });
 
     expect(await round()).toEqual([]);
     const backups = join(home, ".local/state/t3-fleet/skill-backups");

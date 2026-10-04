@@ -18,12 +18,26 @@ const mint = (expiresIn: number) => {
   const home = mkdtempSync(join(tmpdir(), "t3f-access-"));
   const t3 = Layer.succeed(HttpClient.HttpClient)(
     HttpClient.make((request) =>
-      Effect.succeed(HttpClientResponse.fromWeb(request, new Response(JSON.stringify({ access_token: "tok", expires_in: expiresIn, scope: "orchestration:read" })))),
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(
+            JSON.stringify({
+              access_token: "tok",
+              expires_in: expiresIn,
+              scope: "orchestration:read",
+            }),
+          ),
+        ),
+      ),
     ),
   );
   const cli = { command: "/bin/sh", args: ["-c", `echo '{"credential":"pair"}'`, "t3"], env: {} };
   const result = Effect.runPromise(
-    mintAccess({ home, origin: "http://127.0.0.1:3773", cli, now: 1_000 }).pipe(Effect.result, Effect.provide(Layer.mergeAll(NodeServices.layer, t3))),
+    mintAccess({ home, origin: "http://127.0.0.1:3773", cli, now: 1_000 }).pipe(
+      Effect.result,
+      Effect.provide(Layer.mergeAll(NodeServices.layer, t3)),
+    ),
   );
   return { home, result };
 };
@@ -40,7 +54,9 @@ describe("mintAccess", () => {
     const { home, result } = mint(2 * 86_400);
     const outcome = await result;
     expect(outcome._tag).toBe("Failure");
-    expect(outcome._tag === "Failure" ? outcome.failure.message : "").toContain("valid for only 48 hours");
+    expect(outcome._tag === "Failure" ? outcome.failure.message : "").toContain(
+      "valid for only 48 hours",
+    );
     expect(readFileSync(t3AccessAttemptPath(home), "utf8").trim()).toBe("1000");
   });
 });

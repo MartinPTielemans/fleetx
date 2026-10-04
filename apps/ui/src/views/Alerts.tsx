@@ -32,7 +32,12 @@ export function AlertsView() {
       title="Alerts"
       description="Health changes every machine reported through sync"
       actions={
-        <Button size="sm" variant="outline" disabled={alerts.loading} onClick={() => void alerts.reload()}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={alerts.loading}
+          onClick={() => void alerts.reload()}
+        >
           {alerts.loading ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
           Refresh
         </Button>
@@ -40,11 +45,20 @@ export function AlertsView() {
     >
       {nodes.length > 1 ? (
         <div className="flex flex-wrap gap-1">
-          <Button size="xs" variant={node === null ? "outline" : "ghost-muted"} onClick={() => setNode(null)}>
+          <Button
+            size="xs"
+            variant={node === null ? "outline" : "ghost-muted"}
+            onClick={() => setNode(null)}
+          >
             All machines
           </Button>
           {nodes.map((n) => (
-            <Button key={n} size="xs" variant={node === n ? "outline" : "ghost-muted"} onClick={() => setNode(n)}>
+            <Button
+              key={n}
+              size="xs"
+              variant={node === n ? "outline" : "ghost-muted"}
+              onClick={() => setNode(n)}
+            >
               {n}
             </Button>
           ))}
@@ -59,12 +73,19 @@ export function AlertsView() {
           )
         ) : shown.length === 0 ? (
           <Empty icon={<BellOffIcon />} title="No alerts">
-            Machines publish one when a problem appears or is resolved, or when their sync starts failing or recovers.
+            Machines publish one when a problem appears or is resolved, or when their sync starts
+            failing or recovers.
           </Empty>
         ) : (
           shown.map((a, i) => (
-            <div key={`${a.at}-${a.node}-${i}`} className="flex items-baseline gap-3 px-4 py-2.5 text-sm">
-              <span className="w-28 shrink-0 text-muted-foreground text-xs tabular-nums" title={stamp(a.at)}>
+            <div
+              key={`${a.at}-${a.node}-${i}`}
+              className="flex items-baseline gap-3 px-4 py-2.5 text-sm"
+            >
+              <span
+                className="w-28 shrink-0 text-muted-foreground text-xs tabular-nums"
+                title={stamp(a.at)}
+              >
                 {ago(a.at, now)}
               </span>
               <span className="w-20 shrink-0">

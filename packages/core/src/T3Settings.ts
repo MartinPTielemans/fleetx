@@ -18,10 +18,17 @@ import { DEFAULT_SERVER_SETTINGS } from "./vendor/t3/settings.ts";
  * from T3's own settings defaults, so a refresh of the vendored contracts
  * carries any change here.
  */
-export const T3_DRIVERS: Readonly<Record<string, { readonly enabled: boolean; readonly bin: string | null }>> = Object.fromEntries(
-  Object.entries(DEFAULT_SERVER_SETTINGS.providers as Readonly<Record<string, { readonly enabled: boolean; readonly binaryPath?: string }>>).map(
-    ([driver, defaults]) => [driver, { enabled: defaults.enabled, bin: defaults.binaryPath || null }],
-  ),
+export const T3_DRIVERS: Readonly<
+  Record<string, { readonly enabled: boolean; readonly bin: string | null }>
+> = Object.fromEntries(
+  Object.entries(
+    DEFAULT_SERVER_SETTINGS.providers as Readonly<
+      Record<string, { readonly enabled: boolean; readonly binaryPath?: string }>
+    >,
+  ).map(([driver, defaults]) => [
+    driver,
+    { enabled: defaults.enabled, bin: defaults.binaryPath || null },
+  ]),
 );
 
 const ProviderSettings = Schema.Struct({
@@ -55,7 +62,10 @@ export const providerPlans = (settings: T3SettingsFile): Array<ProviderPlan> => 
   for (const [instanceId, instance] of Object.entries(instances)) {
     const driver = String(instance.driver);
     const defaults = T3_DRIVERS[driver];
-    const config = Option.getOrElse(decodeConfig(instance.config ?? {}), () => ({}) as typeof InstanceConfig.Type);
+    const config = Option.getOrElse(
+      decodeConfig(instance.config ?? {}),
+      () => ({}) as typeof InstanceConfig.Type,
+    );
     plans.push({
       instanceId,
       driver,
@@ -81,6 +91,10 @@ export const readT3Settings = (home: string) =>
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(t3SettingsPath(home)).pipe(Effect.option);
     if (Option.isNone(text)) return Option.none<T3SettingsFile | "invalid">();
-    const decoded = yield* Schema.decodeEffect(Schema.fromJsonString(T3SettingsFile))(text.value).pipe(Effect.option);
-    return Option.some<T3SettingsFile | "invalid">(Option.getOrElse(decoded, () => "invalid" as const));
+    const decoded = yield* Schema.decodeEffect(Schema.fromJsonString(T3SettingsFile))(
+      text.value,
+    ).pipe(Effect.option);
+    return Option.some<T3SettingsFile | "invalid">(
+      Option.getOrElse(decoded, () => "invalid" as const),
+    );
   });

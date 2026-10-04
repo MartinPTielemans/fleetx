@@ -21,7 +21,9 @@ const escapeRegExp = (s: string) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
  */
 export const compileDeny = (deny: ReadonlyArray<string>): ((tool: string) => boolean) => {
   if (deny.length === 0) return (tool) => tool.length > MAX_TOOL_NAME;
-  const pattern = new RegExp(`^(?:${deny.map((p) => p.split("*").map(escapeRegExp).join(".*")).join("|")})$`);
+  const pattern = new RegExp(
+    `^(?:${deny.map((p) => p.split("*").map(escapeRegExp).join(".*")).join("|")})$`,
+  );
   return (tool) => tool.length > MAX_TOOL_NAME || pattern.test(tool);
 };
 
@@ -68,4 +70,10 @@ export const newClientToken = () => `fxh_${randomSecret()}`;
 
 /** SHA-256 as base64url, for PKCE. */
 export const sha256Base64url = (text: string) =>
-  Effect.promise(async () => base64url(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))));
+  Effect.promise(async () =>
+    base64url(
+      new Uint8Array(
+        await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
+      ),
+    ),
+  );
