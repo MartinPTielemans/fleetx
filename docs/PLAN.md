@@ -30,7 +30,8 @@ Ticked items are done and in `main`.
 - [x] Accepted differences (`[[accept]]`)
 - [x] Engine contains no personal data (checked in tests and CI)
 - [x] Installable: `curl | sh` (attestation-verified), Homebrew tap, Nix flake;
-      npm publishing is wired and runs once an `NPM_TOKEN` secret is set
+      npm uses trusted publishing after the owner publishes the first version
+      by hand and authorizes `release.yml`
 - [x] Profiles and roles on nodes; `config show <node>` with provenance
 - [x] Fixed runtime: units run an upgrade-proof node and absolute bundle with a fixed PATH; `doctor`
 - [x] Agents: install and upgrade Claude Code and Codex; policy track, pin, manual
@@ -101,7 +102,9 @@ Ticked items are done and in `main`.
 - [x] The fleetx names dropped in 0.8, before 1.0: the author's fleet was the
       only one that had them; its old secret copies and leftover links are
       removed by hand
-- [ ] GitHub repository, npm package and Homebrew formula renamed (owner)
+- [x] Homebrew formula renamed to `t3-fleet`; existing `fleetx` installs migrate
+- [ ] npm package `t3-fleet` first published and trusted publishing authorized (owner)
+- [ ] GitHub repository renamed (owner)
 
 ## Migration (the author's own fleet)
 

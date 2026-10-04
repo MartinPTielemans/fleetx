@@ -16,7 +16,6 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
@@ -34,12 +33,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" t3-fleet.mjs install.sh SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
-      - name: npm (when an NPM_TOKEN secret is configured)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        if: ${{ env.NODE_AUTH_TOKEN != '' }}
-        working-directory: apps/cli
-        run: npm publish --provenance --access public
+      - name: Publish to npm with trusted publishing
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          trap 'echo "::error::npm publication failed; Nix and Homebrew will still run"' ERR
+          # OIDC publishing requires npm >= 11.5.1. Do not configure an auth token.
+          npm install --global npm@11.10.0
+          version="${GITHUB_REF_NAME#v}"
+          metadata=$(mktemp)
+          errors=$(mktemp)
+          trap 'rm -f "$metadata" "$errors"' EXIT
+          if npm view t3-fleet versions --json --registry=https://registry.npmjs.org > "$metadata" 2> "$errors"; then
+            if ! jq -e 'type == "array" and all(.[]; type == "string")' "$metadata" > /dev/null; then
+              echo "::error::Unexpected npm versions response"
+              exit 1
+            fi
+          elif jq -e '.error.code == "E404"' "$metadata" > /dev/null; then
+            echo "::notice::t3-fleet is not on npm yet; the first version is published by hand"
+            exit 0
+          else
+            echo "::error::Could not read npm package versions"
+            cat "$metadata" "$errors" >&2
+            exit 1
+          fi
+          if jq -e --arg version "$version" 'index($version) != null' "$metadata" > /dev/null; then
+            echo "::notice::t3-fleet $version is already on npm"
+            exit 0
+          fi
+          if ! jq -e --arg version "$version" '.name == "t3-fleet" and .version == $version' apps/cli/package.json > /dev/null; then
+            echo "::error::npm package name or version does not match the release"
+            exit 1
+          fi
+          jq 'del(.devDependencies, .scripts)' apps/cli/package.json > "$metadata"
+          mv "$metadata" apps/cli/package.json
+          cp README.md LICENSE apps/cli/
+          cd apps/cli
+          npm publish --access public --registry=https://registry.npmjs.org
       - name: Point the Nix flake at this release
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -49,19 +79,61 @@ jobs:
           git fetch -q origin main && git checkout -q main
           printf '{\n  "version": "%s",\n  "hash": "%s"\n}\n' "$version" "$hash" > nix/release.json
           git add nix/release.json && git commit -q -m "Nix: T3 Fleet $version" && git push -q origin main || echo "flake already current"
-      - name: Update the Homebrew formula (when a HOMEBREW_TAP_TOKEN secret is configured)
+      - name: Update the Homebrew formula
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        if: ${{ env.TAP_TOKEN != '' }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        if: ${{ env.TAP_DEPLOY_KEY != '' }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           sha=$(sha256sum t3-fleet.mjs | cut -d' ' -f1)
-          git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/MartinPTielemans/homebrew-tap.git" tap
-          cd tap
-          # The formula keeps its file name until the owner renames it; its URL names t3-fleet.mjs.
-          sed -i -e "s#releases/download/v[^/]*/[^/\"]*\.mjs#releases/download/v${version}/t3-fleet.mjs#" \
-                 -e "s/^  version \".*\"/  version \"${version}\"/" \
-                 -e "s/^  sha256 \".*\"/  sha256 \"${sha}\"/" Formula/fleetx.rb
+          umask 077
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+          unset TAP_DEPLOY_KEY
+          # Use GitHub's HTTPS-published host keys, never an unauthenticated scan.
+          curl --fail --silent --show-error --retry 3 https://api.github.com/meta \
+            | jq -er '.ssh_keys[] | "github.com " + .' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -F /dev/null -i '$ssh_dir/id_ed25519' -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$ssh_dir/known_hosts'"
+          git clone --quiet --branch main --single-branch git@github.com:MartinPTielemans/homebrew-tap.git "$ssh_dir/tap"
+          cd "$ssh_dir/tap"
+          python3 - "$version" "$sha" <<'PYTHON'
+          import pathlib
+          import re
+          import sys
+
+          version, sha = sys.argv[1:]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
+              sys.exit("::error::Invalid release version")
+          if not re.fullmatch(r"[0-9a-f]{64}", sha):
+              sys.exit("::error::Invalid release checksum")
+          path = pathlib.Path("Formula/t3-fleet.rb")
+          original = path.read_text()
+          for expected in ('class T3Fleet < Formula', 'libexec.install "t3-fleet.mjs"', '(bin/"t3-fleet").write'):
+              if expected not in original:
+                  sys.exit(f"::error::Unexpected Homebrew formula: missing {expected}")
+          fields = [
+              (r'^  url "https://github\.com/MartinPTielemans/fleetx/releases/download/v[^/]+/t3-fleet\.mjs"$',
+               f'  url "https://github.com/MartinPTielemans/fleetx/releases/download/v{version}/t3-fleet.mjs"'),
+              (r'^  version "[^"\n]+"$', f'  version "{version}"'),
+              (r'^  sha256 "[0-9a-f]{64}"$', f'  sha256 "{sha}"'),
+          ]
+          updated = original
+          for pattern, replacement in fields:
+              updated, count = re.subn(pattern, lambda _: replacement, updated, flags=re.MULTILINE)
+              if count != 1 or updated.splitlines().count(replacement) != 1:
+                  sys.exit(f"::error::Expected exactly one Homebrew field: {replacement}")
+          if f'  version "{version}"' in original.splitlines() and original != updated:
+              sys.exit("::error::Homebrew already has this version with a different URL or checksum")
+          path.write_text(updated)
+          PYTHON
+          if git diff --quiet -- Formula/t3-fleet.rb; then
+            echo "::notice::Homebrew is already at T3 Fleet $version"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -qam "T3 Fleet ${version}" && git push -q
+          git add -- Formula/t3-fleet.rb
+          git commit --quiet -m "T3 Fleet $version"
+          git push --quiet origin HEAD:main
