@@ -15,9 +15,10 @@ const definitions = new Map<string, Record<string, unknown>>([
   ["fetch", { kind: "remote", url: "https://fetch.example/mcp" }],
   ["t3-fleet", { kind: "stdio", command: "~/.local/bin/t3-fleet", args: ["mcp"] }],
   ["ctx", { kind: "stdio", command: "npx", args: ["ctx"], env: { CTX_API_KEY: "$CTX_API_KEY" } }],
+  ["bare", { kind: "stdio", command: "bare-mcp" }],
 ]);
 const mcp = {
-  servers: ["fetch", "t3-fleet", "ctx"],
+  servers: ["fetch", "t3-fleet", "ctx", "bare"],
   hub: true,
   gateway: "https://relay.example:8399",
 };
@@ -48,6 +49,81 @@ const registered = (name: string, client: "claude" | "codex"): FoundServer => {
     extracted: (client === "claude" ? fromClaude(name, entry, ctx) : fromCodex(name, entry, ctx))!,
   };
 };
+
+/** An entry as a client stores it, written out here rather than rendered. */
+const stored = (name: string, client: "claude" | "codex", entry: Record<string, unknown>) => {
+  const ctx = { home: HOME, env: {}, name: secretNamer([]) };
+  return {
+    name,
+    client,
+    project: null,
+    entry,
+    extracted: (client === "claude" ? fromClaude(name, entry, ctx) : fromCodex(name, entry, ctx))!,
+  } satisfies FoundServer;
+};
+
+describe("entries as the clients store them", () => {
+  const isFleets = registeredByFleet({
+    servers: definitions,
+    mcp,
+    home: HOME,
+    value: (n) => secrets[n],
+  });
+  const relay = "https://relay.example:8399/mcp/fetch";
+
+  it("are the fleet's in every form a client writes them", () => {
+    for (const [name, client, entry] of [
+      [
+        "fetch",
+        "claude",
+        {
+          type: "http",
+          url: relay,
+          headers: { Authorization: `Bearer ${secrets["T3_FLEET_RELAY_TOKEN"]}` },
+        },
+      ],
+      ["fetch", "codex", { url: relay, bearer_token_env_var: "T3_FLEET_RELAY_TOKEN" }],
+      [
+        "t3-fleet",
+        "claude",
+        { type: "stdio", command: "$HOME/.local/bin/t3-fleet", args: ["mcp"], env: {} },
+      ],
+      ["t3-fleet", "codex", { command: `${HOME}/.local/bin/t3-fleet`, args: ["mcp"] }],
+      [
+        "ctx",
+        "claude",
+        {
+          type: "stdio",
+          command: "npx",
+          args: ["ctx"],
+          env: { CTX_API_KEY: secrets["CTX_API_KEY"] },
+        },
+      ],
+      ["ctx", "codex", { command: "npx", args: ["ctx"], env_vars: ["CTX_API_KEY"] }],
+      // Claude with `type` and an empty `args`, or neither; Codex without `args`.
+      ["bare", "claude", { type: "stdio", command: "bare-mcp", args: [] }],
+      ["bare", "claude", { command: "bare-mcp" }],
+      ["bare", "codex", { command: "bare-mcp" }],
+    ] as const)
+      expect([name, client, isFleets(stored(name, client, entry))]).toEqual([name, client, true]);
+  });
+
+  it("and not when they differ from what the mcp area writes", () => {
+    for (const [name, client, entry] of [
+      ["fetch", "claude", { type: "http", url: relay, headers: { Authorization: "Bearer other" } }],
+      ["fetch", "codex", { url: relay }],
+      ["fetch", "codex", { url: relay, bearer_token_env_var: "OTHER" }],
+      [
+        "ctx",
+        "claude",
+        { type: "stdio", command: "npx", args: ["ctx"], env: { CTX_API_KEY: "x" } },
+      ],
+      ["bare", "claude", { type: "http", url: "https://bare.example/mcp" }],
+      ["bare", "codex", { command: "bare-mcp", args: ["--debug"] }],
+    ] as const)
+      expect([name, client, isFleets(stored(name, client, entry))]).toEqual([name, client, false]);
+  });
+});
 
 describe("setup on a machine set up already", () => {
   const servers = ["fetch", "t3-fleet", "ctx"].flatMap((n) => [

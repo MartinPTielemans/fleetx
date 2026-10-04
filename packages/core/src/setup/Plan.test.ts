@@ -118,6 +118,48 @@ describe("buildPlan on the first machine", () => {
   });
 });
 
+describe("buildPlan on a machine set up already", () => {
+  const fleet: FleetView = {
+    ...EMPTY_FLEET,
+    servers: new Map([["web", { kind: "direct", url: "https://web.example.com/mcp" }]]),
+  };
+  const found = discovery({
+    servers: [
+      server("web", "claude", { type: "http", url: "https://web.example.com/mcp" }),
+      server("repo", "codex", { command: "repo-mcp", tool_timeout_sec: 600 }),
+      server("both", "claude", { command: "both-mcp" }),
+      server("both", "codex", { command: "both-mcp", args: ["--codex"] }),
+    ],
+  });
+  const plan = buildPlan({ mode: "again", node: "laptop", authority: true, found, fleet });
+
+  it("leaves a server the fleet does not declare alone unless asked to add it", () => {
+    expect(plan.add.servers).toEqual([]);
+    expect(plan.conflicts.map((c) => [c.id, c.default, c.after])).toEqual([
+      ["new-server:repo", "here", undefined],
+      ["server-here:both", "copy:0", undefined],
+      ["new-server:both", "here", "server-here:both"],
+    ]);
+    expect(plan.leftAlone).toContainEqual({
+      what: "repo: tool_timeout_sec",
+      why: "a definition cannot carry these client settings",
+    });
+    const kept = decide(plan, {}, paths);
+    expect(kept.servers).toEqual([]);
+    expect(kept.ignored.map((i) => i.name)).toEqual(["repo", "both"]);
+    const added = decide(
+      plan,
+      { "new-server:repo": "mine", "server-here:both": "copy:1", "new-server:both": "mine" },
+      paths,
+    );
+    expect(added.servers.map((s) => [s.name, s.definition["args"]])).toEqual([
+      ["repo", []],
+      ["both", ["--codex"]],
+    ]);
+    expect(added.ignored).toEqual([]);
+  });
+});
+
 describe("buildPlan on a joining machine", () => {
   const fleet: FleetView = {
     ...EMPTY_FLEET,

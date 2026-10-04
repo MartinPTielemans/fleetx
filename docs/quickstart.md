@@ -146,6 +146,15 @@ the fleet's secrets. Its MCP servers are registered once it can.
 
 Running `t3-fleet setup` again on a machine that is set up is safe: it shows what
 still differs from the fleet (a skill installed since, say), and nothing else.
+Where this machine's copy differs, the default is the fleet's. An MCP server
+added since is left alone (`[mcp] "ignore.add"`) unless you choose to add it to
+the fleet.
+
+`t3-fleet approve` merges a proposal only where it adds: servers to the lists in
+t3-fleet.toml, `[[defaults.instructions]]` entries, whole new tables. A proposal
+that removes or changes something the fleet changed since is refused; reject it,
+and the machine's next sync sets its edit aside, so `t3-fleet setup` there can
+offer it again.
 
 ## 4. Use it from T3 Code
 

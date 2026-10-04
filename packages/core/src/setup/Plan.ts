@@ -383,6 +383,39 @@ export const buildPlan = ({ mode, node, authority, found, fleet, registered }: P
     options,
     ...extra,
   });
+  /**
+   * A server the fleet does not declare. Joining, it is added; on a machine
+   * set up already it is one the user added since, and the fleet leaves it
+   * alone (`ignore.add`) unless they choose to add it.
+   */
+  const newServer = (
+    server: PlanServer,
+    after?: { readonly id: string; readonly options: ReadonlyArray<PlanServer> },
+  ) => {
+    if (!fleetFirst) {
+      if (after === undefined) add.servers.push(server);
+      return;
+    }
+    conflicts.push({
+      id: `new-server:${server.name}`,
+      kind: "server",
+      name: server.name,
+      title: `MCP server ${server.name} is not the fleet's`,
+      detail: definitionText(server.found.extracted.definition),
+      choices: [
+        { value: "here", label: 'leave it alone on this machine ([mcp] "ignore.add")' },
+        {
+          value: "mine",
+          label: commits
+            ? "add it to the fleet"
+            : "propose it to the fleet (an authority approves)",
+        },
+      ],
+      default: "here",
+      options: after?.options ?? [server],
+      ...(after === undefined ? {} : { after: after.id }),
+    });
+  };
   for (const [name, all] of byName(userScope)) {
     if (fleet.ignored.includes(name)) continue;
     // The fleet's own registration, exactly as the mcp area wrote it, is no difference.
@@ -417,7 +450,9 @@ export const buildPlan = ({ mode, node, authority, found, fleet, registered }: P
         default: "copy:0",
         options,
       });
-      if (theirs !== undefined)
+      if (theirs === undefined)
+        newServer(serverOf(claude, name), { id: `server-here:${name}`, options });
+      else
         conflicts.push(
           serverConflict(
             name,
@@ -433,7 +468,7 @@ export const buildPlan = ({ mode, node, authority, found, fleet, registered }: P
     }
     const first = entries.find((e) => e.client === "claude") ?? (entries[0] as FoundServer);
     const server = serverOf(first, name);
-    if (theirs === undefined) add.servers.push(server);
+    if (theirs === undefined) newServer(server);
     else if (shapeOf(theirs) === shapeOf(first.extracted.definition)) same.servers.push(server);
     else
       conflicts.push(
@@ -477,7 +512,7 @@ export const buildPlan = ({ mode, node, authority, found, fleet, registered }: P
     let name = s.name;
     if (takenNames.has(name) || fleet.servers.has(name)) name = `${s.name}-${project}`;
     takenNames.add(name);
-    add.servers.push(serverOf(s, name));
+    newServer(serverOf(s, name));
   }
 
   // Instructions.
@@ -655,6 +690,9 @@ export const decide = (
       const one = c.options[pick] ?? (c.options[0] as PlanServer);
       if (c.id.startsWith("server-here:")) {
         if (!followed) writeServer(one, c.name);
+      } else if (c.id.startsWith("new-server:")) {
+        if (choice === "mine") writeServer(one, c.name);
+        else ignored.push({ name: c.name, why: "not the fleet's; added on this machine" });
       } else if (!applies(c, choices, plan.conflicts)) continue;
       else if (choice === "mine") writeServer(one);
       else if (choice === "here") serversHereOnly.push(c.name);
