@@ -67,12 +67,23 @@ const sameKeys = (a: Record<string, string>, b: Record<string, string>) =>
  * message is not read; an approval never takes the secrets it carries (it
  * encrypts its own copy again).
  */
-export const isDeparture = (repo: string, commit: string, node: string) =>
+export const isDeparture = (
+  repo: string,
+  commit: string,
+  node: string,
+): Effect.Effect<boolean, string, ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function* () {
-    const changes = nulList(
-      (yield* git(repo, ["diff", "--name-status", "-z", "--no-renames", `${commit}^`, commit]))
-        .stdout,
-    );
+    // Fails rather than answer: a diff that did not run is no evidence of anything.
+    const diff = yield* git(repo, [
+      "diff",
+      "--name-status",
+      "-z",
+      "--no-renames",
+      `${commit}^`,
+      commit,
+    ]);
+    if (!ok(diff)) return yield* Effect.fail(`cannot tell what ${commit} changes: ${why(diff)}`);
+    const changes = nulList(diff.stdout);
     const pairs: Array<[string, string]> = [];
     for (let i = 0; i + 1 < changes.length; i += 2)
       pairs.push([changes[i] ?? "", changes[i + 1] ?? ""]);
@@ -82,9 +93,14 @@ export const isDeparture = (repo: string, commit: string, node: string) =>
       if (file === own) continue;
       if (file === SECRETS && status === "M") continue;
       if (file !== RECIPIENTS || status !== "M") return false;
+      // Changed, so there on both sides: a read that fails is a failure, not a missing file.
       const show = (rev: string) =>
         git(repo, ["show", `${rev}:${RECIPIENTS}`]).pipe(
-          Effect.map((r) => (ok(r) ? r.stdout : null)),
+          Effect.flatMap((r) =>
+            ok(r)
+              ? Effect.succeed(r.stdout)
+              : Effect.fail(`cannot read ${RECIPIENTS} at ${rev}: ${why(r)}`),
+          ),
         );
       const before = yield* parseKeys(yield* show(`${commit}^`));
       const after = yield* parseKeys(yield* show(commit));
@@ -146,7 +162,9 @@ export const standing = (repo: string, branch: string, node: string) =>
     const tip = out(yield* git(repo, ["ls-remote", "origin", ref])).split(/\s+/)[0] ?? "";
     let proposed: string | null = null;
     if (tip !== "" && ok(yield* git(repo, ["fetch", "-q", "origin", ref])))
-      if (yield* isDeparture(repo, tip, node)) proposed = tip.slice(0, 7);
+      // One that cannot be read is not known to be waiting: leave proposes again, on its own branch.
+      if (yield* isDeparture(repo, tip, node).pipe(Effect.orElseSucceed(() => false)))
+        proposed = tip.slice(0, 7);
     return {
       _tag: "in",
       authority: roles.get(node)?.includes("authority") === true,
@@ -363,10 +381,13 @@ export const leaveFleet = (
     }),
   ).pipe(Effect.mapError(errorText));
 
-/** Whether a node's staging branch holds its departure: sync leaves those alone. */
+/**
+ * Whether a node's staging branch holds its departure: sync leaves those
+ * alone. One it cannot tell is left alone too: never withdrawn or replaced.
+ */
 export const isDepartureProposal = (repo: string, node: string, tip: string) =>
   Effect.gen(function* () {
     if (!ok(yield* git(repo, ["cat-file", "-e", `${tip}^{commit}`])))
       yield* git(repo, ["fetch", "-q", "origin", stagingRef(node)]);
-    return yield* isDeparture(repo, tip, node);
+    return yield* isDeparture(repo, tip, node).pipe(Effect.orElseSucceed(() => true));
   });

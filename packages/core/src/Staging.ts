@@ -395,11 +395,16 @@ export const autoApprovable = (proposal: Proposal, prefixes: ReadonlyArray<strin
  * under the trusted prefixes, and it is not a machine's departure, which
  * always needs a person's approve. A departure is told by what it changes
  * (isDeparture), not by its file names: a member's edit to its own node file
- * is an ordinary proposal.
+ * is an ordinary proposal. When that cannot be told (the commit cannot be
+ * read), it is not approved unattended.
  */
 export const autoApproves = (repo: string, proposal: Proposal, prefixes: ReadonlyArray<string>) =>
   autoApprovable(proposal, prefixes)
-    ? isDeparture(repo, proposal.commit, proposal.node).pipe(Effect.map((d) => !d))
+    ? isDeparture(repo, proposal.commit, proposal.node).pipe(
+        Effect.map((d) => !d),
+        // What cannot be told apart from a departure waits for a person.
+        Effect.orElseSucceed(() => false),
+      )
     : Effect.succeed(false);
 
 /**

@@ -44,6 +44,7 @@ import {
   type LeavePlan,
 } from "./Leave.ts";
 import { writeAtomically } from "./leave/Files.ts";
+import { isDeparture } from "./leave/Fleet.ts";
 import { editCodexServers } from "./leave/Mcp.ts";
 import { settingsUpdates, throughT3, unrouted } from "./leave/Models.ts";
 import { removeService } from "./leave/Services.ts";
@@ -1697,5 +1698,52 @@ describe("the secrets' two files, from a recipients.toml written before encrypte
       await decrypt(f.keys["box"] ?? "", onBranch(f.origin, "secrets/secrets.env.age") ?? ""),
     ).toContain("API=one");
     expect(git(f.box, "status", "--porcelain")).toBe("");
+  });
+});
+
+describe("a proposal that cannot be read", () => {
+  it("is never approved unattended: an undiffable commit needs a person", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(
+      f.box,
+      "t3-fleet.toml",
+      '[fleet]\nbranch = "main"\nauto_approve = ["nodes/", "secrets/", "skills/"]\n',
+    );
+    commitAll(f.box, "trust nodes/");
+    // A root commit on laptop's staging branch: it has no parent to diff against.
+    const scratch = join(f.root, "orphan");
+    git(f.root, "init", "-q", "-b", "x", "orphan");
+    put(scratch, "skills/x/SKILL.md", "x\n");
+    git(scratch, "add", "-A");
+    git(scratch, "commit", "-qm", "orphan");
+    git(scratch, "push", "-q", f.origin, "HEAD:refs/heads/t3-fleet/staging/laptop");
+    const commit = git(scratch, "rev-parse", "HEAD").trim();
+    expect(await run(isDeparture(f.box, commit, "laptop").pipe(Effect.flip))).toContain(
+      "cannot tell what",
+    );
+    const proposal = {
+      node: "laptop",
+      branch: "t3-fleet/staging/laptop",
+      commit,
+      files: [] as Array<string>,
+      stat: "",
+    };
+    expect(autoApprovable(proposal, ["nodes/"])).toBe(true);
+    expect(await run(autoApproves(f.box, proposal, ["nodes/"]))).toBe(false);
+    // The authority's own sync, unattended: nothing is approved, the proposal stays.
+    const boxHome = join(f.root, "box-home");
+    process.env["HOME"] = boxHome;
+    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
+    const main = git(f.origin, "rev-parse", "main").trim();
+    const config = await run(loadConfigFrom(f.box, "box"));
+    const box = config.nodes.find((n) => n.name === "box");
+    if (box === undefined) throw new Error("no box");
+    const lines: Array<string> = [];
+    await run(underSyncLock(exchange(config, box, lines)));
+    expect(lines.join("\n")).not.toContain("approved laptop's");
+    expect(git(f.origin, "rev-parse", "main").trim()).toBe(main);
+    expect(git(f.origin, "rev-parse", "t3-fleet/staging/laptop").trim()).toBe(commit);
+    expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
   });
 });
