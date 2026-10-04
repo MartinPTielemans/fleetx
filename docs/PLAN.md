@@ -99,7 +99,7 @@ Ticked items are done and in `main`.
       the authority once every machine runs the controller's build) moves
       `fleetx.toml` → `t3-fleet.toml` and `fleetx/state|staging|rejected` →
       `t3-fleet/…`, and adds every `FLEETX_*` secret as `T3_FLEET_*`
-- [ ] The author's config repo renamed
+- [x] The author's config repo renamed
 - [ ] 1.0: variables agents read from T3's environment (`FLEETX_RELAY_TOKEN`,
       `token_env = "FLEETX_MCP_TOKEN_*"`) renamed and the `FLEETX_*` secrets
       dropped, together with a T3 restart on every machine
