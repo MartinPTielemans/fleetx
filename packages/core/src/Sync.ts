@@ -250,7 +250,6 @@ const secretFindings = (
     };
   });
 
-/** Units set aside by an earlier run, until the stash entry is dropped. */
 /** A scan for secrets that could not run: nothing it would have looked at is committed or proposed. */
 const scanFailed = (node: string, why: string): Finding => ({
   node,
@@ -261,6 +260,7 @@ const scanFailed = (node: string, why: string): Finding => ({
   detail: "t3-fleet secrets scan shows what the scan sees; the next sync tries again.",
 });
 
+/** Units set aside by an earlier run, until the stash entry is dropped. */
 const asideFindings = (node: string, repo: string, units: ReadonlySet<string>): Array<Finding> =>
   [...units].map((unit) => ({
     node,
