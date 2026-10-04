@@ -136,6 +136,16 @@ export const updateSkills = (repo: string, only: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
     const sources = yield* readSources(repo);
+    // Updating replaces a skill's whole directory, and git can only put back what it tracks.
+    const paths = Object.values(sources.sources ?? {})
+      .flatMap((s) => s.skills)
+      .filter((s) => only.length === 0 || only.includes(s))
+      .map((s) => `skills/${s}`);
+    if (paths.length > 0) {
+      const ignored = yield* git(repo, ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ...paths]);
+      const lost = ignored.stdout.split("\n").filter((l) => l.startsWith("!! ")).map((l) => l.slice(3));
+      if (lost.length > 0) return yield* Effect.fail(`updating would delete files git ignores; move them out of the skill first: ${lost.join(", ")}`);
+    }
     const touched: Array<string> = [];
     for (const [, source] of Object.entries(sources.sources ?? {})) {
       const mine = source.skills.filter((s) => only.length === 0 || only.includes(s));

@@ -18,7 +18,7 @@
     "effect": "catalog:",
     "@effect/platform-node": "catalog:"
   },
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Keep every machine you run T3 Code on equivalent.",
   "license": "MIT",
   "repository": {

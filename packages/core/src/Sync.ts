@@ -321,20 +321,30 @@ export const syncRun = (startConfig: Config, options: { readonly apply: boolean 
 
 const syncLock = () => `${stateDir(process.env["HOME"] ?? "")}/sync.lock`;
 
-/** One run at a time; a lock older than an hour belongs to a dead run. False when another run holds it. */
+/**
+ * One run at a time. Creating the lock directory is the acquisition: it fails
+ * when another run holds it, so two runs can never both take it. A lock older
+ * than an hour belongs to a dead run; it is renamed away (only one run can)
+ * and the directory created again. False when another run holds it.
+ */
 const takeSyncLock = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const lock = syncLock();
-  const now = yield* Clock.currentTimeMillis;
   yield* fs.makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true }).pipe(Effect.ignore);
+  const take = fs.makeDirectory(lock).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+  if (yield* take) return true;
+  const now = yield* Clock.currentTimeMillis;
   const lockStat = yield* fs.stat(lock).pipe(Effect.option);
-  if (Option.isSome(lockStat)) {
-    const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
-    if (age < 3_600_000) return false;
-    yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
-  }
-  yield* fs.makeDirectory(lock).pipe(Effect.ignore);
-  return true;
+  if (Option.isNone(lockStat)) return yield* take;
+  const age = Option.match(lockStat.value.mtime, { onNone: () => Infinity, onSome: (t) => now - t.getTime() });
+  if (age < 3_600_000) return false;
+  const aside = `${lock}.stale.${now}.${process.pid}`;
+  if (!(yield* fs.rename(lock, aside).pipe(Effect.as(true), Effect.orElseSucceed(() => false)))) return false;
+  yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
+  return yield* take;
 });
 
 const releaseSyncLock = Effect.gen(function* () {
