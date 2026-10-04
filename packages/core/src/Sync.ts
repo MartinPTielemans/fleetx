@@ -52,7 +52,8 @@ import {
 import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
-import { settleApproval } from "./Approved.ts";
+import { lastProposalPath, reapplyHeld, settleApproval, type Held } from "./Approved.ts";
+import { clearSetupProposed, setupProposed } from "./setup/State.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
@@ -285,6 +286,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     let self = startSelf;
     let message = "";
     let failed = false;
+    let carried: ReadonlyArray<Held> = [];
     const findings: Array<Finding> = [];
 
     // 1. Propose or commit changes under the auto-commit paths. A node
@@ -301,10 +303,19 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         lines.push(
           `set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`,
         );
-      const approved = yield* settleApproval(repo, self.name, config.branch);
-      if (approved.length > 0)
+      const approved = yield* settleApproval(repo, self.name, config.branch).pipe(
+        Effect.catch((e: string) =>
+          Effect.sync(() => {
+            failed = true;
+            message = e;
+            return { dropped: [] as Array<string>, held: [] as Array<Held> };
+          }),
+        ),
+      );
+      carried = approved.held;
+      if (approved.dropped.length > 0)
         lines.push(
-          `took the branch's version of ${approved.length} approved file${approved.length === 1 ? "" : "s"}; this machine's copies are in git stash`,
+          `took the branch's version of ${approved.dropped.length} approved file${approved.dropped.length === 1 ? "" : "s"}`,
         );
     }
     // What would add a secret is held back, whole skill by whole skill.
@@ -444,6 +455,18 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       ),
     );
     if (pulled > 0) lines.push(`pulled ${pulled} commit${pulled === 1 ? "" : "s"}`);
+    if (carried.length > 0)
+      lines.push(
+        ...(failed
+          ? carried.map((h) => `this machine's edit to ${h.file} is kept in ${h.saved}`)
+          : yield* reapplyHeld(repo, carried).pipe(
+              Effect.catch((e: string) =>
+                Effect.succeed([
+                  `${e}; the edits are in ${carried.map((h) => h.saved).join(", ")}`,
+                ]),
+              ),
+            )),
+      );
     if (authority && !failed) {
       const ahead = Number(
         out(yield* git(repo, ["rev-list", "--count", `origin/${config.branch}..HEAD`])),
@@ -486,7 +509,17 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
     // after a failed pull: its files would be based on an old branch, and
     // approving them would undo what it failed to pull.
     if (!authority && !failed) {
-      const changed = autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit);
+      // What setup wrote is proposed whatever [fleet] auto_commit says, until it is approved.
+      const home = process.env["HOME"] ?? "";
+      const fromSetup = yield* setupProposed(home);
+      const setupChanged = fromSetup.length === 0 ? [] : yield* changedFiles(repo, fromSetup);
+      if (fromSetup.length > 0 && setupChanged.length === 0) yield* clearSetupProposed(home);
+      const changed = [
+        ...new Set([
+          ...(autoCommit.length === 0 ? [] : yield* changedFiles(repo, autoCommit)),
+          ...setupChanged,
+        ]),
+      ];
       const outcome = yield* Effect.gen(function* () {
         const hits = [
           ...(yield* scanEdits(repo, changed, {
@@ -515,10 +548,20 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       if (outcome !== null) {
         findings.push(...secretFindings(self.name, repo, outcome.held, outcome.hits, "propose"));
         for (const unit of outcome.held.keys()) reported.add(unit);
-        if (outcome.commit !== null)
+        if (outcome.commit !== null) {
           lines.push(
             `proposed ${outcome.kept.length} file${outcome.kept.length === 1 ? "" : "s"} for approval (${outcome.commit})`,
           );
+          // What it proposed, for telling an approved copy from a later edit (Approved.ts).
+          const full = out(
+            yield* git(repo, ["rev-parse", "--verify", `${outcome.commit}^{commit}`]),
+          );
+          if (full !== "")
+            yield* FileSystem.FileSystem.pipe(
+              Effect.flatMap((fs) => fs.writeFileString(lastProposalPath(home), `${full}\n`)),
+              Effect.ignore,
+            );
+        }
       }
     }
 
