@@ -52,6 +52,7 @@ import {
 import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
+import { settleApproval } from "./Approved.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
@@ -299,6 +300,11 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       if (settled.length > 0)
         lines.push(
           `set aside ${settled.length} rejected file${settled.length === 1 ? "" : "s"} (git stash list)`,
+        );
+      const approved = yield* settleApproval(repo, self.name, config.branch);
+      if (approved.length > 0)
+        lines.push(
+          `took the branch's version of ${approved.length} approved file${approved.length === 1 ? "" : "s"}; this machine's copies are in git stash`,
         );
     }
     // What would add a secret is held back, whole skill by whole skill.
