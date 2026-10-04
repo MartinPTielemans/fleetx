@@ -166,6 +166,33 @@ const copyDir = (from: string, to: string) =>
   });
 
 /**
+ * Copy `from` into the repo's `rel`, replacing what git sees there but
+ * keeping what it ignores (a skill's .env, say), which git could not put back.
+ */
+const copyIntoRepo = (repo: string, from: string, rel: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const seen = nulList(
+      (yield* git(repo, ["ls-files", "-z", "-c", "-o", "--exclude-standard", "--", rel], {
+        env: literal,
+      })).stdout,
+    );
+    for (const file of seen) yield* fs.remove(`${repo}/${file}`, { force: true });
+    yield* fs.makeDirectory(`${repo}/${rel}`, { recursive: true });
+    const cp = yield* exec({
+      command: "cp",
+      args: ["-R", `${from}/.`, `${repo}/${rel}`],
+      timeout: Duration.seconds(60),
+    });
+    if (cp.code !== 0) return yield* Effect.fail(`copying into ${rel}: ${cp.stderr.trim()}`);
+    yield* exec({
+      command: "rm",
+      args: ["-rf", `${repo}/${rel}/.git`],
+      timeout: Duration.seconds(10),
+    });
+  });
+
+/**
  * Vendor skills from `spec` into the repo. `names` empty takes the only
  * skill (or fails listing the choices); `as` renames one on a clash.
  * Returns the repo paths changed.
@@ -207,7 +234,7 @@ export const addSkills = (repo: string, spec: string, names: ReadonlyArray<strin
             `skills/${local} already exists and came from elsewhere; use --as <name>`,
           );
         }
-        yield* copyDir(path.join(scratch, rel), dest);
+        yield* copyIntoRepo(repo, path.join(scratch, rel), `skills/${local}`);
         paths[local] = rel;
         if (local !== upstream) renamed[local] = upstream;
         changed.push(`skills/${local}`);
@@ -535,8 +562,7 @@ export const keepUpdate = (repo: string, only: ReadonlyArray<string>, digest: st
             : "upstream changed since the preview; preview again",
         );
       }
-      for (const file of now.files)
-        yield* copyDir(path.join(now.stage, file), path.join(repo, file));
+      for (const file of now.files) yield* copyIntoRepo(repo, path.join(now.stage, file), file);
       return now.files;
     }),
   );

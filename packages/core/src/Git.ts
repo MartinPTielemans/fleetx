@@ -304,27 +304,37 @@ export const scanStaged = (
 ) =>
   scanDiff(repo, ["--cached", ...(options.base === undefined ? [] : [options.base])], ":", options);
 
+/** git's empty tree: what a root commit is compared with. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /**
- * What each commit in `from..to` adds that looks like a secret, commits made
+ * What each commit in `range` (rev-list's: `origin/main..HEAD`, or `HEAD`
+ * for a branch nothing has seen) adds that looks like a secret, commits made
  * by hand too, each named. Commit by commit: one that adds a token and a
- * later one that takes it out still put it in history.
+ * later one that takes it out still put it in history. A root commit is
+ * compared with nothing; a merge only for what it adds itself, which no
+ * parent had.
  */
 export const scanCommits = (
   repo: string,
-  from: string,
-  to: string,
+  range: ReadonlyArray<string>,
   options: { readonly allowed?: ReadonlyArray<Allowed> } = {},
 ) =>
   Effect.gen(function* () {
-    const list = yield* git(repo, ["rev-list", "--reverse", `${from}..${to}`]);
+    const list = yield* git(repo, ["rev-list", "--reverse", "--parents", ...range]);
     if (!ok(list)) return yield* Effect.fail(`scanning for secrets: ${why(list)}`);
     const allowed = options.allowed ?? (yield* readAllowed(repo));
     const hits: Array<SecretHit> = [];
-    for (const commit of out(list).split("\n").filter(Boolean)) {
-      // Against its first parent: what this commit itself brings.
-      const found = yield* scanDiff(repo, [`${commit}^`, commit], `${commit}:`, { allowed });
-      const short = commit.slice(0, 7);
-      hits.push(...found.map((h) => ({ ...h, commit: short })));
+    for (const line of out(list).split("\n").filter(Boolean)) {
+      const [commit = "", ...parents] = line.split(" ");
+      const against = parents.length === 0 ? [EMPTY_TREE] : parents;
+      let found: ReadonlyArray<SecretHit> | null = null;
+      for (const parent of against) {
+        const next = yield* scanDiff(repo, [parent, commit], `${commit}:`, { allowed });
+        const same = (h: SecretHit) => `${h.file}\0${h.hash}`;
+        found = found === null ? next : found.filter((h) => next.some((n) => same(n) === same(h)));
+      }
+      hits.push(...(found ?? []).map((h) => ({ ...h, commit: commit.slice(0, 7) })));
     }
     return hits;
   });
@@ -380,7 +390,12 @@ export const restorePaths = (repo: string, paths: ReadonlyArray<string>, tree = 
     if (paths.length === 0) return;
     const fs = yield* FileSystem.FileSystem;
     yield* git(repo, ["reset", "-q", "--", ...paths], { env: literal });
-    for (const p of paths) yield* fs.remove(`${repo}/${p}`, { recursive: true, force: true });
+    // What git sees goes; what it ignores (a skill's .env) stays, as git clean without -x leaves it.
+    const tracked = nulList(
+      (yield* git(repo, ["ls-files", "-z", "--", ...paths], { env: literal })).stdout,
+    );
+    for (const file of tracked) yield* fs.remove(`${repo}/${file}`, { force: true });
+    yield* git(repo, ["clean", "-q", "-f", "-d", "--", ...paths], { env: literal });
     const kept = nulList(
       (yield* git(repo, ["ls-tree", "-r", "-z", "--name-only", tree, "--", ...paths], {
         env: literal,
@@ -470,16 +485,24 @@ export const commitAndPush = (repo: string, paths: ReadonlyArray<string>, messag
       });
       if (!ok(commit)) return yield* Effect.fail(`git commit failed: ${why(commit)}`);
       const branch = yield* upstreamBranch(repo);
-      yield* pullBranch(repo, branch, "rebase").pipe(
-        Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),
-      );
+      // A remote nothing was pushed to yet (a fleet's first commit): nothing to pull.
+      const empty =
+        (yield* git(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`])).code ===
+        2;
+      if (!empty)
+        yield* pullBranch(repo, branch, "rebase").pipe(
+          Effect.mapError((e) => `committed, but pulling before the push failed: ${e}`),
+        );
       // A commit made here by hand rides along with the push: it is checked too.
-      const unpushed = yield* scanCommits(repo, `origin/${branch}`, "HEAD");
+      const unpushed = yield* scanCommits(repo, empty ? ["HEAD"] : [`origin/${branch}..HEAD`]);
       if (unpushed.length > 0)
         return yield* Effect.fail(
           `committed, but not pushed: a commit here that ${branch} lacks adds what looks like a secret\n${refusal(unpushed, "push")}`,
         );
-      const push = yield* git(repo, ["push", "-q"]);
+      const push = yield* git(
+        repo,
+        empty ? ["push", "-q", "-u", "origin", `HEAD:refs/heads/${branch}`] : ["push", "-q"],
+      );
       if (!ok(push)) return yield* Effect.fail(`committed, but the push failed: ${why(push)}`);
       return out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
     }),

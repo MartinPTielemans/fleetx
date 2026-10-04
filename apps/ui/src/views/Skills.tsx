@@ -36,6 +36,7 @@ import { Empty } from "../components/ui/empty";
 import { Group, GroupLabel } from "../components/ui/group";
 import { Spinner } from "../components/ui/spinner";
 import { api, type UiJobT, type UiSkillsLandedT } from "../lib/api";
+import { skippedNote } from "../lib/skills";
 import { useAction, useEvent, useResource, useStore } from "../lib/store";
 import { plural } from "../lib/utils";
 
@@ -553,6 +554,7 @@ function UpdateDialog({
   const shown = preview.result;
   const landed = keep.result;
   const current = shown !== null && shown.digest === "";
+  const skipped = shown === null ? null : skippedNote(shown.skipped);
   return (
     <ActionDialog open={open} busy={keep.running} onClose={onClose} className="max-w-3xl">
       <AlertDialogHeader>
@@ -584,6 +586,9 @@ function UpdateDialog({
             </div>
           </>
         )}
+        {landed === null && skipped !== null ? (
+          <p className="text-muted-foreground text-sm">{skipped}</p>
+        ) : null}
         <Failure error={preview.error ?? keep.error} />
       </AlertDialogBody>
       <AlertDialogFooter>

@@ -100,18 +100,8 @@ const isVariableName = (value: string) => /^[A-Z][A-Z0-9_]*$/.test(value);
 const isPath = (value: string) =>
   /^(?:~\/|\/|\.\.?\/)/.test(value) || (value.includes("/") && /\.[A-Za-z0-9]{1,5}$/.test(value));
 
-/**
- * Code reaching into an object (config.oauth.clientSecret2), not a value. A
- * segment that mixes digits into both cases (SG.k3Jd…) is random, not a name.
- */
-const isMemberAccess = (value: string) =>
-  /^[A-Za-z_]+(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value) &&
-  value
-    .split(".")
-    .every(
-      (part) =>
-        !(/[0-9]/.test(part.replace(/[0-9]+$/, "")) && /[A-Z]/.test(part) && /[a-z]/.test(part)),
-    );
+/** Code reaching into an object (config.oauth.clientSecret, env.S3SecretAccessKey), not a value. */
+const isMemberAccess = (value: string) => /^[A-Za-z_]+(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(value);
 
 /** A kebab-case name (t3-not-installed, docker-http): words, each perhaps ending in a number. */
 const isSlug = (value: string) => /^[a-z]+[0-9]*(?:-[a-z]+[0-9]*)+$/.test(value);
@@ -150,6 +140,8 @@ const looksLikeBasic = (value: string) => {
 type Check = "shape" | "token" | "password" | "basic";
 
 const PASSWORD_NAME = /(?:password|passwd|pwd)$/i;
+/** The shell's working directory (PWD, OLDPWD), which only ends like a password. */
+const SHELL_DIRECTORY = /^(?:OLD)?PWD$/i;
 
 interface Rule {
   readonly kind: string | ((m: RegExpExecArray) => string);
@@ -165,7 +157,7 @@ interface Rule {
 const MIN_LENGTH: Record<Exclude<Check, "shape">, number> = { token: 20, password: 12, basic: 12 };
 /** A name-based rule's check: a password-named value is judged as a password. */
 const byName = (m: RegExpExecArray): Check =>
-  PASSWORD_NAME.test(m[1] ?? "") ? "password" : "token";
+  PASSWORD_NAME.test(m[1] ?? "") && !SHELL_DIRECTORY.test(m[1] ?? "") ? "password" : "token";
 
 /**
  * A name that ends in what a credential is called: api_key, apiKey,
@@ -435,14 +427,32 @@ export const describeHit = (hit: Pick<SecretHit, "file" | "line" | "kind" | "com
 export const allowCommand = (hit: SecretHit) => `t3-fleet secrets allow ${hit.file} ${hit.hash}`;
 
 /** The refusal for hits, on the machine itself: each named, the ways forward, and the allow commands. */
-export const refusal = (hits: ReadonlyArray<SecretHit>, doing = "commit") =>
-  [
-    `refusing to ${doing} what looks like a secret:`,
+export const refusal = (hits: ReadonlyArray<SecretHit>, doing = "commit") => {
+  const conflicts = hits.filter((h) => CONFLICTS.has(h.kind));
+  const secrets = hits.filter((h) => !CONFLICTS.has(h.kind));
+  return [
+    `refusing to ${doing} ${secrets.length > 0 ? "what looks like a secret" : "an unresolved merge conflict"}:`,
     ...hits.map((h) => `  ${describeHit(h)}`),
-    "Move it into the fleet's secrets (`t3-fleet secrets set NAME=VALUE`, then refer to it as ${NAME}).",
-    "If it is not a secret, an authority allows that line, then try again:",
-    ...[...new Set(hits.map(allowCommand))].map((c) => `  ${c}`),
+    ...(secrets.length > 0
+      ? [
+          "Move it into the fleet's secrets (`t3-fleet secrets set NAME=VALUE`, then refer to it as ${NAME}).",
+          "If it is not a secret, an authority allows that line, then try again:",
+          ...[...new Set(secrets.map(allowCommand))].map((c) => `  ${c}`),
+        ]
+      : []),
+    ...(conflicts.length > 0
+      ? [
+          `Resolve the conflict: remove the <<<<<<< and >>>>>>> markers, then \`git add ${[...new Set(conflicts.map((h) => h.file))].join(" ")}\`.`,
+        ]
+      : []),
   ].join("\n");
+};
+
+/** What a merge leaves behind: not a secret, but never committed either. */
+export const CONFLICTS: ReadonlySet<string> = new Set([
+  "a merge conflict marker",
+  "an unresolved merge conflict",
+]);
 
 /** Add an allow_secret entry to the repo's t3-fleet.toml, unless it is there. Whether it was added. */
 export const allowSecret = (repo: string, file: string, hash: string, reason?: string) =>

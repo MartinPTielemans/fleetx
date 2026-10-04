@@ -194,6 +194,7 @@ const fakeFleet = () => {
           stat: " 1 file changed",
           diff: "+new line",
           digest: "d1",
+          skipped: ["skills/held"],
         }),
       update: (names, digest) =>
         digest === "d1"

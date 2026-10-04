@@ -24,9 +24,12 @@ import {
   pullBranch,
   scanEdits,
   scanStaged,
+  unmergedHits,
   why,
 } from "./Git.ts";
-import { describeHit, readAllowed, refusal } from "./SecretScan.ts";
+import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
+import { readAllowed, refusal } from "./SecretScan.ts";
+import { sourcesEntriesChanged } from "./SkillSources.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { underSyncLock } from "./SyncLock.ts";
 
@@ -169,13 +172,28 @@ export const approve = (
       const files = yield* ownChange(repo, tip);
       const dirty = yield* changedFiles(repo, files);
       if (dirty.length > 0) {
-        // Edits sync holds back never get committed: sync sets them aside for a proposal touching them.
-        const held = yield* scanEdits(repo, dirty);
-        return yield* Effect.fail(
-          held.length > 0
-            ? `local edits to ${dirty.join(", ")} would be overwritten, and sync holds them back (${held.map((h) => describeHit(h)).join("; ")}); \`t3-fleet sync\` here sets them aside in git stash, then approve again`
-            : `local edits to ${dirty.join(", ")} would be overwritten; commit or stash them first`,
+        // Edits sync holds back never get committed: approving sets those aside in git stash.
+        const edited = yield* changedFiles(repo, [...new Set([...dirty.map(unitOf), SOURCES])]);
+        const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
+        const hits = [
+          ...(yield* scanEdits(repo, edited, { allowed: yield* readAllowed(repo) })),
+          ...(yield* unmergedHits(repo, edited)),
+        ];
+        const held = heldBack(edited, hits, entries);
+        const heldFiles = new Set([...held.values()].flat());
+        const other = dirty.filter((f) => !heldFiles.has(f));
+        if (other.length > 0 || (held.has(SOURCES) && entries === null))
+          return yield* Effect.fail(
+            `local edits to ${(other.length > 0 ? other : [SOURCES]).join(", ")} would be overwritten; commit or stash them first`,
+          );
+        const inTheWay = new Map(
+          [...held].filter(([, unitFiles]) => unitFiles.some((f) => dirty.includes(f))),
         );
+        const aside = yield* setAsideUnits(repo, inTheWay);
+        if (aside.size < inTheWay.size)
+          return yield* Effect.fail(
+            `could not set ${[...inTheWay.keys()].filter((u) => !aside.has(u)).join(", ")} aside in git stash`,
+          );
       }
       yield* pullBranch(repo, branch, "rebase").pipe(Effect.mapError((e) => `pull failed: ${e}`));
       const allowed = yield* readAllowed(repo);

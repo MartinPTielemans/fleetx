@@ -40,8 +40,17 @@ import {
   unmergedHits,
   why,
 } from "./Git.ts";
+import {
+  heldBack,
+  SET_ASIDE,
+  setAside,
+  setAsideUnits,
+  SOURCES,
+  unitLabel,
+  unitOf,
+} from "./Held.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
-import { describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
+import { CONFLICTS, describeHit, readAllowed, type SecretHit } from "./SecretScan.ts";
 import { lookupLatest } from "./Latest.ts";
 import { applyAccepted } from "./Memory.ts";
 import { loadAreas } from "./Plugins.ts";
@@ -162,67 +171,35 @@ const propose = (repo: string, node: string, branch: string, files: ReadonlyArra
     return out(commit).slice(0, 7);
   });
 
-/**
- * What sync holds back together: a whole skill directory (skills/<name>), or
- * a single file anywhere else. Half a skill is no skill.
- */
-export const unitOf = (file: string) => {
-  const parts = file.split("/");
-  return parts[0] === "skills" && parts.length > 2 ? `skills/${parts[1]}` : file;
+/** What sync says when SOURCES.json does not read: mid-edit, or conflicted. */
+const UNREADABLE_SOURCES: SecretHit = {
+  file: SOURCES,
+  line: 0,
+  kind: "content that is not valid JSON",
+  hash: "",
 };
 
-const SOURCES = "skills/SOURCES.json";
-
-/**
- * The files of `changed` sync holds back for `hits`, by unit: every file in a
- * unit with a hit. SOURCES.json is one unit with every skill whose entry it
- * changes (`entries`, from sourcesEntriesChanged; null when it cannot be
- * read): a skill without its entry, or an entry without its skill, is no use
- * to the other machines.
- */
-export const heldBack = (
-  changed: ReadonlyArray<string>,
-  hits: ReadonlyArray<SecretHit>,
-  entries: ReadonlyArray<string> | null = [],
-) => {
-  // An unreadable SOURCES.json goes with every skill that changed.
-  const named =
-    entries === null
-      ? changed.map(unitOf).filter((u) => u.startsWith("skills/"))
-      : entries.map((name) => `skills/${name}`);
-  const grouped = changed.includes(SOURCES) ? new Set([SOURCES, ...named]) : new Set<string>();
-  const unit = (file: string) => (grouped.has(unitOf(file)) ? SOURCES : unitOf(file));
-  const units = new Set(hits.map((h) => unit(h.file)));
-  const held = new Map<string, Array<string>>();
-  for (const file of changed) {
-    const u = unit(file);
-    if (units.has(u)) held.set(u, [...(held.get(u) ?? []), file]);
-  }
-  return held;
+/** The way forward for what a unit holds: a secret to move, a conflict to resolve, an edit to finish. */
+const whatToDo = (repo: string, hits: ReadonlyArray<SecretHit>) => {
+  const conflicted = [...new Set(hits.filter((h) => CONFLICTS.has(h.kind)).map((h) => h.file))];
+  const unreadable = hits.some((h) => h.kind === UNREADABLE_SOURCES.kind);
+  const secret = hits.some((h) => !CONFLICTS.has(h.kind) && h.kind !== UNREADABLE_SOURCES.kind);
+  return [
+    ...(secret
+      ? [
+          "Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as ${NAME}. If it is not a secret, `t3-fleet secrets scan` on this machine prints the command that lets the line through, for an authority to run.",
+        ]
+      : []),
+    ...(conflicted.length > 0
+      ? [
+          `Resolve the merge conflict: keep the lines you want, remove the <<<<<<< and >>>>>>> markers, then \`git -C ${repo} add ${conflicted.join(" ")}\`.`,
+        ]
+      : []),
+    ...(unreadable && conflicted.length === 0
+      ? [`${SOURCES} does not read as JSON: finish the edit, or undo it.`]
+      : []),
+  ].join(" ");
 };
-
-/** A unit for a person: SOURCES.json names the skills that go with it. */
-const unitLabel = (unit: string, files: ReadonlyArray<string> = []) => {
-  if (unit !== SOURCES) return unit;
-  const skills = [...new Set(files.map(unitOf))].filter((u) => u !== SOURCES).sort();
-  return skills.length === 0 ? unit : `${unit} with ${skills.join(", ")}`;
-};
-
-const SET_ASIDE = "T3 Fleet: held back ";
-
-/** Units sync set aside in git stash because they were in the way, by unit. */
-const setAside = (repo: string) =>
-  Effect.gen(function* () {
-    const list = yield* git(repo, ["stash", "list", "--format=%gs"]);
-    return new Set(
-      out(list)
-        .split("\n")
-        .flatMap((l) => {
-          const at = l.indexOf(SET_ASIDE);
-          return at < 0 ? [] : [l.slice(at + SET_ASIDE.length)];
-        }),
-    );
-  });
 
 /** How to get set-aside edits back, in the order that works. */
 const bringBack = (repo: string, unit: string) =>
@@ -256,9 +233,7 @@ const secretFindings = (
       title: aside.has(unit)
         ? `sync set ${label} aside in git stash, since a change from the branch touches it: ${what}`
         : `sync will not ${verb} ${label}: ${what}`,
-      detail: aside.has(unit)
-        ? bringBack(repo, unit)
-        : "Move the value into the fleet's secrets (t3-fleet secrets set NAME=VALUE on an authority) and refer to it as ${NAME}. If it is not a secret, `t3-fleet secrets scan` on this machine prints the command that lets the line through, for an authority to run.",
+      detail: aside.has(unit) ? bringBack(repo, unit) : whatToDo(repo, inUnit),
     };
   });
 
@@ -336,12 +311,13 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       failed = true;
       message = scanned.failure;
     }
-    // A file still conflicted is never committed or proposed either.
+    // A file still conflicted is never committed or proposed either, nor a SOURCES.json that does not read.
+    const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
     const hits = [
       ...(scanned._tag === "Success" ? scanned.success : []),
       ...(yield* unmergedHits(repo, edited)),
+      ...(entries === null ? [UNREADABLE_SOURCES] : []),
     ];
-    const entries = edited.includes(SOURCES) ? yield* sourcesEntriesChanged(repo) : [];
     const held = heldBack(
       edited,
       scanned._tag === "Success"
@@ -350,10 +326,16 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       entries,
     );
 
-    // A held-back unit that an incoming change (or a proposal this
-    // authority will approve) touches would fail every pull: set it aside in
-    // git stash, as a rejection is, where the edits stay.
-    if (held.size > 0 && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
+    // A held-back unit that an incoming change (or a proposal this run
+    // approves) touches would fail every pull: set it aside in git stash, as
+    // a rejection is, where the edits stay. Not after a failed scan, which
+    // held everything, nor an unreadable SOURCES.json, likely mid-edit.
+    const movable = new Map(
+      [...held].filter(
+        ([unit]) => scanned._tag === "Success" && !(unit === SOURCES && entries === null),
+      ),
+    );
+    if (movable.size > 0 && ok(yield* git(repo, ["fetch", "-q", "origin", config.branch]))) {
       const incoming = new Set(
         nulList(
           (yield* git(repo, [
@@ -365,29 +347,15 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
           ])).stdout,
         ),
       );
-      // On an authority, any proposal it may approve, by hand or not.
-      if (authority)
+      if (authority) {
+        const prefixes = settingList(config, "auto_approve", []);
         for (const p of yield* listProposals(repo, config.branch))
-          for (const f of p.files) incoming.add(f);
-      const aside = new Set<string>();
-      for (const [unit, files] of held) {
-        if (!files.some((f) => incoming.has(f))) continue;
-        const stash = yield* git(
-          repo,
-          [
-            "stash",
-            "push",
-            "-q",
-            "--include-untracked",
-            "-m",
-            `${SET_ASIDE}${unit}`,
-            "--",
-            ...files,
-          ],
-          { env: literal },
-        );
-        if (ok(stash)) aside.add(unit);
+          if (autoApprovable(p, prefixes)) for (const f of p.files) incoming.add(f);
       }
+      const aside = yield* setAsideUnits(
+        repo,
+        new Map([...movable].filter(([, files]) => files.some((f) => incoming.has(f)))),
+      );
       if (aside.size > 0) {
         const moved = new Map([...held].filter(([u]) => aside.has(u)));
         findings.push(
@@ -478,7 +446,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
       const unpushed =
         ahead === 0
           ? []
-          : yield* scanCommits(repo, `origin/${config.branch}`, "HEAD", {
+          : yield* scanCommits(repo, [`origin/${config.branch}..HEAD`], {
               allowed: yield* allowedNow(),
             });
       if (unpushed.length > 0) {
@@ -524,6 +492,7 @@ export const exchange = (startConfig: Config, startSelf: Node, lines: Array<stri
         const entries = changed.includes(SOURCES)
           ? yield* sourcesEntriesChanged(repo, `origin/${config.branch}`)
           : [];
+        if (entries === null) hits.push(UNREADABLE_SOURCES);
         const held = heldBack(changed, hits, entries);
         const heldFiles = new Set([...held.values()].flat());
         const kept = changed.filter((f) => !heldFiles.has(f));

@@ -348,6 +348,7 @@ const skillsPreview: UiSkillsPreview = {
   stat: " skills/tdd/SKILL.md | 4 +++-\n 1 file changed, 3 insertions(+), 1 deletion(-)",
   diff: "diff --git a/skills/tdd/SKILL.md b/skills/tdd/SKILL.md\n--- a/skills/tdd/SKILL.md\n+++ b/skills/tdd/SKILL.md\n@@ -1,5 +1,7 @@\n ---\n name: tdd\n-description: Test-driven development.\n+description: Test-driven development: red, green, refactor.\n ---\n+\n+Write the failing test first.\n",
   digest: "fixture",
+  skipped: ["skills/remotion"],
 };
 
 const hubServers: ReadonlyArray<HubServer> = [

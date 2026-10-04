@@ -17,12 +17,21 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom, type Config } from "./Config.ts";
-import { commitAndPush, pullBranch, putBackConflicted, snapshot, statusEntries } from "./Git.ts";
+import {
+  commitAndPush,
+  pullBranch,
+  putBackConflicted,
+  restorePaths,
+  scanCommits,
+  snapshot,
+  statusEntries,
+  unmergedHits,
+} from "./Git.ts";
 import { lastSyncPath } from "./Probe.ts";
 import { addSkills, keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
 import { exchange, readStates, report } from "./Sync.ts";
-import { allowSecret, lineHash } from "./SecretScan.ts";
+import { allowSecret, lineHash, refusal } from "./SecretScan.ts";
 import { stateDir } from "./Names.ts";
 import {
   processIdentity,
@@ -783,7 +792,8 @@ describe("secrets never reach git: round two", () => {
     put(f.box, "skills/new/SKILL.md", "token: $GITHUB_TOKEN\n");
     const after = await f.sync(f.box, "box");
     expect(onMain(f.origin, "skills/SOURCES.json")).not.toContain("<<<<<<<");
-    expect(onMain(f.origin, "skills/new/SKILL.md")).toBeNull();
+    // A SOURCES.json that does not read is held alone (it names no skill), so the fixed skill goes ahead.
+    expect(onMain(f.origin, "skills/new/SKILL.md")).toBe("token: $GITHUB_TOKEN\n");
     expect(after.findings.map((x) => x.title).join("\n")).toContain("skills/SOURCES.json");
     expect(await fails(commitAndPush(f.box, ["skills/SOURCES.json"], "sources"))).toContain(
       "still conflicted",
@@ -837,22 +847,6 @@ describe("secrets never reach git: round two", () => {
     expect(named).not.toContain("the next sync takes care of them");
   });
 
-  it("approving over a held edit points at the set-aside, and sync makes the way", async () => {
-    const f = makeFleet("[fleet]\nauto_approve = []\n");
-    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
-    await f.sync(f.laptop, "laptop");
-    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
-    const [proposal] = await run(listProposals(f.box, "main"));
-    if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
-      "`t3-fleet sync` here sets them aside in git stash",
-    );
-    await f.sync(f.box, "box");
-    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
-    await run(approve(f.box, "main", proposal, "box", proposal.commit));
-    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
-  });
-
   it("publishes no line hash when an auto-approval is refused", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", `token: ${fakeToken()}\n`);
@@ -878,6 +872,149 @@ describe("secrets never reach git: round two", () => {
     );
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((x, y) => x - y)).toEqual(order);
+  });
+});
+
+describe("secrets never reach git: round three", () => {
+  const upstreamOf = (root: string, name: string, files: Record<string, string>) => {
+    const dir = join(root, `upstream-${name}`);
+    for (const [rel, text] of Object.entries(files)) put(dir, rel, text);
+    git(root, "init", "-q", dir);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "upstream");
+    return `file://${dir}`;
+  };
+
+  it("an approval sets aside the held edits it would overwrite; sync leaves them for a pending proposal", async () => {
+    const f = makeFleet("[fleet]\nauto_approve = []\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    // Pending, not about to be approved: sync does not stash the edit.
+    const synced = await f.sync(f.box, "box");
+    expect(synced.failed).toBe(false);
+    expect(git(f.box, "stash", "list")).toBe("");
+    // Approving it does, and goes ahead.
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) return expect.unreachable();
+    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
+    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    // An edit that is not held still stops it.
+    put(f.laptop, "skills/b/SKILL.md", "b v2 from laptop\n");
+    await f.sync(f.laptop, "laptop");
+    put(f.box, "skills/b/SKILL.md", "b, edited here\n");
+    const [next] = await run(listProposals(f.box, "main"));
+    if (next === undefined) return expect.unreachable();
+    expect(await fails(approve(f.box, "main", next, "box", next.commit))).toContain(
+      "commit or stash them first",
+    );
+  });
+
+  it("a failed scan holds everything but stashes nothing", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/a/SKILL.md", "a, edited\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
+    commitAll(f.laptop, "a v2");
+    // The scan's scratch index cannot be written.
+    mkdirSync(join(f.box, ".git/t3-fleet-scan-index"));
+    const result = await f.sync(f.box, "box");
+    expect(result.failed).toBe(true);
+    expect(git(f.box, "stash", "list")).toBe("");
+    expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited\n");
+  });
+
+  it("a SOURCES.json mid-edit is held alone and never stashed", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.box, "sources");
+    put(f.box, "skills/SOURCES.json", '{"local": ["a", \n');
+    put(f.box, "skills/x/SKILL.md", "x v1\n");
+    const result = await f.sync(f.box, "box");
+    expect(git(f.box, "stash", "list")).toBe("");
+    expect(onMain(f.origin, "skills/x/SKILL.md")).toBe("x v1\n");
+    expect(onMain(f.origin, "skills/SOURCES.json")).toBe(`${JSON.stringify({ local: ["a"] })}\n`);
+    const [finding] = result.findings;
+    expect(finding?.key).toBe("sync-secret-skills/SOURCES.json");
+    expect(finding?.detail).toContain("does not read as JSON");
+    expect(finding?.detail).not.toContain("secrets set");
+  });
+
+  it("an unresolved conflict says how to resolve it, not how to move a secret", async () => {
+    const f = makeFleet();
+    put(f.box, "skills/b/SKILL.md", "b, mine\n");
+    git(f.box, "stash", "push", "-q", "-m", "mine");
+    put(f.box, "skills/b/SKILL.md", "b, theirs\n");
+    commitAll(f.box, "b theirs");
+    spawnSync("git", ["stash", "apply"], { cwd: f.box });
+    // Markers taken out by hand, but not marked resolved.
+    put(f.box, "skills/b/SKILL.md", "b, both\n");
+    const result = await f.sync(f.box, "box");
+    const [finding] = result.findings;
+    expect(finding?.title).toContain("skills/b/SKILL.md has an unresolved merge conflict");
+    expect(finding?.detail).toContain("add skills/b/SKILL.md");
+    expect(finding?.detail).not.toContain("secrets set");
+    const scanned = refusal(await run(unmergedHits(f.box)), "commit or propose");
+    expect(scanned).toContain("git add skills/b/SKILL.md");
+    expect(scanned).not.toContain("secrets allow");
+  });
+
+  it("putting files back keeps what git ignores, and so does re-adding a skill", async () => {
+    const f = makeFleet();
+    put(f.box, ".gitignore", ".env\n");
+    commitAll(f.box, "ignore .env");
+    const url = upstreamOf(f.root, "z", { "z/SKILL.md": "z v1\n" });
+    const config = await f.config(f.box, "box");
+    await run(addSkills(f.box, url, []).pipe(Effect.flatMap((p) => land(config, p, "add z"))));
+    put(f.box, "skills/z/.env", "LOCAL=1\n");
+    // Added again: replaced, but its .env stays.
+    await run(addSkills(f.box, url, []));
+    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+    // A refused write is put back, and its .env stays.
+    const before = await run(snapshot(f.box, ["skills"]));
+    put(f.box, "skills/z/SKILL.md", `token: ${fakeToken()}\n`);
+    await run(restorePaths(f.box, ["skills/z"], before));
+    expect(read(f.box, "skills/z/SKILL.md")).toBe("z v1\n");
+    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+  });
+
+  it("pushes a fleet's first commit to an empty remote, scanned from its root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-fleet-first-"));
+    process.env["HOME"] = root;
+    put(
+      root,
+      ".config/t3-fleet/gitconfig",
+      "[user]\n\tname = T3 Fleet\n\temail = t3-fleet@localhost\n",
+    );
+    git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
+    git(root, "init", "-q", "-b", "main", "fleet");
+    const repo = join(root, "fleet");
+    git(repo, "remote", "add", "origin", join(root, "origin.git"));
+    put(repo, "t3-fleet.toml", "[fleet]\n");
+    put(repo, "notes.md", `token: ${fakeToken()}\n`);
+    expect(await fails(commitAndPush(repo, ["t3-fleet.toml", "notes.md"], "init"))).toContain(
+      "notes.md:1 looks like a GitHub token",
+    );
+    expect(await run(commitAndPush(repo, ["t3-fleet.toml"], "init"))).toMatch(/^[0-9a-f]{7,}$/);
+    expect(onMain(join(root, "origin.git"), "t3-fleet.toml")).toBe("[fleet]\n");
+  });
+
+  it("scans a merge for what it adds itself, and a root commit against nothing", async () => {
+    const f = makeFleet();
+    git(f.box, "checkout", "-q", "-b", "side");
+    put(f.box, "notes/side.md", `token: ${fakeToken()}\n`);
+    git(f.box, "add", "-A");
+    git(f.box, "commit", "-qm", "side adds a token");
+    const side = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
+    git(f.box, "checkout", "-q", "main");
+    put(f.box, "README.md", "fleet, edited\n");
+    git(f.box, "commit", "-qam", "main moves");
+    git(f.box, "merge", "-q", "--no-edit", "side");
+    const hits = await run(scanCommits(f.box, ["origin/main..HEAD"]));
+    expect(hits.map((h) => h.commit)).toEqual([side]);
+    // The whole history, root commit included.
+    const all = await run(scanCommits(f.box, ["HEAD"]));
+    expect(all.map((h) => h.commit)).toEqual([side]);
   });
 });
 

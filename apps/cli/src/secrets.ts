@@ -17,7 +17,13 @@ import * as FileSystem from "effect/FileSystem";
 import { Argument, Command } from "effect/unstable/cli";
 
 import { loadConfig } from "@t3-fleet/core/Config";
-import { allowedAt, changedFiles, commitAndPush, scanEdits } from "@t3-fleet/core/Git";
+import {
+  allowedAt,
+  changedFiles,
+  commitAndPush,
+  scanEdits,
+  unmergedHits,
+} from "@t3-fleet/core/Git";
 import { allowSecret, readAllowed, refusal } from "@t3-fleet/core/SecretScan";
 import { underSyncLock } from "@t3-fleet/core/Sync";
 import {
@@ -218,11 +224,14 @@ const scan = Command.make("scan").pipe(
       const config = yield* loadConfig;
       const authority =
         config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
-      const hits = yield* scanEdits(config.repo, yield* changedFiles(config.repo), {
-        allowed: authority
-          ? yield* readAllowed(config.repo)
-          : yield* allowedAt(config.repo, `origin/${config.branch}`),
-      });
+      const hits = [
+        ...(yield* scanEdits(config.repo, yield* changedFiles(config.repo), {
+          allowed: authority
+            ? yield* readAllowed(config.repo)
+            : yield* allowedAt(config.repo, `origin/${config.branch}`),
+        })),
+        ...(yield* unmergedHits(config.repo)),
+      ];
       yield* Console.log(
         hits.length === 0 ? "nothing here looks like a secret" : refusal(hits, "commit or propose"),
       );

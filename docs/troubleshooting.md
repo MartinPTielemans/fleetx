@@ -282,7 +282,18 @@ secret: a token, a password in a URL, a bearer header, a private key; or a
 merge conflict marker, or a file git still has as conflicted. A unit is a
 whole skill (`skills/<name>`), or `skills/SOURCES.json` together with every
 skill whose entry it changes, or a single file elsewhere: half a skill, or a
-skill without its entry, never reaches the other machines. The finding names the line and the kind, never the value
+skill without its entry, never reaches the other machines. A SOURCES.json
+that does not read as JSON (mid-edit, say) is held on its own. For a conflict
+the finding says how to resolve it: take the markers out, then
+`git -C <repo> add <file>`.
+
+What counts as a secret: tokens known by their shape (`ghp_…`, `sk-…`,
+JWTs, private keys, and the like), and values named like one. A value named
+like a key or token (`api_key`, `--token`, `Bearer`) must be one run of 20 or
+more letters, digits and `_-+/=.`; one named like a password (`DB_PASSWORD`,
+`passwd`), any run of 12 or more without brackets. Shorter keys (16 to 19
+characters) are knowingly let through: below 20, ordinary code and names
+looked like keys far too often. The finding names the line and the kind, never the value
 or its hash. Move the value into the fleet's secrets
 (`t3-fleet secrets set NAME=VALUE` on an authority) and refer to it as
 `${NAME}`.
@@ -304,12 +315,13 @@ committed on the branch. Only the lines a commit adds are checked: what is
 already committed never blocks a later change to the same file.
 
 A held-back unit stays in the checkout as an edit. When a change from the
-branch (or a proposal the authority approves) touches it, sync sets it aside
+branch (or a proposal the authority's sync approves) touches it, sync sets it aside
 in `git stash` as `T3 Fleet: held back <unit>`, so pulling keeps working, and
 the finding says so until the stash entry is dropped. To bring the edits
 back: `git -C <repo> stash apply <entry>` (it can conflict with what changed
 on the branch since; resolve by hand), take the secret out, then
-`git -C <repo> stash drop <entry>`. Every commit not yet pushed is checked
+`git -C <repo> stash drop <entry>`. Approving a proposal by hand sets aside
+the held edits it would overwrite the same way. Every commit not yet pushed is checked
 one by one, so a commit made by hand that adds a secret is not pushed even
 when a later one takes it out again; the finding names the commit, and
 `git -C <repo> reset --soft origin/main` turns them back into edits for sync
