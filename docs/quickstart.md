@@ -104,7 +104,16 @@ so `t3-fleet leave` can give the machine back what it had.
 Once you confirm, the whole run is decided and saved (its secret values
 encrypted to this machine's key), so a setup that fails part-way says where,
 and `t3-fleet setup --resume` does exactly what was decided from there
-(`--resume --plan` shows what is left; `--abandon` drops it).
+(`--resume --plan` shows what is left; `--abandon` drops it). `--abandon`
+says what the run had already done and how to undo it; what it did stays, and
+the next `t3-fleet setup` finishes it: it publishes (or proposes) the files
+the run wrote, and runs the first sync that registers its servers.
+
+The fleet's secrets are encrypted in the repo. Each machine keeps the values in
+`~/.config/t3-fleet/secrets.env` (mode 600). Claude keeps the ones its servers
+use in its own config, `~/.claude.json`, and in the rolling backups it makes of
+it (`~/.claude/backups/`); T3 Fleet keeps all of those at mode 600
+(`mcp-claude-config-exposed`).
 
 ## 3. Add a second machine
 

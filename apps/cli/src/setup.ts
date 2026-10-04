@@ -39,6 +39,7 @@ import {
   restored,
   secretsToStore,
   setupSteps,
+  writtenPaths,
   type Extras,
   type SetupInput,
 } from "@t3-fleet/core/setup/Apply";
@@ -67,14 +68,25 @@ import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Pref
 import { registeredByFleet } from "@t3-fleet/core/setup/RegisteredByFleet";
 import { cloneFleet, readFleet, SELF_SERVER } from "@t3-fleet/core/setup/Repo";
 import {
+  clearAbandoned,
   dropRun,
   loadRunSecrets,
+  readAbandoned,
   readProgress,
+  recordAbandoned,
   runSecretsPath,
   saveRunSecrets,
   writeProgress,
   type Progress,
 } from "@t3-fleet/core/setup/State";
+
+import {
+  abandonReport,
+  finishWork,
+  nothingUnfinished,
+  unfinishedLines,
+  unfinishedWork,
+} from "@t3-fleet/core/setup/Unfinished";
 
 import { reportUserErrors } from "./shared.ts";
 import { connectT3 } from "./t3.ts";
@@ -339,10 +351,26 @@ const setup = (flags: Flags) =>
     if (flags.abandon) {
       if (Option.isNone(unfinished)) return yield* Console.log("No unfinished setup to abandon.");
       const p = unfinished.value;
+      const saved = p.input as SetupInput;
+      // The next setup finishes what this run started (Unfinished.ts); the record has no values.
+      const record = {
+        startedAt: p.startedAt,
+        abandonedAt: yield* Clock.currentTimeMillis,
+        node: p.node,
+        mode: p.mode,
+        checkout: p.checkout,
+        commits: saved.commits,
+        done: p.done,
+        written: writtenPaths(saved),
+      };
+      if (p.done.length > 0) yield* recordAbandoned(home, record);
       yield* dropRun(home);
-      yield* Console.log(
-        `Dropped the unfinished setup of ${p.node}${p.failed ? ` (stopped at ${p.failed.step})` : ""}. What it did already stays: ${p.done.length > 0 ? `the steps ${p.done.join(", ")}` : "nothing was done"}; ~/.local/state/t3-fleet/setup/before.json still lists what it moved, for t3-fleet leave.`,
-      );
+      const steps = setupSteps(saved, {
+        t3Connect: Effect.fail("not run"),
+        raw: { claude: null, codex: null },
+      }).map((s) => s.id);
+      if (p.failed) yield* Console.log(`It stopped at ${p.failed.step}: ${p.failed.why}`);
+      yield* Console.log(abandonReport(record, steps, home).join("\n"));
       return;
     }
     if (flags.resume) {
@@ -543,11 +571,41 @@ const planAndApply = (flags: Flags, scratch: string) =>
         timer: timerNow,
       }),
     );
-    if (nothing) {
+    // What a run dropped with --abandon left undone: the checkout already has its files, so the plan cannot see it.
+    const abandoned = mode === "again" ? yield* readAbandoned(home) : Option.none();
+    const record = Option.getOrNull(Option.filter(abandoned, (a) => a.checkout === checkout));
+    const left = record === null ? null : yield* unfinishedWork(home, record, authority);
+    const pending = left !== null && !nothingUnfinished(left);
+    if (record !== null && left !== null && pending)
+      yield* Console.log(
+        `\nUnfinished from the setup of ${record.node} dropped with --abandon:\n${unfinishedLines(
+          left,
+          record,
+        )
+          .map((l) => `  ${l}`)
+          .join("\n")}`,
+      );
+    if (nothing && !pending) {
+      if (record !== null && !flags.planOnly) yield* clearAbandoned(home);
       yield* Console.log(
         "\nNothing here differs from the fleet. `t3-fleet status` checks everything else.",
       );
       return;
+    }
+    if (nothing && record !== null && left !== null) {
+      if (flags.planOnly) return yield* Console.log("\n--plan: nothing was written.");
+      if (!flags.yes) {
+        if (!interactive())
+          return yield* Effect.fail(
+            "not a terminal: re-run with --yes to finish it, or --plan to only look",
+          );
+        if (!(yield* ask(Prompt.Confirm({ message: "Finish it?", initial: true }))))
+          return yield* Console.log("Nothing was written.");
+      }
+      yield* Console.log("");
+      for (const line of yield* finishWork(home, record, left, { sync: true }))
+        yield* Console.log(`✓ ${line}`);
+      return yield* Console.log(`\n${node} is set up.`);
     }
     if (flags.planOnly) {
       yield* Console.log("\n--plan: nothing was written.");
@@ -614,6 +672,11 @@ const planAndApply = (flags: Flags, scratch: string) =>
       remote: remoteTarget,
       now,
     };
+
+    // What an abandoned run left: published or marked for proposing now; this run's sync does the rest.
+    if (record !== null && left !== null && pending)
+      for (const line of yield* finishWork(home, record, left, { sync: false }))
+        yield* Console.log(`✓ ${line}`);
 
     // 5. Apply: the run is saved first, so a resume does exactly this.
     let plain = "";

@@ -151,6 +151,20 @@ pass "laptop, server and desktop are equivalent"
 expect laptop "Nothing here differs" 't3-fleet setup'
 expect desktop "Nothing here differs" 't3-fleet setup'
 
+# A setup dropped part-way: the next one finishes what it left, rather than finding nothing to do.
+on laptop 'mkdir -p ~/.agents/skills/later && printf -- "---\nname: later\ndescription: added later\n---\nlater\n" > ~/.agents/skills/later/SKILL.md'
+on laptop 'chmod -R a-w /srv/remote/fleet.git'
+expect laptop 'setup stopped at "commit"' 't3-fleet setup --yes'
+expect laptop "Not done: commit, config, links, sync" 't3-fleet setup --abandon'
+on laptop 'chmod -R u+w /srv/remote/fleet.git'
+# Its commit was made, its push refused: the next setup pushes it.
+expect laptop "not pushed: skills/later" 't3-fleet setup --plan'
+expect laptop "pushed what an earlier run committed: skills/later" 't3-fleet setup --yes'
+expect laptop "skills/later/SKILL.md" 'git -C /srv/remote/fleet.git ls-tree -r --name-only main'
+[ "$(on laptop 'readlink ~/.agents/skills/later')" = /home/dev/fleet/skills/later ] || fail "later should be linked once the setup is finished"
+expect laptop "Nothing here differs" 't3-fleet setup'
+pass "a setup dropped with --abandon says what it did, and the next one finishes it"
+
 # Run at all, the real Codex writes under ~/.codex (tmp/arg0, locks, helper links); setup only looks.
 on laptop 'printf "#!/bin/sh\nmkdir -p ~/.codex/tmp/arg0/codex-arg0-\$\$\necho codex-cli 0.160.0\n" > ~/.local/bin/codex && chmod +x ~/.local/bin/codex'
 before=$(state laptop)

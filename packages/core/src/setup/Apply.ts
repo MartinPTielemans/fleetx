@@ -275,6 +275,38 @@ const relayEdits = (text: string, url: string | null): Edit => {
   return setKey(port.text, ["relay"], "url", url);
 };
 
+/** Setup's first sync: everything but MCP until this machine reads the fleet's secrets. */
+export const firstSync = (repo: string) =>
+  Effect.gen(function* () {
+    // A fleet with no remote yet is complete here; syncing (and publishing) waits for one.
+    if (out(yield* git(repo, ["remote", "get-url", "origin"])) === "")
+      return [
+        "skipped: the repo has no remote yet. Add one, then sync:",
+        `  git -C ${repo} remote add origin <url> && git -C ${repo} push -u origin main`,
+        "  t3-fleet sync",
+      ];
+    const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
+    // MCP servers wait until this machine can read the fleet's secrets: registered without them, they would lose their credentials.
+    const readable = yield* readSecrets(repo).pipe(Effect.option);
+    const areas = [
+      "engine",
+      "secrets",
+      "skills",
+      "instructions",
+      "dotfiles",
+      ...(Option.isSome(readable) ? ["mcp"] : []),
+    ];
+    const result = yield* syncRun(config, { apply: true, areas });
+    const lines = [...result.lines];
+    if (Option.isNone(readable))
+      lines.push(
+        "MCP servers are registered once an authority's next sync adds this machine's key",
+      );
+    if (result.state !== null && result.state.result !== "ok")
+      return yield* Effect.fail(`sync incomplete: ${result.state.message}`);
+    return lines;
+  });
+
 /** The steps for this run, in order. `hooks` are what only the command can do. */
 export const setupSteps = (
   input: SetupInput,
@@ -608,35 +640,7 @@ export const setupSteps = (
   steps.push({
     id: "sync",
     title: "a first sync",
-    run: Effect.gen(function* () {
-      // A fleet with no remote yet is complete here; syncing (and publishing) waits for one.
-      if (out(yield* git(repo, ["remote", "get-url", "origin"])) === "")
-        return [
-          "skipped: the repo has no remote yet. Add one, then sync:",
-          `  git -C ${repo} remote add origin <url> && git -C ${repo} push -u origin main`,
-          "  t3-fleet sync",
-        ];
-      const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
-      // MCP servers wait until this machine can read the fleet's secrets: registered without them, they would lose their credentials.
-      const readable = yield* readSecrets(repo).pipe(Effect.option);
-      const areas = [
-        "engine",
-        "secrets",
-        "skills",
-        "instructions",
-        "dotfiles",
-        ...(Option.isSome(readable) ? ["mcp"] : []),
-      ];
-      const result = yield* syncRun(config, { apply: true, areas });
-      const lines = [...result.lines];
-      if (Option.isNone(readable))
-        lines.push(
-          "MCP servers are registered once an authority's next sync adds this machine's key",
-        );
-      if (result.state !== null && result.state.result !== "ok")
-        return yield* Effect.fail(`sync incomplete: ${result.state.message}`);
-      return lines;
-    }).pipe(Effect.mapError(fail("the first sync"))),
+    run: firstSync(repo).pipe(Effect.mapError(fail("the first sync"))),
   });
   return steps;
 };
@@ -646,7 +650,7 @@ export const setupSteps = (
  * push): scanned as commitAndPush scans, from the root when the remote has
  * nothing yet, then pushed.
  */
-const pushLeftover = (repo: string) =>
+export const pushLeftover = (repo: string) =>
   Effect.gen(function* () {
     const empty =
       (yield* git(repo, ["ls-remote", "--exit-code", "origin", "refs/heads/main"])).code === 2;

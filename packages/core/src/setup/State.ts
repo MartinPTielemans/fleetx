@@ -230,3 +230,41 @@ export const clearSetupProposed = (home: string) =>
     Effect.flatMap((fs) => fs.remove(setupProposedPath(home), { force: true })),
     Effect.ignore,
   );
+
+/**
+ * A run dropped with --abandon: what it had done, and what it wrote into the
+ * checkout. No values. The next setup reads it to finish the work (publish
+ * or propose what it wrote, and a first sync), then removes it.
+ */
+export const Abandoned = Schema.Struct({
+  startedAt: Schema.Number,
+  abandonedAt: Schema.Number,
+  node: Schema.String,
+  mode: Schema.Literals(["first", "join", "again"]),
+  checkout: Schema.String,
+  /** Whether the run committed itself (an authority), or proposed (a member). */
+  commits: Schema.Boolean,
+  done: Schema.Array(Schema.String),
+  /** Repo paths the run writes (Apply.writtenPaths). */
+  written: Schema.Array(Schema.String),
+});
+export type Abandoned = typeof Abandoned.Type;
+
+export const abandonedPath = (home: string) => `${stateDir(home)}/setup/abandoned.json`;
+
+export const recordAbandoned = (home: string, abandoned: Abandoned) =>
+  writePrivate(abandonedPath(home), abandoned);
+
+export const readAbandoned = (home: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(abandonedPath(home)).pipe(Effect.option);
+    if (Option.isNone(text)) return Option.none<Abandoned>();
+    return Schema.decodeOption(Schema.fromJsonString(Abandoned))(text.value);
+  });
+
+export const clearAbandoned = (home: string) =>
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fs) => fs.remove(abandonedPath(home), { force: true })),
+    Effect.ignore,
+  );
