@@ -83,7 +83,8 @@ Ticked items are done and in `main`.
       tool policy, call log
 - [x] Security review before deploy; its must-fix items fixed
 - [x] ui: Skills view: links per machine; add, update (previewed), remove; adopt as a fix
-- [ ] The author's fleet on the hub and the model proxy
+- [x] The author's fleet on the hub and the model proxy (claude routed on every
+      machine; codex stays on CLIProxyAPI with `route = false`)
 
 ## Rename: fleetx → T3 Fleet
 
@@ -93,7 +94,7 @@ Ticked items are done and in `main`.
       or adopted; headers between machines sent and read under both names
 - [x] Releases carry `t3-fleet.mjs` and `fleetx.mjs`; install script, Nix and
       Homebrew keep working
-- [ ] The author's fleet upgraded and migrated
+- [x] The author's fleet upgraded and migrated (2026-10-04)
 - [ ] Config repo names, once every machine runs T3 Fleet: `fleetx.toml` →
       `t3-fleet.toml`, `fleetx/state|staging|rejected` → `t3-fleet/…`,
       `FLEETX_RELAY_TOKEN` and `FLEETX_MCP_TOKEN_*` → `T3_FLEET_…`; an

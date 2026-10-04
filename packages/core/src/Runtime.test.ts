@@ -10,7 +10,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import { newBuild } from "./Runtime.ts";
+import { currentBundlePath, newBuild, retireLegacyUnit } from "./Runtime.ts";
 
 describe("newBuild", () => {
   it("completes once the bundle holds a different build, and not before", async () => {
@@ -23,4 +23,21 @@ describe("newBuild", () => {
     const [digest] = await Effect.runPromise(Effect.all([watch, replace], { concurrency: 2 }));
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
   }, 15_000);
+});
+
+describe("currentBundlePath", () => {
+  it("names the T3 Fleet copy where the bundle resolved to a fleetx path", () => {
+    expect(currentBundlePath("/home/u", "/home/u/.local/share/fleetx/fleetx.mjs")).toBe("/home/u/.local/share/t3-fleet/t3-fleet.mjs");
+    expect(currentBundlePath("/home/u", "/home/u/.local/share/t3-fleet/fleetx.mjs")).toBe("/home/u/.local/share/t3-fleet/t3-fleet.mjs");
+    expect(currentBundlePath("/home/u", "/home/u/src/fleetx/apps/cli/dist/bin.mjs")).toBe("/home/u/src/fleetx/apps/cli/dist/bin.mjs");
+  });
+});
+
+describe("retireLegacyUnit", () => {
+  it("stops and disables each systemd unit on its own, so a missing timer cannot block the service", () => {
+    const shell = retireLegacyUnit("linux", true, "models");
+    expect(shell).toContain('for u in fleetx-models.timer fleetx-models.service; do systemctl stop "$u"');
+    expect(shell).not.toContain("disable --now");
+    expect(shell).toMatch(/systemctl daemon-reload/);
+  });
 });
