@@ -78,6 +78,18 @@ export const runFix = (node: Node, finding: Finding & { readonly fix: Fix }, che
     return { finding, ok, summary: summary.slice(0, 240) } satisfies FixOutcome;
   });
 
+/**
+ * Installing this build comes first on a node, then moving fleetx's
+ * directories, then the rest in report order: a unit installed earlier starts
+ * a run at once, and that run must find the new build. Until 1.0 the move
+ * matters too, since an old build would put back what the rename retired.
+ */
+const rank = (f: Finding & { readonly fix: Fix }) =>
+  f.fix.command === ENGINE_INSTALL ? 0 : f.key === "engine-legacy-dirs" ? 1 : 2;
+
+export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(fixes: ReadonlyArray<F>): ReadonlyArray<F> =>
+  fixes.map((f, i) => [f, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j).map(([f]) => f);
+
 /** Fixes for one node run in order (an upgrade may depend on the one before); nodes run in parallel. */
 export const runFixes = (
   nodes: ReadonlyArray<Node>,
@@ -87,6 +99,6 @@ export const runFixes = (
 ) =>
   Effect.forEach(
     nodes,
-    (node) => Effect.forEach(fixes.filter((f) => (f.fix.on ?? f.node) === node.name), (f) => runFix(node, f, checkout, bundle)),
+    (node) => Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) => runFix(node, f, checkout, bundle)),
     { concurrency: "unbounded" },
   ).pipe(Effect.map((perNode) => perNode.flat()));

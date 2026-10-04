@@ -79,10 +79,18 @@ export const nodeFlag = Flag.String("node").pipe(
 /**
  * Runs a long-running service until it stops or this bundle is replaced by a
  * new build; then it returns, the process exits, and its unit starts the new
- * build (see newBuild in Runtime.ts).
+ * build (see newBuild in Runtime.ts). The exit is forced after a few seconds:
+ * a client's open connection (a streaming model response, a kept-alive
+ * socket) would otherwise keep the process alive with nothing listening, and
+ * its unit would never start the new build.
  */
 export const untilNewBuild = <A, E, R>(service: Effect.Effect<A, E, R>) =>
   Effect.raceFirst(
     service,
-    newBuild(process.argv[1] ?? "").pipe(Effect.flatMap(() => Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it"))),
+    newBuild(process.argv[1] ?? "").pipe(
+      Effect.flatMap(() => Console.log("a new T3 Fleet build is installed; exiting so the service restarts on it")),
+      // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
+      // @effect-diagnostics-next-line globalTimersInEffect:off
+      Effect.andThen(Effect.sync(() => setTimeout(() => process.exit(0), 5_000).unref())),
+    ),
   );

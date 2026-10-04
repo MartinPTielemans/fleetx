@@ -14,7 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 
 import { exec } from "./Exec.ts";
 import { sha256 } from "./Hash.ts";
-import { BUNDLE_FILE, CLI, LEGACY_CLI, legacyLaunchdLabel, legacySystemdUnit, SHARE_DIR } from "./Names.ts";
+import { BUNDLE_FILE, CLI, LEGACY_BUNDLE_FILE, LEGACY_CLI, LEGACY_SHARE_DIR, legacyLaunchdLabel, legacySystemdUnit, SHARE_DIR } from "./Names.ts";
 
 export const MIN_NODE_MAJOR = 24;
 
@@ -28,14 +28,26 @@ export const stableNode = (home: string) =>
     return process.execPath;
   });
 
+/**
+ * A bundle at a fleetx path stands for the installed copy at its T3 Fleet
+ * path. A unit written before the engine fix installs that copy must not
+ * name the old file: the unit's first run would start the old build, which
+ * puts back the fleetx units the rename just retired. Until 1.0.
+ */
+export const currentBundlePath = (home: string, bundle: string) =>
+  bundle === `${home}/${LEGACY_SHARE_DIR}/${LEGACY_BUNDLE_FILE}` || bundle === `${home}/${SHARE_DIR}/${LEGACY_BUNDLE_FILE}`
+    ? `${home}/${SHARE_DIR}/${BUNDLE_FILE}`
+    : bundle;
+
 /** The bundle ~/.local/bin/t3-fleet resolves to (a development build, or the installed copy); before the rename, ~/.local/bin/fleetx. */
 export const installedBundle = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    return yield* fs.realPath(`${home}/.local/bin/${CLI}`).pipe(
+    const bundle = yield* fs.realPath(`${home}/.local/bin/${CLI}`).pipe(
       Effect.catch(() => fs.realPath(`${home}/.local/bin/${LEGACY_CLI}`)),
       Effect.orElseSucceed(() => `${home}/${SHARE_DIR}/${BUNDLE_FILE}`),
     );
+    return currentBundlePath(home, bundle);
   });
 
 /** Whether a service or timer is still installed under its fleetx name. Until 1.0. */
