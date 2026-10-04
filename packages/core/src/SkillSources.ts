@@ -129,7 +129,8 @@ export const recordSources = (
     const sources = yield* readSources(repo);
     const all = { ...sources.sources };
     for (const f of found) {
-      const key = parseSource(f.url).name;
+      // Keyed by the URL: alice/skills and bob/skills are two sources.
+      const key = f.url;
       const entry = all[key] ?? {
         type: f.url.includes("github.com") ? "github" : "git",
         url: f.url,

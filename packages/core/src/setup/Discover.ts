@@ -52,6 +52,10 @@ export interface SkillCopy {
   readonly modified: number;
   /** The git repository it was cloned from, when it was. */
   readonly source: SkillSource | null;
+  /** Its SKILL.md, to show how it differs. */
+  readonly text: string;
+  /** How many other files it has, for the diff's label; null when only SKILL.md. */
+  readonly files: string | null;
 }
 
 export interface FoundServer {
@@ -59,6 +63,8 @@ export interface FoundServer {
   readonly client: "claude" | "codex";
   /** Claude's project scope: the project's directory, as ~/…; null for user scope. */
   readonly project: string | null;
+  /** The client's entry as found: kept in memory only, never written (it holds credentials). */
+  readonly entry: Readonly<Record<string, unknown>>;
   readonly extracted: Extracted;
 }
 
@@ -162,7 +168,13 @@ export const hashSkill = (dir: string) =>
       total.set(p, offset);
       offset += p.length;
     }
-    return { hash: yield* Effect.promise(() => sha256(total)), modified };
+    const others = files.filter((f) => f !== `${dir}/SKILL.md`).length;
+    return {
+      hash: yield* Effect.promise(() => sha256(total)),
+      modified,
+      text: yield* fs.readFileString(`${dir}/SKILL.md`).pipe(Effect.orElseSucceed(() => "")),
+      files: others === 0 ? null : `and ${others} other file${others === 1 ? "" : "s"}`,
+    };
   });
 
 /** The repository `dir` was cloned from, when its clone is `entry` or inside it. */
@@ -173,6 +185,10 @@ const sourceOf = (entry: string, dir: string) =>
     if (top === "" || !(top === entry || top.startsWith(`${entry}/`))) return null;
     const url = yield* git(top, ["remote", "get-url", "origin"]);
     if (!ok(url) || out(url) === "") return null;
+    // Edited or ahead of what it was cloned from: the copy is the user's own, and updating it
+    // from the source would lose their work.
+    if (out(yield* git(top, ["status", "--porcelain"])) !== "") return null;
+    if (out(yield* git(top, ["branch", "-r", "--contains", "HEAD"])) === "") return null;
     return {
       url: cleanUrl(out(url)),
       path: path.relative(top, dir) || ".",
@@ -223,7 +239,7 @@ export const discoverSkills = (home: string, managed: string | null) =>
               .map((f) => path.dirname(f))
               .sort();
         for (const skillDir of dirs) {
-          const { hash, modified } = yield* hashSkill(skillDir);
+          const { hash, modified, text, files } = yield* hashSkill(skillDir);
           skills.push({
             name: skillDir === real ? name : path.basename(skillDir),
             root,
@@ -232,6 +248,8 @@ export const discoverSkills = (home: string, managed: string | null) =>
             hash,
             modified,
             source: yield* sourceOf(real, skillDir),
+            text,
+            files,
           });
         }
       }
@@ -279,13 +297,25 @@ export const discoverServers = (
         for (const [name, entry] of Object.entries(claudeRaw)) {
           const extracted = fromClaude(name, asTable(entry), ctx);
           if (extracted !== null)
-            servers.push({ name, client: "claude", project: null, extracted });
+            servers.push({
+              name,
+              client: "claude",
+              project: null,
+              entry: asTable(entry),
+              extracted,
+            });
         }
         for (const [project, settings] of Object.entries(decoded.value.projects ?? {}).sort()) {
           for (const [name, entry] of Object.entries(settings.mcpServers ?? {})) {
             const extracted = fromClaude(name, asTable(entry), ctx);
             if (extracted === null) continue;
-            servers.push({ name, client: "claude", project: tilde(project, home), extracted });
+            servers.push({
+              name,
+              client: "claude",
+              project: tilde(project, home),
+              entry: asTable(entry),
+              extracted,
+            });
           }
         }
       }
@@ -302,7 +332,14 @@ export const discoverServers = (
         codexRaw = asTable((parsed.value as Record<string, unknown>)["mcp_servers"]);
         for (const [name, entry] of Object.entries(codexRaw)) {
           const extracted = fromCodex(name, asTable(entry), ctx);
-          if (extracted !== null) servers.push({ name, client: "codex", project: null, extracted });
+          if (extracted !== null)
+            servers.push({
+              name,
+              client: "codex",
+              project: null,
+              entry: asTable(entry),
+              extracted,
+            });
         }
       }
     }

@@ -71,7 +71,7 @@ const serviceManager = Effect.gen(function* () {
     ? ({ works: true } as const)
     : ({
         works: false,
-        why: `the timer would stop when you log out: run \`sudo loginctl enable-linger ${user}\`, then setup --resume`,
+        why: `the timer would stop when you log out: run \`sudo loginctl enable-linger ${user}\`, then \`t3-fleet setup\` turns the timer on`,
       } as const);
 });
 

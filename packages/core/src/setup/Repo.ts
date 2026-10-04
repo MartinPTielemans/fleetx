@@ -2,6 +2,7 @@
  * The config repo as setup sees it: what a fleet already has (to plan
  * against), and the files a new fleet starts with.
  */
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -10,10 +11,11 @@ import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import { loadConfigFrom } from "../Config.ts";
+import { exec } from "../Exec.ts";
 import { FLEET_FILE } from "../Names.ts";
-import { readSecrets, varNames } from "../Secrets.ts";
+import { keyPath, readSecrets, varNames } from "../Secrets.ts";
 import { secretRefs } from "./Credentials.ts";
-import { hashSkill } from "./Discover.ts";
+import { cleanUrl, hashSkill } from "./Discover.ts";
 import { PROPOSED_SECRETS, type FleetView } from "./Plan.ts";
 import { tomlValue } from "./TomlEdit.ts";
 
@@ -50,10 +52,16 @@ export const readFleet = (repo: string, self: string) =>
     const list = (dir: string) =>
       fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => [] as Array<string>));
     const skills = new Map<string, string>();
+    const skillTexts = new Map<string, string>();
     for (const name of (yield* list(path.join(repo, "skills"))).sort()) {
       const dir = path.join(repo, "skills", name);
-      if (yield* fs.exists(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => false)))
+      if (yield* fs.exists(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => false))) {
         skills.set(name, (yield* hashSkill(dir)).hash);
+        skillTexts.set(
+          name,
+          yield* fs.readFileString(path.join(dir, "SKILL.md")).pipe(Effect.orElseSucceed(() => "")),
+        );
+      }
     }
     const servers = new Map<string, Record<string, unknown>>();
     for (const file of (yield* list(path.join(repo, "mcp"))).filter((f) => f.endsWith(".json"))) {
@@ -76,7 +84,9 @@ export const readFleet = (repo: string, self: string) =>
           onSome: (c) => table(c.nodes.find((n) => n.name === self)?.settings.table as unknown),
         })
       : table(fleetToml["defaults"]);
-    const declared = (table(settings["mcp"])["servers"] as Array<string> | undefined) ?? [];
+    const mcp = table(settings["mcp"]);
+    const names = (v: unknown) =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
     const entries = Array.isArray(settings["instructions"])
       ? (settings["instructions"] as Array<unknown>).map(table)
       : [];
@@ -87,19 +97,29 @@ export const readFleet = (repo: string, self: string) =>
       instructions.push({ src: e["src"], dest: e["dest"], text: Option.getOrNull(text) });
     }
     // Names the repo already uses; an authority can also read the secrets file's own.
-    const known = yield* readSecrets(repo).pipe(
-      Effect.map(varNames),
-      Effect.orElseSucceed(() => [] as Array<string>),
-    );
-    const autoCommit = table(fleetToml["fleet"])["auto_commit"];
-    return {
+    // Only with a key this machine has already: planning creates nothing.
+    const hasKey = yield* fs
+      .exists(keyPath(process.env["HOME"] ?? ""))
+      .pipe(Effect.orElseSucceed(() => false));
+    const known = hasKey
+      ? yield* readSecrets(repo).pipe(
+          Effect.map(varNames),
+          Effect.orElseSucceed(() => [] as Array<string>),
+        )
+      : [];
+    const view: FleetView = {
       skills,
+      skillTexts,
       servers,
-      declared: declared.filter((d) => typeof d === "string"),
+      declared: names(mcp["servers"]),
+      ignored: names(mcp["ignore"]),
       instructions,
       secretNames: [...new Set([...[...servers.values()].flatMap(secretRefs), ...known])],
-      autoCommit: Array.isArray(autoCommit) ? (autoCommit as Array<string>) : ["skills"],
-    } satisfies FleetView;
+    };
+    /** This machine's merged [mcp] settings, as the mcp area would read them. */
+    /** Whether this machine's settings turn the sync timer off (setup did, when it could not run one). */
+    const timerOff = table(settings["engine"])["timer"] === false;
+    return { view, mcp, timerOff };
   });
 
 const list = (values: ReadonlyArray<string>) => tomlValue(values);
@@ -153,3 +173,46 @@ export const GITIGNORE = [
   ".DS_Store",
   "",
 ].join("\n");
+
+/**
+ * Clone the fleet's repository into `dir`, writing no config anywhere (so
+ * `setup --plan` changes nothing): T3 Fleet's git settings go in the
+ * environment, with gh as GitHub's credential helper when gh is here.
+ */
+export const cloneFleet = (url: string, dir: string) =>
+  Effect.gen(function* () {
+    const gh = (yield* exec({
+      command: "sh",
+      args: ["-c", "command -v gh"],
+      timeout: Duration.seconds(5),
+    })).stdout.trim();
+    const helper =
+      gh === ""
+        ? {}
+        : {
+            GIT_CONFIG_COUNT: "2",
+            GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
+            GIT_CONFIG_VALUE_0: "",
+            GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+            GIT_CONFIG_VALUE_1: `!${gh} auth git-credential`,
+          };
+    const clone = yield* exec({
+      command: "git",
+      args: ["clone", "-q", "--", url, dir],
+      env: {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+        ...helper,
+      },
+      timeout: Duration.minutes(5),
+    });
+    if (clone.code !== 0)
+      return yield* Effect.fail(
+        `cloning ${cleanUrl(url)}: ${clone.stderr.trim().split("\n").pop() ?? `exit ${clone.code}`} (for GitHub: gh auth login)`.replaceAll(
+          url,
+          cleanUrl(url),
+        ),
+      );
+  });

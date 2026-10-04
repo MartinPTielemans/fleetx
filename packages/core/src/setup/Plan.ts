@@ -8,6 +8,11 @@
  * their choices and the default the owner chose; `decide` turns a plan and
  * the choices made into the actions Apply.ts runs. Pure, so every rule here
  * is tested without a machine.
+ *
+ * A choice between two copies on this machine (two skills of one name, or
+ * Claude and Codex disagreeing) comes first; the copy chosen is then
+ * compared with the fleet's like any other, as a second conflict that only
+ * applies when the two differ.
  */
 import { secretRefs, shapeOf, type Missing, type Secret } from "./Credentials.ts";
 import type { Discovery, FoundServer, SkillCopy, SkillSource } from "./Discover.ts";
@@ -16,29 +21,32 @@ import type { Discovery, FoundServer, SkillCopy, SkillSource } from "./Discover.
 export interface FleetView {
   /** Skills in the repo, by name, with their hashes. */
   readonly skills: ReadonlyMap<string, string>;
+  /** Their SKILL.md, for showing a difference. */
+  readonly skillTexts: ReadonlyMap<string, string>;
   /** Definitions in mcp/, by name. */
   readonly servers: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
-  /** `[defaults.mcp] servers`. */
+  /** `[mcp] servers` as this machine gets them. */
   readonly declared: ReadonlyArray<string>;
-  /** `[[defaults.instructions]]`, with the file each names. */
+  /** `[mcp] ignore` as this machine gets it: servers the fleet leaves alone here. */
+  readonly ignored: ReadonlyArray<string>;
+  /** `[[instructions]]` as this machine gets them, with the file each names. */
   readonly instructions: ReadonlyArray<{
     readonly src: string;
     readonly dest: string;
     readonly text: string | null;
   }>;
-  /** Secret names the repo's definitions use. */
+  /** Secret names the repo already uses. */
   readonly secretNames: ReadonlyArray<string>;
-  /** `[fleet] auto_commit`: what a member's sync proposes. */
-  readonly autoCommit: ReadonlyArray<string>;
 }
 
 export const EMPTY_FLEET: FleetView = {
   skills: new Map(),
+  skillTexts: new Map(),
   servers: new Map(),
   declared: [],
+  ignored: [],
   instructions: [],
   secretNames: [],
-  autoCommit: [],
 };
 
 /**
@@ -59,13 +67,15 @@ export interface Conflict {
   readonly detail: string;
   readonly choices: ReadonlyArray<{ readonly value: Choice; readonly label: string }>;
   readonly default: Choice;
+  /** The local choice this comparison with the fleet follows; it applies only when the chosen copy differs. */
+  readonly after?: string;
 }
 
 /** Where a server is registered once setup is done. */
 export type Scope =
   /** On every machine: `[defaults.mcp] servers`. */
   | "fleet"
-  /** On this machine only: its node file. */
+  /** On this machine only: its node file's `[mcp] "servers.add"`. */
   | "machine"
   /** In the repo, registered nowhere until a node lists it (a Claude project's server). */
   | "declared";
@@ -93,6 +103,22 @@ export interface PlanInstruction {
   readonly text: string;
 }
 
+export type PlanConflict = Conflict &
+  (
+    | {
+        readonly kind: "skill";
+        readonly copies: ReadonlyArray<PlanSkill>;
+        /** The fleet's hash, for a comparison that follows a local choice. */
+        readonly fleetHash?: string;
+      }
+    | {
+        readonly kind: "server";
+        readonly options: ReadonlyArray<PlanServer>;
+        readonly fleetShape?: string;
+      }
+    | { readonly kind: "instruction"; readonly mine: PlanInstruction }
+  );
+
 export interface Plan {
   readonly mode: Mode;
   readonly node: string;
@@ -111,22 +137,15 @@ export interface Plan {
     readonly instructions: ReadonlyArray<PlanInstruction>;
   };
   /** Differences with a choice to make, each kept for `decide`. */
-  readonly conflicts: ReadonlyArray<
-    Conflict &
-      (
-        | { readonly kind: "skill"; readonly copies: ReadonlyArray<PlanSkill> }
-        | { readonly kind: "server"; readonly options: ReadonlyArray<PlanServer> }
-        | { readonly kind: "instruction"; readonly mine: PlanInstruction }
-      )
-  >;
+  readonly conflicts: ReadonlyArray<PlanConflict>;
+  /** Servers T3 Fleet leaves alone on this machine (its node's `[mcp] "ignore.add"`). */
+  readonly ignored: ReadonlyArray<{ readonly name: string; readonly why: string }>;
   readonly leftAlone: ReadonlyArray<{ readonly what: string; readonly why: string }>;
   readonly secrets: ReadonlyArray<Secret>;
   readonly missing: ReadonlyArray<Missing>;
-  /** What stops this plan from being applied. */
-  readonly blocked: ReadonlyArray<string>;
 }
 
-/** Collected by root, one group per skill name. */
+/** Collected by name. */
 const byName = <A extends { readonly name: string }>(items: ReadonlyArray<A>) => {
   const groups = new Map<string, Array<A>>();
   for (const item of items) groups.set(item.name, [...(groups.get(item.name) ?? []), item]);
@@ -138,7 +157,6 @@ const skillLabel = (c: SkillCopy) =>
 
 const definitionText = (d: Readonly<Record<string, unknown>>) => JSON.stringify(d, null, 2);
 
-/** A unified-looking diff of two texts, line by line, enough to choose by. */
 export const lineDiff = (a: string, b: string, aLabel: string, bLabel: string) => {
   const x = a.split("\n");
   const y = b.split("\n");
@@ -181,9 +199,66 @@ export interface PlanInput {
   readonly authority: boolean;
   readonly found: Discovery;
   readonly fleet: FleetView;
+  /**
+   * Whether a client's entry is exactly what the mcp area registers for the
+   * fleet's definition of that name on this machine: the fleet's own
+   * registration, never a difference (again mode; RegisteredByFleet.ts).
+   */
+  readonly registered?: (server: FoundServer) => boolean;
 }
 
-export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): Plan => {
+/** The diff to show for a conflict, once the choices it follows are made (the chosen copy's). */
+export const detailOf = (
+  conflict: PlanConflict,
+  choices: Readonly<Record<string, Choice>>,
+  fleet: FleetView,
+) => {
+  if (conflict.after === undefined || conflict.kind === "instruction") return conflict.detail;
+  const pick = Number(/^copy:(\d+)$/.exec(choices[conflict.after] ?? "")?.[1] ?? 0);
+  if (conflict.kind === "skill") {
+    const copy = (conflict.copies[pick] ?? conflict.copies[0])?.copy;
+    return copy === undefined
+      ? conflict.detail
+      : lineDiff(
+          fleet.skillTexts.get(conflict.name) ?? "",
+          copy.text,
+          `the fleet's skills/${conflict.name}/SKILL.md`,
+          `${copy.root}/${conflict.name}/SKILL.md`,
+        );
+  }
+  const one = conflict.options[pick] ?? conflict.options[0];
+  const theirs = fleet.servers.get(conflict.name);
+  return one === undefined || theirs === undefined
+    ? conflict.detail
+    : lineDiff(
+        definitionText(theirs),
+        definitionText(one.found.extracted.definition),
+        `the fleet's mcp/${conflict.name}.json`,
+        `${one.found.client === "claude" ? "Claude's" : "Codex's"} ${conflict.name}`,
+      );
+};
+
+/** Whether a conflict is still a question once the choices it follows are made. */
+export const applies = (
+  conflict: PlanConflict,
+  choices: Readonly<Record<string, Choice>>,
+  all: ReadonlyArray<PlanConflict>,
+) => {
+  if (conflict.after === undefined) return true;
+  const first = all.find((c) => c.id === conflict.after);
+  const pick = Number(
+    /^copy:(\d+)$/.exec(choices[conflict.after] ?? first?.default ?? "")?.[1] ?? 0,
+  );
+  if (conflict.kind === "skill")
+    return (conflict.copies[pick] ?? conflict.copies[0])?.copy.hash !== conflict.fleetHash;
+  if (conflict.kind === "server") {
+    const one = conflict.options[pick] ?? conflict.options[0];
+    return one !== undefined && shapeOf(one.found.extracted.definition) !== conflict.fleetShape;
+  }
+  return true;
+};
+
+export const buildPlan = ({ mode, node, authority, found, fleet, registered }: PlanInput): Plan => {
   const commits = mode === "first" || authority;
   const add = {
     skills: [] as Array<PlanSkill>,
@@ -195,21 +270,44 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
     servers: [] as Array<PlanServer>,
     instructions: [] as Array<PlanInstruction>,
   };
-  const conflicts: Array<Plan["conflicts"][number]> = [];
+  const conflicts: Array<PlanConflict> = [];
+  const ignored: Array<{ name: string; why: string }> = [];
   const leftAlone: Array<{ what: string; why: string }> = [];
   const mineOrPropose = commits
     ? "keep mine (it replaces the fleet's)"
     : "keep mine and propose it (the fleet's stays until approved)";
+  // On a machine set up already, a difference from the fleet is drift, not a proposal.
+  const fleetFirst = mode === "again";
 
-  // Skills: one per name. Copies that differ on this machine are a choice too.
+  // Skills: one per name. Copies that differ on this machine are a choice first.
   for (const [name, copies] of byName(found.skills)) {
     const hashes = [...new Set(copies.map((c) => c.hash))];
-    const entries = (hash: string | null) => ({
-      name,
-      copy: copies.find((c) => hash === null || c.hash === hash) as SkillCopy,
-      entries: copies,
-    });
     const inFleet = fleet.skills.get(name);
+    const skillDiff = (copy: SkillCopy) =>
+      lineDiff(
+        fleet.skillTexts.get(name) ?? "",
+        copy.text,
+        `the fleet's skills/${name}/SKILL.md`,
+        `${copy.root}/${name}/SKILL.md${copy.files === null ? "" : ` (${copy.files})`}`,
+      );
+    const skillConflict = (
+      list: ReadonlyArray<PlanSkill>,
+      extra: { readonly after?: string; readonly fleetHash?: string },
+    ): PlanConflict => ({
+      id: `skill:${name}`,
+      kind: "skill",
+      name,
+      title: `skill ${name} differs from the fleet's`,
+      detail: skillDiff(list[0]?.copy as SkillCopy),
+      choices: [
+        { value: "mine", label: mineOrPropose },
+        { value: "fleet", label: "use the fleet's (mine is kept as a backup)" },
+        { value: "both", label: `keep both: mine as ${name}@${node}` },
+      ],
+      default: fleetFirst ? "fleet" : "mine",
+      copies: list,
+      ...extra,
+    });
     if (hashes.length > 1) {
       // Newest first: the default.
       const distinct = hashes
@@ -220,6 +318,7 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
               .sort((a, b) => b.modified - a.modified)[0] as SkillCopy,
         )
         .sort((a, b) => b.modified - a.modified);
+      const list = distinct.map((c) => ({ name, copy: c, entries: copies }));
       conflicts.push({
         id: `skill-here:${name}`,
         kind: "skill",
@@ -236,28 +335,16 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
           label: `use ${skillLabel(c)}`,
         })),
         default: "copy:0",
-        copies: distinct.map((c) => ({ name, copy: c, entries: copies })),
+        copies: list,
       });
+      if (inFleet !== undefined)
+        conflicts.push(skillConflict(list, { after: `skill-here:${name}`, fleetHash: inFleet }));
       continue;
     }
-    const one = entries(null);
+    const one = { name, copy: copies[0] as SkillCopy, entries: copies };
     if (inFleet === undefined) add.skills.push(one);
     else if (inFleet === hashes[0]) same.skills.push(one);
-    else
-      conflicts.push({
-        id: `skill:${name}`,
-        kind: "skill",
-        name,
-        title: `skill ${name} differs from the fleet's`,
-        detail: `${skillLabel(one.copy)} is not the one in the fleet's skills/${name}`,
-        choices: [
-          { value: "mine", label: mineOrPropose },
-          { value: "fleet", label: "use the fleet's (mine is kept as a backup)" },
-          { value: "both", label: `keep both: mine as ${name}@${node}` },
-        ],
-        default: "mine",
-        copies: [one],
-      });
+    else conflicts.push(skillConflict([one], {}));
   }
   for (const p of found.plugins)
     leftAlone.push({
@@ -266,8 +353,6 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
     });
 
   // MCP servers. Both clients' entries for one name are one server.
-  const secrets: Array<Secret> = [];
-  const missing: Array<Missing> = [];
   const userScope = found.servers.filter((s) => s.project === null);
   const projectScope = found.servers.filter((s) => s.project !== null);
   const takenNames = new Set(userScope.map((s) => s.name));
@@ -277,41 +362,43 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
       : s.extracted.local !== null
         ? { name, found: s, scope: "machine", why: s.extracted.local }
         : { name, found: s, scope: "fleet", why: null };
-  const decideServer = (server: PlanServer, label: string) => {
-    const theirs = fleet.servers.get(server.name);
-    if (theirs === undefined) {
-      add.servers.push(server);
-      return;
+  const serverConflict = (
+    name: string,
+    options: ReadonlyArray<PlanServer>,
+    detail: string,
+    extra: { readonly after?: string; readonly fleetShape?: string },
+  ): PlanConflict => ({
+    id: `server:${name}`,
+    kind: "server",
+    name,
+    title: `MCP server ${name} differs from the fleet's`,
+    detail,
+    choices: [
+      { value: "mine", label: mineOrPropose },
+      { value: "fleet", label: "use the fleet's" },
+      { value: "here", label: "keep mine on this machine only" },
+    ],
+    // A server the fleet declares already is the fleet's to change from a machine set up already.
+    default: fleetFirst ? "fleet" : "mine",
+    options,
+    ...extra,
+  });
+  for (const [name, all] of byName(userScope)) {
+    if (fleet.ignored.includes(name)) continue;
+    // The fleet's own registration, exactly as the mcp area wrote it, is no difference.
+    const entries = all.filter((e) => !(registered?.(e) ?? false));
+    if (entries.length === 0) continue;
+    const leave = entries.find((e) => e.extracted.leave !== null);
+    if (leave !== undefined && !fleet.servers.has(name)) {
+      ignored.push({ name, why: leave.extracted.leave ?? "" });
+      continue;
     }
-    if (shapeOf(theirs) === shapeOf(server.found.extracted.definition)) {
-      same.servers.push(server);
-      return;
-    }
-    conflicts.push({
-      id: `server:${server.name}`,
-      kind: "server",
-      name: server.name,
-      title: `MCP server ${server.name} differs from the fleet's`,
-      detail: lineDiff(
-        definitionText(theirs),
-        definitionText(server.found.extracted.definition),
-        `the fleet's mcp/${server.name}.json`,
-        label,
-      ),
-      choices: [
-        { value: "mine", label: mineOrPropose },
-        { value: "fleet", label: "use the fleet's" },
-        { value: "here", label: "keep mine on this machine only" },
-      ],
-      default: "mine",
-      options: [server],
-    });
-  };
-  for (const [name, entries] of byName(userScope)) {
+    const theirs = fleet.servers.get(name);
     const shapes = [...new Set(entries.map((e) => shapeOf(e.extracted.definition)))];
     if (shapes.length > 1) {
       const claude = entries.find((e) => e.client === "claude") as FoundServer;
       const codex = entries.find((e) => e.client === "codex") as FoundServer;
+      const options = [serverOf(claude, name), serverOf(codex, name)];
       conflicts.push({
         id: `server-here:${name}`,
         kind: "server",
@@ -328,17 +415,49 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
           { value: "copy:1", label: "use Codex's" },
         ],
         default: "copy:0",
-        options: [serverOf(claude, name), serverOf(codex, name)],
+        options,
       });
+      if (theirs !== undefined)
+        conflicts.push(
+          serverConflict(
+            name,
+            options,
+            `the one chosen above is not the fleet's mcp/${name}.json`,
+            {
+              after: `server-here:${name}`,
+              fleetShape: shapeOf(theirs),
+            },
+          ),
+        );
       continue;
     }
     const first = entries.find((e) => e.client === "claude") ?? (entries[0] as FoundServer);
-    decideServer(
-      serverOf(first, name),
-      `${entries.map((e) => (e.client === "claude" ? "Claude's" : "Codex's")).join(" and ")} ${name}`,
-    );
+    const server = serverOf(first, name);
+    if (theirs === undefined) add.servers.push(server);
+    else if (shapeOf(theirs) === shapeOf(first.extracted.definition)) same.servers.push(server);
+    else
+      conflicts.push(
+        serverConflict(
+          name,
+          [server],
+          lineDiff(
+            definitionText(theirs),
+            definitionText(first.extracted.definition),
+            `the fleet's mcp/${name}.json`,
+            `${entries.map((e) => (e.client === "claude" ? "Claude's" : "Codex's")).join(" and ")} ${name}`,
+          ),
+          {},
+        ),
+      );
   }
   for (const s of projectScope) {
+    if (s.extracted.leave !== null) {
+      leftAlone.push({
+        what: `${s.name} (Claude project ${s.project ?? ""})`,
+        why: s.extracted.leave,
+      });
+      continue;
+    }
     // A project's server may share a user server's name; it gets the project's added.
     const project =
       (s.project ?? "")
@@ -384,12 +503,14 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
           { value: "fleet", label: "use the fleet's (mine is kept as a backup)" },
           { value: "here", label: "keep mine on this machine only" },
         ],
-        default: "mine",
+        default: fleetFirst ? "fleet" : "mine",
         mine,
       });
   }
 
   // Secrets and missing values of every server that may be written.
+  const secrets: Array<Secret> = [];
+  const missing: Array<Missing> = [];
   const candidates = [
     ...add.servers,
     ...conflicts.flatMap((c) => (c.kind === "server" ? c.options : [])),
@@ -399,7 +520,8 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
       if (!secrets.some((x) => x.name === secret.name))
         secrets.push({ ...secret, where: `${s.name}: ${secret.where}` });
     for (const m of s.found.extracted.missing)
-      if (!missing.some((x) => x.name === m.name)) missing.push(m);
+      if (!missing.some((x) => x.name === m.name))
+        missing.push({ ...m, why: `${s.name}: ${m.why}` });
     if (s.found.extracted.dropped.length > 0)
       leftAlone.push({
         what: `${s.name}: ${s.found.extracted.dropped.join(", ")}`,
@@ -415,42 +537,10 @@ export const buildPlan = ({ mode, node, authority, found, fleet }: PlanInput): P
           : `installed by ${a.installedBy ?? "an unknown installer"} at ${a.path}; setup never installs or upgrades agent CLIs`,
     });
 
-  const blocked: Array<string> = [];
-  if (!commits) {
-    const touched = [
-      ...(add.skills.length > 0 || conflicts.some((c) => c.kind === "skill") ? ["skills"] : []),
-      ...(add.servers.length > 0 || conflicts.some((c) => c.kind === "server")
-        ? ["mcp", "t3-fleet.toml"]
-        : []),
-      ...(add.instructions.length > 0
-        ? ["t3-fleet.toml", ...add.instructions.map((i) => i.src.split("/")[0] ?? "")]
-        : []),
-      ...(secrets.length > 0 ? [PROPOSED_SECRETS] : []),
-    ];
-    const uncovered = [...new Set(touched)].filter(
-      (p) => !fleet.autoCommit.some((a) => p === a || p.startsWith(`${a}/`)),
-    );
-    if (uncovered.length > 0)
-      blocked.push(
-        `this fleet's [fleet] auto_commit does not include ${uncovered.join(", ")}, so sync would never propose them; add them there on an authority first`,
-      );
-  }
-
-  return {
-    mode,
-    node,
-    commits,
-    add,
-    same,
-    conflicts,
-    leftAlone,
-    secrets,
-    missing,
-    blocked,
-  };
+  return { mode, node, commits, add, same, conflicts, ignored, leftAlone, secrets, missing };
 };
 
-/** Where a member's new secrets wait, encrypted, for an authority to merge (Apply.ts). */
+/** Where a member's new secrets wait, encrypted, for an authority to merge (ProposedSecrets.ts). */
 export const PROPOSED_SECRETS = "secrets-proposed";
 
 /** What Apply.ts writes and moves, once every conflict has its choice. */
@@ -469,6 +559,8 @@ export interface Actions {
   }>;
   /** Fleet servers this machine leaves out: it keeps its own entry. */
   readonly serversHereOnly: ReadonlyArray<string>;
+  /** Servers T3 Fleet leaves alone here (`[mcp] "ignore.add"`), and why. */
+  readonly ignored: ReadonlyArray<{ readonly name: string; readonly why: string }>;
   readonly instructions: ReadonlyArray<{
     readonly src: string;
     readonly dest: string;
@@ -483,21 +575,26 @@ export interface Actions {
 
 /**
  * The plan with its conflicts decided: `choices` maps a conflict's id to the
- * choice made, and missing ones take the default.
+ * choice made, and missing ones take the default. `entered` are values given
+ * for missing secrets; a server still without one of its values stays on
+ * this machine, left alone, until setup runs again with it.
  */
 export const decide = (
   plan: Plan,
   choices: Readonly<Record<string, Choice>>,
   paths: { readonly home: string; readonly checkout: string },
+  entered: ReadonlyArray<Secret> = [],
 ): Actions => {
   const skills: Array<Actions["skills"][number]> = [];
   const servers: Array<Actions["servers"][number]> = [];
   const serversHereOnly: Array<string> = [];
+  const ignored: Array<{ name: string; why: string }> = [...plan.ignored];
   const instructions: Array<Actions["instructions"][number]> = [];
   const instructionsHereOnly: Array<Actions["instructionsHereOnly"][number]> = [];
   const links = new Map<string, string | null>();
   const abs = (p: string) => (p.startsWith("~/") ? `${paths.home}${p.slice(1)}` : p);
   const store = `${paths.home}/.agents/skills`;
+  const has = new Set([...plan.secrets.map((s) => s.name), ...entered.map((s) => s.name)]);
 
   /** Each entry of a skill moved aside; the skill linked under `name` where agents read it. */
   const linkSkill = (s: PlanSkill, name: string) => {
@@ -510,8 +607,19 @@ export const decide = (
     skills.push({ name, from: s.copy.dir, source: s.copy.source });
     linkSkill(s, name);
   };
-  const writeServer = (s: PlanServer, name = s.name) =>
+  const writeServer = (s: PlanServer, name = s.name) => {
+    const lacking = secretRefs(s.found.extracted.definition).filter(
+      (r) => s.found.extracted.missing.some((m) => m.name === r) && !has.has(r),
+    );
+    if (lacking.length > 0) {
+      ignored.push({
+        name,
+        why: `${lacking.join(", ")} has no value here yet; run setup again once it is set`,
+      });
+      return;
+    }
     servers.push({ name, definition: s.found.extracted.definition, scope: s.scope });
+  };
   const linkInstruction = (i: PlanInstruction) =>
     links.set(abs(i.dest), `${paths.checkout}/${i.src}`);
 
@@ -524,21 +632,30 @@ export const decide = (
   }
   for (const i of plan.same.instructions) linkInstruction(i);
 
+  const pickOf = (id: string, fallback: Choice) =>
+    Number(/^copy:(\d+)$/.exec(choices[id] ?? fallback)?.[1] ?? 0);
   for (const c of plan.conflicts) {
     const choice = choices[c.id] ?? c.default;
-    const pick = Number(/^copy:(\d+)$/.exec(choice)?.[1] ?? 0);
+    const followed = plan.conflicts.some((x) => x.after === c.id);
     if (c.kind === "skill") {
+      const pick = c.after !== undefined ? pickOf(c.after, "copy:0") : pickOf(c.id, c.default);
       const one = c.copies[pick] ?? (c.copies[0] as PlanSkill);
-      // The chosen copy of several here is written like "mine": the same as the fleet's, it changes nothing.
-      if (c.id.startsWith("skill-here:") || choice === "mine") writeSkill(one, c.name);
+      if (c.id.startsWith("skill-here:")) {
+        // Compared with the fleet's next, when the fleet has one.
+        if (!followed) writeSkill(one, c.name);
+      } else if (!applies(c, choices, plan.conflicts)) linkSkill(one, c.name);
+      else if (choice === "mine") writeSkill(one, c.name);
       else if (choice === "fleet") linkSkill(one, c.name);
       else {
         writeSkill({ ...one, entries: [] }, `${c.name}@${plan.node}`);
         linkSkill(one, c.name);
       }
     } else if (c.kind === "server") {
+      const pick = c.after !== undefined ? pickOf(c.after, "copy:0") : pickOf(c.id, c.default);
       const one = c.options[pick] ?? (c.options[0] as PlanServer);
-      if (c.id.startsWith("server-here:")) writeServer(one, c.name);
+      if (c.id.startsWith("server-here:")) {
+        if (!followed) writeServer(one, c.name);
+      } else if (!applies(c, choices, plan.conflicts)) continue;
       else if (choice === "mine") writeServer(one);
       else if (choice === "here") serversHereOnly.push(c.name);
     } else {
@@ -555,9 +672,10 @@ export const decide = (
     skills,
     servers,
     serversHereOnly,
+    ignored,
     instructions,
     instructionsHereOnly,
     links: [...links].map(([path, link]) => ({ path, link })),
-    secrets: plan.secrets.filter((s) => needed.has(s.name)),
+    secrets: [...plan.secrets, ...entered].filter((s) => needed.has(s.name)),
   };
 };

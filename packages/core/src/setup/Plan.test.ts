@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { fromClaude, fromCodex, secretNamer } from "./Credentials.ts";
 import type { Discovery, FoundServer, SkillCopy } from "./Discover.ts";
-import { buildPlan, decide, EMPTY_FLEET, lineDiff, type FleetView } from "./Plan.ts";
+import { applies, buildPlan, decide, EMPTY_FLEET, lineDiff, type FleetView } from "./Plan.ts";
 
 const HOME = "/home/u";
 const paths = { home: HOME, checkout: `${HOME}/fleet` };
@@ -17,6 +17,8 @@ const skill = (n: string, root: string, hash: string, modified = 0): SkillCopy =
   hash,
   modified,
   source: null,
+  text: `---\nname: ${n}\n---\n${hash}\n`,
+  files: null,
 });
 const server = (
   n: string,
@@ -27,6 +29,7 @@ const server = (
   name: n,
   client,
   project,
+  entry,
   extracted: (client === "claude" ? fromClaude(n, entry, ctx) : fromCodex(n, entry, ctx))!,
 });
 const discovery = (over: Partial<Discovery>): Discovery => ({
@@ -89,7 +92,6 @@ describe("buildPlan on the first machine", () => {
   it("leaves plugin skills to Claude, and lists every secret", () => {
     expect(plan.leftAlone.map((l) => l.what)).toContain("skill plug (~/.claude/skills/plug)");
     expect(plan.secrets.map((s) => s.name).sort()).toEqual(["CTX_API_KEY", "DB_PASSWORD"]);
-    expect(plan.blocked).toEqual([]);
   });
 
   it("decides: copies moved aside and linked, defaults taken", () => {
@@ -128,7 +130,6 @@ describe("buildPlan on a joining machine", () => {
       ["web", { kind: "direct", url: "https://web.example.com/mcp" }],
     ]),
     instructions: [{ src: "claude/CLAUDE.md", dest: "~/.claude/CLAUDE.md", text: "fleet\n" }],
-    autoCommit: ["skills"],
   };
   const found = discovery({
     node: "desktop",
@@ -166,10 +167,6 @@ describe("buildPlan on a joining machine", () => {
     expect(plan.conflicts[2]?.detail).toContain("- fleet\n+ mine");
   });
 
-  it("is blocked when sync would not propose what it writes", () => {
-    expect(plan.blocked[0]).toContain("mcp, t3-fleet.toml");
-  });
-
   it("decides each choice", () => {
     const actions = decide(
       plan,
@@ -187,6 +184,87 @@ describe("buildPlan on a joining machine", () => {
       link: `${HOME}/fleet/claude/CLAUDE.md`,
     });
     expect(actions.secrets).toEqual([]);
+  });
+});
+
+describe("choices on this machine, then the fleet's", () => {
+  const fleet: FleetView = {
+    ...EMPTY_FLEET,
+    skills: new Map([["review", "b"]]),
+    servers: new Map([["ctx", { kind: "stdio", command: "npx", args: ["ctx", "--fleet"] }]]),
+  };
+  const found = discovery({
+    node: "desktop",
+    skills: [
+      skill("review", "~/.agents/skills", "a", 2),
+      skill("review", "~/.claude/skills", "b", 1),
+    ],
+    servers: [
+      server("ctx", "claude", { command: "npx", args: ["ctx", "--claude"] }),
+      server("ctx", "codex", { command: "npx", args: ["ctx", "--fleet"] }),
+    ],
+  });
+  const plan = buildPlan({ mode: "join", node: "desktop", authority: false, found, fleet });
+
+  it("compares the copy chosen here with the fleet's, and offers the fleet's", () => {
+    const review = plan.conflicts.find((c) => c.id === "skill:review");
+    expect(review?.after).toBe("skill-here:review");
+    expect(review?.choices.map((c) => c.value)).toEqual(["mine", "fleet", "both"]);
+    // The newest copy differs from the fleet's: a question. The older one is the fleet's: none.
+    expect(applies(review!, {}, plan.conflicts)).toBe(true);
+    expect(applies(review!, { "skill-here:review": "copy:1" }, plan.conflicts)).toBe(false);
+    expect(decide(plan, { "skill:review": "fleet" }, paths).skills).toEqual([]);
+    expect(decide(plan, {}, paths).skills.map((s) => s.from)).toEqual([
+      `${HOME}/.agents/skills/review`,
+    ]);
+  });
+
+  it("does the same for Claude and Codex disagreeing", () => {
+    expect(plan.conflicts.find((c) => c.id === "server:ctx")?.after).toBe("server-here:ctx");
+    expect(decide(plan, { "server:ctx": "fleet" }, paths).servers).toEqual([]);
+    // Codex's is the fleet's already: nothing to write, nothing to ask.
+    expect(
+      decide(plan, { "server-here:ctx": "copy:1", "server:ctx": "mine" }, paths).servers,
+    ).toEqual([]);
+  });
+});
+
+describe("servers setup does not take into the fleet", () => {
+  const found = discovery({
+    servers: [
+      server("node_repl", "codex", {
+        command: "/Applications/ChatGPT.app/Contents/Resources/node_repl",
+      }),
+      server("off", "codex", { command: "x", enabled: false }),
+      server("linear", "codex", {
+        url: "https://l.example/mcp",
+        bearer_token_env_var: "LINEAR_KEY",
+      }),
+    ],
+  });
+  const plan = buildPlan({
+    mode: "first",
+    node: "laptop",
+    authority: true,
+    found,
+    fleet: EMPTY_FLEET,
+  });
+
+  it("leaves an app's and a disabled server alone, through [mcp] ignore", () => {
+    expect(plan.ignored.map((i) => i.name)).toEqual(["node_repl", "off"]);
+    expect(decide(plan, {}, paths).ignored.map((i) => i.name)).toEqual([
+      "node_repl",
+      "off",
+      "linear",
+    ]);
+  });
+
+  it("keeps a server whose value is missing on this machine until it has one", () => {
+    expect(plan.missing.map((m) => m.name)).toEqual(["LINEAR_KEY"]);
+    const entered = [{ name: "LINEAR_KEY", value: "lin_entered_value_123", where: "entered" }];
+    const actions = decide(plan, {}, paths, entered);
+    expect(actions.servers.map((s) => s.name)).toEqual(["linear"]);
+    expect(actions.secrets).toEqual(entered);
   });
 });
 
