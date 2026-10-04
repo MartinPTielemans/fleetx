@@ -7,13 +7,18 @@ import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import { Command, Flag, Prompt } from "effect/unstable/cli";
 
-import { loadConfig } from "@t3-fleet/core/Config";
-import { applyLeave, planLeave, type LeaveOutcome, type LeavePlan } from "@t3-fleet/core/Leave";
+import {
+  applyLeave,
+  currentDeparture,
+  planLeave,
+  type LeaveOutcome,
+  type LeavePlan,
+} from "@t3-fleet/core/Leave";
 
 import { reportUserErrors } from "./shared.ts";
 
 export const renderLeavePlan = (plan: LeavePlan) => {
-  const lines = [`t3-fleet leave  ${plan.node}`];
+  const lines = [`t3-fleet leave  ${plan.departure.node}`];
   if (plan.refusal !== null) {
     lines.push("", `  ${plan.refusal}`);
     return lines.join("\n");
@@ -39,6 +44,7 @@ export const renderLeaveResults = (plan: LeavePlan, outcomes: ReadonlyArray<Leav
   if (skipped.length > 0) {
     lines.push("", "  Stopped there; these did not run:");
     for (const s of skipped) lines.push(`    ${s.title}`);
+    lines.push("", "  Run t3-fleet leave again to go on from here.");
   }
   return lines.join("\n");
 };
@@ -66,9 +72,20 @@ export const leaveCommand = Command.make("leave", {
   ),
   Command.withHandler(({ yes, dryRun, purge }) =>
     Effect.gen(function* () {
-      const config = yield* loadConfig;
-      const plan = yield* planLeave(config, { home: process.env["HOME"] ?? "", purge });
+      const home = process.env["HOME"] ?? "";
+      const { departure, resumed } = yield* currentDeparture(home);
+      if (resumed)
+        yield* Console.log(
+          departure.finished
+            ? `${departure.node} has left the fleet; this finishes what is left here.\n`
+            : `Going on with ${departure.node}'s unfinished departure.\n`,
+        );
+      const plan = yield* planLeave(departure, { home, purge });
       yield* Console.log(renderLeavePlan(plan));
+      if (plan.refusal === null && plan.steps.length === 0) {
+        yield* Console.log("\nNothing left to do.");
+        return;
+      }
       if (plan.refusal !== null) {
         process.exitCode = 1;
         return;
@@ -80,7 +97,7 @@ export const leaveCommand = Command.make("leave", {
           return;
         }
         const go = yield* Prompt.run(
-          Prompt.Confirm({ message: `Take ${plan.node} out of the fleet?` }),
+          Prompt.Confirm({ message: `Take ${plan.departure.node} out of the fleet?` }),
         );
         if (!go) return;
       }

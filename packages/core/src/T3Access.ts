@@ -114,7 +114,7 @@ export type SnapshotResult =
   | { readonly _tag: "rejected" }
   | { readonly _tag: "failed"; readonly detail: string };
 
-const wsUrl = (origin: string, ticket: string) => {
+export const wsUrl = (origin: string, ticket: string) => {
   const url = new URL("/ws", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set(ORCHESTRATION_PROTOCOL_QUERY_PARAM, ORCHESTRATION_PROTOCOL_VERSION_TEXT);

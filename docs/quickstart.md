@@ -202,8 +202,10 @@ t3-fleet leave             # do it, after asking
 `leave` takes this machine out of the fleet and leaves it working on its own.
 It stops T3 Fleet's timer and services, turns its links (skills, dotfiles,
 instructions) into real copies, points T3's providers back at what they ran
-before, and puts back the MCP servers Claude and Codex had before setup. An
-authority commits its own removal (unless it is the only one); a member proposes
-it, and an authority approves it with `t3-fleet approve`. `--purge` also
-removes this machine's key, the decrypted secrets and the installed `t3-fleet`.
-The config repo checkout is never deleted.
+before, and puts back the MCP servers Claude and Codex had before setup. Entries
+you changed yourself since are left alone. An authority removes itself (unless
+no other authority would be left); a member proposes its departure, and an
+authority approves it with `t3-fleet approve`. `--purge` also removes this
+machine's key, the decrypted secrets and the installed `t3-fleet`, keeping
+backups of your own files. If leaving stops partway, run it again: it picks up
+where it stopped. The config repo checkout is never deleted.

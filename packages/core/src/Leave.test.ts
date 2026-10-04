@@ -1,6 +1,8 @@
-// A fleet in a temp directory (a bare remote, an authority's clone and a
-// member's), and a temp HOME for the machine that leaves. launchctl,
-// systemctl, claude and codex are fakes that log their calls.
+// A fleet in a temp directory (a bare remote; box, an authority; laptop, the
+// member that leaves; desk, a member or a second authority), and a temp HOME
+// for the machine that leaves. launchctl and systemctl are fakes that keep
+// state in files, so a stop can be made to fail; nothing else is faked: the
+// files leave writes are parsed back.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync, spawnSync } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -11,6 +13,9 @@ import { dirname, join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient } from "effect/unstable/http";
+import type * as HttpClient from "effect/unstable/http/HttpClient";
 import {
   armor,
   Decrypter,
@@ -18,19 +23,31 @@ import {
   generateX25519Identity,
   identityToRecipient,
 } from "age-encryption";
+import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom } from "./Config.ts";
 import {
   applyLeave,
+  currentDeparture,
+  departureOf,
+  departurePath,
   planLeave,
-  removeService,
-  setupSnapshotPath,
+  type Departure,
   type LeavePlan,
 } from "./Leave.ts";
+import { writeAtomically } from "./leave/Files.ts";
+import { editCodexServers } from "./leave/Mcp.ts";
+import { settingsUpdates } from "./leave/Models.ts";
+import { removeService } from "./leave/Services.ts";
+import { approve, listProposals } from "./Staging.ts";
+import { exchange } from "./Sync.ts";
+import { underSyncLock } from "./SyncLock.ts";
 
-const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
+const layer = Layer.merge(NodeServices.layer, FetchHttpClient.layer);
+const run = <A, E>(
+  effect: Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>,
+) => Effect.runPromise(effect.pipe(Effect.provide(layer)));
 const git = (cwd: string, ...args: Array<string>) =>
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
     cwd,
@@ -41,8 +58,10 @@ const put = (dir: string, rel: string, text: string, mode?: number) => {
   fs.writeFileSync(join(dir, rel), text, mode === undefined ? {} : { mode });
 };
 const read = (dir: string, rel: string) => fs.readFileSync(join(dir, rel), "utf8");
+const exists = (dir: string, rel: string) => fs.existsSync(join(dir, rel));
 const isLink = (p: string) => fs.lstatSync(p).isSymbolicLink();
-const onMain = (origin: string, rel: string, ref = "main") => {
+const modeOf = (p: string) => fs.statSync(p).mode & 0o777;
+const onBranch = (origin: string, rel: string, ref = "main") => {
   const show = spawnSync("git", ["show", `${ref}:${rel}`], { cwd: origin, encoding: "utf8" });
   return show.status === 0 ? show.stdout : null;
 };
@@ -56,8 +75,11 @@ const decrypt = async (identity: string, armored: string) => {
   d.addIdentity(identity);
   return d.decrypt(armor.decode(armored), "text");
 };
+const planText = (plan: LeavePlan) =>
+  [plan.refusal ?? "", ...plan.steps.flatMap((s) => [s.title, ...s.lines]), ...plan.notes].join(
+    "\n",
+  );
 
-const FAKES = ["launchctl", "systemctl", "claude", "codex"];
 let savedPath: string | undefined;
 let savedHome: string | undefined;
 beforeEach(() => {
@@ -70,13 +92,50 @@ afterEach(() => {
 });
 
 /**
- * A fleet of box (authority), laptop (member, the machine that leaves) and,
- * with `twoAuthorities`, desk (another authority). HOME is laptop's.
+ * launchctl: a job is loaded while $root/loaded/<label> exists; bootout
+ * clears it unless $root/stuck exists. systemctl: a unit is active while
+ * $root/active/<unit> exists; disable --now clears it unless $root/stuck.
  */
+const FAKE_LAUNCHCTL = (root: string) => `#!/bin/sh
+echo "launchctl $*" >> "${root}/calls"
+label="\${2##*/}"
+case "$1" in
+  print) [ -e "${root}/loaded/$label" ] && exit 0; exit 113 ;;
+  bootout) [ -e "${root}/stuck" ] || rm -f "${root}/loaded/$label"; exit 0 ;;
+esac
+exit 0
+`;
+const FAKE_SYSTEMCTL = (root: string) => `#!/bin/sh
+echo "systemctl $*" >> "${root}/calls"
+[ "$1" = --user ] && shift
+case "$1" in
+  disable) shift; [ "$1" = --now ] && shift; [ -e "${root}/stuck" ] || for u in "$@"; do rm -f "${root}/active/$u"; done; exit 0 ;;
+  is-active) [ "$2" = --quiet ] && u="$3" || u="$2"; [ -e "${root}/active/$u" ] && exit 0; exit 3 ;;
+  is-enabled) echo disabled; exit 1 ;;
+esac
+exit 0
+`;
+
+const GATEWAY = "https://relay.tailnet.ts.net:8399";
+const LAPTOP = [
+  'roles = ["member"]',
+  "[skills]",
+  'store = "~/.agents/skills"',
+  'clients = ["~/.claude/skills"]',
+  "[[dotfiles]]",
+  'src = "zshrc"',
+  'dest = "~/.zshrc"',
+  "[mcp]",
+  'servers = ["fetch", "docs", "notes"]',
+  "hub = true",
+  `gateway = "${GATEWAY}"`,
+  "",
+].join("\n");
+
 const makeFleet = async (
   options: {
     readonly self?: string;
-    readonly twoAuthorities?: boolean;
+    readonly desk?: "member" | "authority";
     readonly node?: string;
   } = {},
 ) => {
@@ -85,14 +144,10 @@ const makeFleet = async (
   fs.mkdirSync(home);
   process.env["HOME"] = home;
   const bin = join(root, "bin");
-  fs.mkdirSync(bin);
-  for (const fake of FAKES)
-    put(
-      bin,
-      fake,
-      `#!/bin/sh\necho "${fake} $*" >> "${root}/calls"\n[ "${fake} $1" = "launchctl print" ] && exit 113\nexit 0\n`,
-      0o755,
-    );
+  put(bin, "launchctl", FAKE_LAUNCHCTL(root), 0o755);
+  put(bin, "systemctl", FAKE_SYSTEMCTL(root), 0o755);
+  fs.mkdirSync(join(root, "loaded"));
+  fs.mkdirSync(join(root, "active"));
   process.env["PATH"] = `${bin}:${savedPath ?? ""}`;
   put(
     home,
@@ -116,123 +171,178 @@ const makeFleet = async (
   git(box, "remote", "add", "origin", origin);
   put(box, "t3-fleet.toml", '[fleet]\nbranch = "main"\n');
   put(box, "nodes/box.toml", 'roles = ["authority"]\n');
-  put(
-    box,
-    "nodes/desk.toml",
-    options.twoAuthorities === true ? 'roles = ["authority"]\n' : 'roles = ["member"]\n',
-  );
-  put(
-    box,
-    "nodes/laptop.toml",
-    options.node ??
-      [
-        'roles = ["member"]',
-        "[skills]",
-        'store = "~/.agents/skills"',
-        'clients = ["~/.claude/skills"]',
-        "[[dotfiles]]",
-        'src = "zshrc"',
-        'dest = "~/.zshrc"',
-        "[mcp]",
-        'servers = ["fetch", "docs"]',
-        'gateway = "https://relay.tailnet.ts.net:8399"',
-        "",
-      ].join("\n"),
-  );
+  put(box, "nodes/desk.toml", `roles = ["${options.desk ?? "member"}"]\n`);
+  put(box, "nodes/laptop.toml", options.node ?? LAPTOP);
   put(box, "skills/a/SKILL.md", "a from the repo\n");
+  put(box, "skills/shared/ref.md", "shared from the repo\n");
+  // A skill linking a shared file in the repo, by a relative link.
+  fs.symlinkSync("../shared/ref.md", join(box, "skills/a/ref.md"));
   put(box, "dotfiles/zshrc", "export FLEET=1\n");
-  const names = Object.keys(recipients).sort();
+  put(box, "mcp/fetch.json", '{ "kind": "remote", "url": "https://fetch.example/mcp" }\n');
+  put(
+    box,
+    "mcp/docs.json",
+    '{ "kind": "stdio", "command": "~/bin/docs-mcp", "args": ["--quiet"] }\n',
+  );
+  put(box, "mcp/notes.json", '{ "kind": "stdio", "command": "notes-mcp" }\n');
   put(
     box,
     "secrets/recipients.toml",
-    `# keys\n${names.map((n) => `${n} = "${recipients[n]}"`).join("\n")}\n`,
+    `# keys\n${Object.keys(recipients)
+      .sort()
+      .map((n) => `${n} = "${recipients[n]}"`)
+      .join("\n")}\n`,
   );
   put(
     box,
     "secrets/secrets.env.age",
-    await encrypt(Object.values(recipients), "API=1\nT3_FLEET_MCP_TOKEN_LAPTOP=x\n"),
+    await encrypt(Object.values(recipients), "API=one\nT3_FLEET_MCP_TOKEN_LAPTOP=x\n"),
   );
   git(box, "add", "-A");
   git(box, "commit", "-qm", "fleet");
   git(box, "push", "-q", "-u", "origin", "main");
   const repo = join(root, self);
   if (self !== "box") git(root, "clone", "-q", origin, self);
+  put(home, ".config/t3-fleet/config.toml", `repo = "${repo}"\nnode = "${self}"\n`);
   const config = await run(loadConfigFrom(repo, self));
-  const calls = () => (fs.existsSync(join(root, "calls")) ? read(root, "calls") : "");
-  return { root, home, origin, box, repo, keys, recipients, config, calls };
+  const calls = () => (exists(root, "calls") ? read(root, "calls") : "");
+  const planFor = (departure: Departure, purge = false, platform = "darwin") =>
+    run(
+      planLeave(departure, {
+        home,
+        purge,
+        platform,
+        root: false,
+        systemDir: join(root, "etc-systemd"),
+        stopWait: 1,
+      }),
+    );
+  const plan = (purge = false, platform = "darwin") =>
+    planFor(departureOf(config), purge, platform);
+  return { root, home, origin, box, repo, keys, recipients, config, calls, plan, planFor };
 };
 
+type Fleet = Awaited<ReturnType<typeof makeFleet>>;
 const titles = (plan: LeavePlan) => plan.steps.map((s) => s.title);
+const commitAll = (dir: string, message: string) => {
+  git(dir, "add", "-A");
+  git(dir, "commit", "-qm", message);
+  git(dir, "push", "-q", "origin", "HEAD:main");
+};
 
-describe("a member leaving", () => {
-  it("plans every step, and changes nothing until applied", async () => {
-    const f = await makeFleet();
-    put(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist", "<plist/>");
-    const plan = await run(planLeave(f.config, { home: f.home, purge: false, platform: "darwin" }));
-    expect(plan.refusal).toBeNull();
-    expect(titles(plan)).toEqual([
-      "Propose removing laptop from the fleet (members cannot push to main)",
-      "Stop and remove the sync timer",
-    ]);
-    expect(plan.notes.join("\n")).toContain("kept ~/.config/t3-fleet");
-    expect(plan.notes.join("\n")).toContain(`the config repo checkout stays at ${f.repo}`);
-    expect(plan.notes.join("\n")).toContain("T3_FLEET_MCP_TOKEN_LAPTOP");
-    expect(f.calls()).toBe("");
-    expect(fs.existsSync(join(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist"))).toBe(true);
-  });
-
-  it("stops its services, copies links into place, unroutes T3, restores MCP, and proposes its removal", async () => {
-    const f = await makeFleet();
-    const { home } = f;
-    for (const role of ["sync", "listen", "models"])
-      put(home, `Library/LaunchAgents/dev.t3-fleet.${role}.plist`, "<plist/>");
-    // Store → repo, client → store; a dotfile into the repo; a link of the user's own elsewhere.
-    fs.mkdirSync(join(home, ".agents/skills"), { recursive: true });
-    fs.mkdirSync(join(home, ".claude/skills"), { recursive: true });
-    fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/a"));
-    fs.symlinkSync(join(home, ".agents/skills/a"), join(home, ".claude/skills/a"));
-    fs.symlinkSync(join(f.repo, "dotfiles/zshrc"), join(home, ".zshrc"));
-    put(home, "elsewhere/mine/SKILL.md", "mine\n");
-    fs.symlinkSync(join(home, "elsewhere/mine"), join(home, ".claude/skills/mine"));
-    // T3 routed through a launcher, with the copy routing kept.
-    const settings = (binaryPath: string) =>
-      JSON.stringify({ providers: { claudeAgent: { binaryPath } } });
-    put(home, ".t3/userdata/settings.json", settings(`${home}/.local/bin/t3-fleet-claude`));
-    put(home, ".t3/userdata/settings.json.t3-fleet-models-backup", settings("/opt/claude"));
-    put(home, ".local/bin/t3-fleet-claude", "#!/bin/sh\n", 0o755);
-    put(home, ".local/bin/t3-fleet", "bundle\n", 0o755);
-    // Setup's snapshot: fetch was the user's own before setup replaced it; a skill was moved aside.
-    put(
-      home,
-      ".claude.json",
-      JSON.stringify({
+/** The member's machine as setup left it: services, links, routing, MCP and setup's snapshot. */
+const setUpLaptop = (f: Fleet) => {
+  const { home, root } = f;
+  for (const role of ["sync", "listen", "models"]) {
+    put(home, `Library/LaunchAgents/dev.t3-fleet.${role}.plist`, "<plist/>");
+    put(root, `loaded/dev.t3-fleet.${role}`, "");
+  }
+  fs.mkdirSync(join(home, ".agents/skills"), { recursive: true });
+  fs.mkdirSync(join(home, ".claude/skills"), { recursive: true });
+  fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/a"));
+  fs.symlinkSync(join(home, ".agents/skills/a"), join(home, ".claude/skills/a"));
+  fs.symlinkSync(join(f.repo, "dotfiles/zshrc"), join(home, ".zshrc"));
+  fs.symlinkSync(join(f.repo, "skills/gone"), join(home, ".agents/skills/gone"));
+  put(home, "elsewhere/mine/SKILL.md", "mine\n");
+  fs.symlinkSync(join(home, "elsewhere/mine"), join(home, ".claude/skills/mine"));
+  // Someone else's directory with the name the first version of leave staged copies under.
+  put(home, ".agents/skills/a.t3-fleet-leave/keep.txt", "not ours\n");
+  // T3 routed: the legacy claudeAgent field (which claudeWork inherits), and codexMain's own.
+  put(
+    home,
+    ".t3/userdata/settings.json",
+    JSON.stringify({
+      providers: { claudeAgent: { binaryPath: `${home}/.local/bin/t3-fleet-claude` } },
+      providerInstances: {
+        claudeWork: { driver: "claudeAgent", config: {} },
+        codexMain: { driver: "codex", config: { binaryPath: "t3-fleet-codex" } },
+      },
+    }),
+  );
+  put(
+    home,
+    ".t3/userdata/settings.json.t3-fleet-models-backup",
+    JSON.stringify({ providers: { claudeAgent: { binaryPath: "/opt/claude" } } }),
+  );
+  put(home, ".local/bin/t3-fleet-claude", "#!/bin/sh\n", 0o755);
+  put(home, ".local/bin/t3-fleet-codex", "#!/bin/sh\n", 0o755);
+  put(home, ".local/bin/t3-fleet", "bundle\n", 0o755);
+  put(
+    home,
+    ".claude.json",
+    JSON.stringify(
+      {
+        numStartups: 3,
         mcpServers: {
-          fetch: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/fetch" },
-          docs: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/docs" },
+          fetch: {
+            type: "http",
+            url: `${GATEWAY}/mcp/fetch`,
+            headers: { Authorization: "Bearer relay-token" },
+          },
+          docs: { type: "stdio", command: `${home}/bin/docs-mcp`, args: ["--quiet"] },
+          // The user replaced notes with their own since setup.
+          notes: { type: "stdio", command: "my-notes" },
           later: { type: "stdio", command: "later" },
         },
-      }),
-    );
-    put(
-      home,
-      ".codex/config.toml",
-      '[mcp_servers.fetch]\nurl = "https://relay.tailnet.ts.net:8399/mcp/fetch"\n',
-    );
-    put(home, ".local/state/t3-fleet/setup/moved/b/SKILL.md", "b before setup\n");
-    fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/b"));
-    put(
-      home,
-      ".local/state/t3-fleet/setup/before.json",
-      JSON.stringify({
-        takenAt: 1,
-        claude: { mcpServers: { fetch: { command: "uvx", args: ["mcp-fetch"] } } },
-        codex: { mcp_servers: { fetch: { command: "uvx", args: ["mcp-fetch"], env: { A: "1" } } } },
-        moved: [{ path: "~/.agents/skills/b", backup: "~/.local/state/t3-fleet/setup/moved/b" }],
-      }),
-      0o600,
-    );
+      },
+      null,
+      2,
+    ),
+    0o600,
+  );
+  put(
+    home,
+    ".codex/config.toml",
+    [
+      "# my codex",
+      'model = "o3"',
+      "",
+      "[mcp_servers.fetch]",
+      `url = "${GATEWAY}/mcp/fetch"`,
+      'bearer_token_env_var = "T3_FLEET_RELAY_TOKEN"',
+      "",
+      "[mcp_servers.other]",
+      'command = "other"',
+      "",
+      "[profiles.fast]",
+      'model = "o4-mini"',
+      "",
+    ].join("\n"),
+    0o640,
+  );
+  put(home, ".local/state/t3-fleet/setup/moved/b/SKILL.md", "b before setup\n");
+  fs.symlinkSync(join(f.repo, "skills/a"), join(home, ".agents/skills/b"));
+  put(home, ".local/state/t3-fleet/setup/moved/zprofile", "my zprofile\n");
+  fs.symlinkSync(join(home, "elsewhere/mine"), join(home, ".zprofile"));
+  const fetchBefore = {
+    command: "uvx",
+    args: ["mcp-fetch"],
+    env: { FETCH_TOKEN: "sk-secret-123" },
+  };
+  put(
+    home,
+    ".local/state/t3-fleet/setup/before.json",
+    JSON.stringify({
+      takenAt: 1,
+      claude: { mcpServers: { fetch: fetchBefore, notes: { command: "old-notes" } } },
+      codex: { mcp_servers: { fetch: fetchBefore } },
+      moved: [
+        { path: "~/.agents/skills/b", backup: "~/.local/state/t3-fleet/setup/moved/b" },
+        { path: "~/.zprofile", backup: "~/.local/state/t3-fleet/setup/moved/zprofile" },
+      ],
+    }),
+    0o600,
+  );
+  return { fetchBefore };
+};
 
-    const plan = await run(planLeave(f.config, { home, purge: false, platform: "darwin" }));
+describe("a member leaving", () => {
+  it("gives back everything, proposes its departure, and parses back what it wrote", async () => {
+    const f = await makeFleet();
+    const { fetchBefore } = setUpLaptop(f);
+    const { home } = f;
+    const plan = await f.plan();
+    expect(plan.refusal).toBeNull();
     expect(titles(plan)).toEqual([
       "Propose removing laptop from the fleet (members cannot push to main)",
       "Stop and remove the sync timer, the listener, the model proxy",
@@ -241,112 +351,251 @@ describe("a member leaving", () => {
       "Point T3's providers back at what they ran before, and remove the launchers",
       "Put back the MCP servers Claude and Codex had before setup",
     ]);
+    const text = planText(plan);
+    // No value from any entry reaches the plan.
+    expect(text).not.toContain("sk-secret-123");
+    expect(text).not.toContain("relay-token");
+    expect(text).not.toContain("uvx");
+    expect(text).toContain("~/.agents/skills/gone points into the config repo");
+    expect(text).toContain("notes in Claude was changed since T3 Fleet registered it");
+    expect(text).toContain("~/.zprofile is your own now");
+    expect(text).toContain("T3 is not running, so in ~/.t3/userdata/settings.json");
+    expect(f.calls()).toBe("");
+
     const outcomes = await run(applyLeave(plan));
     expect(outcomes.map((o) => o.ok)).toEqual(plan.steps.map(() => true));
 
-    // Services: each booted out and its plist gone.
+    // Services: stopped, then their plists removed.
     for (const role of ["sync", "listen", "models"]) {
-      expect(f.calls()).toMatch(new RegExp(`launchctl bootout gui/\\d+/dev\\.t3-fleet\\.${role}`));
-      expect(fs.existsSync(join(home, `Library/LaunchAgents/dev.t3-fleet.${role}.plist`))).toBe(
-        false,
-      );
+      expect(exists(f.root, `loaded/dev.t3-fleet.${role}`)).toBe(false);
+      expect(exists(home, `Library/LaunchAgents/dev.t3-fleet.${role}.plist`)).toBe(false);
     }
-    // Links: real copies, the user's own link untouched.
+    // Links: real copies with the nested repo link copied in; the user's link and others' files untouched.
     for (const at of [".agents/skills/a", ".claude/skills/a"]) {
       expect(isLink(join(home, at))).toBe(false);
       expect(read(home, `${at}/SKILL.md`)).toBe("a from the repo\n");
+      expect(isLink(join(home, `${at}/ref.md`))).toBe(false);
+      expect(read(home, `${at}/ref.md`)).toBe("shared from the repo\n");
     }
-    expect(isLink(join(home, ".zshrc"))).toBe(false);
     expect(read(home, ".zshrc")).toBe("export FLEET=1\n");
+    expect(isLink(join(home, ".zshrc"))).toBe(false);
     expect(isLink(join(home, ".claude/skills/mine"))).toBe(true);
-    // Moved back, instead of copied.
-    expect(isLink(join(home, ".agents/skills/b"))).toBe(false);
+    expect(isLink(join(home, ".agents/skills/gone"))).toBe(true);
+    expect(read(home, ".agents/skills/a.t3-fleet-leave/keep.txt")).toBe("not ours\n");
+    expect(
+      fs.readdirSync(join(home, ".agents/skills")).filter((n) => n.includes(".t3-fleet-leave-")),
+    ).toEqual([]);
+    // Backups: b went back over T3 Fleet's link; ~/.zprofile is the user's own link, so its backup stays.
     expect(read(home, ".agents/skills/b/SKILL.md")).toBe("b before setup\n");
-    // Models.
-    expect(JSON.parse(read(home, ".t3/userdata/settings.json"))).toEqual(
-      JSON.parse(settings("/opt/claude")),
-    );
-    expect(fs.existsSync(join(home, ".local/bin/t3-fleet-claude"))).toBe(false);
-    expect(fs.existsSync(join(home, ".local/bin/t3-fleet"))).toBe(true);
-    // MCP: fleet entries removed, the user's restored, a later one of theirs left alone.
-    expect(f.calls()).toContain("claude mcp remove -s user fetch");
-    expect(f.calls()).toContain("claude mcp remove -s user docs");
-    expect(f.calls()).toContain(
-      'claude mcp add-json -s user fetch {"command":"uvx","args":["mcp-fetch"]}',
-    );
-    expect(f.calls()).not.toContain("later");
-    expect(f.calls()).toContain("codex mcp remove fetch");
-    expect(read(home, ".codex/config.toml")).toContain('[mcp_servers.fetch]\ncommand = "uvx"');
-    expect(read(home, ".codex/config.toml")).toContain('[mcp_servers.fetch.env]\nA = "1"');
-    // The fleet: a proposal on its staging branch; main untouched.
+    expect(fs.readlinkSync(join(home, ".zprofile"))).toBe(join(home, "elsewhere/mine"));
+    expect(read(home, ".local/state/t3-fleet/setup/moved/zprofile")).toBe("my zprofile\n");
+    // Models: the legacy field (claudeWork inherits it) and codexMain's own, both restored.
+    const settings = JSON.parse(read(home, ".t3/userdata/settings.json")) as {
+      providers: { claudeAgent: { binaryPath?: string } };
+      providerInstances: { codexMain: { config: { binaryPath?: string } } };
+    };
+    expect(settings.providers.claudeAgent.binaryPath).toBe("/opt/claude");
+    expect(settings.providerInstances.codexMain.config.binaryPath).toBeUndefined();
+    expect(exists(home, ".local/bin/t3-fleet-claude")).toBe(false);
+    expect(exists(home, ".local/bin/t3-fleet-codex")).toBe(false);
+    expect(exists(home, ".local/bin/t3-fleet")).toBe(true);
+    // Claude, parsed back: fetch is the user's again, docs gone, notes and later untouched, mode kept.
+    const claude = JSON.parse(read(home, ".claude.json")) as Record<string, unknown>;
+    expect(claude["numStartups"]).toBe(3);
+    expect(claude["mcpServers"]).toEqual({
+      fetch: fetchBefore,
+      notes: { type: "stdio", command: "my-notes" },
+      later: { type: "stdio", command: "later" },
+    });
+    expect(modeOf(join(home, ".claude.json"))).toBe(0o600);
+    // Codex, parsed back: one fetch table, everything else as it was, mode kept.
+    const codexText = read(home, ".codex/config.toml");
+    expect(codexText.match(/^\[mcp_servers\.fetch\]$/gm)).toHaveLength(1);
+    expect(codexText).toContain("# my codex");
+    expect(parseToml(codexText)).toEqual({
+      model: "o3",
+      mcp_servers: { other: { command: "other" }, fetch: fetchBefore },
+      profiles: { fast: { model: "o4-mini" } },
+    });
+    expect(modeOf(join(home, ".codex/config.toml"))).toBe(0o640);
+    // The fleet: a departure proposal; main and the checkout untouched.
     const staging = "t3-fleet/staging/laptop";
-    expect(onMain(f.origin, "nodes/laptop.toml", staging)).toBeNull();
-    expect(onMain(f.origin, "nodes/box.toml", staging)).not.toBeNull();
-    expect(onMain(f.origin, "nodes/laptop.toml")).not.toBeNull();
-    const recipients = onMain(f.origin, "secrets/recipients.toml", staging) ?? "";
-    expect(recipients).not.toContain("laptop");
-    expect(recipients).toContain(f.recipients["box"]);
-    const sealed = onMain(f.origin, "secrets/secrets.env.age", staging) ?? "";
-    expect(await decrypt(f.keys["box"] ?? "", sealed)).toContain("API=1");
-    await expect(decrypt(f.keys["laptop"] ?? "", sealed)).rejects.toThrow();
-    expect(outcomes[0]?.lines.join("\n")).toMatch(/t3-fleet approve laptop [0-9a-f]{7}/);
-    // Local state kept; the checkout never touched.
-    expect(fs.existsSync(join(home, ".config/t3-fleet/age-key.txt"))).toBe(true);
+    expect(onBranch(f.origin, "nodes/laptop.toml", staging)).toBeNull();
+    expect(onBranch(f.origin, "secrets/recipients.toml", staging)).not.toContain("laptop");
+    expect(git(f.origin, "log", "-1", "--format=%B", staging)).toContain(
+      "T3-Fleet-Departure: laptop",
+    );
+    expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
     expect(git(f.repo, "status", "--porcelain")).toBe("");
+    // Recorded as finished; local state kept without --purge.
+    expect(JSON.parse(read(home, ".local/state/t3-fleet/leave.json"))).toMatchObject({
+      node: "laptop",
+      finished: true,
+    });
+    expect(exists(home, ".config/t3-fleet/age-key.txt")).toBe(true);
+    // Run again: nothing left but what is waiting on an authority.
+    const again = await f.plan();
+    expect(again.steps).toEqual([]);
+    expect(again.notes.join("\n")).toContain("waits for an authority: t3-fleet approve laptop");
   });
 
-  it("keeps its MCP registrations without a snapshot, and says which go through the hub", async () => {
+  it("is not withdrawn by an ordinary sync, and approval re-encrypts the authority's current secrets", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    await run(applyLeave(await f.plan()));
+    // A sync on the member (one its timer started just before, say) leaves the departure alone.
+    const node = f.config.nodes.find((n) => n.name === "laptop");
+    if (node === undefined) throw new Error("no laptop");
+    await run(underSyncLock(exchange(f.config, node, [])));
+    expect(git(f.origin, "log", "-1", "--format=%B", "t3-fleet/staging/laptop")).toContain(
+      "T3-Fleet-Departure: laptop",
+    );
+    // The secrets change before an authority approves; the member is long gone by then.
+    const boxHome = join(f.root, "box-home");
+    process.env["HOME"] = boxHome;
+    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
+    put(f.box, "secrets/secrets.env.age", await encrypt(Object.values(f.recipients), "API=two\n"));
+    commitAll(f.box, "new secret");
+    const [proposal] = await run(listProposals(f.box, "main"));
+    if (proposal === undefined) throw new Error("no proposal");
+    await run(approve(f.box, "main", proposal, "box"));
+    expect(onBranch(f.origin, "nodes/laptop.toml")).toBeNull();
+    expect(onBranch(f.origin, "secrets/recipients.toml")).not.toContain(f.recipients["laptop"]);
+    const sealed = onBranch(f.origin, "secrets/secrets.env.age") ?? "";
+    expect(await decrypt(f.keys["box"] ?? "", sealed)).toBe("API=two\n");
+    await expect(decrypt(f.keys["laptop"] ?? "", sealed)).rejects.toThrow();
+    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).toBeNull();
+  });
+
+  it("keeps its MCP registrations without a snapshot, says which use the hub, and removes only t3-fleet mcp", async () => {
     const f = await makeFleet();
     put(
       f.home,
       ".claude.json",
       JSON.stringify({
         mcpServers: {
-          fetch: { type: "http", url: "https://relay.tailnet.ts.net:8399/mcp/fetch" },
-          "t3-fleet": { type: "stdio", command: "t3-fleet", args: ["mcp"] },
+          fetch: { type: "http", url: `${GATEWAY}/mcp/fetch` },
+          fleet: { type: "stdio", command: "t3-fleet", args: ["mcp"] },
         },
       }),
     );
-    const plan = await run(planLeave(f.config, { home: f.home, purge: false, platform: "darwin" }));
-    const notes = plan.notes.join("\n");
-    expect(notes).toContain("no setup snapshot");
-    expect(notes).toContain(
-      "fetch (Claude) go through the fleet's hub at https://relay.tailnet.ts.net:8399",
-    );
-    // Only T3 Fleet's own server goes: it cannot work once the machine has left.
+    const plan = await f.plan();
+    expect(plan.notes.join("\n")).toContain("no setup snapshot");
+    expect(plan.notes.join("\n")).toContain("fetch in Claude go through the fleet's hub");
     const mcp = plan.steps.find((s) => s.title.startsWith("Remove T3 Fleet's own MCP server"));
-    expect(mcp?.lines).toEqual(["$ claude mcp remove -s user t3-fleet"]);
+    expect(mcp?.lines).toEqual([
+      "Claude: remove fleet (T3 Fleet's own server, which cannot work once this machine has left)",
+    ]);
+    await run(applyLeave(plan));
+    const claude = JSON.parse(read(f.home, ".claude.json")) as { mcpServers: object };
+    expect(Object.keys(claude.mcpServers)).toEqual(["fetch"]);
   });
 });
 
-describe("an authority leaving", () => {
-  it("is refused when it is the only authority, and nothing runs", async () => {
-    const f = await makeFleet({ self: "box" });
-    const plan = await run(planLeave(f.config, { home: f.home, purge: true, platform: "darwin" }));
-    expect(plan.refusal).toContain("only authority");
-    expect(plan.steps).toEqual([]);
+describe("Codex's config.toml", () => {
+  it("replaces a server's tables and keeps every other line", async () => {
+    const text = [
+      "# top",
+      "[mcp_servers.fetch]",
+      'url = "u"',
+      "[mcp_servers.fetch.env]",
+      'A = "1"',
+      "# about other",
+      '[mcp_servers."other one"]',
+      'command = "o"',
+      "",
+    ].join("\n");
+    const edited = await run(editCodexServers(text, { fetch: { command: "uvx" }, gone: null }));
+    expect(edited).toContain("# top");
+    expect(edited).toContain("# about other");
+    expect(parseToml(edited)).toEqual({
+      mcp_servers: { "other one": { command: "o" }, fetch: { command: "uvx" } },
+    });
   });
 
-  it("commits and pushes its removal when another authority remains", async () => {
-    const f = await makeFleet({ self: "box", twoAuthorities: true });
-    git(f.box, "push", "-q", "origin", "main:t3-fleet/state/box");
-    const plan = await run(planLeave(f.config, { home: f.home, purge: false, platform: "darwin" }));
-    expect(titles(plan)).toEqual(["Remove box from the fleet (commit and push, as an authority)"]);
-    const outcomes = await run(applyLeave(plan));
-    expect(outcomes[0]?.ok).toBe(true);
-    expect(onMain(f.origin, "nodes/box.toml")).toBeNull();
-    expect(onMain(f.origin, "nodes/desk.toml")).not.toBeNull();
-    expect(onMain(f.origin, "secrets/recipients.toml")).not.toContain(f.recipients["box"]);
-    const sealed = onMain(f.origin, "secrets/secrets.env.age") ?? "";
-    expect(await decrypt(f.keys["desk"] ?? "", sealed)).toContain("API=1");
-    expect(onMain(f.origin, "nodes/box.toml", "t3-fleet/state/box")).toBeNull();
+  it("refuses, changing nothing, a server it cannot edit table by table", async () => {
+    const f = await makeFleet();
+    setUpLaptop(f);
+    const inline = `mcp_servers = { fetch = { url = "${GATEWAY}/mcp/fetch" } }\n`;
+    put(f.home, ".codex/config.toml", inline);
+    const outcomes = await run(applyLeave(await f.plan()));
+    expect(outcomes.at(-1)).toMatchObject({ ok: false });
+    expect(outcomes.at(-1)?.lines.join("")).toContain("edit it by hand");
+    expect(read(f.home, ".codex/config.toml")).toBe(inline);
+    // Not finished: a later leave goes on from there.
+    expect(JSON.parse(read(f.home, ".local/state/t3-fleet/leave.json")).finished).toBe(false);
+  });
+
+  it("creates a missing config private", async () => {
+    const f = await makeFleet();
+    const { fetchBefore } = setUpLaptop(f);
+    fs.rmSync(join(f.home, ".codex"), { recursive: true });
+    await run(applyLeave(await f.plan()));
+    expect(modeOf(join(f.home, ".codex/config.toml"))).toBe(0o600);
+    expect(parseToml(read(f.home, ".codex/config.toml"))).toEqual({
+      mcp_servers: { fetch: fetchBefore },
+    });
+  });
+});
+
+describe("links", () => {
+  const markerFor = (f: Fleet, at: string, ready: boolean) =>
+    JSON.stringify({ path: at, source: join(f.repo, "skills/a"), how: "copy", ready });
+
+  it("finishes a copy an interrupted run left with the link moved aside", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, ".agents/skills/a");
+    const staging = join(f.home, ".agents/skills/.a.t3-fleet-leave-XyZ123");
+    put(staging, "copy/SKILL.md", "a copied\n");
+    fs.symlinkSync(join(f.repo, "skills/a"), join(staging, "link"));
+    put(staging, "marker.json", markerFor(f, at, true));
+    const plan = await f.plan();
+    expect(plan.steps.find((s) => s.title.startsWith("Turn"))?.lines).toEqual([
+      "~/.agents/skills/a  ← finish what an interrupted run left half-done",
+    ]);
+    await run(applyLeave(plan));
+    expect(isLink(at)).toBe(false);
+    expect(read(f.home, ".agents/skills/a/SKILL.md")).toBe("a copied\n");
+    expect(fs.existsSync(staging)).toBe(false);
+  });
+
+  it("puts the link back when an interrupted copy was not finished", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, ".agents/skills/a");
+    const staging = join(f.home, ".agents/skills/.a.t3-fleet-leave-AbC456");
+    put(staging, "copy/half", "");
+    fs.symlinkSync(join(f.repo, "skills/a"), join(staging, "link"));
+    put(staging, "marker.json", markerFor(f, at, false));
+    await run(applyLeave(await f.plan()));
+    expect(isLink(at)).toBe(true);
+    expect(fs.existsSync(staging)).toBe(false);
+    // The next run copies it properly.
+    await run(applyLeave(await f.plan()));
+    expect(isLink(at)).toBe(false);
+    expect(read(f.home, ".agents/skills/a/SKILL.md")).toBe("a from the repo\n");
+  });
+
+  it("keeps the link when the copy fails, and leaves no staging behind", async () => {
+    const f = await makeFleet();
+    const at = join(f.home, ".agents/skills/a");
+    fs.mkdirSync(dirname(at), { recursive: true });
+    fs.symlinkSync(join(f.repo, "skills/a"), at);
+    put(f.repo, "skills/a/private.md", "unreadable\n", 0o000);
+    try {
+      const outcomes = await run(applyLeave(await f.plan()));
+      expect(outcomes.find((o) => o.title.startsWith("Turn"))?.ok).toBe(false);
+      expect(isLink(at)).toBe(true);
+      expect(fs.readdirSync(dirname(at))).toEqual(["a"]);
+    } finally {
+      fs.chmodSync(join(f.repo, "skills/a/private.md"), 0o644);
+    }
   });
 });
 
 describe("--purge", () => {
-  it("removes T3 Fleet's local state, keeping the skills from before joining", async () => {
+  it("keeps every backup of the user's own files, moving setup's out of what it deletes", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
-    put(f.home, ".config/t3-fleet/secrets.env", "API=1\n", 0o600);
+    put(f.home, ".config/t3-fleet/secrets.env", "API=one\n", 0o600);
     put(f.home, ".local/state/t3-fleet/sync.log", "log\n");
     put(f.home, ".local/state/t3-fleet/skill-backups/1/.claude-skills/x/SKILL.md", "x\n");
     put(f.home, ".local/share/t3-fleet/t3-fleet.mjs", "bundle\n");
@@ -355,57 +604,261 @@ describe("--purge", () => {
       join(f.home, ".local/share/t3-fleet/t3-fleet.mjs"),
       join(f.home, ".local/bin/t3-fleet"),
     );
-    const plan = await run(planLeave(f.config, { home: f.home, purge: true, platform: "darwin" }));
-    expect(plan.notes.join("\n")).toContain("kept ~/.local/state/t3-fleet/skill-backups");
-    expect(plan.notes.join("\n")).not.toContain("--purge removes them");
+    // The user replaced setup's link with a real file of their own: the backup is not restored.
+    put(f.home, ".local/state/t3-fleet/setup/moved/zshenv", "zshenv before setup\n");
+    put(f.home, ".zshenv", "my newer zshenv\n");
+    put(
+      f.home,
+      ".local/state/t3-fleet/setup/before.json",
+      JSON.stringify({
+        takenAt: 1,
+        moved: [{ path: "~/.zshenv", backup: "~/.local/state/t3-fleet/setup/moved/zshenv" }],
+      }),
+    );
+    const plan = await f.plan(true);
+    const text = planText(plan);
+    expect(text).toContain(
+      "setup's backup ~/.local/state/t3-fleet/setup/moved/zshenv is kept, moved to ~/.local/state/t3-fleet/setup-backups/.zshenv",
+    );
+    expect(text).toContain("kept ~/.local/state/t3-fleet/skill-backups");
     const outcomes = await run(applyLeave(plan));
     expect(outcomes.every((o) => o.ok)).toBe(true);
-    for (const gone of [
-      ".config/t3-fleet",
-      ".local/state/t3-fleet/sync.log",
-      ".local/share/t3-fleet",
-    ])
-      expect(fs.existsSync(join(f.home, gone))).toBe(false);
-    expect(fs.lstatSync(join(f.home, ".local/bin"), { throwIfNoEntry: false })?.isDirectory()).toBe(
-      true,
+    expect(read(f.home, ".zshenv")).toBe("my newer zshenv\n");
+    expect(read(f.home, ".local/state/t3-fleet/setup-backups/.zshenv")).toBe(
+      "zshenv before setup\n",
     );
-    expect(fs.existsSync(join(f.home, ".local/bin/t3-fleet"))).toBe(false);
     expect(read(f.home, ".local/state/t3-fleet/skill-backups/1/.claude-skills/x/SKILL.md")).toBe(
       "x\n",
     );
-    expect(fs.existsSync(join(f.repo, "nodes/laptop.toml"))).toBe(true);
+    for (const gone of [
+      ".config/t3-fleet",
+      ".local/state/t3-fleet/sync.log",
+      ".local/state/t3-fleet/setup",
+      ".local/state/t3-fleet/leave.json",
+      ".local/state/t3-fleet/sync.lock",
+      ".local/share/t3-fleet",
+      ".local/bin/t3-fleet",
+    ])
+      expect(exists(f.home, gone)).toBe(false);
+    expect(exists(f.repo, "nodes/laptop.toml")).toBe(true);
   });
 });
 
-describe("services under systemd", () => {
-  it("disables and removes user units, the sync timer with its service", async () => {
+describe("an authority leaving", () => {
+  it("is refused when it is the only authority, and nothing runs", async () => {
+    const f = await makeFleet({ self: "box" });
+    const plan = await f.plan(true);
+    expect(plan.refusal).toContain("only authority");
+    expect(plan.steps).toEqual([]);
+    expect(await run(applyLeave(plan))).toEqual([]);
+    expect(exists(f.home, ".local/state/t3-fleet/leave.json")).toBe(false);
+  });
+
+  it("goes by origin's authorities, not a stale checkout's, when it plans and again when it runs", async () => {
+    const f = await makeFleet({ self: "box", desk: "authority" });
+    const other = join(f.root, "other");
+    git(f.root, "clone", "-q", f.origin, "other");
+    const demote = () => {
+      put(other, "nodes/desk.toml", 'roles = ["member"]\n');
+      commitAll(other, "demote desk");
+    };
+    const promote = () => {
+      put(other, "nodes/desk.toml", 'roles = ["authority"]\n');
+      commitAll(other, "promote desk");
+    };
+    // The checkout still says desk is an authority; origin no longer does.
+    demote();
+    expect((await f.plan()).refusal).toContain("only authority");
+    // Planned while desk was one again, demoted before it runs.
+    promote();
+    const plan = await f.plan();
+    expect(plan.refusal).toBeNull();
+    demote();
+    const outcomes = await run(applyLeave(plan));
+    expect(outcomes[0]).toMatchObject({ ok: false });
+    expect(outcomes[0]?.lines.join("")).toContain("only authority");
+    expect(onBranch(f.origin, "nodes/box.toml")).not.toBeNull();
+  });
+
+  it("removes itself, and a later run resumes once its node file is gone", async () => {
+    const f = await makeFleet({ self: "box", desk: "authority" });
+    git(f.box, "push", "-q", "origin", "main:t3-fleet/state/box");
+    put(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist", "<plist/>");
+    put(f.root, "loaded/dev.t3-fleet.sync", "");
+    put(f.root, "stuck", "");
+    const first = await run(applyLeave(await f.plan()));
+    expect(first.map((o) => o.ok)).toEqual([true, false]);
+    expect(first[1]?.lines.join("")).toContain("launchd still has dev.t3-fleet.sync loaded");
+    expect(exists(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist")).toBe(true);
+    expect(onBranch(f.origin, "nodes/box.toml")).toBeNull();
+    expect(onBranch(f.origin, "nodes/desk.toml")).not.toBeNull();
+    const sealed = onBranch(f.origin, "secrets/secrets.env.age") ?? "";
+    expect(await decrypt(f.keys["desk"] ?? "", sealed)).toContain("API=one");
+    await expect(decrypt(f.keys["box"] ?? "", sealed)).rejects.toThrow();
+    expect(
+      spawnSync("git", ["rev-parse", "--verify", "t3-fleet/state/box"], { cwd: f.origin }).status,
+    ).not.toBe(0);
+    // The checkout followed, so the config no longer has box: leave goes on from its record.
+    expect(exists(f.box, "nodes/box.toml")).toBe(false);
+    fs.rmSync(join(f.root, "stuck"));
+    const { departure, resumed } = await run(currentDeparture(f.home));
+    expect(resumed).toBe(true);
+    expect(departure).toMatchObject({ node: "box", finished: false });
+    const again = await f.planFor(departure);
+    expect(titles(again)).toEqual(["Stop and remove the sync timer"]);
+    expect((await run(applyLeave(again))).every((o) => o.ok)).toBe(true);
+    // And --purge later still works, from the finished record.
+    const later = await run(currentDeparture(f.home));
+    expect(later.departure.finished).toBe(true);
+    await run(applyLeave(await f.planFor(later.departure, true)));
+    expect(exists(f.home, ".config/t3-fleet")).toBe(false);
+    expect(exists(f.home, ".local/state/t3-fleet")).toBe(false);
+  });
+});
+
+describe("services", () => {
+  it("keeps a systemd unit that is still running, and stops there", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
     put(f.home, ".config/systemd/user/t3-fleet-sync.service", "[Service]\n");
     put(f.home, ".config/systemd/user/t3-fleet-sync.timer", "[Timer]\n");
     put(f.home, ".config/systemd/user/t3-fleet-listen.service", "[Service]\n");
-    const plan = await run(
-      planLeave(f.config, { home: f.home, purge: false, platform: "linux", root: false }),
-    );
-    const step = plan.steps.find((s) => s.title.startsWith("Stop and remove"));
-    expect(step?.title).toBe("Stop and remove the sync timer, the listener");
-    await run(step?.apply ?? Effect.succeed([]));
-    expect(f.calls()).toContain(
-      "systemctl --user disable --now t3-fleet-sync.timer t3-fleet-sync.service",
-    );
-    expect(f.calls()).toContain("systemctl --user disable --now t3-fleet-listen.service");
-    expect(f.calls()).toContain("systemctl --user daemon-reload");
+    put(f.root, "active/t3-fleet-sync.timer", "");
+    put(f.root, "active/t3-fleet-listen.service", "");
+    put(f.root, "stuck", "");
+    const outcomes = await run(applyLeave(await f.plan(true, "linux")));
+    const services = outcomes.find((o) => o.title.startsWith("Stop and remove"));
+    expect(services).toMatchObject({ ok: false });
+    expect(services?.lines.join("")).toContain("t3-fleet-sync.timer is still running");
+    expect(exists(f.home, ".config/systemd/user/t3-fleet-sync.timer")).toBe(true);
+    // Purge never ran.
+    expect(exists(f.home, ".config/t3-fleet/age-key.txt")).toBe(true);
+    fs.rmSync(join(f.root, "stuck"));
+    const again = await run(applyLeave(await f.plan(true, "linux")));
+    expect(again.every((o) => o.ok)).toBe(true);
     for (const unit of ["t3-fleet-sync.service", "t3-fleet-sync.timer", "t3-fleet-listen.service"])
-      expect(fs.existsSync(join(f.home, ".config/systemd/user", unit))).toBe(false);
+      expect(exists(f.home, `.config/systemd/user/${unit}`)).toBe(false);
   });
 
-  it("uses system units for root", () => {
-    const script = removeService("linux", true, "models", 75);
-    expect(script).toContain("systemctl disable --now t3-fleet-models.service");
-    expect(script).toContain("rm -f /etc/systemd/system/t3-fleet-models.service");
-    expect(script).not.toContain("--user");
+  it("keeps a launchd plist whose job does not unload", () => {
+    const root = fs.mkdtempSync(join(tmpdir(), "t3-fleet-launchd-"));
+    put(root, "bin/launchctl", FAKE_LAUNCHCTL(root), 0o755);
+    put(root, "loaded/dev.t3-fleet.models", "");
+    put(root, "stuck", "");
+    put(root, "Library/LaunchAgents/dev.t3-fleet.models.plist", "<plist/>");
+    const r = spawnSync("sh", ["-c", removeService("darwin", "user", "models", 1)], {
+      env: { ...process.env, HOME: root, PATH: `${root}/bin:${process.env["PATH"] ?? ""}` },
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("still has dev.t3-fleet.models loaded");
+    expect(fs.existsSync(join(root, "Library/LaunchAgents/dev.t3-fleet.models.plist"))).toBe(true);
+  });
+
+  it("refuses before anything changes when system units need root, saying what to run", async () => {
+    const f = await makeFleet();
+    put(f.root, "etc-systemd/t3-fleet-sync.timer", "[Timer]\n");
+    put(f.root, "etc-systemd/t3-fleet-sync.service", "[Service]\n");
+    const plan = await f.plan(true, "linux");
+    expect(plan.steps).toEqual([]);
+    expect(plan.refusal).toContain("only root can stop");
+    expect(plan.refusal).toContain(
+      "sudo sh -c 'systemctl disable --now t3-fleet-sync.timer t3-fleet-sync.service",
+    );
+    expect(plan.refusal).not.toContain("--user");
+    expect(await run(applyLeave(plan))).toEqual([]);
+    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).toBeNull();
+    expect(exists(f.root, "etc-systemd/t3-fleet-sync.timer")).toBe(true);
+    expect(exists(f.home, ".config/t3-fleet/age-key.txt")).toBe(true);
   });
 });
 
-it("finds setup's snapshot where setup writes it", () => {
-  expect(setupSnapshotPath("/h")).toBe("/h/.local/state/t3-fleet/setup/before.json");
+describe("model routing", () => {
+  it("does not write T3's settings itself while T3 runs, and keeps the launchers", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    const settings = JSON.stringify({
+      providers: { claudeAgent: { binaryPath: "t3-fleet-claude" } },
+    });
+    put(f.home, ".t3/userdata/settings.json", settings);
+    put(f.home, ".local/bin/t3-fleet-claude", "#!/bin/sh\n", 0o755);
+    // This test's own process stands in for a T3 server whose CLI cannot be found.
+    put(
+      f.home,
+      ".t3/userdata/server-runtime.json",
+      JSON.stringify({ pid: process.pid, origin: "http://127.0.0.1:1" }),
+    );
+    const plan = await f.plan();
+    expect(planText(plan)).toContain("through T3 (server.updateSettings");
+    const outcomes = await run(applyLeave(plan));
+    const models = outcomes.find((o) => o.title.startsWith("Point T3's providers"));
+    expect(models).toMatchObject({ ok: false });
+    expect(models?.lines.join("")).toContain("quit T3 and run leave again");
+    expect(read(f.home, ".t3/userdata/settings.json")).toBe(settings);
+    expect(exists(f.home, ".local/bin/t3-fleet-claude")).toBe(true);
+  });
+
+  it("removes only launchers T3's settings no longer use", async () => {
+    const f = await makeFleet({ node: 'roles = ["member"]\n' });
+    put(
+      f.home,
+      ".t3/userdata/settings.json",
+      JSON.stringify({ providerInstances: { pi: { driver: "pi", config: {} } } }),
+    );
+    put(f.home, ".local/bin/t3-fleet-claude", "#!/bin/sh\n", 0o755);
+    const outcomes = await run(applyLeave(await f.plan()));
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(exists(f.home, ".local/bin/t3-fleet-claude")).toBe(false);
+  });
+});
+
+it("records the departure where a later run finds it", () => {
+  expect(departurePath("/h")).toBe("/h/.local/state/t3-fleet/leave.json");
+});
+
+describe("writing the user's files", () => {
+  it("writes nothing when the file changed since it was read", async () => {
+    const dir = fs.mkdtempSync(join(tmpdir(), "t3-fleet-write-"));
+    put(dir, "f.json", "theirs\n", 0o640);
+    const result = await run(
+      writeAtomically(join(dir, "f.json"), "ours\n", "what we read\n").pipe(Effect.result),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(read(dir, "f.json")).toBe("theirs\n");
+    expect(fs.readdirSync(dir)).toEqual(["f.json"]);
+    await run(writeAtomically(join(dir, "f.json"), "ours\n", "theirs\n"));
+    expect(read(dir, "f.json")).toBe("ours\n");
+    expect(modeOf(join(dir, "f.json"))).toBe(0o640);
+  });
+});
+
+describe("T3's settings, through T3", () => {
+  it("patches the legacy field and upserts an instance as it is on disk, binaryPath aside", () => {
+    const settings = {
+      providerInstances: {
+        codexMain: {
+          driver: "codex",
+          displayName: "Main",
+          config: { binaryPath: "t3-fleet-codex", homePath: "/h" },
+        },
+      },
+    };
+    expect(
+      settingsUpdates(settings, [
+        { where: "legacy", id: "claudeAgent", launcher: "t3-fleet-claude", restore: null },
+        { where: "instance", id: "codexMain", launcher: "t3-fleet-codex", restore: "/opt/codex" },
+      ]),
+    ).toEqual([
+      {
+        patch: { providers: { claudeAgent: { binaryPath: "claude" } } },
+        providerInstanceMutation: {
+          operation: "upsert",
+          instanceId: "codexMain",
+          instance: {
+            driver: "codex",
+            displayName: "Main",
+            config: { binaryPath: "/opt/codex", homePath: "/h" },
+          },
+        },
+      },
+    ]);
+  });
 });

@@ -33,6 +33,7 @@ import { proposalTrailer } from "./Approved.ts";
 import { heldBack, setAsideUnits, SOURCES, unitOf } from "./Held.ts";
 import { readAllowed, refusal } from "./SecretScan.ts";
 import { sourcesEntriesChanged } from "./SkillSources.ts";
+import { departureOf, removeNode } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { PROPOSED_SECRETS } from "./setup/Plan.ts";
@@ -175,6 +176,21 @@ export const approve = (
   underSyncLock(
     Effect.gen(function* () {
       const tip = yield* reviewedTip(repo, proposal, expected);
+      // A machine leaving the fleet: removed from this authority's own current repo and secrets.
+      const departing = yield* departureOf(repo, tip);
+      if (departing !== null) {
+        if (departing !== proposal.node)
+          return yield* Effect.fail(`${proposal.node}'s proposal removes ${departing}, not itself`);
+        const removed = yield* removeNode(
+          repo,
+          branch,
+          departing,
+          process.env["HOME"] ?? "",
+          `Approve ${departing}'s departure from the fleet (by ${by})`,
+        );
+        yield* dropStaging(repo, proposal, tip);
+        return removed.rev ?? out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
+      }
       const files = yield* ownChange(repo, tip);
       // A newline in a path could write a line of the approval's message; no such path enters the fleet.
       const unsafe = files.filter(unsafePath);
