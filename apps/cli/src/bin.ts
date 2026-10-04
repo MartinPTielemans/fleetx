@@ -44,6 +44,7 @@ import {
 import { hubCommands } from "./hub.ts";
 import { initCommand, inviteCommand, joinCommand } from "./onboard.ts";
 import { setupCommand } from "./setup.ts";
+import { leaveCommand } from "./leave.ts";
 import { modelsCommand } from "./models.ts";
 import { listenCommand, relayCommand } from "./relay.ts";
 import { secretsCommand } from "./secrets.ts";
@@ -322,6 +323,7 @@ const cli = Command.make("t3-fleet").pipe(
     inviteCommand,
     initCommand,
     joinCommand,
+    leaveCommand,
     statusCommand,
     fixCommand,
     syncCommand,

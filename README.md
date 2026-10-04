@@ -183,7 +183,7 @@ it, since that would put the old build back.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md): `t3-fleet setup`, from one machine to two
+- [Quickstart](docs/quickstart.md): `t3-fleet setup`, from one machine to two, and back with `t3-fleet leave`
 - [Topologies](docs/topologies.md): roles, relays, profiles
 - [Areas](docs/areas.md): everything T3 Fleet manages, and its settings
 - [Troubleshooting](docs/troubleshooting.md): every `doctor` finding explained
