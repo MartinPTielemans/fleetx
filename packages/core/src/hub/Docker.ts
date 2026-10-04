@@ -13,7 +13,9 @@
  *                 restart a running container with the same spec (a digest
  *                 in its labels) is adopted rather than started twice; a
  *                 stale one is replaced. A container that stops is started
- *                 again with backoff.
+ *                 again with backoff. A `docker run` that fails removes the
+ *                 container only when it carries that run's own label: the
+ *                 name may belong to a container something else just started.
  *   stdio images  `docker run -i --rm`, owned by the stdio bridge like any
  *                 other process; a leftover from a crash is removed first.
  */
@@ -30,6 +32,7 @@ import type { StdioProcess } from "./Bridge.ts";
 import { exec } from "../Exec.ts";
 import { IMAGE_PATTERN } from "./Definitions.ts";
 import { parseJson, toJson } from "./JsonRpc.ts";
+import { randomSecret } from "./Policy.ts";
 import { spawnStdio } from "./Process.ts";
 
 export const PORT_RANGE = { first: 18200, last: 18299 } as const;
@@ -88,6 +91,8 @@ export interface Inspected {
   readonly digest: string | null;
   readonly port: number | null;
   readonly status: string;
+  /** The label of the `docker run` that created it. */
+  readonly run: string | null;
 }
 
 /** `docker inspect` of a container, or null when there is none. */
@@ -110,6 +115,7 @@ export const inspect = (name: string) =>
       status: c.State?.Status ?? "unknown",
       digest: c.Config?.Labels?.[`${CONTAINER_LABEL}.digest`] ?? c.Config?.Labels?.[`${LEGACY_CONTAINER_LABEL}.digest`] ?? null,
       port: binding?.HostPort === undefined ? null : Number(binding.HostPort),
+      run: c.Config?.Labels?.[`${CONTAINER_LABEL}.run`] ?? null,
     } satisfies Inspected;
   });
 
@@ -155,6 +161,7 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
     let lastError = "no free port in 18200–18299";
     for (let port = PORT_RANGE.first; port <= PORT_RANGE.last; port++) {
       if (used.has(port) || reserved.has(port)) continue;
+      const run = randomSecret();
       const r = yield* Effect.scoped(
         Effect.gen(function* () {
           const envArgs = yield* envFile(spec.env);
@@ -168,6 +175,8 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
           `${CONTAINER_LABEL}.hub=${spec.server}`,
           "--label",
           `${CONTAINER_LABEL}.digest=${digest}`,
+          "--label",
+          `${CONTAINER_LABEL}.run=${run}`,
           ...HARDENING,
           "-p",
           `127.0.0.1:${port}:${spec.targetPort}`,
@@ -182,7 +191,8 @@ export const ensureHttpContainer = (spec: ContainerSpec & { readonly targetPort:
       );
       if (r.code === 0) return { port, adopted: false };
       lastError = failure(r);
-      yield* removeContainer(name);
+      // A container left in "created" by a failed port binding is this run's; one that took the name meanwhile is not.
+      if ((yield* inspect(name))?.run === run) yield* removeContainer(name);
       if (!/address already in use|port is already allocated|bind/i.test(lastError)) break;
     }
     return yield* Effect.fail(`starting ${name} failed: ${lastError}`);

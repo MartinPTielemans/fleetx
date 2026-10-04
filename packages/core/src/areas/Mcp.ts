@@ -199,22 +199,31 @@ const resolveUnchecked = (
   return ok({ type: "http", url: `http://${desired.origin}:${port}/mcp`, tokenEnv });
 };
 
-/** An initialize request: what any client does first. No tool is called. */
-const liveCheck = (url: string, token: string | undefined) =>
+/**
+ * An initialize request: what any client does first. No tool is called. The
+ * session it opens is deleted again, as every probe on every node runs this.
+ */
+export const liveCheck = (url: string, token: string | undefined) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    let request = HttpClientRequest.post(url).pipe(
+    const authorized = (request: HttpClientRequest.HttpClientRequest) => (token ? HttpClientRequest.bearerToken(request, token) : request);
+    const request = HttpClientRequest.post(url).pipe(
       HttpClientRequest.setHeaders({ "content-type": "application/json", accept: "application/json, text/event-stream" }),
       HttpClientRequest.bodyText(INITIALIZE, "application/json"),
+      authorized,
     );
-    if (token) request = HttpClientRequest.bearerToken(request, token);
     const result = yield* client.execute(request).pipe(
       Effect.flatMap((r) =>
-        readHeader(r.headers, "hub-state") === "needs-login"
-          ? Effect.succeed(NEEDS_LOGIN)
-          : r.status >= 200 && r.status < 300
-            ? Effect.succeed("ok")
-            : r.text.pipe(Effect.map((t) => `HTTP ${r.status}: ${t.trim().slice(0, 80)}`)),
+        Effect.gen(function* () {
+          const session = r.headers["mcp-session-id"];
+          if (session !== undefined) {
+            const close = HttpClientRequest.delete(url).pipe(HttpClientRequest.setHeader("mcp-session-id", session), authorized);
+            yield* client.execute(close).pipe(Effect.flatMap((d) => d.text), Effect.ignore);
+          }
+          if (readHeader(r.headers, "hub-state") === "needs-login") return NEEDS_LOGIN;
+          if (r.status >= 200 && r.status < 300) return "ok";
+          return `HTTP ${r.status}: ${(yield* r.text).trim().slice(0, 80)}`;
+        }),
       ),
       Effect.timeout(Duration.seconds(8)),
       Effect.option,
