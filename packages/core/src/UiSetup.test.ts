@@ -41,7 +41,7 @@ const PLAN_ID = "f".repeat(64);
 const request: UiSetupPlanRequest = {
   repo: { kind: "github", name: "t3-fleet" },
   node: "laptop",
-  hub: { ssh: "me@box", node: "box", mcp: false },
+  hub: { ssh: "me@hub", node: "hub", mcp: false },
   extras: [],
   autoUpdate: true,
   notify: { desktop: true, ntfy: null },
@@ -60,11 +60,11 @@ const plan: typeof UiSetupPlan.Type = {
   secrets: [{ name: "CTX_API_KEY", server: "ctx", from: "Claude Code: arg --api-key" }],
   missing: [],
   hub: {
-    node: "box",
-    ssh: "me@box",
-    relayUrl: "https://box.tailnet.ts.net:8399",
+    node: "hub",
+    ssh: "me@hub",
+    relayUrl: "https://hub.tailnet.ts.net:8399",
     mcp: false,
-    steps: ["Add box"],
+    steps: ["Add hub"],
   },
   settings: [],
   steps: ["the config repo at ~/fleet"],
@@ -82,7 +82,7 @@ const fakeSetup = () => {
       Effect.gen(function* () {
         yield* step(`${kind}: first step`);
         if (kind === "setup") yield* state.gate.wait;
-        if (kind === "setup-hub" && state.failHub) return yield* Effect.fail("ssh me@box: refused");
+        if (kind === "setup-hub" && state.failHub) return yield* Effect.fail("ssh me@hub: refused");
         ran.push(kind);
         if (kind === "setup") state.inFleet = true;
       }),
@@ -96,13 +96,14 @@ const fakeSetup = () => {
       github: "me",
       unfinished: null,
       hub: null,
+      fleetUrl: state.inFleet ? "https://box.tailnet.ts.net:8399/" : null,
     })),
     probe: (ssh) =>
       Effect.succeed({
         ssh,
         reachable: true,
         error: null,
-        hostname: "box",
+        hostname: "hub",
         os: "linux",
         node: { state: "ok", label: "Node 24", remedy: null },
         git: { state: "ok", label: "git", remedy: null },
@@ -110,7 +111,7 @@ const fakeSetup = () => {
         tailscale: { state: "ok", label: "tailscale", remedy: null },
         docker: { state: "missing", label: "no docker", remedy: "install docker" },
         service: { state: "ok", label: "systemd", remedy: null },
-        relayUrl: "https://box.tailnet.ts.net:8399",
+        relayUrl: "https://hub.tailnet.ts.net:8399",
         ready: true,
       }),
     plan: (r) =>
@@ -121,7 +122,7 @@ const fakeSetup = () => {
       if (r.planId !== PLAN_ID)
         return Effect.fail("this machine or the fleet changed since the plan was made: plan again");
       values.push(r.values);
-      return Effect.succeed([job("setup", "Set up laptop"), job("setup-hub", "Bring up box")]);
+      return Effect.succeed([job("setup", "Set up laptop"), job("setup-hub", "Bring up hub")]);
     },
     invite: (node) =>
       Effect.succeed({ command: `curl -fsSL https://x/install.sh | sh -s -- setup url ${node}` }),
@@ -161,8 +162,8 @@ const serve = () => {
     version: "0.0.0",
     self: "laptop",
     authority: true,
-    nodes: ["laptop", "box"],
-    relay: "https://box.tailnet.ts.net:8399",
+    nodes: ["laptop", "hub"],
+    relay: "https://hub.tailnet.ts.net:8399",
   };
   const setupSession: Session = { ...fleetSession, authority: false, nodes: [], relay: null };
   const { handler, dispose } = HttpRouter.toWebHandler(
@@ -231,15 +232,15 @@ describe("the UI server in setup mode", () => {
   it("probes only an ssh destination, and plans", async () => {
     const server = serve();
     expect((await server.post("/api/setup/probe", { ssh: "-oProxyCommand=sh" })).status).toBe(400);
-    expect((await server.post("/api/setup/probe", { ssh: "me@box two" })).status).toBe(400);
+    expect((await server.post("/api/setup/probe", { ssh: "me@hub two" })).status).toBe(400);
     const probe = decode(
       UiProbe,
-      await (await server.post("/api/setup/probe", { ssh: "me@box" })).text(),
+      await (await server.post("/api/setup/probe", { ssh: "me@hub" })).text(),
     );
-    expect(probe).toMatchObject({ ready: true, relayUrl: "https://box.tailnet.ts.net:8399" });
+    expect(probe).toMatchObject({ ready: true, relayUrl: "https://hub.tailnet.ts.net:8399" });
     expect((await server.post("/api/setup/plan", { nope: 1 })).status).toBe(400);
     expect(
-      (await server.post("/api/setup/plan", { ...request, hub: { ssh: "-x", node: "box" } }))
+      (await server.post("/api/setup/plan", { ...request, hub: { ssh: "-x", node: "hub" } }))
         .status,
     ).toBe(400);
     const refused = await server.post("/api/setup/plan", { ...request, node: "Laptop" });
@@ -305,10 +306,10 @@ describe("the UI server in setup mode", () => {
     let text = "";
     while (!text.includes("event: session")) text += (await reader.read()).value ?? "";
     await reader.cancel();
-    expect(text).toMatch(/event: session\ndata: \{[^\n]*"nodes":\["laptop","box"\]/);
+    expect(text).toMatch(/event: session\ndata: \{[^\n]*"nodes":\["laptop","hub"\]/);
     expect(text).not.toContain("SEKRIT");
     const session = decode(UiSession, await (await server.call("/api/session")).text());
-    expect(session).toMatchObject({ authority: true, nodes: ["laptop", "box"] });
+    expect(session).toMatchObject({ authority: true, nodes: ["laptop", "hub"] });
     await tick(30);
     await server.dispose();
   });
@@ -330,7 +331,7 @@ describe("the UI server in setup mode", () => {
     const done = await server.settled();
     expect(done.find((j) => j.kind === "setup-hub")).toMatchObject({
       state: "failed",
-      error: "ssh me@box: refused",
+      error: "ssh me@hub: refused",
     });
     await server.dispose();
   });

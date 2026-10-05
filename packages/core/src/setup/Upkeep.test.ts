@@ -148,7 +148,7 @@ describe("the MCP hub", () => {
     expect(on).toHaveLength(5);
     expect(no).toHaveLength(5);
     expect(on[0]).toBe(
-      "Add box to the fleet as its relay and MCP hub, with a new relay token among the secrets",
+      "Add box to the fleet as its relay and MCP hub, with a new relay token among the secrets, and let your Tailscale login open the app it hosts",
     );
     expect(on[4]).toBe("Sync box, so it starts the relay and hosts your MCP servers");
     expect(no.join("\n")).not.toContain("MCP");

@@ -26,7 +26,7 @@ const observed = (over: Record<string, unknown> = {}) => ({
 
 const outdated = (over: Record<string, unknown>) =>
   EngineArea.diagnose({
-    node: "box",
+    node: "hub",
     desired: undefined,
     observed: observed({ wanted: "new", installed: "old", ...over }),
     fleet: [],
@@ -97,7 +97,7 @@ describe("engine-outdated", () => {
       installedBuild: build("0.6.1", 1),
       services: ["serve", "listen"],
     });
-    expect(f?.fix?.disrupts).toBe("restarts the relay and the listener on box");
+    expect(f?.fix?.disrupts).toBe("restarts the relay and the listener on hub");
   });
 });
 
@@ -131,7 +131,7 @@ describe("engine-timer on macOS", () => {
     desired: { timer: boolean } = { timer: true },
   ) =>
     EngineArea.diagnose({
-      node: "mac",
+      node: "laptop",
       desired,
       observed: observed({
         platform: "darwin",
@@ -214,7 +214,7 @@ describe("engine-timer on macOS", () => {
   it("reports a reload that never ran", () => {
     const stuck = { installed: "<plist/>", want: "<plist/>", loaded: true, reloadPending: true };
     const [finding] = EngineArea.diagnose({
-      node: "mac",
+      node: "laptop",
       desired: { timer: true },
       observed: observed({ platform: "darwin", timer: stuck }),
       fleet: [],
@@ -226,7 +226,7 @@ describe("engine-timer on macOS", () => {
     });
     const removed = { installed: null, want: null, loaded: true, reloadPending: true };
     const [unwanted] = EngineArea.diagnose({
-      node: "mac",
+      node: "laptop",
       desired: undefined,
       observed: observed({ platform: "darwin", timer: removed }),
       fleet: [],
@@ -251,12 +251,12 @@ describe("engine-local-config", () => {
   // A machine that joined with --dir: its repo is not the fleet's [fleet] checkout.
   const config: Config = {
     repo: "/Users/u/src/fleet-config",
-    self: "mac",
+    self: "laptop",
     checkout: "~/fleet",
     branch: "main",
     interval: 900,
     alertAfter: 3,
-    nodes: [node("mac", null), node("box", "box")],
+    nodes: [node("laptop", null), node("hub", "hub")],
     settings: {},
   };
 
@@ -267,10 +267,10 @@ describe("engine-local-config", () => {
 
   it("leaves rewriting the local config to a person", () => {
     const [finding] = EngineArea.diagnose({
-      node: "mac",
+      node: "laptop",
       desired: undefined,
       observed: observed({
-        local: { want: 'repo = "~/fleet"\nnode = "mac"\n', matches: false },
+        local: { want: 'repo = "~/fleet"\nnode = "laptop"\n', matches: false },
       }),
       fleet: [],
       authority: null,

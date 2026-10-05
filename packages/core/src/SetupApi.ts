@@ -54,8 +54,9 @@ export const UiSetupState = Schema.Struct({
     Schema.Struct({ node: Schema.String, ssh: Schema.String, error: Schema.NullOr(Schema.String) }),
   ),
   /**
-   * Where the fleet's app is served once a hub serves it on the tailnet; null
-   * or absent without one (the app here is the way in). wizard/hub-ui owns it.
+   * Where the fleet's app is served once a hub serves it on the tailnet
+   * (`[relay] url`); null or absent without one (the app here is the way in).
+   * Filled by setup/Wizard.ts once this machine is in a fleet with a relay.
    */
   fleetUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });

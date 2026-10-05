@@ -524,6 +524,10 @@ export const make = (hooks: {
             onNone: () => null,
             onSome: (h) => ({ node: h.node, ssh: h.ssh, error: h.error }),
           }),
+          fleetUrl:
+            config === null || Option.isSome(unfinished)
+              ? null
+              : (config.settings.relay?.url?.replace(/\/+$/, "").concat("/") ?? null),
         } satisfies UiSetupState;
       }),
     );

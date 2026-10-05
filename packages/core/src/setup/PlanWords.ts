@@ -8,8 +8,8 @@ import { NTFY_SECRET, UPDATE_WORDS } from "../Upkeep.ts";
 /** What bringing the hub up does, for the plan: exactly what Hub.bringUp says as it goes. */
 export const hubStepTitles = (hub: { readonly node: string; readonly mcp?: boolean }) => [
   hub.mcp === true
-    ? `Add ${hub.node} to the fleet as its relay and MCP hub, with a new relay token among the secrets`
-    : `Add ${hub.node} to the fleet as its relay, with a new relay token among the secrets`,
+    ? `Add ${hub.node} to the fleet as its relay and MCP hub, with a new relay token among the secrets, and let your Tailscale login open the app it hosts`
+    : `Add ${hub.node} to the fleet as its relay, with a new relay token among the secrets, and let your Tailscale login open the app it hosts`,
   `Install T3 Fleet on ${hub.node} and join it to the fleet, over ssh`,
   `Let ${hub.node} read the fleet's secrets`,
   `Approve ${hub.node}'s proposal when it only touches its own files`,

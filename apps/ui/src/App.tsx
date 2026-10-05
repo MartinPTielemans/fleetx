@@ -235,7 +235,11 @@ function Sidebar({ active }: { active: View }) {
           />
           <span className="truncate">
             {CONNECTION_TEXT[connection]}
-            {session === null ? "" : ` · on ${session.self}`}
+            {session === null
+              ? ""
+              : session.hub !== undefined
+                ? ` · on the hub (${session.self}) as ${session.hub.login}`
+                : ` · on ${session.self}`}
           </span>
         </div>
         <ThemeSwitch />

@@ -101,4 +101,11 @@ describe("TomlEdit", () => {
       "instructions.remove": [one, { src: "b", dest: "~/b" }],
     });
   });
+  it("adds a key after the table's last one, not after the next table's comment", () => {
+    const text = '[fleet]\nbranch = "main"\n\n# Every machine.\n[defaults.engine]\ntimer = true\n';
+    const edit = setKey(text, ["fleet"], "apply", ["mcp"]);
+    expect(edit).toEqual({
+      text: '[fleet]\nbranch = "main"\napply = ["mcp"]\n\n# Every machine.\n[defaults.engine]\ntimer = true\n',
+    });
+  });
 });

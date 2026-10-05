@@ -39,7 +39,7 @@ const run = (home: string, script: string) => {
 describe("installedProbe", () => {
   const bundle = "console.log(JSON.stringify(process.argv.slice(2)))\n";
   const engine = createHash("sha256").update(bundle).digest("hex");
-  const settings = { node: "box" };
+  const settings = { node: "hub" };
 
   it("runs the node's own copy when it is the wanted build", () => {
     const home = mkdtempSync(join(tmpdir(), "t3-fleet-home-"));
@@ -87,7 +87,7 @@ describe("probeRemote", () => {
   let path: string | undefined;
   const observation = (installed: string | null) => ({
     protocol: 5,
-    hostname: "box",
+    hostname: "hub",
     platform: "linux",
     arch: "x64",
     user: "u",
@@ -132,6 +132,7 @@ describe("probeRemote", () => {
       join(dir, "ssh"),
       `#!/bin/bash
 d=${JSON.stringify(dir)}
+printf '%s\n' "$@" >> "$d/args"
 step=$(head -n 1 "$d/plan"); tail -n +2 "$d/plan" > "$d/plan.next"; mv "$d/plan.next" "$d/plan"
 case " $* " in *" -n "*) echo installed >> "$d/log" ;; *) cat > /dev/null; echo bundle >> "$d/log" ;; esac
 [ "$step" = sleep ] && sleep 5
@@ -147,32 +148,40 @@ exit "$step"
     process.env["PATH"] = path;
   });
 
+  it("keeps regular checks' configured SSH host-key policy for both probe paths", async () => {
+    plan([String(NOT_INSTALLED), "0"]);
+    expect((await probe("example-policy"))._tag).toBe("Success");
+    const args = readFileSync(join(dir, "args"), "utf8");
+    expect(args).not.toContain("StrictHostKeyChecking=");
+    expect(args).not.toContain("UpdateHostKeys=");
+  });
+
   it("streams the bundle when the installed copy is not this build, then skips the copy", async () => {
     plan([String(NOT_INSTALLED), "0", "0"]);
-    expect((await probe("box-97"))._tag).toBe("Success");
+    expect((await probe("hub-97"))._tag).toBe("Success");
     expect(calls()).toEqual(["installed", "bundle"]);
-    expect((await probe("box-97"))._tag).toBe("Success");
+    expect((await probe("hub-97"))._tag).toBe("Success");
     expect(calls()).toEqual(["installed", "bundle", "bundle"]);
   });
 
   it("does not ask an unreachable node twice", async () => {
     plan(["255"]);
-    const result = await probe("box-255");
+    const result = await probe("hub-255");
     expect(result._tag).toBe("Failure");
     expect(calls()).toEqual(["installed"]);
   });
 
   it("does not ask a node that timed out twice", async () => {
     plan(["sleep"]);
-    const result = await probe("box-slow");
-    expect(result).toMatchObject({ _tag: "Failure", failure: "no answer from box-slow within 1s" });
+    const result = await probe("hub-slow");
+    expect(result).toMatchObject({ _tag: "Failure", failure: "no answer from hub-slow within 1s" });
     expect(calls()).toEqual(["installed"]);
   }, 15_000);
 
   it("tries the installed copy again once an observation shows the build installed", async () => {
     plan([String(NOT_INSTALLED), "0", "0", "0"], observation("engine-sha"));
-    await probe("box-fixed");
-    await probe("box-fixed");
+    await probe("hub-fixed");
+    await probe("hub-fixed");
     expect(calls()).toEqual(["installed", "bundle", "installed"]);
   });
 });

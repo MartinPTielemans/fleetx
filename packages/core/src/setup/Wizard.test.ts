@@ -104,7 +104,7 @@ describe("the setup wizard's engine", () => {
     const wizard = await engine();
     expect(await run(wizard.state)).toMatchObject({ stage: "fresh", unfinished: null, hub: null });
     expect(
-      await fails(wizard.plan({ ...request, hub: { ssh: "me@box", node: "box", mcp: false } })),
+      await fails(wizard.plan({ ...request, hub: { ssh: "me@hub", node: "hub", mcp: false } })),
     ).toContain("the hub joins through the fleet's repository");
     expect(
       await fails(
@@ -185,39 +185,41 @@ describe("the setup wizard's engine", () => {
     git("push", "-q", "-u", "origin", "main");
     const config = await run(loadConfig);
     const hub = {
-      node: "box",
-      ssh: "me@box",
-      relayUrl: "https://box.tailnet.ts.net:8399",
+      node: "hub",
+      ssh: "me@hub",
+      relayUrl: "https://hub.tailnet.ts.net:8399",
       error: null,
     };
-    const lines = await run(admitHub(config, hub));
+    const lines = await run(admitHub(config, hub, "me@example.com"));
     expect(lines.join("\n")).toContain("committed and pushed");
+    expect(lines.join("\n")).toContain("opens for me@example.com");
     const show = (file: string) =>
       execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
-    expect(show("nodes/box.toml")).toMatch(/roles = \["member", "relay"\]/);
-    expect(show("nodes/box.toml")).toContain('ssh = "me@box"');
-    expect(show("t3-fleet.toml")).toContain('url = "https://box.tailnet.ts.net:8399"');
+    expect(show("nodes/hub.toml")).toMatch(/roles = \["member", "relay"\]/);
+    expect(show("nodes/hub.toml")).toContain('ssh = "me@hub"');
+    expect(show("t3-fleet.toml")).toContain('url = "https://hub.tailnet.ts.net:8399"');
+    expect(show("t3-fleet.toml")).toMatch(/\[ui\]\nallow = \["me@example\.com"\]/);
     expect(await run(readSecrets(repo))).toMatch(/^T3_FLEET_RELAY_TOKEN=[0-9a-f]{64}$/m);
     const mcpOf = () =>
       (parseToml(show("t3-fleet.toml")) as { defaults: { mcp: Record<string, unknown> } }).defaults
         .mcp;
     expect(mcpOf()["hub"]).toBeUndefined();
     expect(mcpOf()["gateway"]).toBeUndefined();
-    expect(await run(admitHub(await run(loadConfig), hub))).toEqual([
-      "box is in the fleet already",
+    expect(await run(admitHub(await run(loadConfig), hub, "someone@example.com"))).toEqual([
+      "hub is in the fleet already",
     ]);
     // Switched on: [defaults.mcp] hub, served at the relay's URL, as docs/topologies.md says.
     const hosted = await run(admitHub(await run(loadConfig), { ...hub, mcp: true }));
-    expect(hosted[0]).toBe("[defaults.mcp] hub in t3-fleet.toml: your MCP servers run on box");
-    expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://box.tailnet.ts.net:8399" });
+    expect(hosted[0]).toBe("[defaults.mcp] hub in t3-fleet.toml: your MCP servers run on hub");
+    expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://hub.tailnet.ts.net:8399" });
     expect(await run(admitHub(await run(loadConfig), { ...hub, mcp: true }))).toEqual([
-      "box is in the fleet already",
+      "hub is in the fleet already",
     ]);
     expect(
       await fails(admitHub(await run(loadConfig), { ...hub, relayUrl: null, mcp: true })),
     ).toContain("no relay URL");
-    expect(ownFilesOnly("box", ["nodes/box.toml", "secrets-proposed/box.env.age"])).toBe(true);
-    expect(ownFilesOnly("box", ["nodes/box.toml", "skills/x/SKILL.md"])).toBe(false);
+    expect(ownFilesOnly("hub", ["nodes/hub.toml", "secrets-proposed/hub.env.age"])).toBe(true);
+    expect(ownFilesOnly("hub", ["nodes/hub.toml", "skills/x/SKILL.md"])).toBe(false);
   });
 
   it("invites with the line `t3-fleet invite` prints, committing the node once", async () => {

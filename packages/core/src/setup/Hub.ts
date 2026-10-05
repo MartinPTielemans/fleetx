@@ -7,8 +7,10 @@
  *
  *   admit    nodes/<hub>.toml (roles member and relay, its ssh destination),
  *            [relay] in t3-fleet.toml, a relay token among the secrets, and
- *            [defaults.mcp] hub and gateway when it hosts the MCP servers;
- *            committed and pushed, so the hub's setup finds itself in the fleet
+ *            [ui] allow with this machine's Tailscale login, so the app the
+ *            hub hosts opens for whoever set it up, and [defaults.mcp] hub
+ *            and gateway when it hosts the MCP servers; committed and
+ *            pushed, so the hub's setup finds itself in the fleet
  *   join     Remote.bringUpHub: T3 Fleet installed there, `t3-fleet setup`
  *            joining the fleet as that node
  *   key      the hub's public key added as a recipient of the secrets, so it
@@ -34,6 +36,7 @@ import { exec } from "../Exec.ts";
 import { commitAndPush, git, out } from "../Git.ts";
 import { randomBytes } from "../hub/Policy.ts";
 import { FLEET_FILE, stateDir } from "../Names.ts";
+import { TAILSCALE_APP } from "../areas/RelayArea.ts";
 import { RELAY_TOKEN } from "../RelayClient.ts";
 import {
   addRecipient,
@@ -107,11 +110,41 @@ const edited = (file: string, text: string, steps: ReadonlyArray<(t: string) => 
     return current;
   });
 
+const TailscaleStatus = Schema.fromJsonString(
+  Schema.Struct({
+    Self: Schema.Struct({ UserID: Schema.Number }),
+    User: Schema.optionalKey(
+      Schema.Record(Schema.String, Schema.Struct({ LoginName: Schema.String })),
+    ),
+  }),
+);
+
+/** The login in `tailscale status --json`'s output; null when it names none. */
+export const loginOfStatus = (json: string) =>
+  Option.match(Schema.decodeUnknownOption(TailscaleStatus)(json), {
+    onNone: () => null,
+    onSome: (s) => s.User?.[String(s.Self.UserID)]?.LoginName ?? null,
+  });
+
+/** The Tailscale login this machine is signed in as; null without Tailscale, or signed out. */
+export const tailscaleLogin = Effect.gen(function* () {
+  for (const command of ["tailscale", TAILSCALE_APP]) {
+    const status = yield* exec({
+      command,
+      args: ["status", "--json", "--peers=false"],
+      timeout: Duration.seconds(10),
+    });
+    if (status.code === 0) return loginOfStatus(status.stdout);
+  }
+  return null;
+});
+
 /**
- * The hub in the repo: its node file, [relay], the relay token. Only what is
- * missing is written; committed and pushed in one commit.
+ * The hub in the repo: its node file, [relay], the relay token, and `owner`
+ * (this machine's Tailscale login) as the one login the app on the hub opens
+ * for. Only what is missing is written; committed and pushed in one commit.
  */
-export const admitHub = (config: Config, hub: HubRequest) =>
+export const admitHub = (config: Config, hub: HubRequest, owner: string | null = null) =>
   underSyncLock(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -159,6 +192,16 @@ export const admitHub = (config: Config, hub: HubRequest) =>
         fleetAfter = hosted;
       }
       if (fleetAfter !== fleetBefore) yield* fs.writeFileString(fleetFile, fleetAfter);
+      if (owner !== null) {
+        const text = yield* fs.readFileString(fleetFile);
+        if (config.settings.ui?.allow === undefined && !/^\[ui\]/m.test(text)) {
+          const after = yield* edited(FLEET_FILE, text, [
+            (t) => setKey(t, ["ui"], "allow", [owner]),
+          ]);
+          yield* fs.writeFileString(fleetFile, after);
+          lines.push(`[ui] in ${FLEET_FILE}: the app on ${hub.node} opens for ${owner}`);
+        }
+      }
       const secrets = yield* readSecrets(repo);
       if (!varNames(secrets).includes(RELAY_TOKEN)) {
         yield* writeSecrets(repo, setVar(secrets, RELAY_TOKEN, hex(randomBytes(32))));
@@ -214,7 +257,8 @@ export const bringUp = (
     const config = yield* loadConfig.pipe(Effect.mapError(message));
     const [admit, join, key, review, sync] = hubStepTitles(hub);
     yield* step(admit ?? "");
-    for (const line of yield* admitHub(config, hub).pipe(Effect.mapError(message)))
+    const owner = yield* tailscaleLogin;
+    for (const line of yield* admitHub(config, hub, owner).pipe(Effect.mapError(message)))
       yield* step(`✓ ${line}`);
 
     yield* step(join ?? "");
