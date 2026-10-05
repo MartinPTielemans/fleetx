@@ -41,6 +41,8 @@ export function JobsTray() {
     (j) =>
       !watched.has(j.id) &&
       !dismissed.has(j.id) &&
+      // Setup's own screens showed how it went.
+      !((j.kind === "setup" || j.kind === "setup-hub") && finished(j)) &&
       (!finished(j) || (j.finishedAt !== null && j.finishedAt >= loadedAt - RECENT_MS)),
   );
   if (shown.length === 0 && details === null) return null;

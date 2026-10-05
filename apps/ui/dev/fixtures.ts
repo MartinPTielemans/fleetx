@@ -20,6 +20,10 @@ import type {
   UiStatus,
 } from "@t3-fleet/core/Api";
 
+import { followSetup, setupJobs, setupResponse, setupSession } from "./setup-fixtures.ts";
+
+export { followSetup };
+
 const now = Date.now();
 const min = 60_000;
 
@@ -455,12 +459,20 @@ const job = (
 /** What the event stream sends first: where things stand. */
 export const fixtureEvents = `: connected\n\nevent: check\ndata: ${JSON.stringify(status)}\n\n`;
 
+/**
+ * The answer to one request. `page` is the query string of the page asking
+ * (its Referer): ?setup=… makes this machine one setup has not finished on;
+ * see setup-fixtures.ts.
+ */
 export const fixtureResponse = (
   method: string,
   path: string,
   body = "",
-): { status: number; body: string } | "events" => {
+  page = new URLSearchParams(),
+): { status: number; body: string; delay?: number } | "events" => {
   if (path === "/api/events") return "events";
+  const setup = setupResponse(method, path, body, page);
+  if (setup !== null) return setup;
   if (method === "POST") {
     if (path === "/api/session") return json({ token: "fixture" });
     if (path === "/api/fixes/plan") {
@@ -504,9 +516,9 @@ export const fixtureResponse = (
   }
   switch (path) {
     case "/api/session":
-      return json(session);
+      return json(setupSession(page, session) ?? session);
     case "/api/jobs":
-      return json([]);
+      return json(setupJobs(page));
     case "/api/status":
       return json(status);
     case "/api/proposals":
