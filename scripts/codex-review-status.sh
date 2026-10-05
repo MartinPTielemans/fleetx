@@ -56,8 +56,18 @@ post() {
     -f target_url="https://github.com/$repo/pull/$pr"
 }
 
+# When this gate first posted a status on commit $1, in epoch seconds; empty if never.
+seen_at() {
+  api --paginate --slurp "repos/$repo/commits/$1/statuses" | jq -r '
+    add // []
+    | map(select(.context == "codex-review" and .creator.login == "github-actions[bot]"))
+    | map(.created_at | fromdateiso8601) | min // empty'
+}
+
+# Only a commit seen for the first time: a pull request reopened on a head it
+# already had keeps that head's record and status.
 if [[ $mode == --seen ]]; then
-  post "$4" pending "waiting for Codex to review ${4:0:7}"
+  [[ -z $(seen_at "$4") ]] && post "$4" pending "waiting for Codex to review ${4:0:7}"
   exit 0
 fi
 
@@ -74,12 +84,7 @@ summary=$(
 )
 
 # When this gate first saw the head commit, in epoch seconds; empty if it has not.
-first_seen=$(
-  api --paginate --slurp "repos/$repo/commits/$head/statuses" | jq -r '
-    add // []
-    | map(select(.context == "codex-review" and .creator.login == "github-actions[bot]"))
-    | map(.created_at | fromdateiso8601) | min // empty'
-)
+first_seen=$(seen_at "$head")
 # "2026-10-05T22:43:12.129609Z" in a row's <relative-time>, in epoch seconds.
 when() {
   grep -o 'datetime="[^"]*"' <<<"$1" | head -n 1 | cut -d'"' -f2 |
