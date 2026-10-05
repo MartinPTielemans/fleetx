@@ -41,7 +41,7 @@ const relayNode = (url: string) => {
     env: { HOME: home, PATH: bin, T3_FLEET_TAILSCALE_APP: join(home, "Tailscale.app/Tailscale") },
     engine: null,
     engineBuild: null,
-    node: "box",
+    node: "hub",
     roles: ["relay"],
     relay: { url, port: 8399 },
   };
@@ -49,7 +49,7 @@ const relayNode = (url: string) => {
     const observed = await Effect.runPromise(
       RelayArea.observe(null, ctx).pipe(Effect.provide(services)),
     );
-    return RelayArea.diagnose({ node: "box", desired: null, observed, fleet: [], authority: null });
+    return RelayArea.diagnose({ node: "hub", desired: null, observed, fleet: [], authority: null });
   };
   const tool = (name: string, script: string) => {
     writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
@@ -111,7 +111,7 @@ describe("the relay before its service", () => {
 describe("a tailnet name", () => {
   it("is a MagicDNS name or a Tailscale address", () => {
     expect(onTailnet("https://server.tailnet.ts.net")).toBe(true);
-    expect(onTailnet("http://box:8399")).toBe(true);
+    expect(onTailnet("http://hub:8399")).toBe(true);
     expect(onTailnet("http://100.101.2.3:8399")).toBe(true);
     expect(onTailnet(null)).toBe(true);
     expect(onTailnet("https://relay.example.com")).toBe(false);
