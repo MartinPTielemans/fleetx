@@ -139,7 +139,7 @@ const pinCommand = (agent: "claude" | "codex", version: string) =>
  * (there, or in place of it). Nix keeps a Nix copy's version, so T3 Fleet
  * never installs or upgrades over it: that would fight the Nix configuration.
  */
-const keptCopy = (agent: AgentObservation) => {
+export const keptCopy = (agent: AgentObservation) => {
   const nix = agent.nix;
   return nix !== undefined && (agent.managedVersion === null || nix.path === agent.managedPath)
     ? { path: nix.path, version: nix.version, fromNix: true, label: `${agent.name} from Nix` }
@@ -174,10 +174,9 @@ const agentFindings = (
     });
     return out;
   }
-  // A Nix copy whose version could not be read: nothing to compare.
+  // A Nix copy whose version could not be read has nothing to compare; its path still counts.
   const version = kept.version;
-  if (version === null) return out;
-  if (policy.kind === "pin" && version !== policy.version) {
+  if (version !== null && policy.kind === "pin" && version !== policy.version) {
     out.push({
       node,
       key: `${agent.name}-off-pin`,
@@ -191,7 +190,7 @@ const agentFindings = (
   }
   const newest = latest.agents[agent.name];
   const failed = latest.failed?.[agent.name];
-  if (policy.kind === "track" && newest === null && failed !== undefined) {
+  if (version !== null && policy.kind === "track" && newest === null && failed !== undefined) {
     out.push({
       node,
       severity: "info",
@@ -201,7 +200,7 @@ const agentFindings = (
       detail: failed,
     });
   }
-  if (policy.kind === "track" && newest !== null && newest !== version) {
+  if (version !== null && policy.kind === "track" && newest !== null && newest !== version) {
     out.push({
       node,
       // nixpkgs trails the agents' releases by design; a Nix copy behind is a note, not a problem.
@@ -271,8 +270,12 @@ const providerFindings = (
       !viaLauncher(proxy, p.instanceId, p.resolved) &&
       !viaModels &&
       p.resolved !== kept.path &&
-      // Another profile's link to the same Nix-installed agent (/etc/profiles/per-user, say).
-      !(kept.fromNix && p.resolvedFromNix === true)
+      // Another profile's link to the Nix-installed agent (/etc/profiles/per-user, say), at the same version.
+      !(
+        kept.fromNix &&
+        p.resolvedFromNix === true &&
+        (p.launch.version === null || kept.version === null || p.launch.version === kept.version)
+      )
     ) {
       out.push({
         node,

@@ -5,6 +5,7 @@ import { diagnose, type Finding } from "./Diagnose.ts";
 import type { Latest } from "./Latest.ts";
 import type { MachineObservation, ProviderObservation } from "./Observation.ts";
 import { providerPlans } from "./Probe.ts";
+import { renderStatus } from "./Render.ts";
 import { T3_DRIVERS } from "./T3Settings.ts";
 import type { NodeResult } from "./Remote.ts";
 
@@ -441,6 +442,7 @@ describe("diagnose", () => {
           binaryPath: "claude",
           resolved: "/etc/profiles/per-user/u/bin/claude",
           resolvedFromNix: true,
+          launch: { ok: true, version: "2.1.288", detail: "starts" },
         }),
         provider({ instanceId: "codex" }),
       ]);
@@ -496,6 +498,32 @@ describe("diagnose", () => {
       expect(titles(diagnose([ok("nixos", shadowed)], latest, settings), "warn")).toEqual([
         "nixos: your shell runs ~/.npm-global/bin/claude, not the claude from Nix",
         "nixos: T3 runs claude from ~/.npm-global/bin/claude, not the claude from Nix",
+      ]);
+    });
+
+    it("still flags T3 running another Nix profile's copy at a different version", () => {
+      const stale = fromNix({}, [
+        provider({
+          instanceId: "claudeAgent",
+          binaryPath: "claude",
+          resolved: "/etc/profiles/per-user/u/bin/claude",
+          resolvedFromNix: true,
+          launch: { ok: true, version: "2.1.270", detail: "starts" },
+        }),
+        provider({ instanceId: "codex" }),
+      ]);
+      expect(titles(diagnose([ok("nixos", stale)], latest, settings), "warn")).toEqual([
+        "nixos: T3 runs claude from /etc/profiles/per-user/u/bin/claude, not the claude from Nix",
+      ]);
+    });
+
+    it("checks PATH even when the Nix copy's version is unreadable", () => {
+      const unreadable = fromNix({
+        onPath: ["/home/u/.npm-global/bin/claude", "/home/u/.nix-profile/bin/claude"],
+        nix: { path: "/home/u/.nix-profile/bin/claude", version: null },
+      });
+      expect(titles(diagnose([ok("nixos", unreadable)], latest, settings))).toEqual([
+        "nixos: your shell runs ~/.npm-global/bin/claude, not the claude from Nix",
       ]);
     });
 
@@ -772,5 +800,25 @@ describe("t3-access", () => {
     expect(tried?.fix?.safe).toBe(false);
     expect(tried?.detail).toContain("tried to renew it 2 hours ago");
     expect(access("expiring", now + 86_400_000, "", now - 25 * 3_600_000)?.fix?.safe).toBe(true);
+  });
+});
+
+describe("status table", () => {
+  it("shows the version of an agent Nix installed, not missing", () => {
+    const nix = machine({
+      agents: [
+        {
+          name: "claude",
+          managedPath: "/home/u/.local/bin/claude",
+          managedVersion: null,
+          onPath: ["/home/u/.nix-profile/bin/claude"],
+          nix: { path: "/home/u/.nix-profile/bin/claude", version: "2.1.288" },
+        },
+        machine().agents[1]!,
+      ],
+    });
+    const table = renderStatus([ok("nixos", nix)], [], latest, { verbose: false, elapsedMs: 1 });
+    expect(table).toContain("2.1.288");
+    expect(table).not.toContain("missing");
   });
 });

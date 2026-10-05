@@ -224,19 +224,6 @@ export const t3CliFromCommandLine = (
   return null;
 };
 
-/**
- * Whether the server on this command line comes from the Nix store: its own
- * `t3` runtime and the desktop app update themselves; a Nix-built T3 is updated
- * through Nix.
- */
-export const t3FromNix = (commandLine: string) => {
-  if (t3CliFromCommandLine(commandLine) !== null) return false;
-  const [program = "", script = ""] = commandLine.trim().split(/\s+/);
-  // A node-run server is the script it runs, wherever node comes from.
-  const t3 = /(?:^|\/)(?:node|bun)$/.test(program) ? script : program;
-  return t3.startsWith("/nix/store/");
-};
-
 const Pairing = Schema.Struct({ credential: Schema.String });
 const TokenResult = Schema.Struct({
   access_token: Schema.String,

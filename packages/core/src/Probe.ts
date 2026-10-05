@@ -42,8 +42,8 @@ import {
   RENEW_WITHIN_MS,
   t3AccessAttemptPath,
   t3CliFromCommandLine,
-  t3FromNix,
 } from "./T3Access.ts";
+import { inNixStore, t3FromNix } from "./Nix.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
 import { stateDir } from "./Names.ts";
@@ -92,14 +92,6 @@ export const resolveAll = (name: string, pathVar: string | undefined) =>
     return hits;
   });
 
-/** Whether `file` is, or links to, something in the Nix store: Nix keeps its version, not T3 Fleet. */
-const inNixStore = (file: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const real = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file));
-    return real.startsWith("/nix/store/");
-  });
-
 // ---- agents -------------------------------------------------------------
 
 const observeAgent = (name: "claude" | "codex", home: string, loginPath: string | undefined) =>
@@ -119,7 +111,7 @@ const observeAgent = (name: "claude" | "codex", home: string, loginPath: string 
     const nixPath =
       managed && (yield* inNixStore(managedPath))
         ? managedPath
-        : yield* Effect.findFirst(onPath, inNixStore).pipe(Effect.map(Option.getOrNull));
+        : yield* Effect.findFirst(onPath, (p) => inNixStore(p)).pipe(Effect.map(Option.getOrNull));
     const nix =
       nixPath === null
         ? undefined
@@ -211,7 +203,7 @@ export const runtimeFromCommandLine = (pid: number) =>
       binary: match?.[1] ?? null,
       version: match?.[2] ?? null,
       cli: t3CliFromCommandLine(ps.stdout) !== null,
-      nix: t3FromNix(ps.stdout),
+      nix: yield* t3FromNix(ps.stdout),
     };
   });
 

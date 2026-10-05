@@ -5,7 +5,7 @@
  */
 import * as DateTime from "effect/DateTime";
 
-import { providerLabel, shortT3, type Finding, type Severity } from "./Diagnose.ts";
+import { keptCopy, providerLabel, shortT3, type Finding, type Severity } from "./Diagnose.ts";
 import type { Latest } from "./Latest.ts";
 import { releasesBehind } from "./Latest.ts";
 import type { Changes } from "./Memory.ts";
@@ -75,11 +75,13 @@ const row = (
 
   const agent = (name: "claude" | "codex") => {
     const a = obs.agents.find((x) => x.name === name);
-    if (a === undefined || a.managedVersion === null) return `${MARK.error} ${c.red("missing")}`;
+    const kept = a === undefined ? undefined : keptCopy(a);
+    if (kept === undefined || (kept.version === null && !kept.fromNix))
+      return `${MARK.error} ${c.red("missing")}`;
     const flagged = mine.filter(
       (f) => f.area === "agents" && f.severity !== "info" && f.title.includes(name),
     );
-    return `${MARK[worst(flagged)]} ${a.managedVersion}`;
+    return `${MARK[worst(flagged)]} ${kept.version ?? "Nix"}`;
   };
 
   const providers = obs.t3.providers

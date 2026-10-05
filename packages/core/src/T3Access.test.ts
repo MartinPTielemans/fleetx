@@ -11,7 +11,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mintAccess, t3AccessAttemptPath, t3AccessPath, t3FromNix } from "./T3Access.ts";
+import { mintAccess, t3AccessAttemptPath, t3AccessPath } from "./T3Access.ts";
 
 /** T3's CLI and token endpoint, faked: the endpoint grants `expiresIn` seconds. */
 const mint = (expiresIn: number) => {
@@ -58,23 +58,5 @@ describe("mintAccess", () => {
       "valid for only 48 hours",
     );
     expect(readFileSync(t3AccessAttemptPath(home), "utf8").trim()).toBe("1000");
-  });
-});
-
-describe("t3FromNix", () => {
-  it("is a server run from the Nix store, not T3's own runtime or the desktop app", () => {
-    expect(t3FromNix("/nix/store/abc-t3code-0.0.46/bin/t3 serve")).toBe(true);
-    expect(
-      t3FromNix(
-        "/nix/store/abc-nodejs-24/bin/node /nix/store/def-t3code/lib/t3code/apps/server/dist/bin.mjs",
-      ),
-    ).toBe(true);
-    expect(t3FromNix("/home/u/.t3/runtime/versions/0.0.46-nightly.20261003.2632/t3 serve")).toBe(
-      false,
-    );
-    expect(t3FromNix("/home/u/.local/bin/t3 serve --data /nix/store/x")).toBe(false);
-    expect(t3FromNix("/nix/store/abc-nodejs-24/bin/node /home/u/.local/lib/t3/bin.mjs")).toBe(
-      false,
-    );
   });
 });
