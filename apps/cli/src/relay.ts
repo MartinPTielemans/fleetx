@@ -75,6 +75,7 @@ const serve = Command.make("serve").pipe(
       );
       const routes = relayLayer({
         token,
+        node: config.self,
         repo: config.repo,
         branch: config.branch,
         hub: {

@@ -16,6 +16,7 @@ import { runFixes } from "@t3-fleet/core/Fix";
 import { loadConfig, NOT_SET_UP, ProbeSettings } from "@t3-fleet/core/Config";
 import { FleetToolkit, fleetHandlers } from "@t3-fleet/core/Mcp";
 import { compareWithLast } from "@t3-fleet/core/Memory";
+import { notificationStatus, testNotification } from "@t3-fleet/core/Notify";
 import { MachineObservation } from "@t3-fleet/core/Observation";
 import { probeMachine } from "@t3-fleet/core/Probe";
 import {
@@ -115,7 +116,9 @@ const statusCommand = Command.make("status", {
   Command.withHandler(({ json, verbose, all, changes, node }) =>
     Effect.gen(function* () {
       if (all) {
-        yield* Console.log(yield* renderFleetFromStates(yield* loadConfig, verbose));
+        const config = yield* loadConfig;
+        yield* Console.log(yield* renderFleetFromStates(config, verbose));
+        for (const line of yield* notificationStatus(config)) yield* Console.log(line);
         return;
       }
       const { config, bundle, shown } = yield* prepare(node);
@@ -126,8 +129,9 @@ const statusCommand = Command.make("status", {
         yield* Console.log(json ? yield* encodeJson(diff) : renderChanges(diff));
         return;
       }
+      const notifications = yield* notificationStatus(config);
       if (json) {
-        yield* Console.log(yield* encodeJson(report));
+        yield* Console.log(yield* encodeJson({ ...report, notifications }));
       } else {
         yield* Console.log(
           renderStatus(report.results, report.findings, report.latest, {
@@ -135,6 +139,7 @@ const statusCommand = Command.make("status", {
             elapsedMs: report.elapsedMs,
           }),
         );
+        for (const line of notifications) yield* Console.log(line);
       }
     }).pipe(reportUserErrors),
   ),
@@ -229,6 +234,7 @@ const doctorCommand = Command.make("doctor", { node: nodeFlag }).pipe(
       yield* Console.log(
         renderFindings("t3-fleet doctor", report.results.length, findings, report.elapsedMs),
       );
+      for (const line of yield* notificationStatus(config)) yield* Console.log(line);
       if (findings.some((f) => f.severity === "error")) process.exitCode = 1;
     }).pipe(reportUserErrors),
   ),
@@ -316,6 +322,24 @@ const mcpServeCommand = Command.make("mcp").pipe(
   ),
 );
 
+const notifyCommand = Command.make("notify").pipe(
+  Command.withDescription("Deterministic OS and ntfy notifications."),
+  Command.withSubcommands([
+    Command.make("test").pipe(
+      Command.withDescription("Send one test through this node's configured notification paths."),
+      Command.withHandler(() =>
+        Effect.gen(function* () {
+          const config = yield* loadConfig;
+          yield* Console.log("Sending a test notification through configured desktop/ntfy paths.");
+          const result = yield* testNotification(config);
+          for (const line of result.lines) yield* Console.log(line);
+          if (result.failed) process.exitCode = 1;
+        }).pipe(reportUserErrors),
+      ),
+    ),
+  ]),
+);
+
 const cli = Command.make("t3-fleet").pipe(
   Command.withDescription("Keep every T3 Code environment equivalent."),
   Command.withSubcommands([
@@ -331,6 +355,7 @@ const cli = Command.make("t3-fleet").pipe(
     approveCommand,
     rejectCommand,
     alertsCommand,
+    notifyCommand,
     listenCommand,
     relayCommand,
     modelsCommand,

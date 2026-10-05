@@ -46,7 +46,7 @@ Ticked items are done and in `main`.
 - [x] Timers (launchd, systemd user and system units)
 - [x] `review`, `approve`, `reject`; `[fleet] auto_approve`
 - [x] `status --all` from published state, without ssh
-- [x] Alerts on health transitions, delivered to a T3 thread (`fleet_alerts`, scheduled)
+- [x] Alerts on health transitions, delivered as OS notifications and ntfy push; `fleet_alerts` is an optional agent read path
 - [x] `setup`, `invite`, `leave` (`setup` replaced `init` and `join` in 0.9.0)
 
 ## Phase 3: remaining areas

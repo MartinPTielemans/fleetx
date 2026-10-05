@@ -15,6 +15,8 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { Config } from "./Config.ts";
 import { localSecretsPath } from "./Secrets.ts";
+import { loadConfigFrom } from "./Config.ts";
+import { deliverAlerts } from "./Notify.ts";
 import { NodeState } from "./State.ts";
 
 export const RELAY_TOKEN = "T3_FLEET_RELAY_TOKEN";
@@ -85,6 +87,15 @@ export const listen = <E, R>(
       );
       if (response.status !== 200) return yield* Effect.fail(`relay answered ${response.status}`);
       yield* log(`connected to ${url}`);
+      const receive = (catchUp: boolean) =>
+        Effect.gen(function* () {
+          const fresh = yield* loadConfigFrom(config.repo, config.self);
+          const states = yield* fleetFromRelay(fresh);
+          if (states !== null)
+            for (const line of yield* deliverAlerts(fresh, states, "listen", { catchUp }))
+              yield* log(line);
+        }).pipe(Effect.ignore);
+      yield* receive(true);
       let buffer = "";
       yield* response.stream.pipe(
         Stream.decodeText(),
@@ -100,6 +111,7 @@ export const listen = <E, R>(
               const rev = /"rev":"([0-9a-f]+)"/.exec(frame)?.[1] ?? "";
               if (id !== undefined) lastId = Number(id);
               if (type === "pull") yield* onPull(rev);
+              if (type === "state") yield* receive(false);
             }
           }),
         ),

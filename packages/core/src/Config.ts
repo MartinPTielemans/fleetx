@@ -87,7 +87,13 @@ const RelaySection = Schema.Struct({
   port: Schema.optionalKey(Schema.Number),
 });
 
+const NotifySection = Schema.Struct({
+  desktop: Schema.optionalKey(Schema.Array(Schema.String)),
+  ntfy: Schema.optionalKey(Schema.String),
+});
+
 const FleetFile = Schema.Struct({
+  notify: Schema.optionalKey(NotifySection),
   fleet: Schema.optionalKey(FleetSection),
   /** Plugin areas, relative to the config repo (see Plugins.ts). */
   plugins: Schema.optionalKey(

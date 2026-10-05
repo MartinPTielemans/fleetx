@@ -427,3 +427,58 @@ A plugin exports `(kit) => area`; see `examples/plugins/brew.mjs`. A plugin
 that fails to load, or an area whose observation or diagnosis fails, is
 reported as a finding (`plugin-failed-<path>`, `<area>-unreadable`); every
 other area is still checked.
+
+## Notifications
+
+Health transitions recorded by sync are delivered deterministically. No scheduled
+T3 thread is required. Configure the fleet-wide paths in `t3-fleet.toml`:
+
+```toml
+[notify]
+desktop = ["laptop"]
+ntfy = "T3_FLEET_NTFY_URL"
+```
+
+Both keys are optional. `desktop` lists nodes that display OS notifications.
+`ntfy` names a secret containing the topic URL. Set it through `t3-fleet secrets
+set` on an authority so it lives in the encrypted secrets file. The sender reads
+the installed decrypted file each time; the URL never appears in diagnostics.
+
+With a relay, its service delivers pushes for the fleet. Selected desktop nodes
+receive fleet alerts through `t3-fleet listen`, including state events and
+reconnects. Without a relay, each node's sync delivers its own alerts. Members
+never take over pushes when a configured relay is unavailable; the relay catches
+up from published git state when it returns. It also checks git every 30 seconds
+for reports that did not arrive over HTTP.
+
+macOS uses `osascript`; Linux uses `notify-send` in a graphical session. A missing
+notifier or graphical session skips desktop delivery and appears as info in
+`doctor` and `status`. Command arguments carry notification text as data. ntfy
+uses an HTTP POST, a five-second timeout, and up to three attempts with exponential
+backoff starting at 250 milliseconds for transport failures, HTTP 429 and 5xx.
+Problems have high priority and a warning tag; recoveries have low priority and a
+check-mark tag. Failed sends remain eligible for the next delivery pass.
+
+Each machine persists a separate notification ledger under
+`~/.local/state/t3-fleet/`. A dead-owner-aware process lock serializes senders.
+Per-channel ledgers retain SHA-256 alert identities derived from timestamp, node,
+kind and message. Resyncs, concurrent listeners and restarts cannot replay an
+acknowledged alert. Identity hashes are retained for the fleet's lifetime, so the
+ledger grows with delivered alerts; clock corrections cannot hide a new alert.
+Reconnects send at most one summary per configured path. Alerts older than two
+minutes are summarized too, so a resumed machine cannot burst its old backlog.
+This summary covers the bounded alert history each node still publishes.
+
+A claim is persisted before sending. If the sender crashes, that claim is kept
+and `status` reports an unconfirmed receipt rather than sending the alert again.
+Strict transactional exactly-once delivery is unavailable with OS notifications
+and ntfy: a crash before acceptance may lose a claimed notification, and a retry
+after an HTTP timeout may repeat a push the server accepted before the connection
+failed. The ledger prevents replay duplicates but cannot resolve an ambiguous
+remote receipt. Do not delete the ledger to retry an unconfirmed receipt unless
+you accept replaying retained alerts.
+
+`t3-fleet notify test` sends an explicit test through the node's configured paths.
+`fleet_alerts`, the CLI alerts command and the UI keep their own existing read
+behavior. Asking a T3 thread for alerts, including on an optional schedule, is
+still available and does not control notification delivery.

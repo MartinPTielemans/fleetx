@@ -118,9 +118,11 @@ T3 Fleet  3 environments  1 warning  (3.2s)
 
 `t3-fleet fix` applies fixes the same way the app does. See [the CLI](docs/cli.md)
 for every command, model proxies, accepting deliberate differences, and
-scheduled checks.
+optional checks from a thread.
 
 ## How it works
+
+Alerts arrive as notifications; no agent needed.
 
 - **Your setup lives in your own private repository**: one settings file
   for the fleet and one file per machine. T3 Fleet itself knows nothing about
