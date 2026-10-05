@@ -302,7 +302,15 @@ t3-fleet mcp login | logout | restart <name>
 t3-fleet mcp calls [--server x]      recent calls: client, method, tool, time, outcome
 t3-fleet mcp token create <client> [--server x]   a gateway token for one client
 t3-fleet mcp token list | revoke <client>
+t3-fleet mcp tools <name>            the tools a server offers
+t3-fleet mcp call <name> <tool> [--args JSON | --args-file FILE]
 ```
+
+`tools` and `call` reach a server the way this machine's agents do (the
+gateway with this node's token, or a direct server with its own), in a
+session of their own. They are for an agent whose session cannot reload its
+MCP registrations, and for scripts. `call` prints the tool's text and fails
+when the tool reports an error; `--json` prints the whole result.
 
 The call log never holds arguments or results. Denied tools are hidden from
 `tools/list` and refused with a JSON-RPC error. A server receives only the

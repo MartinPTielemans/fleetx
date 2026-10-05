@@ -8,22 +8,28 @@
  *   calls [--server] [--limit]    the tool-call log (never arguments or results)
  *   token create CLIENT [--server …]   a gateway token for one client, shown once
  *   token list | revoke CLIENT
+ *   tools NAME                    the tools a server offers, as this node's clients reach it
+ *   call NAME TOOL [--args JSON | --args-file FILE]   call one tool and print its result
  *
  * Every command goes through the relay (`[relay] url`, the relay token); the
  * hub itself holds the logins, so nothing here touches the local machine.
+ * `tools` and `call` are the exception: they connect the way this node's
+ * agents do, for an agent session that cannot reload its MCP registrations.
  */
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import type { HubServer } from "@t3-fleet/core/Api";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
 import { clientTokenEnv, expectOk, hubRequest } from "@t3-fleet/core/hub/HubClient";
-import { toJson } from "@t3-fleet/core/hub/JsonRpc";
+import { parseJson, toJson } from "@t3-fleet/core/hub/JsonRpc";
+import { request, targetFor } from "@t3-fleet/core/hub/McpClient";
 import {
   decodeCalls,
   decodeCreated,
@@ -347,6 +353,100 @@ const tokenCommand = Command.make("token").pipe(
   Command.withSubcommands([tokenCreate, tokenList, tokenRevoke]),
 );
 
+/** A server's own JSON, for people to read. */
+const pretty = (value: unknown) => JSON.stringify(value, null, 2);
+
+const isRecord = (u: unknown): u is Record<string, unknown> =>
+  typeof u === "object" && u !== null && !Array.isArray(u);
+
+/** A tool's description, first line only: some run to pages. */
+const firstLine = (text: unknown) =>
+  typeof text === "string" ? (text.trim().split("\n")[0] ?? "").trim() : "";
+
+const toolsCommand = Command.make("tools", {
+  name: nameArg,
+  json: Flag.Boolean("json").pipe(
+    Flag.withDescription("Print every tool with its input schema, as JSON."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription(
+    "List the tools an MCP server offers, reached the way this machine's agents reach it.",
+  ),
+  Command.withHandler(({ name, json }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const target = yield* targetFor(config, name);
+      const result = yield* request(target, "tools/list", {});
+      const tools =
+        isRecord(result) && Array.isArray(result["tools"]) ? result["tools"].filter(isRecord) : [];
+      if (json) return yield* Console.log(pretty(tools));
+      if (tools.length === 0) return yield* Console.log(`${name} offers no tools`);
+      const width = Math.max(...tools.map((t) => String(t["name"]).length));
+      for (const t of tools)
+        yield* Console.log(
+          `${String(t["name"]).padEnd(width)}  ${firstLine(t["description"])}`.trimEnd(),
+        );
+    }).pipe(reportUserErrors),
+  ),
+);
+
+const callCommand = Command.make("call", {
+  name: nameArg,
+  tool: Argument.String("tool").pipe(
+    Argument.withDescription("The tool to call (see t3-fleet mcp tools NAME)."),
+  ),
+  args: Flag.String("args").pipe(
+    Flag.withDescription("The tool's arguments, a JSON object."),
+    Flag.optional,
+  ),
+  argsFile: Flag.String("args-file").pipe(
+    Flag.withDescription("Read the arguments from this JSON file instead."),
+    Flag.optional,
+  ),
+  json: Flag.Boolean("json").pipe(
+    Flag.withDescription("Print the whole result as JSON, not just its text."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Call one tool on an MCP server and print its result; fails when the tool reports an error.",
+  ),
+  Command.withHandler(({ name, tool, args, argsFile, json }) =>
+    Effect.gen(function* () {
+      if (args._tag === "Some" && argsFile._tag === "Some")
+        return yield* Effect.fail("give --args or --args-file, not both");
+      const text =
+        argsFile._tag === "Some"
+          ? yield* (yield* FileSystem.FileSystem)
+              .readFileString(argsFile.value)
+              .pipe(Effect.mapError(() => `cannot read ${argsFile.value}`))
+          : args._tag === "Some"
+            ? args.value
+            : "{}";
+      const parsed = parseJson(text);
+      if (!isRecord(parsed)) return yield* Effect.fail("the arguments must be a JSON object");
+      const config = yield* loadConfig;
+      const target = yield* targetFor(config, name);
+      const result = yield* request(target, "tools/call", { name: tool, arguments: parsed });
+      if (json) yield* Console.log(pretty(result));
+      else {
+        const content =
+          isRecord(result) && Array.isArray(result["content"]) ? result["content"] : [];
+        const texts = content
+          .filter(isRecord)
+          .map((c) =>
+            c["type"] === "text" && typeof c["text"] === "string" ? c["text"] : toJson(c),
+          );
+        const structured = isRecord(result) ? result["structuredContent"] : undefined;
+        yield* Console.log(texts.length > 0 ? texts.join("\n") : pretty(structured ?? result));
+      }
+      if (isRecord(result) && result["isError"] === true)
+        return yield* Effect.fail(`${tool} on ${name} reported an error`);
+    }).pipe(reportUserErrors),
+  ),
+);
+
 /** The hub's commands, registered under `t3-fleet mcp`. */
 export const hubCommands = [
   serversCommand,
@@ -359,4 +459,6 @@ export const hubCommands = [
   ),
   callsCommand,
   tokenCommand,
+  toolsCommand,
+  callCommand,
 ] as const;
