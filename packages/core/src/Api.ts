@@ -402,6 +402,8 @@ export const UiJobKind = Schema.Literals([
   "skills-add",
   "skills-update",
   "skills-remove",
+  "setup",
+  "setup-hub",
 ]);
 export type UiJobKind = typeof UiJobKind.Type;
 
