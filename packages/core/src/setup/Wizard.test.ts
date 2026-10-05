@@ -157,15 +157,17 @@ describe("the setup wizard's engine", () => {
       relayUrl: "https://box.tailnet.ts.net:8399",
       error: null,
     };
-    const lines = await run(admitHub(config, hub));
+    const lines = await run(admitHub(config, hub, "me@example.com"));
     expect(lines.join("\n")).toContain("committed and pushed");
+    expect(lines.join("\n")).toContain("opens for me@example.com");
     const show = (file: string) =>
       execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
     expect(show("nodes/box.toml")).toMatch(/roles = \["member", "relay"\]/);
     expect(show("nodes/box.toml")).toContain('ssh = "me@box"');
     expect(show("t3-fleet.toml")).toContain('url = "https://box.tailnet.ts.net:8399"');
+    expect(show("t3-fleet.toml")).toMatch(/\[ui\]\nallow = \["me@example\.com"\]/);
     expect(await run(readSecrets(repo))).toMatch(/^T3_FLEET_RELAY_TOKEN=[0-9a-f]{64}$/m);
-    expect(await run(admitHub(await run(loadConfig), hub))).toEqual([
+    expect(await run(admitHub(await run(loadConfig), hub, "someone@example.com"))).toEqual([
       "box is in the fleet already",
     ]);
     expect(ownFilesOnly("box", ["nodes/box.toml", "secrets-proposed/box.env.age"])).toBe(true);
