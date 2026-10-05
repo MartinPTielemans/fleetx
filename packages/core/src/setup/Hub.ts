@@ -748,8 +748,8 @@ export const bringUp = (
       const taken = yield* ssh(hub.ssh, "t3-fleet sync --wait", 900);
       yield* step(
         taken.code === 0
-          ? `✓ ${hub.node} has it; its relay restarts within a minute to host them`
-          : `${hub.node} takes it on its next sync (${lastLine(taken)}); its relay restarts then`,
+          ? `✓ ${hub.node} has it; its relay serves them within a couple of minutes`
+          : `${hub.node} takes it on its next sync (${lastLine(taken)}); its relay serves them then`,
       );
     }
 

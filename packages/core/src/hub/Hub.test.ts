@@ -448,6 +448,34 @@ describe("hub OAuth validation", () => {
 });
 
 describe("hub gateway", () => {
+  it("follows the hub being turned on while it runs: its hosted servers start on the next reload", async () => {
+    const dir = fixture({
+      local: { kind: "hosted-stdio", command: process.execPath, args: [stdioServer] },
+    });
+    let enabled = false;
+    await run(
+      Effect.gen(function* () {
+        const { hub } = yield* startHub(
+          dir,
+          {},
+          {
+            enabled: false,
+            checkEvery: Duration.millis(100),
+            serving: Effect.sync(() => ({ enabled, ports: {} })),
+          },
+        );
+        expect(yield* hub.servers).toEqual([]);
+        // hostMcp lands in the config repo the relay follows: no restart, the next reload serves it.
+        enabled = true;
+        yield* waitFor(hub, "local", "running");
+        enabled = false;
+        for (let i = 0; i < 100 && (yield* hub.servers).length > 0; i++)
+          yield* Effect.sleep(Duration.millis(50));
+        expect(yield* hub.servers).toEqual([]);
+      }),
+    );
+  });
+
   it("bridges a stdio server, applies the tool policy, checks client tokens and logs calls", async () => {
     const dir = fixture({
       local: {

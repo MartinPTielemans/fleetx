@@ -96,18 +96,24 @@ const answerHere = (url: string, token: string) => (node: string, id: string) =>
   );
 
 /**
- * What the relay serves from, read once as it starts: this node's [mcp] hub
- * and ports (the hosted servers, the gateway), and [relay] port and url.
+ * What the relay reads only as it starts: [relay] port (where it listens) and
+ * url (where OAuth sends a login back). The MCP hub and ports it follows as
+ * they change (mcpOf).
  */
-export const servingOf = (config: Config) => {
-  const self = config.nodes.find((n) => n.name === config.self);
-  const mcp = (self?.settings.table["mcp"] ?? {}) as { ports?: unknown; hub?: unknown };
-  return JSON.stringify({
-    hub: mcp.hub === true,
-    ports: mcp.ports ?? {},
+export const servingOf = (config: Config) =>
+  JSON.stringify({
     port: config.settings.relay?.port ?? 8399,
     url: config.settings.relay?.url ?? null,
   });
+
+/** This node's [mcp] hub and ports: the hosted servers, and the gateway's local ones. */
+export const mcpOf = (config: Config) => {
+  const self = config.nodes.find((n) => n.name === config.self);
+  const mcp = (self?.settings.table["mcp"] ?? {}) as {
+    ports?: Record<string, number>;
+    hub?: boolean;
+  };
+  return { enabled: mcp.hub === true, ports: mcp.ports ?? {} };
 };
 
 /** Every upstream base some node's [models] declares: where /egress may forward. */
@@ -143,7 +149,7 @@ const serve = Command.make("serve").pipe(
       // Followed as sync updates the config repo; a read that fails keeps the last good one.
       let current = config;
       let egressBases = egressBasesOf(config);
-      // What the relay reads only as it starts (the MCP hub, its port): a change restarts it.
+      // What the relay reads only as it starts (its port, its address): a change restarts it.
       const serving = servingOf(config);
       const changed = yield* Deferred.make<string>();
       yield* loadConfig.pipe(
@@ -154,7 +160,7 @@ const serve = Command.make("serve").pipe(
             if (servingOf(c) !== serving)
               yield* Deferred.succeed(
                 changed,
-                "the relay's settings changed (its MCP hub, ports or address); exiting so the service restarts with them",
+                "the relay's port or address changed; exiting so the service restarts with them",
               );
           }),
         ),
@@ -192,6 +198,8 @@ const serve = Command.make("serve").pipe(
           home: process.env["HOME"] ?? "",
           enabled: hub,
           ports: mcp.ports ?? {},
+          // Followed: hostMcp turning the hub on is served on the hub's next reload.
+          serving: Effect.sync(() => mcpOf(current)),
           relayUrl: config.settings.relay?.url ?? null,
           identity,
           version: packageJson.version,

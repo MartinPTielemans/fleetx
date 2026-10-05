@@ -10,10 +10,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom } from "@t3-fleet/core/Config";
 
-import { servingOf } from "./relay.ts";
+import { mcpOf, servingOf } from "./relay.ts";
 
 describe("what the relay serves from", () => {
-  it("changes when the hub starts hosting the fleet's MCP servers, and not for anything else", async () => {
+  it("follows the MCP hub as it changes, and restarts only for its port or address", async () => {
     const repo = mkdtempSync(join(tmpdir(), "t3-fleet-relay-serving-"));
     mkdirSync(join(repo, "nodes"));
     writeFileSync(join(repo, "nodes/hub.toml"), 'roles = ["member", "relay"]\n');
@@ -22,17 +22,21 @@ describe("what the relay serves from", () => {
         join(repo, "t3-fleet.toml"),
         `[relay]\nurl = "https://hub.tailnet.ts.net:8399"\nport = 8399\n${extra}`,
       );
-    const serving = () =>
-      Effect.runPromise(
-        loadConfigFrom(repo, "hub").pipe(Effect.map(servingOf), Effect.provide(NodeServices.layer)),
-      );
+    const read = () =>
+      Effect.runPromise(loadConfigFrom(repo, "hub").pipe(Effect.provide(NodeServices.layer)));
     fleet("");
-    const before = await serving();
-    // A change the relay follows while it runs (who may open its app): no restart.
-    fleet('\n[ui]\nallow = ["me@example.com"]\n');
-    expect(await serving()).toBe(before);
-    // hostMcp: [defaults.mcp] hub, read only as it starts.
+    const before = await read();
+    expect(mcpOf(before)).toEqual({ enabled: false, ports: {} });
+    // hostMcp: [defaults.mcp] hub. The hub follows it (Hub.ts serving); the relay keeps running.
     fleet('\n[defaults.mcp]\nhub = true\ngateway = "https://hub.tailnet.ts.net:8399"\n');
-    expect(await serving()).not.toBe(before);
+    const hosting = await read();
+    expect(mcpOf(hosting)).toEqual({ enabled: true, ports: {} });
+    expect(servingOf(hosting)).toBe(servingOf(before));
+    // Where it listens is read only as it starts: that restarts it.
+    writeFileSync(
+      join(repo, "t3-fleet.toml"),
+      '[relay]\nurl = "https://hub.tailnet.ts.net:8399"\nport = 8400\n',
+    );
+    expect(servingOf(await read())).not.toBe(servingOf(before));
   });
 });
