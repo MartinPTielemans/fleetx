@@ -13,6 +13,11 @@ createServer((req, res) => {
     body += chunk;
   });
   req.on("end", () => {
+    if (req.url === "/reject") {
+      res.writeHead(403);
+      res.end("rejected");
+      return;
+    }
     received.push({
       body,
       title: req.headers.title,

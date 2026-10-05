@@ -137,8 +137,8 @@ It listens on 127.0.0.1 only, on a new port each run, and answers only the tab
 that opened its link, from its own address, so no other website can read your
 fleet or apply fixes. The link works once: if it was already used, the page
 says so (someone else on the machine may have opened it), and `t3-fleet ui`
-prints a new one for each further tab. `--port` pins the port, `--no-open`
-prints the link instead of opening a browser. The app is built into the single
+prints a new one for each further tab. `--port` pins the port (and implies
+`--local`), `--no-open` prints the link instead of opening a browser. The app is built into the single
 `t3-fleet` file. It reads the config again for every check, fix and action;
 when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
 does too), it stops installing its build on other machines until you restart
@@ -158,10 +158,50 @@ Store the topic URL with `t3-fleet secrets set` on an authority and sync it to t
 sending node. `t3-fleet notify test` sends one test through each configured path
 on the node where you run it. Run it on the relay to test the fleet push path,
 and on a selected desktop to test the OS path. The command shows the send plan
-before sending and reports accepted, skipped or failed transport results.
+before sending and reports accepted, skipped or failed transport results. A failed
+transport exits nonzero and persists the result for `status` and `doctor`.
 
 `status` and `doctor` show local delivery failures, unconfirmed interrupted sends,
 and missing desktop capability. `status --json` includes a `notifications` list.
 A successful notifier invocation does not prove the OS displayed the notification;
 use the explicit test to confirm it. See [areas](areas.md#notifications) for routing,
 persisted dedupe, catch-up summaries and ambiguous receipt limits.
+
+### On the hub
+
+On a fleet with a hub (`[relay] url`), `t3-fleet ui` prints and opens the
+hub's address instead: `t3-fleet relay serve` serves the same app there, on
+the port `tailscale serve` already publishes. `--local` serves it on this
+machine as above; the setup wizard always runs locally.
+
+```
+$ t3-fleet ui
+T3 Fleet is on your hub: https://server.tailnet.ts.net:8399/
+it opens for you@example.com, from any device on the tailnet signed in as one of them
+```
+
+Who may open it is a Tailscale login, not just being on the tailnet:
+
+```toml
+# t3-fleet.toml
+[ui]
+allow = ["you@example.com"]
+```
+
+Setup writes the login of the authority that made the hub. A request is let
+in only through `tailscale serve` on the hub itself (a loopback connection,
+with the login Tailscale sets and strips from what the browser sent), with
+the hub's address as Host and Origin, not through Funnel, and with a login in
+`[ui] allow`. Tagged devices carry no login and are refused. Anyone else gets
+a page naming the login Tailscale saw and the line to add.
+
+There it differs from the local app in three ways. Machines are shown as
+they last reported (to the relay, else on their state branch), with when; a
+machine that never reported says "not reported", and one on an older T3 Fleet
+shows its findings without fixes. A fix is sent through the relay to the
+machine that runs it: its `t3-fleet listen` (on the hub, the relay itself)
+checks itself again and runs it only if it proposes that exact fix, then
+reports back as the job's steps; one nobody picks up within 90 seconds is
+dropped, never run later. And proposals are shown but approved or rejected
+only on an authority, so a hub cannot approve its own change. The hub needs no
+ssh to any machine.

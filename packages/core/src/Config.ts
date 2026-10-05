@@ -25,7 +25,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { BuildId } from "./Build.ts";
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
-import { configDir, FLEET_FILE } from "./Names.ts";
+import { configDir, DEFAULT_RELAY_PORT, FLEET_FILE } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -92,6 +92,14 @@ const NotifySection = Schema.Struct({
   ntfy: Schema.optionalKey(Schema.String),
 });
 
+/**
+ * The app on the hub (HubUi.ts): the Tailscale logins it opens for. Setup
+ * writes the login of the authority that made the hub; none means nobody.
+ */
+const UiSection = Schema.Struct({
+  allow: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 const FleetFile = Schema.Struct({
   notify: Schema.optionalKey(NotifySection),
   fleet: Schema.optionalKey(FleetSection),
@@ -100,6 +108,7 @@ const FleetFile = Schema.Struct({
     Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) }),
   ),
   relay: Schema.optionalKey(RelaySection),
+  ui: Schema.optionalKey(UiSection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
   allow_secret: Schema.optionalKey(Schema.Array(AllowedSecret)),
@@ -310,7 +319,10 @@ export const probeSettings = (
   ...(config.settings.relay === undefined
     ? {}
     : {
-        relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
+        relay: {
+          url: config.settings.relay.url ?? null,
+          port: config.settings.relay.port ?? DEFAULT_RELAY_PORT,
+        },
       }),
   // This machine uses the repo it loaded, wherever it is (setup --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,

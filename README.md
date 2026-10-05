@@ -92,7 +92,13 @@ This opens a local web app that looks like T3 Code, in light and dark:
   and see the hub's servers and their tool calls.
 - **Models**: traffic through your model proxy, if you use one.
 
-It runs only on your computer (127.0.0.1) and answers only the tab it opened.
+With a hub, the hub hosts the app on your tailnet, so you open it from any
+device signed in to Tailscale as a login the fleet allows (setup allows yours).
+It shows each machine as it last reported, sends a fix to the machine it
+changes (which checks itself again and runs only what it proposes), and leaves
+approving proposals to an authority. Without a hub, or with
+`t3-fleet ui --local`, it runs only on your computer (127.0.0.1) and answers
+only the tab it opened.
 
 ## Ask from a T3 thread
 

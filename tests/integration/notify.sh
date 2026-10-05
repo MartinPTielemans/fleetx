@@ -56,5 +56,19 @@ start
 report
 report
 on member node -e 'fetch("http://sink:8080/requests").then(r=>r.json()).then(a=>{if(a.length!==1||a[0].body!=="test provider unhealthy"||a[0].priority!=="4"||a[0].tags!=="warning")throw Error(JSON.stringify(a));console.log("PASS: one relay-owned ntfy push after repeated reports and restart",JSON.stringify(a))}).catch(e=>{console.error(e);process.exit(1)})'
-# Doctor/status are read-only; no graphical session means no desktop transport.
-on hub node /t3-fleet/bin.mjs notify --help
+# The explicit CLI test is a second notification, independent of the alert ledger.
+on hub node /t3-fleet/bin.mjs notify test
+on member node -e 'fetch("http://sink:8080/requests").then(r=>r.json()).then(a=>{if(a.length!==2||a[1].title!=="T3 Fleet: notification test"||a[1].priority!=="2")throw Error(JSON.stringify(a));console.log("PASS: notify test sent one explicit test")}).catch(e=>{console.error(e);process.exit(1)})'
+# A rejected explicit test exits nonzero and leaves a visible, sanitized status.
+on hub bash -c 'sed -i "s|http://sink:8080/topic|http://sink:8080/reject|" ~/.config/t3-fleet/secrets.env'
+if on hub node /t3-fleet/bin.mjs notify test; then
+  echo "FAIL: rejected notification test exited successfully" >&2
+  exit 1
+fi
+status=$(on hub node /t3-fleet/bin.mjs status --all)
+printf '%s\n' "$status" | grep -q 'ntfy rejected notification (HTTP 403)'
+if printf '%s\n' "$status" | grep -q 'http://sink'; then
+  echo "FAIL: status exposed the topic URL" >&2
+  exit 1
+fi
+echo "PASS: rejected test exits nonzero and status reports failure without the secret"

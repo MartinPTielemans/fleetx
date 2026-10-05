@@ -125,7 +125,7 @@ describe("a plugin that fails", () => {
     });
 
     const node = {
-      name: "mac",
+      name: "laptop",
       ssh: null,
       roles: ["member" as const],
       profiles: [],

@@ -117,9 +117,9 @@ import {
 import { Desired as SkillsDesired, Observed as SkillsObserved } from "./areas/Skills.ts";
 import type { CheckReport } from "./Check.ts";
 import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
-import type { FixOutcome } from "./Fix.ts";
-import { sha256 } from "./Hash.ts";
+import { fixDigest, type FixOutcome } from "./Fix.ts";
 import { constantTimeEqual } from "./hub/Policy.ts";
+import { identify, refusedPage, type HubGate } from "./HubUi.ts";
 import { releasesBehind } from "./Latest.ts";
 import { findingId } from "./Memory.ts";
 import type { MachineObservation } from "./Observation.ts";
@@ -140,6 +140,8 @@ import {
 } from "./SetupApi.ts";
 import type { SetupActions, SetupJob } from "./setup/Wizard.ts";
 
+export { fixDigest } from "./Fix.ts";
+
 /** A full check, with what it needs to be shown: published sync states and accepted differences. */
 export interface UiCheck {
   readonly report: CheckReport;
@@ -150,8 +152,10 @@ export interface UiCheck {
 /** What the server does on the fleet; `t3-fleet ui` wires these to the real engine, tests to fakes. */
 export interface UiActions {
   readonly check: Effect.Effect<UiCheck, string>;
+  /** `step` says how it goes, for the job (the hub waits on other machines). */
   readonly apply: (
     fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
+    step: (text: string) => Effect.Effect<void>,
   ) => Effect.Effect<ReadonlyArray<FixOutcome>>;
   readonly proposals: Effect.Effect<ReadonlyArray<UiProposal>, string>;
   /** Approve `node`'s proposal, failing unless it still makes the reviewed `change` (UiProposal.change). */
@@ -189,13 +193,26 @@ export interface UiAsset {
   readonly body: Uint8Array;
 }
 
+/** The app served by the hub instead of on this machine's loopback (HubUi.ts). */
+export interface UiHubAccess {
+  /** Who may open it, read as it is now. */
+  readonly gate: Effect.Effect<HubGate>;
+  /** The authorities: proposals are decided there, never on the hub. */
+  readonly approveOn: Effect.Effect<ReadonlyArray<string>>;
+}
+
 export interface UiServerOptions {
-  /** The one-use ticket in the link `t3-fleet ui` opens; the app trades it for a token. */
+  /** The one-use ticket in the link `t3-fleet ui` opens; the app trades it for a token. Unused on the hub. */
   readonly ticket: string;
   /** Called with a new ticket each time one is used, so the user can open another tab. */
   readonly onTicketUsed?: (next: string) => Effect.Effect<void>;
-  /** The port the server listens on, for the Host check. */
+  /** The port the server listens on, for the Host check. Unused on the hub. */
   readonly port: number;
+  /**
+   * Served by the hub: Tailscale identity in place of the ticket and the
+   * loopback Host, and no approving or rejecting proposals.
+   */
+  readonly hub?: UiHubAccess;
   /** The built app, by URL path ("/index.html", "/assets/…"). */
   readonly assets: ReadonlyMap<string, UiAsset>;
   /** This machine and its fleet; read as it is now when given as an effect (it changes once setup is done). */
@@ -442,6 +459,23 @@ export const refusal = (
   return null;
 };
 
+/** On the hub: the token must be one this run handed to the same login. */
+const tokenRefusal = (
+  request: { readonly headers: Readonly<Record<string, string | undefined>> },
+  query: URLSearchParams,
+  handed: ReadonlyMap<string, string | null>,
+  login: string | null,
+  queryToken: boolean,
+): { readonly status: number; readonly message: string } | null => {
+  const given =
+    request.headers["x-t3-fleet-token"] ?? (queryToken ? query.get("token") : null) ?? "";
+  let owner: string | null | undefined;
+  for (const [token, who] of handed) if (constantTimeEqual(given, token)) owner = who;
+  if (owner === undefined || owner === null || owner !== login)
+    return { status: 401, message: "missing or stale session: reload the app" };
+  return null;
+};
+
 const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
@@ -483,19 +517,6 @@ const randomHex = (bytes: number) =>
       b.toString(16).padStart(2, "0"),
     ).join(""),
   );
-
-/** Names exactly what a fix would do: where, which command, and what it interrupts. */
-export const fixDigest = (finding: Finding & { readonly fix: Fix }) => {
-  const { command, on, disrupts, safe } = finding.fix;
-  const parts = [
-    finding.node,
-    on ?? finding.node,
-    command,
-    disrupts ?? "-",
-    safe ? "safe" : "unsafe",
-  ];
-  return Effect.promise(() => sha256(parts.map((p) => `${p.length}:${p}`).join("")));
-};
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -563,7 +584,8 @@ export const uiLayer = (options: UiServerOptions) =>
       const jobs = yield* Ref.make<ReadonlyMap<string, UiJob>>(new Map());
       /** Each running job's end, by id, for stopping the server. */
       const running = yield* Ref.make<ReadonlyMap<string, Deferred.Deferred<void>>>(new Map());
-      const tokens = yield* Ref.make<ReadonlySet<string>>(new Set());
+      /** The tokens this run handed out, each with the login it was handed to (null: by ticket). */
+      const tokens = yield* Ref.make<ReadonlyMap<string, string | null>>(new Map());
       const ticket = yield* Ref.make(options.ticket);
       const usedTickets = yield* Ref.make<ReadonlySet<string>>(new Set());
       /** Guards starting a check, so two callers never start two. */
@@ -825,6 +847,20 @@ export const uiLayer = (options: UiServerOptions) =>
 
       // ── routes ──
 
+      /**
+       * Who is asking: on the hub, the Tailscale login (HubUi.ts); here, nobody
+       * in particular (null). A refusal is the response to send.
+       */
+      const identity = (request: HttpServerRequest.HttpServerRequest) =>
+        Effect.gen(function* () {
+          if (options.hub === undefined) return { login: null } as const;
+          const who = identify(
+            { headers: request.headers, remoteAddress: Option.getOrNull(request.remoteAddress) },
+            yield* options.hub.gate,
+          );
+          return who.ok ? ({ login: who.login } as const) : ({ refused: who } as const);
+        });
+
       /** Guard, then run: every /api route goes through here. */
       const api = <E, R>(
         handler: (
@@ -836,15 +872,23 @@ export const uiLayer = (options: UiServerOptions) =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const query = new URL(request.url, "http://ui").searchParams;
-          const refused = refusal(
-            request,
-            {
-              port: options.port,
-              tokens: guard.ticket === true ? null : yield* Ref.get(tokens),
-              queryToken: guard.queryToken === true,
-            },
-            query,
-          );
+          const who = yield* identity(request);
+          if ("refused" in who) return plain(who.refused.message, who.refused.status);
+          const handed = yield* Ref.get(tokens);
+          const refused =
+            options.hub === undefined
+              ? refusal(
+                  request,
+                  {
+                    port: options.port,
+                    tokens: guard.ticket === true ? null : new Set(handed.keys()),
+                    queryToken: guard.queryToken === true,
+                  },
+                  query,
+                )
+              : guard.ticket === true
+                ? null
+                : tokenRefusal(request, query, handed, who.login, guard.queryToken === true);
           if (refused !== null) return plain(refused.message, refused.status);
           return yield* handler(request, query);
         });
@@ -868,12 +912,23 @@ export const uiLayer = (options: UiServerOptions) =>
       const accepted = jsonResponse(UiJob, 202);
 
       // The ticket is good once. A second use means the link went somewhere else too.
+      // On the hub there is no ticket: a login the gate lets in gets a token of its own.
       const trade = HttpRouter.add(
         "POST",
         "/api/session",
         api(
           (request) =>
             Effect.gen(function* () {
+              if (options.hub !== undefined) {
+                // A header no form can send: a page elsewhere cannot get a token without a preflight.
+                if (request.headers["x-t3-fleet-hub"] !== "1")
+                  return plain("ask for a session from the app", 400);
+                const who = yield* identity(request);
+                if ("refused" in who) return plain(who.refused.message, who.refused.status);
+                const token = yield* randomHex(24);
+                yield* Ref.update(tokens, (all) => new Map(all).set(token, who.login));
+                return yield* jsonResponse(UiSessionGrant)({ token });
+              }
               const given = request.headers["x-t3-fleet-ticket"] ?? "";
               const expected = yield* Ref.get(ticket);
               if (!constantTimeEqual(given, expected)) {
@@ -887,7 +942,7 @@ export const uiLayer = (options: UiServerOptions) =>
               }
               const token = yield* randomHex(24);
               const next = yield* randomHex(24);
-              yield* Ref.update(tokens, (all) => new Set(all).add(token));
+              yield* Ref.update(tokens, (all) => new Map(all).set(token, null));
               yield* Ref.update(usedTickets, (all) => new Set(all).add(given));
               yield* Ref.set(ticket, next);
               if (options.onTicketUsed !== undefined) yield* options.onTicketUsed(next);
@@ -900,7 +955,20 @@ export const uiLayer = (options: UiServerOptions) =>
       const session = HttpRouter.add(
         "GET",
         "/api/session",
-        api(() => sessionNow.pipe(Effect.flatMap(jsonResponse(UiSession)))),
+        api((request) =>
+          Effect.gen(function* () {
+            const now = yield* sessionNow;
+            if (options.hub === undefined) return yield* jsonResponse(UiSession)(now);
+            const who = yield* identity(request);
+            return yield* jsonResponse(UiSession)({
+              ...now,
+              hub: {
+                login: "login" in who && who.login !== null ? who.login : "",
+                approveOn: [...(yield* options.hub.approveOn)],
+              },
+            });
+          }),
+        ),
       );
 
       const status = HttpRouter.add(
@@ -998,7 +1066,7 @@ export const uiLayer = (options: UiServerOptions) =>
             let outcomes: ReadonlyArray<FixOutcome> = [];
             if (chosen.length > 0) {
               yield* step(`running ${plural(chosen.length, "fix", "fixes")}`);
-              outcomes = yield* machines.withPermits(1)(actions.apply(chosen));
+              outcomes = yield* machines.withPermits(1)(actions.apply(chosen, step));
               yield* step("checking every machine again");
               yield* checked(0).pipe(Effect.ignore);
             }
@@ -1058,6 +1126,14 @@ export const uiLayer = (options: UiServerOptions) =>
           `/api/proposals/:node/${verb}`,
           api((request) =>
             Effect.gen(function* () {
+              // The hub shows proposals but never decides them: a hub that could would approve its own.
+              if (options.hub !== undefined) {
+                const on = yield* options.hub.approveOn;
+                return plain(
+                  `proposals are approved and rejected on an authority (${on.join(", ") || "none in this fleet"}), not in the app on the hub`,
+                  403,
+                );
+              }
               const node = (yield* HttpRouter.params)["node"] ?? "";
               if (!NAME.test(node)) return plain("not a machine name", 400);
               const { change } = yield* body(
@@ -1502,11 +1578,17 @@ export const uiLayer = (options: UiServerOptions) =>
         "/*",
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          const refused = refusal(
-            request,
-            { port: options.port, tokens: null },
-            new URLSearchParams(),
-          );
+          const who = yield* identity(request);
+          if ("refused" in who)
+            return HttpServerResponse.text(refusedPage(who.refused), {
+              status: who.refused.status,
+              contentType: "text/html; charset=utf-8",
+              headers: { ...SECURITY_HEADERS, "cache-control": "no-store" },
+            });
+          const refused =
+            options.hub === undefined
+              ? refusal(request, { port: options.port, tokens: null }, new URLSearchParams())
+              : null;
           if (refused !== null) return plain(refused.message, refused.status);
           const path = new URL(request.url, "http://ui").pathname;
           const asset = options.assets.get(path);

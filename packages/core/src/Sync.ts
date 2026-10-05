@@ -68,10 +68,10 @@ import { applyAccepted } from "./Memory.ts";
 import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
-import { NodeState, type Alert } from "./State.ts";
+import { NodeState, REPORT_FORMAT, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
 import { deliverAlerts } from "./Notify.ts";
-import { reportToRelay } from "./RelayClient.ts";
+import { localSecrets, reportToRelay } from "./RelayClient.ts";
 import { approve, autoApproves, listProposals, settleRejection } from "./Staging.ts";
 import { isDepartureProposal } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
@@ -745,6 +745,10 @@ export const report = ({
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
     const repo = config.repo;
+    // A fix whose command holds one of this node's secret values is not published: it runs here only.
+    const secrets = [...(yield* localSecrets).values()].filter((v) => v.length >= 6);
+    const publishable = (fix: Finding["fix"]) =>
+      fix !== undefined && !secrets.some((v) => fix.command.includes(v));
     const previousStreak = Option.getOrElse(yield* localStreak(home), () =>
       Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
     );
@@ -775,6 +779,7 @@ export const report = ({
       if (streak === 0 && wasFailing)
         alerts.push({ at: now, node, kind: "recovered", message: "sync works again" });
       return {
+        format: REPORT_FORMAT,
         node,
         at: now,
         result: fail ? "fail" : "ok",
@@ -789,6 +794,16 @@ export const report = ({
           area: f.area,
           title: f.title,
           ...(f.detail === undefined ? {} : { detail: f.detail }),
+          ...(f.fix !== undefined && publishable(f.fix)
+            ? {
+                fix: {
+                  command: f.fix.command,
+                  safe: f.fix.safe,
+                  ...(f.fix.disrupts === undefined ? {} : { disrupts: f.fix.disrupts }),
+                  ...(f.fix.on === undefined ? {} : { on: f.fix.on }),
+                },
+              }
+            : {}),
         })),
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
@@ -834,6 +849,47 @@ export interface SyncResult {
   readonly lines: ReadonlyArray<string>;
 }
 
+/**
+ * A node's own check, as sync makes it: itself observed now and the others as
+ * they last published, diagnosed together. Its findings are this node's own,
+ * and the fixes other nodes need that run here (an authority adding a node's
+ * key). A fix request from the hub is checked against exactly this.
+ */
+export const ownCheck = (config: Config, self: Node, others: ReadonlyArray<NodeState>) =>
+  Effect.gen(function* () {
+    const selfResult: NodeResult = {
+      node: self,
+      ok: true,
+      observation: yield* probeMachine(probeSettings(config, self)),
+      ms: 0,
+    };
+    const results: Array<NodeResult> = [
+      selfResult,
+      ...others
+        .filter((s) => s.node !== self.name && s.observation !== null)
+        .flatMap((s) => {
+          const node = config.nodes.find((n) => n.name === s.node);
+          return node === undefined || s.observation === null
+            ? []
+            : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
+        }),
+    ];
+    const versions = results
+      .flatMap((x) =>
+        x.ok
+          ? [x.observation.t3.descriptor?.serverVersion ?? x.observation.t3.installedVersion ?? ""]
+          : [],
+      )
+      .filter(Boolean);
+    const latest = yield* lookupLatest(versions);
+    const { areas } = yield* loadAreas(config.repo, config.settings.plugins?.areas ?? []);
+    const findings = applyAccepted(
+      diagnose(results, latest, config.settings, config.nodes, areas),
+      config.settings.accept,
+    ).filter((f) => f.node === self.name || f.fix?.on === self.name);
+    return { selfResult, findings };
+  });
+
 export const syncRun = (
   startConfig: Config,
   /** `areas` narrows [fleet] apply further (setup's first sync). */
@@ -862,45 +918,7 @@ export const syncRun = (
 
       // 3. Observe, diagnose against everyone's last state, apply safe fixes.
       const others = yield* readStates(repo);
-      const observeSelf = probeMachine(probeSettings(config, self)).pipe(
-        Effect.map((observation): NodeResult => ({ node: self, ok: true, observation, ms: 0 })),
-      );
-      const fleetResults = (selfResult: NodeResult): Array<NodeResult> => [
-        selfResult,
-        ...others
-          .filter((s) => s.node !== self.name && s.observation !== null)
-          .flatMap((s) => {
-            const node = config.nodes.find((n) => n.name === s.node);
-            return node === undefined || s.observation === null
-              ? []
-              : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
-          }),
-      ];
-      const versions = (r: ReadonlyArray<NodeResult>) =>
-        r
-          .flatMap((x) =>
-            x.ok
-              ? [
-                  x.observation.t3.descriptor?.serverVersion ??
-                    x.observation.t3.installedVersion ??
-                    "",
-                ]
-              : [],
-          )
-          .filter(Boolean);
-      const findingsFor = (results: ReadonlyArray<NodeResult>) =>
-        Effect.gen(function* () {
-          const latest = yield* lookupLatest(versions(results));
-          const { areas } = yield* loadAreas(repo, config.settings.plugins?.areas ?? []);
-          // This node's findings, plus fixes other nodes need that must run here (an authority adding a node's key).
-          return applyAccepted(
-            diagnose(results, latest, config.settings, config.nodes, areas),
-            config.settings.accept,
-          ).filter((f) => f.node === self.name || f.fix?.on === self.name);
-        });
-
-      let selfResult = yield* observeSelf;
-      let findings = yield* findingsFor(fleetResults(selfResult));
+      let { selfResult, findings } = yield* ownCheck(config, self, others);
       const applyAreas = settingList(config, "apply", DEFAULT_APPLY).filter(
         (a) => options.areas === undefined || options.areas.includes(a),
       );
@@ -919,8 +937,7 @@ export const syncRun = (
         lines.push(
           ...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`),
         );
-        selfResult = yield* observeSelf;
-        findings = yield* findingsFor(fleetResults(selfResult));
+        ({ selfResult, findings } = yield* ownCheck(config, self, others));
       }
       if (applied.some((a) => !a.ok)) {
         failed = true;

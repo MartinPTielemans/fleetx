@@ -58,3 +58,6 @@ export const branchPrefix = (kind: BranchKind) => `t3-fleet/${kind}/`;
 export const SECRET_PREFIX = "T3_FLEET_";
 /** A fleet secret's name: T3_FLEET_RELAY_TOKEN. */
 export const secretName = (name: string) => `${SECRET_PREFIX}${name}`;
+
+/** The relay listener port when a fleet has not set one. */
+export const DEFAULT_RELAY_PORT = 8399;

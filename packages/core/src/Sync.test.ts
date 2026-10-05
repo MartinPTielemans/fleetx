@@ -1,5 +1,5 @@
-// A fleet in a temp directory: a bare remote and three clones, box (authority),
-// laptop and omarchy. The repo's part of a sync runs against them for real.
+// A fleet in a temp directory: a bare remote and three clones, hub (authority),
+// laptop and desktop. The repo's part of a sync runs against them for real.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -86,24 +86,24 @@ const makeFleet = (toml = '[fleet]\nauto_approve = ["skills/"]\n') => {
   );
   const origin = join(root, "origin.git");
   git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
-  const box = join(root, "box");
-  git(root, "init", "-q", "-b", "main", "box");
-  git(box, "remote", "add", "origin", origin);
-  put(box, "t3-fleet.toml", toml);
-  put(box, "nodes/box.toml", 'roles = ["authority"]\n');
-  put(box, "nodes/laptop.toml", 'roles = ["member"]\n');
-  put(box, "nodes/omarchy.toml", 'roles = ["member"]\n');
-  put(box, "README.md", "fleet\n");
-  put(box, "skills/a/SKILL.md", "a v1\n");
-  put(box, "skills/b/SKILL.md", "b v1\n");
-  put(box, "skills/a/Ref Guide.md", "line one\n");
-  commitAll(box, "fleet");
-  git(box, "fetch", "-q", "origin");
-  git(box, "branch", "-q", "--set-upstream-to=origin/main");
+  const hub = join(root, "hub");
+  git(root, "init", "-q", "-b", "main", "hub");
+  git(hub, "remote", "add", "origin", origin);
+  put(hub, "t3-fleet.toml", toml);
+  put(hub, "nodes/hub.toml", 'roles = ["authority"]\n');
+  put(hub, "nodes/laptop.toml", 'roles = ["member"]\n');
+  put(hub, "nodes/desktop.toml", 'roles = ["member"]\n');
+  put(hub, "README.md", "fleet\n");
+  put(hub, "skills/a/SKILL.md", "a v1\n");
+  put(hub, "skills/b/SKILL.md", "b v1\n");
+  put(hub, "skills/a/Ref Guide.md", "line one\n");
+  commitAll(hub, "fleet");
+  git(hub, "fetch", "-q", "origin");
+  git(hub, "branch", "-q", "--set-upstream-to=origin/main");
   git(root, "clone", "-q", origin, "laptop");
-  git(root, "clone", "-q", origin, "omarchy");
+  git(root, "clone", "-q", origin, "desktop");
   const laptop = join(root, "laptop");
-  const omarchy = join(root, "omarchy");
+  const desktop = join(root, "desktop");
   const config = (repo: string, self: string) => run(loadConfigFrom(repo, self));
   /** The repo's part of one sync run on `repo` as `self`. */
   const sync = (repo: string, self: string) =>
@@ -117,7 +117,7 @@ const makeFleet = (toml = '[fleet]\nauto_approve = ["skills/"]\n') => {
         return { ...result, lines };
       }),
     );
-  return { root, origin, box, laptop, omarchy, config, sync };
+  return { root, origin, hub, laptop, desktop, config, sync };
 };
 
 describe("git's own lists", () => {
@@ -141,18 +141,18 @@ describe("approving a proposal", () => {
     expect(proposed.lines.join("\n")).toContain("proposed 1 file");
 
     // Meanwhile main moves on under skills/: b updated, c added.
-    put(f.box, "skills/b/SKILL.md", "b v2\n");
-    put(f.box, "skills/c/SKILL.md", "c v1\n");
-    commitAll(f.box, "update b, add c");
+    put(f.hub, "skills/b/SKILL.md", "b v2\n");
+    put(f.hub, "skills/c/SKILL.md", "c v1\n");
+    commitAll(f.hub, "update b, add c");
 
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
     if (proposal === undefined) return;
-    await run(approve(f.box, "main", proposal, "box", proposal.commit.slice(0, 7)));
+    await run(approve(f.hub, "main", proposal, "hub", proposal.commit.slice(0, 7)));
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
     expect(onMain(f.origin, "skills/b/SKILL.md")).toBe("b v2\n");
     expect(onMain(f.origin, "skills/c/SKILL.md")).toBe("c v1\n");
-    expect(await run(listProposals(f.box, "main"))).toEqual([]);
+    expect(await run(listProposals(f.hub, "main"))).toEqual([]);
   });
 
   it("on auto-approve, keeps what the authority committed earlier in the same run", async () => {
@@ -160,28 +160,28 @@ describe("approving a proposal", () => {
     put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
     await f.sync(f.laptop, "laptop");
     // The authority's own edit, which step 1 of its sync commits.
-    put(f.box, "skills/b/SKILL.md", "b v2 from box\n");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "skills/b/SKILL.md", "b v2 from hub\n");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(false);
     expect(result.lines.join("\n")).toContain("approved laptop's proposal");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
-    expect(onMain(f.origin, "skills/b/SKILL.md")).toBe("b v2 from box\n");
+    expect(onMain(f.origin, "skills/b/SKILL.md")).toBe("b v2 from hub\n");
   });
 
   it("refuses when the proposal is not the commit reviewed", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box", "0000000"))).toContain(
+    expect(await fails(approve(f.hub, "main", proposal, "hub", "0000000"))).toContain(
       "review it again",
     );
-    expect(await fails(reject(f.box, proposal, "0000000"))).toContain("review it again");
+    expect(await fails(reject(f.hub, proposal, "0000000"))).toContain("review it again");
     // Laptop changes its proposal after the review.
     put(f.laptop, "skills/a/SKILL.md", "a v3\n");
     await f.sync(f.laptop, "laptop");
-    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
+    expect(await fails(approve(f.hub, "main", proposal, "hub", proposal.commit))).toContain(
       "review it again",
     );
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
@@ -191,9 +191,9 @@ describe("approving a proposal", () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [first] = await run(listProposals(f.box, "main"));
+    const [first] = await run(listProposals(f.hub, "main"));
     await f.sync(f.laptop, "laptop");
-    const [second] = await run(listProposals(f.box, "main"));
+    const [second] = await run(listProposals(f.hub, "main"));
     expect(second?.commit).toBe(first?.commit);
   });
 
@@ -201,16 +201,16 @@ describe("approving a proposal", () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a from laptop\n");
     await f.sync(f.laptop, "laptop");
-    put(f.box, "skills/a/SKILL.md", "a from box\n");
-    commitAll(f.box, "box edits a");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    put(f.hub, "skills/a/SKILL.md", "a from hub\n");
+    commitAll(f.hub, "hub edits a");
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain(
+    expect(await fails(approve(f.hub, "main", proposal, "hub"))).toContain(
       "conflicts with what reached main",
     );
-    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from box\n");
-    expect(git(f.box, "status", "--porcelain")).toBe("");
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from hub\n");
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a from hub\n");
   });
 
   it("a conflict that also adds a file leaves no conflict markers for the next sync to push", async () => {
@@ -218,37 +218,37 @@ describe("approving a proposal", () => {
     put(f.laptop, "skills/a/SKILL.md", "a from laptop\n");
     put(f.laptop, "skills/a/new.md", "new from laptop\n");
     await f.sync(f.laptop, "laptop");
-    put(f.box, "skills/a/SKILL.md", "a from box\n");
-    commitAll(f.box, "box edits a");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    put(f.hub, "skills/a/SKILL.md", "a from hub\n");
+    commitAll(f.hub, "hub edits a");
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box"))).toContain(
+    expect(await fails(approve(f.hub, "main", proposal, "hub"))).toContain(
       "conflicts with what reached main",
     );
-    expect(git(f.box, "status", "--porcelain")).toBe("");
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
-    expect(existsSync(join(f.box, "skills/a/new.md"))).toBe(false);
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a from hub\n");
+    expect(existsSync(join(f.hub, "skills/a/new.md"))).toBe(false);
     // The authority's next sync, auto-approve included, pushes nothing of it.
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     expect(result.lines.join("\n")).toContain("could not auto-approve laptop's proposal");
-    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from box\n");
+    expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a from hub\n");
     expect(onMain(f.origin, "skills/a/new.md")).toBeNull();
-    expect(git(f.box, "worktree", "list")).not.toContain("approve");
+    expect(git(f.hub, "worktree", "list")).not.toContain("approve");
   });
 
   it("approves the same change remade on a newer branch, though its commit changed", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [reviewed] = await run(listProposals(f.box, "main"));
+    const [reviewed] = await run(listProposals(f.hub, "main"));
     if (reviewed === undefined) return expect.unreachable();
     // Main moves; laptop pulls and proposes the same change on the new base.
-    put(f.box, "README.md", "fleet, updated\n");
-    commitAll(f.box, "readme");
+    put(f.hub, "README.md", "fleet, updated\n");
+    commitAll(f.hub, "readme");
     await f.sync(f.laptop, "laptop");
-    const [now] = await run(listProposals(f.box, "main"));
+    const [now] = await run(listProposals(f.hub, "main"));
     expect(now?.commit).not.toBe(reviewed.commit);
-    await run(approve(f.box, "main", reviewed, "box", reviewed.commit.slice(0, 7)));
+    await run(approve(f.hub, "main", reviewed, "hub", reviewed.commit.slice(0, 7)));
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
   });
 
@@ -256,13 +256,13 @@ describe("approving a proposal", () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "if x:\n    a()\nb()\n");
     await f.sync(f.laptop, "laptop");
-    const [reviewed] = await run(listProposals(f.box, "main"));
+    const [reviewed] = await run(listProposals(f.hub, "main"));
     if (reviewed === undefined) return expect.unreachable();
-    put(f.box, "README.md", "fleet, updated\n");
-    commitAll(f.box, "readme");
+    put(f.hub, "README.md", "fleet, updated\n");
+    commitAll(f.hub, "readme");
     put(f.laptop, "skills/a/SKILL.md", "if x:\n    a()\n    b()\n");
     await f.sync(f.laptop, "laptop");
-    expect(await fails(approve(f.box, "main", reviewed, "box", reviewed.commit))).toContain(
+    expect(await fails(approve(f.hub, "main", reviewed, "hub", reviewed.commit))).toContain(
       "review it again",
     );
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
@@ -272,20 +272,20 @@ describe("approving a proposal", () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/Ref Guide.md", "line one, laptop\n");
     await f.sync(f.laptop, "laptop");
-    git(f.box, "mv", "skills/a/Ref Guide.md", "secrets-ish.md");
-    git(f.box, "commit", "-qm", "move the guide");
-    git(f.box, "push", "-q", "origin", "HEAD:main");
-    const result = await f.sync(f.box, "box");
+    git(f.hub, "mv", "skills/a/Ref Guide.md", "secrets-ish.md");
+    git(f.hub, "commit", "-qm", "move the guide");
+    git(f.hub, "push", "-q", "origin", "HEAD:main");
+    const result = await f.sync(f.hub, "hub");
     expect(result.lines.join("\n")).toContain("could not auto-approve laptop's proposal");
     expect(onMain(f.origin, "secrets-ish.md")).toBe("line one\n");
-    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
   });
 
   it("a rejection is all or nothing: no rejected branch when the staging branch stays", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
     // The remote refuses the staging branch's deletion, as a lease would when the node re-proposed meanwhile.
     put(
@@ -294,7 +294,7 @@ describe("approving a proposal", () => {
       '#!/bin/sh\ncase "$1" in refs/heads/t3-fleet/staging/*) [ "$3" = 0000000000000000000000000000000000000000 ] && exit 1;; esac\nexit 0\n',
     );
     execFileSync("chmod", ["+x", join(f.origin, "hooks/update")]);
-    expect(await fails(reject(f.box, proposal, proposal.commit))).toContain("reject failed");
+    expect(await fails(reject(f.hub, proposal, proposal.commit))).toContain("reject failed");
     expect(
       git(f.origin, "for-each-ref", "--format=%(refname)", "refs/heads/t3-fleet/").trim(),
     ).toBe("refs/heads/t3-fleet/staging/laptop");
@@ -304,28 +304,28 @@ describe("approving a proposal", () => {
     const f = makeFleet();
     const scratch = join(stateDir(f.root), "approve");
     mkdirSync(stateDir(f.root), { recursive: true });
-    git(f.box, "worktree", "add", "-q", "--detach", scratch, "HEAD");
-    git(f.box, "worktree", "lock", "--reason", "initializing", scratch);
+    git(f.hub, "worktree", "add", "-q", "--detach", scratch, "HEAD");
+    git(f.hub, "worktree", "lock", "--reason", "initializing", scratch);
     execFileSync("rm", ["-rf", scratch]);
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    await run(approve(f.hub, "main", proposal, "hub", proposal.commit));
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
-    expect(git(f.box, "worktree", "list")).not.toContain("approve");
+    expect(git(f.hub, "worktree", "list")).not.toContain("approve");
   });
 
   it("a rejection sets aside only the edits the proposal made", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
     await f.sync(f.laptop, "laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    await run(reject(f.box, proposal, proposal.commit));
+    await run(reject(f.hub, proposal, proposal.commit));
     // Main moves on elsewhere, and the laptop has an edit of its own there.
-    put(f.box, "README.md", "fleet, updated\n");
-    commitAll(f.box, "readme");
+    put(f.hub, "README.md", "fleet, updated\n");
+    commitAll(f.hub, "readme");
     put(f.laptop, "README.md", "fleet, laptop's notes\n");
     expect(await run(settleRejection(f.laptop, "laptop", "main"))).toEqual(["skills/a/SKILL.md"]);
     expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a v1\n");
@@ -338,8 +338,8 @@ describe("pulling", () => {
   it("a member whose pull failed proposes nothing", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/b/SKILL.md", "b from laptop\n");
-    put(f.box, "skills/b/SKILL.md", "b from box\n");
-    commitAll(f.box, "box edits b");
+    put(f.hub, "skills/b/SKILL.md", "b from hub\n");
+    commitAll(f.hub, "hub edits b");
     const result = await f.sync(f.laptop, "laptop");
     expect(result.failed).toBe(true);
     expect(result.message).toContain("local edits overlap incoming changes: skills/b/SKILL.md");
@@ -349,8 +349,8 @@ describe("pulling", () => {
   it("sees an overlap on a path git would quote, and leaves no conflict in it", async () => {
     const f = makeFleet();
     put(f.laptop, "skills/a/Ref Guide.md", "line one, laptop\n");
-    put(f.box, "skills/a/Ref Guide.md", "line one, box\n");
-    commitAll(f.box, "box edits the guide");
+    put(f.hub, "skills/a/Ref Guide.md", "line one, hub\n");
+    commitAll(f.hub, "hub edits the guide");
     const result = await f.sync(f.laptop, "laptop");
     expect(result.message).toContain("skills/a/Ref Guide.md");
     expect(read(f.laptop, "skills/a/Ref Guide.md")).toBe("line one, laptop\n");
@@ -363,7 +363,7 @@ describe("pulling", () => {
     put(f.laptop, "skills/x/SKILL.md", "x\n");
     const result = await f.sync(f.laptop, "laptop");
     expect(result.lines.join("\n")).toContain("proposed 2 files");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     expect(proposal?.files).toEqual(["skills/x/Ref Guide.md", "skills/x/SKILL.md"]);
   });
 
@@ -391,13 +391,13 @@ describe("pulling", () => {
 
   it("aborts a conflicted rebase and says so", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", "a from box\n");
-    git(f.box, "commit", "-qam", "box, not pushed yet");
+    put(f.hub, "skills/a/SKILL.md", "a from hub\n");
+    git(f.hub, "commit", "-qam", "hub, not pushed yet");
     put(f.laptop, "skills/a/SKILL.md", "a from elsewhere\n");
     commitAll(f.laptop, "pushed first");
-    expect(await fails(pullBranch(f.box, "main", "rebase"))).toContain("conflicted");
-    expect(existsSync(join(f.box, ".git", "rebase-merge"))).toBe(false);
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a from box\n");
+    expect(await fails(pullBranch(f.hub, "main", "rebase"))).toContain("conflicted");
+    expect(existsSync(join(f.hub, ".git", "rebase-merge"))).toBe(false);
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a from hub\n");
   });
 
   it("a member with a commit of its own rebases it along, still proposes, and names it", async () => {
@@ -406,8 +406,8 @@ describe("pulling", () => {
     git(f.laptop, "commit", "-qam", "notes");
     const mine = git(f.laptop, "rev-parse", "--short", "HEAD").trim();
     put(f.laptop, "skills/a/SKILL.md", "a v2\n");
-    put(f.box, "skills/b/SKILL.md", "b v2\n");
-    commitAll(f.box, "b");
+    put(f.hub, "skills/b/SKILL.md", "b v2\n");
+    commitAll(f.hub, "b");
     const result = await f.sync(f.laptop, "laptop");
     expect(result.failed).toBe(false);
     expect(result.lines.join("\n")).toContain("proposed 1 file");
@@ -420,8 +420,8 @@ describe("pulling", () => {
   it("a member fast-forwards, keeping unrelated local edits", async () => {
     const f = makeFleet();
     put(f.laptop, "README.md", "laptop's notes\n");
-    put(f.box, "skills/b/SKILL.md", "b v2\n");
-    commitAll(f.box, "b");
+    put(f.hub, "skills/b/SKILL.md", "b v2\n");
+    commitAll(f.hub, "b");
     expect(await run(pullBranch(f.laptop, "main", "ff-only"))).toBe(1);
     expect(read(f.laptop, "skills/b/SKILL.md")).toBe("b v2\n");
     expect(read(f.laptop, "README.md")).toBe("laptop's notes\n");
@@ -429,16 +429,16 @@ describe("pulling", () => {
 
   it("an authority commits a deletion it already staged", async () => {
     const f = makeFleet();
-    git(f.box, "rm", "-q", "skills/b/SKILL.md");
-    const result = await f.sync(f.box, "box");
+    git(f.hub, "rm", "-q", "skills/b/SKILL.md");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(false);
     expect(onMain(f.origin, "skills/b/SKILL.md")).toBeNull();
   });
 
   it("an authority commits its changes even when an auto_commit path does not exist", async () => {
     const f = makeFleet('[fleet]\nauto_commit = ["skills", "claude"]\n');
-    put(f.box, "skills/b/SKILL.md", "b v2\n");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "skills/b/SKILL.md", "b v2\n");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(false);
     expect(result.lines).toContain("committed 1 file");
     expect(onMain(f.origin, "skills/b/SKILL.md")).toBe("b v2\n");
@@ -454,39 +454,39 @@ describe("writes outside sync", () => {
     git(upstream, "add", "-A");
     git(upstream, "commit", "-qm", "v2");
     put(
-      f.box,
+      f.hub,
       "skills/SOURCES.json",
       `${JSON.stringify({ sources: { upstream: { type: "github", url: upstream, skills: ["a"], paths: { a: "a" } } } })}\n`,
     );
-    commitAll(f.box, "sources");
+    commitAll(f.hub, "sources");
 
-    const preview = await run(previewUpdate(f.box, ["a"]));
+    const preview = await run(previewUpdate(f.hub, ["a"]));
     expect(preview.diff).toContain("+a upstream v2");
-    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
     // A sync while "Keep these changes?" waits.
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     expect(result.lines.join("\n")).not.toContain("committed");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
 
     // An edit of the skill's own is never overwritten by keeping the update.
-    put(f.box, "skills/a/SKILL.md", "a, edited here\n");
-    expect(await run(keepUpdate(f.box, ["a"], preview.digest).pipe(Effect.flip))).toContain(
+    put(f.hub, "skills/a/SKILL.md", "a, edited here\n");
+    expect(await run(keepUpdate(f.hub, ["a"], preview.digest).pipe(Effect.flip))).toContain(
       "preview again",
     );
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited here\n");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a, edited here\n");
   });
 
   it("removing a skill commits on an authority", async () => {
     const f = makeFleet();
     put(
-      f.box,
+      f.hub,
       "skills/SOURCES.json",
       `${JSON.stringify({ sources: { u: { type: "github", url: "x", skills: ["b"] } } })}\n`,
     );
-    commitAll(f.box, "sources");
-    const config = await f.config(f.box, "box");
+    commitAll(f.hub, "sources");
+    const config = await f.config(f.hub, "hub");
     const landed = await run(
-      removeSkills(f.box, ["b"]).pipe(Effect.flatMap((paths) => land(config, paths, "Remove b"))),
+      removeSkills(f.hub, ["b"]).pipe(Effect.flatMap((paths) => land(config, paths, "Remove b"))),
     );
     expect(landed).toContain("committed and pushed");
     expect(onMain(f.origin, "skills/b/SKILL.md")).toBeNull();
@@ -494,13 +494,13 @@ describe("writes outside sync", () => {
 
   it("commitAndPush refuses while a sync holds the lock", async () => {
     const f = makeFleet();
-    put(f.box, "README.md", "x\n");
+    put(f.hub, "README.md", "x\n");
     const token = await run(takeSyncLock);
-    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
+    expect(await fails(commitAndPush(f.hub, ["README.md"], "readme"))).toContain(
       "a sync is running",
     );
     if (token !== null) await run(releaseSyncLock(token));
-    expect(await run(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(/^[0-9a-f]{7,}$/);
+    expect(await run(commitAndPush(f.hub, ["README.md"], "readme"))).toMatch(/^[0-9a-f]{7,}$/);
   });
 });
 
@@ -511,28 +511,28 @@ describe("secrets never reach git", () => {
   it("commitAndPush refuses a token in an MCP URL, naming file and line, never the value", async () => {
     const f = makeFleet();
     const key = "3f9a1c2e-7b4d-4e8a-9c1f-2d6b8e0a4c7f";
-    put(f.box, "mcp/exa.json", `{\n  "url": "https://mcp.exa.ai/mcp?exaApiKey=${key}"\n}\n`);
-    const refused = await fails(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"));
+    put(f.hub, "mcp/exa.json", `{\n  "url": "https://mcp.exa.ai/mcp?exaApiKey=${key}"\n}\n`);
+    const refused = await fails(commitAndPush(f.hub, ["mcp/exa.json"], "Add exa"));
     expect(refused).toContain("mcp/exa.json:2 looks like a token in a URL query (exaApiKey)");
     expect(refused).not.toContain(key);
     expect(onMain(f.origin, "mcp/exa.json")).toBeNull();
     // Left as an edit, not staged for the next commit to take along.
-    expect(git(f.box, "status", "--porcelain", "--", "mcp")).toBe("?? mcp/\n");
+    expect(git(f.hub, "status", "--porcelain", "--", "mcp")).toBe("?? mcp/\n");
 
     // Not a secret after all: allowed by its line's SHA-256, and through.
     const hash = /secrets allow mcp\/exa\.json ([0-9a-f]{64})/.exec(String(refused))?.[1] ?? "";
-    expect(await run(allowSecret(f.box, "mcp/exa.json", hash))).toBe(true);
-    expect(await run(commitAndPush(f.box, ["mcp/exa.json"], "Add exa"))).toMatch(/^[0-9a-f]{7,}$/);
+    expect(await run(allowSecret(f.hub, "mcp/exa.json", hash))).toBe(true);
+    expect(await run(commitAndPush(f.hub, ["mcp/exa.json"], "Add exa"))).toMatch(/^[0-9a-f]{7,}$/);
   });
 
   it("refuses a token in args", async () => {
     const f = makeFleet();
     put(
-      f.box,
+      f.hub,
       "mcp/x.json",
       `{"args": ["server", "--api-key", "${"Kq8".repeat(4)}Zr72mPw9xLt3"]}\n`,
     );
-    expect(await fails(commitAndPush(f.box, ["mcp/x.json"], "x"))).toContain(
+    expect(await fails(commitAndPush(f.hub, ["mcp/x.json"], "x"))).toContain(
       "mcp/x.json:1 looks like a secret in a command-line flag (--api-key)",
     );
   });
@@ -540,30 +540,30 @@ describe("secrets never reach git", () => {
   it("commits what `mcp add --token-env` writes: a variable's name is not a secret", async () => {
     const f = makeFleet();
     put(
-      f.box,
+      f.hub,
       "mcp/linear.json",
       `{\n  "kind": "direct",\n  "url": "https://mcp.linear.app/mcp",\n  "auth": {\n    "type": "bearer",\n    "token_env": "T3_FLEET_MCP_TOKEN_LAPTOP"\n  }\n}\n`,
     );
-    expect(await run(commitAndPush(f.box, ["mcp/linear.json"], "Add linear"))).toMatch(
+    expect(await run(commitAndPush(f.hub, ["mcp/linear.json"], "Add linear"))).toMatch(
       /^[0-9a-f]{7,}$/,
     );
   });
 
   it("scans only what a commit adds: a skill already holding an example token still updates", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", `a v1\nEXAMPLE=${fakeToken()}\n`);
-    commitAll(f.box, "vendored with an example");
-    put(f.box, "skills/a/SKILL.md", `a v2\nEXAMPLE=${fakeToken()}\nAPI_KEY = "your-api-key"\n`);
-    expect(await run(commitAndPush(f.box, ["skills/a/SKILL.md"], "update a"))).toMatch(
+    put(f.hub, "skills/a/SKILL.md", `a v1\nEXAMPLE=${fakeToken()}\n`);
+    commitAll(f.hub, "vendored with an example");
+    put(f.hub, "skills/a/SKILL.md", `a v2\nEXAMPLE=${fakeToken()}\nAPI_KEY = "your-api-key"\n`);
+    expect(await run(commitAndPush(f.hub, ["skills/a/SKILL.md"], "update a"))).toMatch(
       /^[0-9a-f]{7,}$/,
     );
   });
 
   it("an authority's sync holds back the skill with a secret and says why, without its hash", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", "a v2\n");
-    put(f.box, "skills/c/SKILL.md", `token: ${fakeToken()}\n`);
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "skills/a/SKILL.md", "a v2\n");
+    put(f.hub, "skills/c/SKILL.md", `token: ${fakeToken()}\n`);
+    const result = await f.sync(f.hub, "hub");
     expect(result.lines.join("\n")).toContain("committed 1 file");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
     expect(onMain(f.origin, "skills/c/SKILL.md")).toBeNull();
@@ -579,15 +579,15 @@ describe("secrets never reach git", () => {
 
   it("never commits half a skill: a new skill whose script holds a secret stays out whole", async () => {
     const f = makeFleet();
-    put(f.box, "skills/new/SKILL.md", "Run scripts/go.sh.\n");
+    put(f.hub, "skills/new/SKILL.md", "Run scripts/go.sh.\n");
     put(
-      f.box,
+      f.hub,
       "skills/new/scripts/go.sh",
       `curl -H "Authorization: Bearer ${fakeToken().slice(4)}"\n`,
     );
-    put(f.box, "skills/SOURCES.json", '{"local": ["new"]}\n');
-    put(f.box, "skills/a/SKILL.md", "a v2\n");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "skills/SOURCES.json", '{"local": ["new"]}\n');
+    put(f.hub, "skills/a/SKILL.md", "a v2\n");
+    const result = await f.sync(f.hub, "hub");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2\n");
     expect(onMain(f.origin, "skills/new/SKILL.md")).toBeNull();
     expect(onMain(f.origin, "skills/new/scripts/go.sh")).toBeNull();
@@ -600,22 +600,22 @@ describe("secrets never reach git", () => {
 
   it("a held-back skill an incoming change touches is set aside, and the authority's sync still works", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    put(f.hub, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
     // Main moves on under the same file, from elsewhere.
     put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
     commitAll(f.laptop, "a v2");
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     expect([result.failed, result.message, result.lines]).toEqual([false, "", expect.anything()]);
     expect(result.lines.join("\n")).toContain("pulled 1 commit");
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a v2 from main\n");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a v2 from main\n");
     const [finding] = result.findings;
     expect(finding?.key).toBe("sync-secret-skills/a");
     expect(finding?.title).toContain("sync set skills/a aside in git stash");
     // The edit is kept, where the finding says.
-    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
-    expect(git(f.box, "stash", "show", "-p", "stash@{0}")).toContain("a, edited");
+    expect(git(f.hub, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    expect(git(f.hub, "stash", "show", "-p", "stash@{0}")).toContain("a, edited");
     // Later runs keep naming it until the entry is dropped.
-    const later = await f.sync(f.box, "box");
+    const later = await f.sync(f.hub, "hub");
     expect(later.failed).toBe(false);
     expect(later.findings.map((x) => [x.key, x.severity])).toEqual([
       ["sync-secret-skills/a", "warn"],
@@ -630,17 +630,17 @@ describe("secrets never reach git", () => {
     git(upstream, "add", "-A");
     git(upstream, "commit", "-qm", "v2");
     put(
-      f.box,
+      f.hub,
       "skills/SOURCES.json",
       `${JSON.stringify({ sources: { upstream: { type: "github", url: upstream, skills: ["a"], paths: { a: "a" } } } })}\n`,
     );
-    commitAll(f.box, "sources");
-    const sources = read(f.box, "skills/SOURCES.json");
-    const config = await f.config(f.box, "box");
+    commitAll(f.hub, "sources");
+    const sources = read(f.hub, "skills/SOURCES.json");
+    const config = await f.config(f.hub, "hub");
 
-    const preview = await run(previewUpdate(f.box, ["a"]));
+    const preview = await run(previewUpdate(f.hub, ["a"]));
     const refused = await run(
-      keepUpdate(f.box, ["a"], preview.digest).pipe(
+      keepUpdate(f.hub, ["a"], preview.digest).pipe(
         Effect.flatMap((paths) => land(config, paths, "Update a")),
         Effect.flip,
       ),
@@ -649,21 +649,21 @@ describe("secrets never reach git", () => {
       "skills/a/SKILL.md:2 looks like a secret assigned to api_key",
     );
     // Put back as it was: no fetched files, no advanced pin.
-    expect(git(f.box, "status", "--porcelain")).toBe("");
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a v1\n");
-    expect(read(f.box, "skills/SOURCES.json")).toBe(sources);
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a v1\n");
+    expect(read(f.hub, "skills/SOURCES.json")).toBe(sources);
 
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     expect(result.lines.join("\n")).not.toContain("committed");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
   });
 
   it("an authority does not push a commit made by hand that adds a secret", async () => {
     const f = makeFleet();
-    put(f.box, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
-    git(f.box, "add", "-A");
-    git(f.box, "commit", "-qm", "notes, by hand");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
+    git(f.hub, "add", "-A");
+    git(f.hub, "commit", "-qm", "notes, by hand");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(true);
     expect(onMain(f.origin, "notes/setup.md")).toBeNull();
     expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-notes/setup.md"]);
@@ -672,8 +672,8 @@ describe("secrets never reach git", () => {
     );
 
     // commitAndPush checks what rides along too.
-    put(f.box, "README.md", "x\n");
-    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toMatch(
+    put(f.hub, "README.md", "x\n");
+    expect(await fails(commitAndPush(f.hub, ["README.md"], "readme"))).toMatch(
       /notes\/setup\.md:1 \(in commit [0-9a-f]{7}\) looks like a GitHub token/,
     );
     expect(onMain(f.origin, "README.md")).toBe("fleet\n");
@@ -685,7 +685,7 @@ describe("secrets never reach git", () => {
     put(f.laptop, "skills/d/SKILL.md", `x\nkey = "${fakeToken()}"\n`);
     const result = await f.sync(f.laptop, "laptop");
     expect(result.lines.join("\n")).toContain("proposed 1 file");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
     expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/d"]);
 
@@ -693,7 +693,7 @@ describe("secrets never reach git", () => {
     put(f.laptop, "skills/a/SKILL.md", "a v1\n");
     const again = await f.sync(f.laptop, "laptop");
     expect(again.lines.join("\n")).not.toContain("proposed");
-    expect(await run(listProposals(f.box, "main"))).toEqual([]);
+    expect(await run(listProposals(f.hub, "main"))).toEqual([]);
   });
 
   it("a member trusts only the committed allow-list, not its own checkout's", async () => {
@@ -706,8 +706,8 @@ describe("secrets never reach git", () => {
     expect(held.findings.map((x) => x.key)).toEqual(["sync-secret-skills/d"]);
 
     // An authority allows it on the branch: now it is proposed.
-    await run(allowSecret(f.box, "skills/d/SKILL.md", hash));
-    commitAll(f.box, "allow");
+    await run(allowSecret(f.hub, "skills/d/SKILL.md", hash));
+    commitAll(f.hub, "allow");
     git(f.laptop, "checkout", "-q", "--", "t3-fleet.toml");
     const proposed = await f.sync(f.laptop, "laptop");
     expect(proposed.findings).toEqual([]);
@@ -720,9 +720,9 @@ describe("secrets never reach git", () => {
     git(f.laptop, "add", "-A");
     git(f.laptop, "commit", "-qm", "by hand");
     git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    const refused = await fails(approve(f.box, "main", proposal, "box", proposal.commit));
+    const refused = await fails(approve(f.hub, "main", proposal, "hub", proposal.commit));
     expect(refused).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v1\n");
   });
@@ -741,20 +741,20 @@ describe("secrets never reach git: round two", () => {
 
   it("scans every unpushed commit, not just where they end up, and names the commit", async () => {
     const f = makeFleet();
-    put(f.box, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
-    git(f.box, "add", "-A");
-    git(f.box, "commit", "-qm", "token, by hand");
-    const added = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
-    put(f.box, "notes/setup.md", "export GITHUB_TOKEN=$GITHUB_TOKEN\n");
-    git(f.box, "commit", "-qam", "token out again");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "notes/setup.md", `export GITHUB_TOKEN=${fakeToken()}\n`);
+    git(f.hub, "add", "-A");
+    git(f.hub, "commit", "-qm", "token, by hand");
+    const added = git(f.hub, "rev-parse", "--short=7", "HEAD").trim();
+    put(f.hub, "notes/setup.md", "export GITHUB_TOKEN=$GITHUB_TOKEN\n");
+    git(f.hub, "commit", "-qam", "token out again");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(true);
     expect(onMain(f.origin, "notes/setup.md")).toBeNull();
     expect(result.findings[0]?.title).toContain(
       `notes/setup.md:1 (in commit ${added}) looks like a GitHub token`,
     );
-    put(f.box, "README.md", "x\n");
-    expect(await fails(commitAndPush(f.box, ["README.md"], "readme"))).toContain(
+    put(f.hub, "README.md", "x\n");
+    expect(await fails(commitAndPush(f.hub, ["README.md"], "readme"))).toContain(
       `(in commit ${added})`,
     );
     expect(git(f.origin, "log", "--all", "-p")).not.toContain(fakeToken());
@@ -762,41 +762,41 @@ describe("secrets never reach git: round two", () => {
 
   it("sets SOURCES.json aside with the skills its entries name, in one stash entry", async () => {
     const f = makeFleet();
-    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
-    commitAll(f.box, "sources");
+    put(f.hub, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.hub, "sources");
     // A new skill with a secret, and its entry.
-    put(f.box, "skills/new/SKILL.md", `token: ${fakeToken()}\n`);
-    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "new"] })}\n`);
+    put(f.hub, "skills/new/SKILL.md", `token: ${fakeToken()}\n`);
+    put(f.hub, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "new"] })}\n`);
     // Main changes SOURCES.json meanwhile.
     git(f.laptop, "pull", "-q", "origin", "main");
     put(f.laptop, "skills/SOURCES.json", `${JSON.stringify({ local: ["a", "b"] })}\n`);
     commitAll(f.laptop, "b is local too");
 
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(false);
     expect(result.findings.map((x) => x.key)).toEqual(["sync-secret-skills/SOURCES.json"]);
     expect(result.findings[0]?.title).toContain("skills/SOURCES.json with skills/new");
     // One entry holding both; the checkout has main's SOURCES.json and no half skill.
-    const entries = git(f.box, "stash", "list").trim().split("\n");
+    const entries = git(f.hub, "stash", "list").trim().split("\n");
     expect(entries).toEqual([expect.stringContaining("T3 Fleet: held back skills/SOURCES.json")]);
-    const stashed = git(f.box, "stash", "show", "--include-untracked", "--name-only", "stash@{0}");
+    const stashed = git(f.hub, "stash", "show", "--include-untracked", "--name-only", "stash@{0}");
     expect(stashed.split("\n").filter(Boolean).sort()).toEqual([
       "skills/SOURCES.json",
       "skills/new/SKILL.md",
     ]);
-    expect(read(f.box, "skills/SOURCES.json")).toContain('"b"');
-    expect(existsSync(join(f.box, "skills/new"))).toBe(false);
+    expect(read(f.hub, "skills/SOURCES.json")).toContain('"b"');
+    expect(existsSync(join(f.hub, "skills/new"))).toBe(false);
 
     // The edits come back, conflicting; nothing with conflict markers is ever committed.
-    spawnSync("git", ["stash", "apply", "stash@{0}"], { cwd: f.box });
-    expect(read(f.box, "skills/SOURCES.json")).toContain("<<<<<<<");
-    put(f.box, "skills/new/SKILL.md", "token: $GITHUB_TOKEN\n");
-    const after = await f.sync(f.box, "box");
+    spawnSync("git", ["stash", "apply", "stash@{0}"], { cwd: f.hub });
+    expect(read(f.hub, "skills/SOURCES.json")).toContain("<<<<<<<");
+    put(f.hub, "skills/new/SKILL.md", "token: $GITHUB_TOKEN\n");
+    const after = await f.sync(f.hub, "hub");
     expect(onMain(f.origin, "skills/SOURCES.json")).not.toContain("<<<<<<<");
     // A SOURCES.json that does not read is held alone (it names no skill), so the fixed skill goes ahead.
     expect(onMain(f.origin, "skills/new/SKILL.md")).toBe("token: $GITHUB_TOKEN\n");
     expect(after.findings.map((x) => x.title).join("\n")).toContain("skills/SOURCES.json");
-    expect(await fails(commitAndPush(f.box, ["skills/SOURCES.json"], "sources"))).toContain(
+    expect(await fails(commitAndPush(f.hub, ["skills/SOURCES.json"], "sources"))).toContain(
       "still conflicted",
     );
   });
@@ -834,16 +834,16 @@ describe("secrets never reach git: round two", () => {
       "b/SKILL.md": "b upstream v2\n",
     });
     put(
-      f.box,
+      f.hub,
       "skills/SOURCES.json",
       `${JSON.stringify({ sources: { up: { type: "github", url, skills: ["a", "b"], paths: { a: "a", b: "b" } } } })}\n`,
     );
-    commitAll(f.box, "sources");
-    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
-    const preview = await run(previewUpdate(f.box, []));
+    commitAll(f.hub, "sources");
+    put(f.hub, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    const preview = await run(previewUpdate(f.hub, []));
     expect(preview.skipped).toEqual(["skills/a"]);
     expect(preview.files).toEqual(["skills/b"]);
-    const named = await fails(previewUpdate(f.box, ["a"]));
+    const named = await fails(previewUpdate(f.hub, ["a"]));
     expect(named).toContain("sync holds back skills/a");
     expect(named).not.toContain("the next sync takes care of them");
   });
@@ -854,7 +854,7 @@ describe("secrets never reach git: round two", () => {
     git(f.laptop, "add", "-A");
     git(f.laptop, "commit", "-qm", "by hand");
     git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     const text = result.lines.join("\n");
     expect(text).toContain("could not auto-approve laptop's proposal");
     expect(text).toContain("skills/a/SKILL.md:1 looks like a GitHub token");
@@ -863,10 +863,10 @@ describe("secrets never reach git: round two", () => {
 
   it("tells how to bring set-aside edits back in the order that works", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    put(f.hub, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
     put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
     commitAll(f.laptop, "a v2");
-    const result = await f.sync(f.box, "box");
+    const result = await f.sync(f.hub, "hub");
     const detail = result.findings[0]?.detail ?? "";
     const order = ["stash apply", "can conflict", "take the secret out", "stash drop"].map((s) =>
       detail.indexOf(s),
@@ -890,50 +890,50 @@ describe("secrets never reach git: round three", () => {
     const f = makeFleet("[fleet]\nauto_approve = []\n");
     put(f.laptop, "skills/a/SKILL.md", "a v2 from laptop\n");
     await f.sync(f.laptop, "laptop");
-    put(f.box, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
+    put(f.hub, "skills/a/SKILL.md", `a, edited\ntoken: ${fakeToken()}\n`);
     // Pending, not about to be approved: sync does not stash the edit.
-    const synced = await f.sync(f.box, "box");
+    const synced = await f.sync(f.hub, "hub");
     expect(synced.failed).toBe(false);
-    expect(git(f.box, "stash", "list")).toBe("");
+    expect(git(f.hub, "stash", "list")).toBe("");
     // Approving it does, and goes ahead.
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    await run(approve(f.hub, "main", proposal, "hub", proposal.commit));
     expect(onMain(f.origin, "skills/a/SKILL.md")).toBe("a v2 from laptop\n");
-    expect(git(f.box, "stash", "list")).toContain("T3 Fleet: held back skills/a");
+    expect(git(f.hub, "stash", "list")).toContain("T3 Fleet: held back skills/a");
     // An edit that is not held still stops it.
     put(f.laptop, "skills/b/SKILL.md", "b v2 from laptop\n");
     await f.sync(f.laptop, "laptop");
-    put(f.box, "skills/b/SKILL.md", "b, edited here\n");
-    const [next] = await run(listProposals(f.box, "main"));
+    put(f.hub, "skills/b/SKILL.md", "b, edited here\n");
+    const [next] = await run(listProposals(f.hub, "main"));
     if (next === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", next, "box", next.commit))).toContain(
+    expect(await fails(approve(f.hub, "main", next, "hub", next.commit))).toContain(
       "commit or stash them first",
     );
   });
 
   it("a failed scan holds everything but stashes nothing", async () => {
     const f = makeFleet();
-    put(f.box, "skills/a/SKILL.md", "a, edited\n");
+    put(f.hub, "skills/a/SKILL.md", "a, edited\n");
     put(f.laptop, "skills/a/SKILL.md", "a v2 from main\n");
     commitAll(f.laptop, "a v2");
     // The scan's scratch index cannot be written.
-    mkdirSync(join(f.box, ".git/t3-fleet-scan-index"));
-    const result = await f.sync(f.box, "box");
+    mkdirSync(join(f.hub, ".git/t3-fleet-scan-index"));
+    const result = await f.sync(f.hub, "hub");
     expect(result.failed).toBe(true);
     expect(result.findings.map((x) => x.key)).toContain("sync-scan-failed");
-    expect(git(f.box, "stash", "list")).toBe("");
-    expect(read(f.box, "skills/a/SKILL.md")).toBe("a, edited\n");
+    expect(git(f.hub, "stash", "list")).toBe("");
+    expect(read(f.hub, "skills/a/SKILL.md")).toBe("a, edited\n");
   });
 
   it("a SOURCES.json mid-edit is held alone and never stashed", async () => {
     const f = makeFleet();
-    put(f.box, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
-    commitAll(f.box, "sources");
-    put(f.box, "skills/SOURCES.json", '{"local": ["a", \n');
-    put(f.box, "skills/x/SKILL.md", "x v1\n");
-    const result = await f.sync(f.box, "box");
-    expect(git(f.box, "stash", "list")).toBe("");
+    put(f.hub, "skills/SOURCES.json", `${JSON.stringify({ local: ["a"] })}\n`);
+    commitAll(f.hub, "sources");
+    put(f.hub, "skills/SOURCES.json", '{"local": ["a", \n');
+    put(f.hub, "skills/x/SKILL.md", "x v1\n");
+    const result = await f.sync(f.hub, "hub");
+    expect(git(f.hub, "stash", "list")).toBe("");
     expect(onMain(f.origin, "skills/x/SKILL.md")).toBe("x v1\n");
     expect(onMain(f.origin, "skills/SOURCES.json")).toBe(`${JSON.stringify({ local: ["a"] })}\n`);
     const [finding] = result.findings;
@@ -944,40 +944,40 @@ describe("secrets never reach git: round three", () => {
 
   it("an unresolved conflict says how to resolve it, not how to move a secret", async () => {
     const f = makeFleet();
-    put(f.box, "skills/b/SKILL.md", "b, mine\n");
-    git(f.box, "stash", "push", "-q", "-m", "mine");
-    put(f.box, "skills/b/SKILL.md", "b, theirs\n");
-    commitAll(f.box, "b theirs");
-    spawnSync("git", ["stash", "apply"], { cwd: f.box });
+    put(f.hub, "skills/b/SKILL.md", "b, mine\n");
+    git(f.hub, "stash", "push", "-q", "-m", "mine");
+    put(f.hub, "skills/b/SKILL.md", "b, theirs\n");
+    commitAll(f.hub, "b theirs");
+    spawnSync("git", ["stash", "apply"], { cwd: f.hub });
     // Markers taken out by hand, but not marked resolved.
-    put(f.box, "skills/b/SKILL.md", "b, both\n");
-    const result = await f.sync(f.box, "box");
+    put(f.hub, "skills/b/SKILL.md", "b, both\n");
+    const result = await f.sync(f.hub, "hub");
     const [finding] = result.findings;
     expect(finding?.title).toContain("skills/b/SKILL.md has an unresolved merge conflict");
     expect(finding?.detail).toContain("add skills/b/SKILL.md");
     expect(finding?.detail).not.toContain("secrets set");
-    const scanned = refusal(await run(unmergedHits(f.box)), "commit or propose");
+    const scanned = refusal(await run(unmergedHits(f.hub)), "commit or propose");
     expect(scanned).toContain("git add skills/b/SKILL.md");
     expect(scanned).not.toContain("secrets allow");
   });
 
   it("putting files back keeps what git ignores, and so does re-adding a skill", async () => {
     const f = makeFleet();
-    put(f.box, ".gitignore", ".env\n");
-    commitAll(f.box, "ignore .env");
+    put(f.hub, ".gitignore", ".env\n");
+    commitAll(f.hub, "ignore .env");
     const url = upstreamOf(f.root, "z", { "z/SKILL.md": "z v1\n" });
-    const config = await f.config(f.box, "box");
-    await run(addSkills(f.box, url, []).pipe(Effect.flatMap((p) => land(config, p, "add z"))));
-    put(f.box, "skills/z/.env", "LOCAL=1\n");
+    const config = await f.config(f.hub, "hub");
+    await run(addSkills(f.hub, url, []).pipe(Effect.flatMap((p) => land(config, p, "add z"))));
+    put(f.hub, "skills/z/.env", "LOCAL=1\n");
     // Added again: replaced, but its .env stays.
-    await run(addSkills(f.box, url, []));
-    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+    await run(addSkills(f.hub, url, []));
+    expect(read(f.hub, "skills/z/.env")).toBe("LOCAL=1\n");
     // A refused write is put back, and its .env stays.
-    const before = await run(snapshot(f.box, ["skills"]));
-    put(f.box, "skills/z/SKILL.md", `token: ${fakeToken()}\n`);
-    await run(restorePaths(f.box, ["skills/z"], before));
-    expect(read(f.box, "skills/z/SKILL.md")).toBe("z v1\n");
-    expect(read(f.box, "skills/z/.env")).toBe("LOCAL=1\n");
+    const before = await run(snapshot(f.hub, ["skills"]));
+    put(f.hub, "skills/z/SKILL.md", `token: ${fakeToken()}\n`);
+    await run(restorePaths(f.hub, ["skills/z"], before));
+    expect(read(f.hub, "skills/z/SKILL.md")).toBe("z v1\n");
+    expect(read(f.hub, "skills/z/.env")).toBe("LOCAL=1\n");
   });
 
   it("pushes a fleet's first commit to an empty remote, scanned from its root", async () => {
@@ -1003,19 +1003,19 @@ describe("secrets never reach git: round three", () => {
 
   it("scans a merge for what it adds itself, and a root commit against nothing", async () => {
     const f = makeFleet();
-    git(f.box, "checkout", "-q", "-b", "side");
-    put(f.box, "notes/side.md", `token: ${fakeToken()}\n`);
-    git(f.box, "add", "-A");
-    git(f.box, "commit", "-qm", "side adds a token");
-    const side = git(f.box, "rev-parse", "--short=7", "HEAD").trim();
-    git(f.box, "checkout", "-q", "main");
-    put(f.box, "README.md", "fleet, edited\n");
-    git(f.box, "commit", "-qam", "main moves");
-    git(f.box, "merge", "-q", "--no-edit", "side");
-    const hits = await run(scanCommits(f.box, ["origin/main..HEAD"]));
+    git(f.hub, "checkout", "-q", "-b", "side");
+    put(f.hub, "notes/side.md", `token: ${fakeToken()}\n`);
+    git(f.hub, "add", "-A");
+    git(f.hub, "commit", "-qm", "side adds a token");
+    const side = git(f.hub, "rev-parse", "--short=7", "HEAD").trim();
+    git(f.hub, "checkout", "-q", "main");
+    put(f.hub, "README.md", "fleet, edited\n");
+    git(f.hub, "commit", "-qam", "main moves");
+    git(f.hub, "merge", "-q", "--no-edit", "side");
+    const hits = await run(scanCommits(f.hub, ["origin/main..HEAD"]));
     expect(hits.map((h) => h.commit)).toEqual([side]);
     // The whole history, root commit included.
-    const all = await run(scanCommits(f.box, ["HEAD"]));
+    const all = await run(scanCommits(f.hub, ["HEAD"]));
     expect(all.map((h) => h.commit)).toEqual([side]);
   });
 });
@@ -1171,20 +1171,20 @@ describe("reporting a run", () => {
 
   it("raises an alert once per problem, though its title counts on", async () => {
     const f = makeFleet();
-    const config = await f.config(f.box, "box");
+    const config = await f.config(f.hub, "hub");
     const previous = async () =>
-      Option.fromNullishOr((await run(readStates(f.box))).find((s) => s.node === "box"));
+      Option.fromNullishOr((await run(readStates(f.hub))).find((s) => s.node === "hub"));
     await run(
-      report(outcome(config, "box", 1, [{ key: "sync-failing", title: "failed 3 times" }])),
+      report(outcome(config, "hub", 1, [{ key: "sync-failing", title: "failed 3 times" }])),
     );
     await run(
       report({
-        ...outcome(config, "box", 2, [{ key: "sync-failing", title: "failed 4 times" }]),
+        ...outcome(config, "hub", 2, [{ key: "sync-failing", title: "failed 4 times" }]),
         previous: await previous(),
       }),
     );
     const state = await run(
-      report({ ...outcome(config, "box", 3, []), previous: await previous() }),
+      report({ ...outcome(config, "hub", 3, []), previous: await previous() }),
     );
     expect(state.alerts.map((a) => [a.at, a.kind, a.message])).toEqual([
       [1, "problem", "failed 3 times"],
@@ -1218,11 +1218,11 @@ describe("a member's approved proposal", () => {
     const f = makeFleet(TOML);
     put(f.laptop, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "notes"]'));
     await f.sync(f.laptop, "laptop");
-    put(f.box, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
-    commitAll(f.box, "posthog");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    put(f.hub, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
+    commitAll(f.hub, "posthog");
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    await run(approve(f.hub, "main", proposal, "hub", proposal.commit));
     expect(onMain(f.origin, "t3-fleet.toml")).toContain('["fetch", "posthog", "notes"]');
 
     const synced = await f.sync(f.laptop, "laptop");
@@ -1233,8 +1233,8 @@ describe("a member's approved proposal", () => {
 
     // An edit of its own the branch also changed: left in place, named, and never re-proposed.
     put(f.laptop, "skills/b/SKILL.md", "b, mine\n");
-    put(f.box, "skills/b/SKILL.md", "b, box\n");
-    commitAll(f.box, "b");
+    put(f.hub, "skills/b/SKILL.md", "b, hub\n");
+    commitAll(f.hub, "b");
     const refused = await f.sync(f.laptop, "laptop");
     expect(refused.failed).toBe(true);
     expect(read(f.laptop, "skills/b/SKILL.md")).toBe("b, mine\n");
@@ -1248,8 +1248,8 @@ describe("a member's approved proposal", () => {
     const f = makeFleet(TOML);
     put(f.laptop, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "notes"]'));
     await f.sync(f.laptop, "laptop");
-    put(f.box, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
-    commitAll(f.box, "posthog");
+    put(f.hub, "t3-fleet.toml", TOML.replace('["fetch"]', '["fetch", "posthog"]'));
+    commitAll(f.hub, "posthog");
     const synced = await f.sync(f.laptop, "laptop");
     expect(synced.failed).toBe(true);
     expect(read(f.laptop, "t3-fleet.toml")).toContain('["fetch", "notes"]');
@@ -1270,9 +1270,9 @@ describe("a path that could forge a line", () => {
     git(f.laptop, "add", "--", forged);
     git(f.laptop, "commit", "-qm", "forged");
     git(f.laptop, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
-    expect(await fails(approve(f.box, "main", proposal, "box", proposal.commit))).toContain(
+    expect(await fails(approve(f.hub, "main", proposal, "hub", proposal.commit))).toContain(
       "control character",
     );
     expect(onMain(f.origin, "skills/a/x")).toBeNull();
@@ -1284,17 +1284,17 @@ describe("an approved file and a held-back edit in one skill", () => {
     const f = makeFleet("[fleet]\nauto_approve = []\n");
     put(f.laptop, "skills/a/run.sh", "#!/bin/sh\necho mine\n");
     await f.sync(f.laptop, "laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) return expect.unreachable();
     // The branch changes the skill's SKILL.md, and approves the script.
-    put(f.box, "skills/a/SKILL.md", "a v2 from box\n");
-    commitAll(f.box, "a v2");
-    await run(approve(f.box, "main", proposal, "box", proposal.commit));
+    put(f.hub, "skills/a/SKILL.md", "a v2 from hub\n");
+    commitAll(f.hub, "a v2");
+    await run(approve(f.hub, "main", proposal, "hub", proposal.commit));
     // Meanwhile a secret in this machine's SKILL.md: the skill is held back, and set aside.
     put(f.laptop, "skills/a/SKILL.md", `a, mine\nEXAMPLE=${fakeToken()}\n`);
     const synced = await f.sync(f.laptop, "laptop");
     expect(synced.lines.join("\n")).toContain("set aside skills/a");
-    expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a v2 from box\n");
+    expect(read(f.laptop, "skills/a/SKILL.md")).toBe("a v2 from hub\n");
     const finding = synced.findings.find((x) => x.key === "sync-secret-skills/a");
     expect(finding?.detail).toContain("stash apply");
 
@@ -1312,7 +1312,7 @@ describe("an approved file and a held-back edit in one skill", () => {
     expect(read(f.laptop, "skills/a/SKILL.md")).toContain("a, mine");
     expect(read(f.laptop, "skills/a/run.sh")).toBe("#!/bin/sh\necho mine\n");
     // Resolved by hand, the secret taken out, the entry dropped: the next sync proposes it.
-    put(f.laptop, "skills/a/SKILL.md", "a v2 from box\na, mine\n");
+    put(f.laptop, "skills/a/SKILL.md", "a v2 from hub\na, mine\n");
     git(f.laptop, "reset", "-q", "--", "skills/a/SKILL.md");
     git(f.laptop, "stash", "drop", entry);
     const after = await f.sync(f.laptop, "laptop");
@@ -1338,14 +1338,14 @@ describe("every C0 control character and DEL in a path", () => {
       expect(unsafe?.title).toContain(JSON.stringify(named(code)));
     }
     // What is safe is still proposed; none of these is.
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     expect(proposal?.files).toEqual(["skills/a/SKILL.md"]);
   }, 60_000);
 
   it("the scanner reads every such name as it is, whatever git quotes", async () => {
     const f = makeFleet();
-    for (const code of codes) put(f.box, named(code), `token: ${fakeToken()}\n`);
-    const hits = await run(scanEdits(f.box, ["skills"]));
+    for (const code of codes) put(f.hub, named(code), `token: ${fakeToken()}\n`);
+    const hits = await run(scanEdits(f.hub, ["skills"]));
     expect([...new Set(hits.map((h) => h.file))].sort()).toEqual(codes.map(named).sort());
   });
 });

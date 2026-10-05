@@ -8,6 +8,9 @@
  * keeps working but nothing outlives the tab. A tab opened from this one asks
  * the tabs already open for the token. If the ticket was already used, the
  * page says so: someone else opened the link.
+ *
+ * On the hub there is no ticket: the hub knows who is asking from Tailscale,
+ * and gives a login it lets in a token of its own (core HubUi.ts).
  */
 import {
   HubCall,
@@ -114,11 +117,31 @@ export async function startSession(): Promise<SessionStart> {
     window.sessionStorage.setItem(TOKEN_KEY, shared);
     return { ok: true };
   }
+  const hub = await hubSession();
+  if (hub !== null) return hub;
   return {
     ok: false,
     title: "Open the link t3-fleet ui printed",
     message: "Each link works once; t3-fleet ui prints a new one for another tab.",
   };
+}
+
+/** A session from the hub, or null when this is `t3-fleet ui` on a machine (it wants a ticket). */
+async function hubSession(): Promise<SessionStart | null> {
+  let response: Response;
+  try {
+    response = await fetch("/api/session", { method: "POST", headers: { "x-t3-fleet-hub": "1" } });
+  } catch {
+    return null;
+  }
+  const text = await response.text();
+  if (response.ok) {
+    window.sessionStorage.setItem(TOKEN_KEY, decoder(UiSessionGrant)("/api/session", text).token);
+    return { ok: true };
+  }
+  // `t3-fleet ui` answers 401 for a missing ticket; the hub refuses with why.
+  if (response.status === 401 && text.includes("t3-fleet ui")) return null;
+  return { ok: false, title: "The hub did not let you in", message: text.trim() };
 }
 
 export class ApiError extends Error {

@@ -31,9 +31,11 @@ export function ProposalsView() {
       description={
         session === null
           ? undefined
-          : session.authority
-            ? "Changes other machines made under the auto-commit paths, waiting for you"
-            : `${session.self} is not an authority: proposals can be reviewed here and approved on an authority`
+          : session.hub !== undefined
+            ? `Shown as the hub sees them. Approve or reject on an authority (${session.hub.approveOn.join(", ") || "none in this fleet"}): t3-fleet approve, or t3-fleet ui --local there. The hub never decides proposals, so it cannot approve its own.`
+            : session.authority
+              ? "Changes other machines made under the auto-commit paths, waiting for you"
+              : `${session.self} is not an authority: proposals can be reviewed here and approved on an authority`
       }
       actions={
         <Button
@@ -71,7 +73,8 @@ export function ProposalsView() {
           <Proposal
             key={p.node}
             proposal={p}
-            canDecide={session?.authority === true}
+            canDecide={session?.authority === true && session.hub === undefined}
+            decideOn={session?.hub?.approveOn ?? null}
             onDecide={(verb) => setDeciding({ verb, proposal: p })}
           />
         ))
@@ -93,10 +96,13 @@ export function ProposalsView() {
 function Proposal({
   proposal: p,
   canDecide,
+  decideOn,
   onDecide,
 }: {
   proposal: UiProposalT;
   canDecide: boolean;
+  /** On the hub: the authorities where it is decided instead. */
+  decideOn: ReadonlyArray<string> | null;
   onDecide: (verb: "approve" | "reject") => void;
 }) {
   return (
@@ -110,6 +116,11 @@ function Proposal({
         {p.autoApprovable ? <Badge variant="info">auto-approvable</Badge> : null}
         <span className="text-muted-foreground text-xs">{p.summary}</span>
         <span className="ml-auto flex gap-2">
+          {decideOn !== null ? (
+            <span className="self-center text-muted-foreground text-xs">
+              Approve on {decideOn.join(" or ") || "an authority"}
+            </span>
+          ) : null}
           <Button
             size="sm"
             variant="destructive-outline"

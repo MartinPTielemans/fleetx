@@ -8,7 +8,7 @@ import type { Node } from "./Config.ts";
 import { inRunOrder, runFix, runFixes } from "./Fix.ts";
 
 const finding = (key: string, command = `echo ${key}`): Finding & { readonly fix: Fix } => ({
-  node: "box",
+  node: "hub",
   key,
   severity: "warn",
   area: "engine",
@@ -36,8 +36,8 @@ describe("inRunOrder", () => {
 describe("runFix", () => {
   it("refuses to install a build it was not given, instead of an empty file", async () => {
     const node = {
-      name: "box",
-      ssh: "box.invalid",
+      name: "hub",
+      ssh: "hub.invalid",
       roles: [],
       profiles: [],
       settings: { table: {}, sources: {} },
@@ -54,7 +54,7 @@ describe("runFix", () => {
 
 describe("runFixes", () => {
   const self = {
-    name: "box",
+    name: "hub",
     ssh: null,
     roles: ["member" as const],
     profiles: [],

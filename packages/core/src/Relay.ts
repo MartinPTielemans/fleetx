@@ -7,7 +7,8 @@
  *   GET  /fleet         every node's latest reported state
  *   GET  /events        server-sent events: "pull" when the branch moves,
  *                       "state" when a node reports, "hub" when a hosted MCP
- *                       server changes state; replays what a client missed
+ *                       server changes state, "fix" when the app on the hub
+ *                       asks a node for fixes; replays what a client missed
  *                       (Last-Event-ID or ?since=) so a laptop that slept
  *                       catches up, and adds a "pull" when it cannot know
  *                       what was missed (see eventIds)
@@ -15,6 +16,11 @@
  *                       endpoint and one token (see hub/Hub.ts)
  *        /hub/*, /oauth/callback
  *                       managing the hub and signing in (see hub/Routes.ts)
+ *   POST /fixes, GET /fixes/<id>, POST /fixes/<id>/progress
+ *                       fix requests from the app on the hub, claimed and
+ *                       answered by the node they name (FixRequest.ts)
+ *   GET  /, /api/*      the app, when this relay hosts it (HubUi.ts): its own
+ *                       guard, Tailscale identity, instead of the relay token
  *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
  *                       (models/Egress.ts; token in x-t3-fleet-relay-token)
  *   GET  /health
@@ -45,6 +51,13 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { loadConfigFrom } from "./Config.ts";
 import { deliverAlerts } from "./Notify.ts";
 import { readStates } from "./Sync.ts";
+import {
+  advance,
+  FixProgress,
+  FixRequestBody,
+  FixRequestRecord,
+  type FixRelay,
+} from "./FixRequest.ts";
 import { git, out } from "./Git.ts";
 import { egressLayer } from "./models/Egress.ts";
 import { makeHub, type HubConfig } from "./hub/Hub.ts";
@@ -55,16 +68,18 @@ import { NodeState } from "./State.ts";
 export interface RelayEvent {
   readonly id: number;
   readonly at: number;
-  readonly type: "pull" | "state" | "hub";
+  readonly type: "pull" | "state" | "hub" | "fix";
   readonly node?: string;
   readonly rev?: string;
+  /** fix: the request's id; what it asks for is fetched from /fixes/<id>. */
+  readonly request?: string;
   /** hub: the server, its new state, and why. */
   readonly server?: string;
   readonly state?: string;
   readonly detail?: string | null;
 }
 
-export interface RelayOptions {
+export interface RelayOptions<R = never> {
   readonly token: string;
   /** This relay node, enabling deterministic delivery. Omitted by embedders without notifications. */
   readonly node?: string;
@@ -77,7 +92,19 @@ export interface RelayOptions {
   readonly pollEvery?: Duration.Input;
   /** The upstream bases /egress may forward to (models/Egress.ts); the built-in ones when absent. */
   readonly egressBases?: () => ReadonlyArray<string>;
+  /** More routes on the same port, given the relay's state: the app (HubUi.ts). */
+  readonly extra?: (relay: RelayHandle) => Layer.Layer<never, never, R>;
 }
+
+/** What the relay keeps, for routes served beside it. */
+export interface RelayHandle {
+  /** Every node's latest report since the relay started. */
+  readonly states: Effect.Effect<ReadonlyArray<NodeState>>;
+  readonly fixes: FixRelay;
+}
+
+/** How long a fix request is kept, answered or not. */
+const FIX_REQUESTS_KEPT_MS = 60 * 60 * 1000;
 
 const MAX_EVENTS = 500;
 
@@ -103,12 +130,16 @@ export const eventIds = (startedAt: number) => {
 };
 
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(NodeState));
+const decodeFixBody = Schema.decodeUnknownEffect(Schema.fromJsonString(FixRequestBody));
+const decodeProgress = Schema.decodeUnknownEffect(Schema.fromJsonString(FixProgress));
+const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(FixRequestRecord));
+const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const unauthorized = HttpServerResponse.text("Unauthorized", { status: 401 });
 
 /** The relay's routes and its background watcher, as one layer. */
-export const relayLayer = (options: RelayOptions) =>
+export const relayLayer = <R = never>(options: RelayOptions<R>) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const events = yield* Ref.make<ReadonlyArray<RelayEvent>>([]);
@@ -182,6 +213,107 @@ export const relayLayer = (options: RelayOptions) =>
 
       const hubService = yield* makeHub({ ...options.hub, relayToken: options.token }, (e) =>
         emit({ type: "hub", server: e.server, state: e.state, detail: e.detail }),
+      );
+
+      // ── fix requests (FixRequest.ts) ──
+      const requests = yield* Ref.make<ReadonlyMap<string, FixRequestRecord>>(new Map());
+      const fixRelay: FixRelay = {
+        request: (body) =>
+          Effect.gen(function* () {
+            const at = yield* Clock.currentTimeMillis;
+            const id = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(12)), (b) =>
+              b.toString(16).padStart(2, "0"),
+            ).join("");
+            const record: FixRequestRecord = {
+              id,
+              node: body.node,
+              at,
+              fixes: body.fixes,
+              acknowledged: body.acknowledged,
+              state: "waiting",
+              step: null,
+              result: null,
+              error: null,
+            };
+            yield* Ref.update(
+              requests,
+              (all) =>
+                new Map(
+                  [...all, [id, record] as const].filter(
+                    ([, r]) => at - r.at < FIX_REQUESTS_KEPT_MS,
+                  ),
+                ),
+            );
+            yield* emit({ type: "fix", node: body.node, request: id });
+            return record;
+          }),
+        get: (id) => Ref.get(requests).pipe(Effect.map((all) => all.get(id) ?? null)),
+        expire: (id) =>
+          Ref.modify(requests, (all): [boolean, ReadonlyMap<string, FixRequestRecord>] => {
+            const record = all.get(id);
+            if (record?.state !== "waiting") return [false, all];
+            return [true, new Map(all).set(id, { ...record, state: "expired" })];
+          }),
+      };
+
+      const json = (body: string, status = 200) =>
+        HttpServerResponse.text(body, { status, contentType: "application/json" });
+
+      const askFixes = HttpRouter.add(
+        "POST",
+        "/fixes",
+        Effect.gen(function* () {
+          if (!(yield* authorized)) return unauthorized;
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const body = yield* decodeFixBody(yield* request.text).pipe(Effect.option);
+          if (Option.isNone(body) || !NODE_NAME.test(body.value.node))
+            return HttpServerResponse.text("Not a fix request", { status: 400 });
+          return json(yield* encodeRecord(yield* fixRelay.request(body.value)), 202);
+        }).pipe(
+          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
+        ),
+      );
+
+      const fixRequest = HttpRouter.add(
+        "GET",
+        "/fixes/:id",
+        Effect.gen(function* () {
+          if (!(yield* authorized)) return unauthorized;
+          const record = yield* fixRelay.get((yield* HttpRouter.params)["id"] ?? "");
+          if (record === null) return HttpServerResponse.text("No such request", { status: 404 });
+          return json(yield* encodeRecord(record));
+        }).pipe(
+          Effect.orElseSucceed(() =>
+            HttpServerResponse.text("Internal Server Error", { status: 500 }),
+          ),
+        ),
+      );
+
+      const fixProgress = HttpRouter.add(
+        "POST",
+        "/fixes/:id/progress",
+        Effect.gen(function* () {
+          if (!(yield* authorized)) return unauthorized;
+          const id = (yield* HttpRouter.params)["id"] ?? "";
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const progress = yield* decodeProgress(yield* request.text).pipe(Effect.option);
+          if (Option.isNone(progress))
+            return HttpServerResponse.text("Not a fix progress", { status: 400 });
+          const refused = yield* Ref.modify(
+            requests,
+            (all): [string | null, ReadonlyMap<string, FixRequestRecord>] => {
+              const record = all.get(id);
+              if (record === undefined) return ["No such request", all];
+              const next = advance(record, progress.value);
+              return typeof next === "string" ? [next, all] : [null, new Map(all).set(id, next)];
+            },
+          );
+          return refused === null
+            ? HttpServerResponse.empty({ status: 204 })
+            : HttpServerResponse.text(refused, { status: 409 });
+        }).pipe(
+          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
+        ),
       );
 
       const health = HttpRouter.add("GET", "/health", HttpServerResponse.text("ok"));
@@ -262,11 +394,20 @@ export const relayLayer = (options: RelayOptions) =>
         }),
       );
 
+      const handle: RelayHandle = {
+        states: Ref.get(states).pipe(Effect.map((m) => [...m.values()])),
+        fixes: fixRelay,
+      };
+
       return Layer.mergeAll(
         health,
         report,
         fleet,
         eventStream,
+        askFixes,
+        fixRequest,
+        fixProgress,
+        options.extra === undefined ? Layer.empty : options.extra(handle),
         hubRoutes(hubService, options.token),
         egressLayer(
           options.token,

@@ -115,7 +115,7 @@ describe("mcp area: where clients connect", () => {
 describe("mcp area: hub findings", () => {
   const diagnose = (observed: Parameters<typeof McpArea.diagnose>[0]["observed"]) =>
     McpArea.diagnose({
-      node: "box",
+      node: "hub",
       desired: { hub: true, gateway },
       observed,
       fleet: [],
@@ -448,7 +448,7 @@ describe("mcp area: definitions that carry credentials", () => {
   });
 
   const diagnose = (observed: Parameters<typeof McpArea.diagnose>[0]["observed"]) =>
-    McpArea.diagnose({ node: "box", desired: {}, observed, fleet: [], authority: null });
+    McpArea.diagnose({ node: "hub", desired: {}, observed, fleet: [], authority: null });
 
   it("registers an SSE server in Claude only, and says why Codex has none", () => {
     const findings = diagnose({
@@ -505,7 +505,7 @@ describe("mcp area: definitions that carry credentials", () => {
     expect(finding).toMatchObject({
       key: "mcp-undeclared",
       severity: "info",
-      title: "box has MCP servers the fleet does not declare for it: figma, github",
+      title: "hub has MCP servers the fleet does not declare for it: figma, github",
     });
     expect(finding?.detail).toContain("figma (Claude), github (Claude and Codex)");
     expect(finding?.detail).toContain("t3-fleet mcp add");
