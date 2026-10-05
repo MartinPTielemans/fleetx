@@ -151,14 +151,14 @@ describe("the setup wizard's engine", () => {
     git("remote", "add", "origin", bare);
     git("push", "-q", "-u", "origin", "main");
     const config = await run(loadConfig);
-    const hub = { node: "box", ssh: "me@box", relayUrl: "https://box.ts.net:8399", error: null };
+    const hub = { node: "box", ssh: "me@box", relayUrl: "https://box.tailnet.ts.net:8399", error: null };
     const lines = await run(admitHub(config, hub));
     expect(lines.join("\n")).toContain("committed and pushed");
     const show = (file: string) =>
       execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
     expect(show("nodes/box.toml")).toMatch(/roles = \["member", "relay"\]/);
     expect(show("nodes/box.toml")).toContain('ssh = "me@box"');
-    expect(show("t3-fleet.toml")).toContain('url = "https://box.ts.net:8399"');
+    expect(show("t3-fleet.toml")).toContain('url = "https://box.tailnet.ts.net:8399"');
     expect(await run(readSecrets(repo))).toMatch(/^T3_FLEET_RELAY_TOKEN=[0-9a-f]{64}$/m);
     expect(await run(admitHub(await run(loadConfig), hub))).toEqual([
       "box is in the fleet already",

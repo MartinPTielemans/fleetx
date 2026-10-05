@@ -57,7 +57,7 @@ const plan: typeof UiSetupPlan.Type = {
   leftAlone: [],
   secrets: [{ name: "CTX_API_KEY", server: "ctx", from: "Claude Code: arg --api-key" }],
   missing: [],
-  hub: { node: "box", ssh: "me@box", relayUrl: "https://box.ts.net:8399", steps: ["Add box"] },
+  hub: { node: "box", ssh: "me@box", relayUrl: "https://box.tailnet.ts.net:8399", steps: ["Add box"] },
   steps: ["the config repo at ~/fleet"],
 };
 
@@ -101,7 +101,7 @@ const fakeSetup = () => {
         tailscale: { state: "ok", label: "tailscale", remedy: null },
         docker: { state: "missing", label: "no docker", remedy: "install docker" },
         service: { state: "ok", label: "systemd", remedy: null },
-        relayUrl: "https://box.ts.net:8399",
+        relayUrl: "https://box.tailnet.ts.net:8399",
         ready: true,
       }),
     plan: (r) =>
@@ -153,7 +153,7 @@ const serve = () => {
     self: "laptop",
     authority: true,
     nodes: ["laptop", "box"],
-    relay: "https://box.ts.net:8399",
+    relay: "https://box.tailnet.ts.net:8399",
   };
   const setupSession: Session = { ...fleetSession, authority: false, nodes: [], relay: null };
   const { handler, dispose } = HttpRouter.toWebHandler(
@@ -227,7 +227,7 @@ describe("the UI server in setup mode", () => {
       UiProbe,
       await (await server.post("/api/setup/probe", { ssh: "me@box" })).text(),
     );
-    expect(probe).toMatchObject({ ready: true, relayUrl: "https://box.ts.net:8399" });
+    expect(probe).toMatchObject({ ready: true, relayUrl: "https://box.tailnet.ts.net:8399" });
     expect((await server.post("/api/setup/plan", { nope: 1 })).status).toBe(400);
     expect(
       (await server.post("/api/setup/plan", { ...request, hub: { ssh: "-x", node: "box" } }))
