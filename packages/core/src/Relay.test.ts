@@ -9,6 +9,7 @@ import * as Duration from "effect/Duration";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { generateX25519Identity } from "age-encryption";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -17,7 +18,7 @@ import { eventIds, relayLayer } from "./Relay.ts";
 const TOKEN = "relay-token-for-relay-tests";
 
 /** One run of the relay over `dir`; `stop` is the restart. */
-const startRelay = async (dir: string, identity: string) => {
+const startRelay = async (dir: string, identity: string, withApp = false) => {
   const repo = join(dir, "repo");
   const app = relayLayer({
     token: TOKEN,
@@ -34,6 +35,10 @@ const startRelay = async (dir: string, identity: string) => {
       version: "test",
       stateDir: join(dir, "state"),
     },
+    // Stands in for the app (HubUi.ts): it answers every path the relay does not.
+    ...(withApp
+      ? { extra: () => HttpRouter.add("GET", "/*", HttpServerResponse.text("the app")) }
+      : {}),
   }).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)));
   const web = HttpRouter.toWebHandler(app, { disableLogger: true });
   const request = (path: string, init: RequestInit = {}) =>
@@ -158,6 +163,80 @@ describe("relay events", () => {
       expect(resumed).toEqual([]);
     } finally {
       await second.stop();
+    }
+  }, 15_000);
+});
+
+describe("fix requests", () => {
+  it("announces a request to its node, which claims it once and answers it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "t3-fleet-relay-fixes-"));
+    mkdirSync(join(dir, "repo"), { recursive: true });
+    execFileSync("git", ["init", "-q", join(dir, "repo")]);
+    const relay = await startRelay(dir, await generateX25519Identity());
+    try {
+      const body = JSON.stringify({
+        node: "laptop",
+        fixes: [{ id: "laptop:claude-behind", digest: "d".repeat(64) }],
+        acknowledged: [],
+      });
+      expect(
+        (
+          await relay.request("/fixes", {
+            method: "POST",
+            body,
+            headers: { authorization: "Bearer wrong" },
+          })
+        ).status,
+      ).toBe(401);
+      const created = await relay.request("/fixes", { method: "POST", body });
+      expect(created.status).toBe(202);
+      const { id } = JSON.parse(await created.text()) as { id: string };
+      const events = await readEvents(await relay.request("/events?since=0"), (f) =>
+        f.some((e) => e.event === "fix"),
+      );
+      // Only the node and the request: what it asks for is fetched with the token.
+      expect(events.find((e) => e.event === "fix")?.data).toMatchObject({
+        type: "fix",
+        node: "laptop",
+        request: id,
+      });
+      expect(JSON.stringify(events)).not.toContain("claude-behind");
+      const progress = (state: string) =>
+        relay.request(`/fixes/${id}/progress`, {
+          method: "POST",
+          body: JSON.stringify({ state, step: null, result: null, error: null }),
+        });
+      expect((await progress("done")).status).toBe(409);
+      expect((await progress("running")).status).toBe(204);
+      expect((await progress("done")).status).toBe(204);
+      expect((await progress("running")).status).toBe(409);
+      const record = JSON.parse(await (await relay.request(`/fixes/${id}`)).text()) as {
+        state: string;
+      };
+      expect(record.state).toBe("done");
+      expect((await relay.request("/fixes/nope")).status).toBe(404);
+    } finally {
+      await relay.stop();
+    }
+  }, 15_000);
+});
+
+describe("the app beside the relay", () => {
+  it("answers only what the relay's own routes do not", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "t3-fleet-relay-app-"));
+    mkdirSync(join(dir, "repo"), { recursive: true });
+    execFileSync("git", ["init", "-q", join(dir, "repo")]);
+    const relay = await startRelay(dir, await generateX25519Identity(), true);
+    try {
+      expect(await (await relay.request("/health")).text()).toBe("ok");
+      expect(await (await relay.request("/fleet")).text()).toBe("[]");
+      expect(await (await relay.request("/fixes/nope")).text()).toBe("No such request");
+      expect(await (await relay.request("/mcp/linear")).text()).not.toBe("the app");
+      expect(await (await relay.request("/hub/servers")).text()).not.toBe("the app");
+      expect(await (await relay.request("/")).text()).toBe("the app");
+      expect(await (await relay.request("/environments")).text()).toBe("the app");
+    } finally {
+      await relay.stop();
     }
   }, 15_000);
 });

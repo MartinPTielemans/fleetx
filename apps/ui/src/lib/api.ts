@@ -8,6 +8,9 @@
  * keeps working but nothing outlives the tab. A tab opened from this one asks
  * the tabs already open for the token. If the ticket was already used, the
  * page says so: someone else opened the link.
+ *
+ * On the hub there is no ticket: the hub knows who is asking from Tailscale,
+ * and gives a login it lets in a token of its own (core HubUi.ts).
  */
 import {
   HubCall,
@@ -27,6 +30,15 @@ import {
   UiSkillsPreview,
   UiStatus,
 } from "@t3-fleet/core/Api";
+import {
+  UiInvite,
+  UiProbe,
+  UiSetupPlan,
+  UiSetupStarted,
+  UiSetupState,
+  type UiSetupApplyRequest,
+  type UiSetupPlanRequest,
+} from "@t3-fleet/core/SetupApi";
 import * as Schema from "effect/Schema";
 
 const TOKEN_KEY = "t3-fleet:token";
@@ -105,11 +117,31 @@ export async function startSession(): Promise<SessionStart> {
     window.sessionStorage.setItem(TOKEN_KEY, shared);
     return { ok: true };
   }
+  const hub = await hubSession();
+  if (hub !== null) return hub;
   return {
     ok: false,
     title: "Open the link t3-fleet ui printed",
     message: "Each link works once; t3-fleet ui prints a new one for another tab.",
   };
+}
+
+/** A session from the hub, or null when this is `t3-fleet ui` on a machine (it wants a ticket). */
+async function hubSession(): Promise<SessionStart | null> {
+  let response: Response;
+  try {
+    response = await fetch("/api/session", { method: "POST", headers: { "x-t3-fleet-hub": "1" } });
+  } catch {
+    return null;
+  }
+  const text = await response.text();
+  if (response.ok) {
+    window.sessionStorage.setItem(TOKEN_KEY, decoder(UiSessionGrant)("/api/session", text).token);
+    return { ok: true };
+  }
+  // `t3-fleet ui` answers 401 for a missing ticket; the hub refuses with why.
+  if (response.status === 401 && text.includes("t3-fleet ui")) return null;
+  return { ok: false, title: "The hub did not let you in", message: text.trim() };
 }
 
 export class ApiError extends Error {
@@ -175,6 +207,7 @@ const getConfig = get(Schema.Array(UiConfigRow));
 const getSkills = get(UiSkills);
 const getJobs = get(Schema.Array(UiJob));
 const decodeLogin = decoder(HubLoginStart);
+const getSetupState = get(UiSetupState);
 
 const post = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) => {
   const decode = decoder(schema);
@@ -186,10 +219,15 @@ const postLookup = post(UiSkillsLookup);
 const postPreview = post(UiSkillsPreview);
 /** Starts a job; the answer is the job as it begins. */
 const postJob = post(UiJob);
+const postProbe = post(UiProbe);
+const postSetupPlan = post(UiSetupPlan);
+const postSetupApply = post(UiSetupStarted);
+const postInvite = post(UiInvite);
 
 export const decodeStatusEvent = decoder(UiStatus);
 export const decodeCheckFailedEvent = decoder(UiCheckFailed);
 export const decodeJobEvent = decoder(UiJob);
+export const decodeSessionEvent = decoder(UiSession);
 
 export const api = {
   session: () => getSession("/api/session"),
@@ -231,6 +269,12 @@ export const api = {
   skillsUpdate: (skills: ReadonlyArray<string>, digest: string) =>
     postJob("/api/skills/update", { skills, digest }),
   skillsRemove: (skills: ReadonlyArray<string>) => postJob("/api/skills/remove", { skills }),
+  /** Where this machine stands: in a fleet, not yet, or part-way through setup. */
+  setupState: () => getSetupState("/api/setup/state"),
+  setupProbe: (ssh: string) => postProbe("/api/setup/probe", { ssh }),
+  setupPlan: (request: UiSetupPlanRequest) => postSetupPlan("/api/setup/plan", request),
+  setupApply: (request: UiSetupApplyRequest) => postSetupApply("/api/setup/apply", request),
+  setupInvite: (node: string) => postInvite("/api/setup/invite", { node }),
   /** EventSource cannot send headers; the token goes in the query instead, which only this endpoint accepts. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,
 };
@@ -251,4 +295,14 @@ export type {
   UiSkillsPreview as UiSkillsPreviewT,
   UiStatus,
 } from "@t3-fleet/core/Api";
+export type {
+  UiInvite,
+  UiPlanConflict,
+  UiPlanItem,
+  UiProbe,
+  UiProbeItem,
+  UiSetupCheck,
+  UiSetupPlan,
+  UiSetupState,
+} from "@t3-fleet/core/SetupApi";
 export type UiAlertT = typeof UiAlert.Type;

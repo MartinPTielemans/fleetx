@@ -53,6 +53,12 @@ export const UiSetupState = Schema.Struct({
   hub: Schema.NullOr(
     Schema.Struct({ node: Schema.String, ssh: Schema.String, error: Schema.NullOr(Schema.String) }),
   ),
+  /**
+   * Where the fleet's app is served once a hub serves it on the tailnet
+   * (`[relay] url`); null or absent without one (the app here is the way in).
+   * Filled by setup/Wizard.ts once this machine is in a fleet with a relay.
+   */
+  fleetUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type UiSetupState = typeof UiSetupState.Type;
 
@@ -141,6 +147,12 @@ export const UiPlanConflict = Schema.Struct({
   default: Schema.String,
   /** The conflict whose choice this one follows; it applies only when that choice differs. */
   after: Schema.NullOr(Schema.String),
+  /**
+   * With `after`: that conflict's choice value → this one's diff once it is
+   * chosen, or null when that choice settles this one (setup/Plan.ts detailOf
+   * and applies, worked out for each choice). Absent: `detail`, always asked.
+   */
+  byChoice: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
 });
 export type UiPlanConflict = typeof UiPlanConflict.Type;
 

@@ -10,6 +10,7 @@ import type { Finding, Fix } from "./Diagnose.ts";
 import { shPath } from "./Area.ts";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
+import { sha256 } from "./Hash.ts";
 import type { Node } from "./Config.ts";
 import { remoteExec } from "./Remote.ts";
 import { BUNDLE_FILE, CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
@@ -129,3 +130,16 @@ export const runFixes = (
       ),
     { concurrency: "unbounded" },
   ).pipe(Effect.map((perNode) => perNode.flat()));
+
+/** Names exactly what a fix would do: where, which command, and what it interrupts. */
+export const fixDigest = (finding: Finding & { readonly fix: Fix }) => {
+  const { command, on, disrupts, safe } = finding.fix;
+  const parts = [
+    finding.node,
+    on ?? finding.node,
+    command,
+    disrupts ?? "-",
+    safe ? "safe" : "unsafe",
+  ];
+  return Effect.promise(() => sha256(parts.map((p) => `${p.length}:${p}`).join("")));
+};

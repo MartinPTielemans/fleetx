@@ -2,6 +2,10 @@
 
 From one machine to two, with what each already has.
 
+There are two ways through, and they do the same setup: the **browser
+wizard** and the **CLI**. Pick one; you can change your mind between
+machines. Both show you the whole plan before anything is written.
+
 ## 1. Install
 
 ```sh
@@ -17,9 +21,40 @@ PATH, and whether a sync timer would run here.
 
 ## 2. Start a fleet on this machine
 
+### In the browser
+
+After the installer, a wizard opens on your own computer (or run
+`t3-fleet ui`, or `t3-fleet setup --ui`, on a machine that is not in a fleet
+yet). It runs only on 127.0.0.1 and answers only the tab it opened. It asks:
+
+1. **What machines do you have?** Whether one stays on (a home server, a Mac
+   mini, a VPS), and how many others you run T3 on.
+2. **The recommended layout.** This computer is the **authority**: it
+   approves changes and holds the keys. An always-on machine is the **hub**:
+   it runs the relay and the MCP hub for the fleet. A laptop is never the hub,
+   because it sleeps. See [topologies](topologies.md).
+3. **Where your setup lives.** A new private GitHub repository, an existing
+   repository URL, or local only.
+4. **Your hub, checked.** You give its ssh address; this computer checks it
+   read-only (Node, git, T3, tailscale, docker, a service manager) and says how
+   to fix anything missing.
+5. **The plan.** The same plan `t3-fleet setup` shows, below, plus what the hub
+   will be asked to do. Credentials the plan needs and didn't find are typed
+   here; they are encrypted before the first step and never shown in progress.
+6. **Apply.** Live progress. This computer first, then the hub over ssh.
+7. **Invite.** The line to run on each next machine.
+
+If a run stops part-way, the wizard opens on it and offers to resume or
+abandon it, the same as `--resume` and `--abandon` below. The design is in
+[the setup wizard](design/setup-wizard.md).
+
+### Or in the terminal
+
 ```sh
 t3-fleet setup
 ```
+
+This is the same setup, with prompts instead of screens.
 
 Setup looks at what is already here and shows one screen of what it would do,
 before it writes anything:
@@ -117,7 +152,7 @@ it (`~/.claude/backups/`); T3 Fleet keeps all of those at mode 600
 
 ## 3. Add a second machine
 
-On the first machine:
+On the first machine (the wizard's last screen shows this line too):
 
 ```sh
 t3-fleet invite desktop

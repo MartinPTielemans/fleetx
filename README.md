@@ -1,193 +1,151 @@
 # T3 Fleet
 
-Every machine you run [T3 Code](https://github.com/pingdotgg/t3code) on, checked
-in one command, and kept equivalent.
+**Every machine you run [T3 Code](https://github.com/pingdotgg/t3code) on, kept
+equivalent.** Your laptop, your desktop, the server in the closet: same T3
+version, same providers working, same skills, same MCP servers, signed in once.
 
-```
-$ t3-fleet status
-T3 Fleet  3 environments  2 warnings  (3.2s)
+T3 Fleet shows every machine in one place, explains what differs and why, and
+fixes it after you've seen exactly what will run.
 
-           T3                          CLAUDE     CODEX      PROVIDERS IN T3    SYNC
-  laptop   ✓ 0.0.46 nightly 10-03      ✓ 2.1.288  ✓ 0.160.0  ✓ claude  ✓ codex  ✓ 2m ago
-  server   ! 0.0.43 nightly 09-27 -23  ✓ 2.1.288  ✓ 0.160.0  ✓ claude  ✓ codex  ✓ 7m ago
-  desktop  ✓ 0.0.46 nightly 10-03      ✓ 2.1.288  ! 0.160.0  ✓ claude  ! codex  ✓ 4m ago
+## Pick your setup
 
-  ! server   T3 is 23 nightly releases behind (0.0.43 nightly 09-27 → 0.0.46 nightly 10-03)
-             fix ~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes
-  ! desktop  T3 runs codex from ~/.local/share/mise/shims/codex, not the managed codex
-             upgrades of ~/.local/bin/codex never reach T3 here
-```
+Start on the computer you use every day. That machine stays in charge: it's
+where you approve changes and where your secrets are decrypted. What you add
+around it depends on what you have.
 
-For each machine it checks:
+### Just this computer
 
-- **T3**: the running server's version against the newest release on its channel.
-- **Providers in T3**: each enabled provider, launched exactly the way the T3
-  server would, with the server's own environment. A provider that works in
-  your terminal can still fail inside T3; this is where you find out.
-- **Agent CLIs**: Claude Code and Codex against the latest releases, and which
-  copy your shell and T3 actually run.
-- **A model proxy**, if you route providers through one: whether each machine's
-  key is accepted, before any provider is pointed at it.
-- **Across machines**: a provider on everywhere but one, or routed differently.
+You run T3 on one machine. T3 Fleet keeps T3 and your agent CLIs current,
+catches providers that work in your terminal but fail inside T3, and backs up
+your skills, MCP servers and instructions to a private repository. When a
+second machine shows up, it joins with what it already has.
 
-Nothing needs to be installed on the other machines: T3 Fleet streams itself over
-ssh into `node -` (Node 24 or newer) and reads what it needs. It only reads;
-changes happen through `t3-fleet fix`, after you have seen them.
+### This computer and an always-on server (recommended)
+
+Do you have something that stays on: a home server, a Mac mini, a VPS? Make it
+your **hub**. It works for the fleet; it doesn't control it:
+
+- **Changes arrive right away.** Every machine hears the moment you change
+  something, and a laptop that slept catches up when it wakes.
+- **OAuth logins happen once.** The hub hosts your MCP servers, so you sign
+  in to each of them on the hub and every machine uses that login.
+- **Docker only on the hub.** MCP servers that run in containers run there.
+
+Your own computer stays the **authority**: it approves changes and holds the
+keys. The hub runs things; you decide things. A laptop shouldn't be the hub,
+because it sleeps.
+
+### Several machines
+
+Add as many as you like. Each joins with the skills and servers it already has,
+and you settle any conflicts with the fleet one at a time, with a diff, before
+anything is written. Want to stop? `t3-fleet leave` gives a machine back
+everything it had before it joined.
+
+More on roles and layouts: [topologies](docs/topologies.md).
 
 ## Getting started
 
 ```sh
 curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
-t3-fleet setup                                  # the first machine starts a fleet
-t3-fleet invite desktop                         # prints the line to run on desktop:
-#   … | sh -s -- setup <your repo> desktop      # it joins, with what it already has
 ```
 
-`setup` looks at the skills, MCP servers and instruction files a machine already
-has, and shows one screen of what it would do before writing anything:
-what goes into the repository, what gets linked, each conflict with the
-fleet (with a diff and a choice), and every credential it found, which goes
-into the encrypted secrets file and never into a plain file. `--plan` only
-shows, `--yes` takes the defaults, `--resume` continues a setup that stopped.
-Run it again on a machine any time to see what still differs. See the
-[quickstart](docs/quickstart.md).
+When it finishes, a setup wizard opens in your browser, on your own computer.
+It asks what machines you have, recommends a layout, and asks where your setup
+should live: a new private GitHub repository, one you already have, or just
+this computer. If you have an always-on machine, it checks it over ssh from
+here and sets it up as your hub. Before anything is written you see the whole
+plan: what goes into your repository, each conflict with a choice, and every
+credential it found. Credentials go into an encrypted file, never a plain one.
 
-## Your setup lives in your own repository
+Close the tab and want it back? `t3-fleet ui`. When it's done, the wizard gives
+you the line to run on each next machine.
 
-T3 Fleet is the engine and knows nothing about your machines. Your setup lives in
-a private repository of your own:
+### Prefer the terminal?
 
-```
-my-fleet/
-├─ t3-fleet.toml          settings for the whole fleet
-└─ nodes/
-   ├─ laptop.toml       one file per machine
-   ├─ server.toml       ssh = "server.tailnet.ts.net"
-   └─ desktop.toml
+The wizard and the CLI run the same setup, so you get the same plan either way.
+
+```sh
+t3-fleet setup        # on your own computer: starts the fleet
+t3-fleet invite hub   # prints the line to run on the next machine
 ```
 
-Each machine has one local file, `~/.config/t3-fleet/config.toml`, saying where
-that repository is and which node the machine is:
+Or `brew install martinptielemans/tap/t3-fleet`. The
+[quickstart](docs/quickstart.md) walks through both paths, from one machine to
+two.
 
-```toml
-repo = "~/my-fleet"
-node = "laptop"
+## See your fleet
+
+```sh
+t3-fleet ui
 ```
 
-A node file only needs `ssh` when its ssh destination differs from its name.
+This opens a local web app that looks like T3 Code, in light and dark:
 
-## Fixing
+- **Environments**: every machine, with its T3 version, providers, agent
+  CLIs, sync and model proxy.
+- **Findings and fixes**: what differs and why. Each fix shows its exact
+  commands and what it would interrupt (an update restarts T3 and stops the
+  threads running there). Nothing runs until you confirm.
+- **Proposals**: changes from other machines, with diffs, waiting for you.
+- **Skills and MCP**: what's on every machine. Add, update and remove skills,
+  and see the hub's servers and their tool calls.
+- **Models**: traffic through your model proxy, if you use one.
 
-```
-$ t3-fleet fix
-t3-fleet fix  1 fix on 1 machine
+With a hub, the hub hosts the app on your tailnet, so you open it from any
+device signed in to Tailscale as a login the fleet allows (setup allows yours).
+It shows each machine as it last reported, sends a fix to the machine it
+changes (which checks itself again and runs only what it proposes), and leaves
+approving proposals to an authority. Without a hub, or with
+`t3-fleet ui --local`, it runs only on your computer (127.0.0.1) and answers
+only the tab it opened.
 
-  server    T3 is 23 nightly releases behind (0.0.43 nightly 09-27 → 0.0.46 nightly 10-03)
-            $ ~/.t3/runtime/versions/0.0.43-nightly.20260927.2344/t3 update --channel nightly --yes
-            interrupts: restarts the T3 server on server; threads running there stop
-Apply 1 fix? (y/N)
-```
+## Ask from a T3 thread
 
-`fix` shows every command before it runs, marks the ones that interrupt
-something, asks, runs them in parallel across machines, and checks again
-afterwards. `--safe` keeps only fixes that interrupt nothing, `--dry-run` stops
-after the plan, `--node server` narrows to one machine. Findings that need a
-decision rather than a command are listed, never guessed at.
+Setup adds T3 Fleet as an MCP server in Claude Code and Codex on every
+machine. You can ask any thread "what's wrong with my environments?" and it
+answers with the same findings, and can apply the same fixes after checking
+again that each still applies.
 
-## Routing providers through a proxy
+## Prefer the terminal?
 
-If your providers go through a model proxy, describe it in `t3-fleet.toml`:
-
-```toml
-[proxy]
-# {"endpoint": "https://proxy.example/v1", "api_key": "..."}, one per machine
-credentials = "~/.config/my-proxy.json"
-# Points T3's provider at its launcher; {provider} is the instance id.
-enable = "my-proxy-enable --provider {provider}"
-rejected_hint = "restart the proxy so it loads new keys"
-
-[proxy.launchers]
-claudeAgent = "~/.local/bin/proxy-claude"
-codex = "~/.local/bin/proxy-codex"
-```
-
-T3 Fleet then checks each machine's key against the proxy (a `/models` request,
-no model call), reports machines whose providers skip the launcher, and offers
-`enable` only once the key is accepted.
-
-## Intended differences
-
-When a difference is deliberate, accept it in `t3-fleet.toml` with the id that
-`status --json` or `fleet_status` shows:
-
-```toml
-[[accept]]
-id = "desktop:claude-other-copies"
-reason = "the distribution ships its own package"
-```
-
-An accepted finding stays visible as a note with its reason, so it never
-disappears without anyone remembering why.
-
-## Only what changed
-
-`t3-fleet status --changes` compares with the previous `--changes` run and prints
-only findings that appeared, got worse, or were resolved, or one line saying
-nothing changed. Scheduled checks use this to stay quiet.
-
-## From a T3 thread
-
-`t3-fleet mcp` serves two tools over stdio:
-
-- `fleet_status`: the same report, as text to show plus findings with ids such
-  as `server:t3-behind`. With `changesOnly` it also says what changed since the
-  last such call.
-- `fleet_apply_fixes`: runs fixes by id, only ones T3 Fleet proposed, after
-  checking again that each still applies.
-
-`t3-fleet setup` declares it as the MCP server `t3-fleet` in every machine's
-Claude Code and Codex, so any thread can be asked "what's wrong with my
-environments?".
-
-## In the browser
+Everything the app does, the CLI does too:
 
 ```
-$ t3-fleet ui
-t3-fleet ui on http://127.0.0.1:53117/#ticket=…
+$ t3-fleet status
+T3 Fleet  3 environments  1 warning  (3.2s)
+
+           T3                          CLAUDE     CODEX      PROVIDERS IN T3    SYNC
+  laptop   ✓ 0.0.46 nightly 10-03      ✓ 2.1.288  ✓ 0.160.0  ✓ claude  ✓ codex  ✓ 2m ago
+  hub      ! 0.0.43 nightly 09-27 -23  ✓ 2.1.288  ✓ 0.160.0  ✓ claude  ✓ codex  ✓ 7m ago
+
+  ! hub      T3 is 23 nightly releases behind (0.0.43 nightly 09-27 → 0.0.46 nightly 10-03)
 ```
 
-A local web app in T3 Code's look, light and dark, with everything above:
-the environments table (each machine opens to its providers, agent CLIs, sync
-and model proxy), findings with their fixes, staged proposals with diffs,
-alerts, skills on every machine (add, update and remove them), the MCP
-hub's servers and tool-call log, model traffic, and every
-machine's merged config. Applying a fix works as `t3-fleet fix` does: the exact
-commands, what each interrupts, an explicit confirmation, then a fresh check.
-What runs is what you reviewed: a fix whose command changed since is left out
-and reported, and a proposal is approved only if it still makes the change you
-saw. Fixes and repo changes keep running if you close or reload the tab; any
-tab shows how they went, and Ctrl-C waits for them (a second Ctrl-C stops
-them). It checks every minute while a tab is open and visible, and updates as
-the relay reports syncs.
+`t3-fleet fix` applies fixes the same way the app does. See [the CLI](docs/cli.md)
+for every command, model proxies, accepting deliberate differences, and
+scheduled checks.
 
-It listens on 127.0.0.1 only, on a new port each run, and answers only the tab
-that opened its link, from its own address, so no other website can read your
-fleet or apply fixes. The link works once: if it was already used, the page
-says so (someone else on the machine may have opened it), and `t3-fleet ui`
-prints a new one for each further tab. `--port` pins the port, `--no-open`
-prints the link instead of opening a browser. The app is built into the single
-`t3-fleet` file. It reads the config again for every check, fix and action;
-when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
-does too), it stops installing its build on other machines until you restart
-it, since that would put the old build back.
+## How it works
+
+- **Your setup lives in your own private repository**: one settings file
+  for the fleet and one file per machine. T3 Fleet itself knows nothing about
+  your machines.
+- **Nothing to install elsewhere just to check.** T3 Fleet runs itself over ssh
+  on the other machines (Node 24 or newer) and reads what it needs.
+- **Checks only read.** Anything that changes a machine is a fix, and you see
+  it before it runs.
+- **Git is always the source of truth.** The hub only makes things faster,
+  so if it's down, every machine still syncs from the repository.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md): `t3-fleet setup`, from one machine to two, and back with `t3-fleet leave`
-- [Topologies](docs/topologies.md): roles, relays, profiles
-- [Areas](docs/areas.md): everything T3 Fleet manages, and its settings
-- [Troubleshooting](docs/troubleshooting.md): every `doctor` finding explained
-- [Plan](docs/PLAN.md): what is built and what is next
+- [Quickstart](docs/quickstart.md): setup, from one machine to two, and back with `leave`
+- [Topologies](docs/topologies.md): roles, the hub, profiles
+- [The CLI](docs/cli.md): every command and setting
+- [Areas](docs/areas.md): everything T3 Fleet manages
+- [Troubleshooting](docs/troubleshooting.md): every finding explained
+- [Plan](docs/PLAN.md): what's built and what's next
 
 ## Development
 
@@ -197,10 +155,10 @@ vite-plus), so its packages could move into T3's monorepo.
 ```sh
 pnpm install
 pnpm typecheck && pnpm test
-pnpm --filter t3-fleet build     # builds apps/ui into the bundle too
+pnpm --filter t3-fleet build                            # builds the UI into the bundle too
 node apps/cli/dist/bin.mjs status
 T3_FLEET_UI_FIXTURES=1 pnpm --filter @t3-fleet/ui dev   # the UI against a made-up fleet
-tests/integration/run.sh       # three throwaway nodes in Docker
+tests/integration/run.sh                                # three throwaway nodes in Docker
 ```
 
 ## License

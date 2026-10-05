@@ -33,6 +33,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import type { UiAlert, UiProposal, UiSession } from "@t3-fleet/core/Api";
+import type { NodeState } from "@t3-fleet/core/State";
 import { checkNodes } from "@t3-fleet/core/Check";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
@@ -60,7 +61,13 @@ import { readStates, underSyncLock } from "@t3-fleet/core/Sync";
 import { nodeName } from "@t3-fleet/core/setup/Discover";
 import { unfinishedRun } from "@t3-fleet/core/setup/Session";
 import * as Wizard from "@t3-fleet/core/setup/Wizard";
-import { uiLayer, type UiAsset, type UiRelay, type UiServerOptions } from "@t3-fleet/core/UiServer";
+import {
+  uiLayer,
+  type UiActions,
+  type UiAsset,
+  type UiRelay,
+  type UiServerOptions,
+} from "@t3-fleet/core/UiServer";
 
 import packageJson from "../package.json" with { type: "json" };
 import { applyLive, liveController, reportUserErrors, withoutStaleInstalls } from "./shared.ts";
@@ -98,7 +105,7 @@ export const mimeOf = (file: string) =>
   MIME[file.slice(file.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
 
 /** The app this build carries, or the last `vp build` of apps/ui when running from source. */
-const loadAssets = Effect.gen(function* () {
+export const loadAssets = Effect.gen(function* () {
   const assets = new Map<string, UiAsset>();
   if (typeof __T3_FLEET_UI_ASSETS__ === "string") {
     const files = yield* Schema.decodeEffect(EmbeddedAssets)(__T3_FLEET_UI_ASSETS__);
@@ -126,7 +133,7 @@ const loadAssets = Effect.gen(function* () {
   return assets;
 });
 
-const isAuthority = (config: Config) =>
+export const isAuthority = (config: Config) =>
   config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") === true;
 
 /** Every node's published state: the relay's when it answers, else the config repo's. */
@@ -211,27 +218,114 @@ export const proposalFrom = (config: Config, node: string, reviewed: string) =>
     return proposal;
   });
 
+/** Every alert in `states`, newest first, plus nodes that stopped reporting. */
+export const alertsFrom = (config: Config, states: ReadonlyArray<NodeState>, now: number) => {
+  const alerts: Array<typeof UiAlert.Type> = states.flatMap((s) => s.alerts);
+  for (const node of config.nodes) {
+    const state = states.find((s) => s.node === node.name);
+    if (state === undefined) continue;
+    const age = (now - state.at) / 1000;
+    if (age > config.interval * config.alertAfter) {
+      alerts.push({
+        at: now,
+        node: node.name,
+        kind: "failing",
+        message: `last reported ${Math.round(age / 60)} minutes ago; is its timer running?`,
+      });
+    }
+  }
+  return alerts.sort((a, b) => b.at - a.at);
+};
+
 /** Every alert the nodes published, newest first, plus nodes that stopped reporting. */
 const alertsOf = (config: Config) =>
   Effect.gen(function* () {
-    const states = yield* statesOf(config);
-    const now = yield* Clock.currentTimeMillis;
-    const alerts: Array<typeof UiAlert.Type> = states.flatMap((s) => s.alerts);
-    for (const node of config.nodes) {
-      const state = states.find((s) => s.node === node.name);
-      if (state === undefined) continue;
-      const age = (now - state.at) / 1000;
-      if (age > config.interval * config.alertAfter) {
-        alerts.push({
-          at: now,
-          node: node.name,
-          kind: "failing",
-          message: `last reported ${Math.round(age / 60)} minutes ago; is its timer running?`,
-        });
-      }
-    }
-    return alerts.sort((a, b) => b.at - a.at);
+    return alertsFrom(config, yield* statesOf(config), yield* Clock.currentTimeMillis);
   });
+
+type Live = <A, E>(
+  action: (
+    config: Config,
+  ) => Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>,
+) => Effect.Effect<A, string>;
+
+/**
+ * Skill changes, as `t3-fleet skills` makes them: an authority commits them,
+ * any other machine's next sync proposes them (SkillSources.land).
+ */
+export const skillsActions = (live: Live): UiActions["skills"] => ({
+  list: live((config) => listSkills(config.repo)),
+  lookup: (source) => live((config) => lookupSource(config.repo, source)),
+  add: (source, names, as) =>
+    live((config) =>
+      underSyncLock(
+        Effect.gen(function* () {
+          // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+          const before = yield* snapshot(config.repo, ["skills"]);
+          const paths = yield* addSkills(config.repo, source, names, as);
+          const added = paths
+            .filter((p) => p !== "skills/SOURCES.json")
+            .map((p) => p.slice("skills/".length));
+          return {
+            paths,
+            landed: yield* land(
+              config,
+              paths,
+              `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`,
+              before,
+            ),
+          };
+        }),
+      ),
+    ),
+  preview: (names) => live((config) => underSyncLock(previewUpdate(config.repo, names))),
+  update: (names, digest) =>
+    live((config) =>
+      underSyncLock(
+        Effect.gen(function* () {
+          // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+          const before = yield* snapshot(config.repo, ["skills"]);
+          const paths = yield* keepUpdate(config.repo, names, digest);
+          return {
+            paths,
+            landed: yield* land(
+              config,
+              paths,
+              `Update skill${paths.length === 1 ? "" : "s"} from upstream`,
+              before,
+            ),
+          };
+        }),
+      ),
+    ),
+  remove: (names) =>
+    live((config) =>
+      underSyncLock(
+        Effect.gen(function* () {
+          // What is there now, edits waiting to be proposed too, for putting back on a refusal.
+          const before = yield* snapshot(config.repo, ["skills"]);
+          const paths = yield* removeSkills(config.repo, names);
+          return {
+            paths,
+            landed: yield* land(
+              config,
+              paths,
+              `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`,
+              before,
+            ),
+          };
+        }),
+      ),
+    ),
+});
+
+/** Plain words for whatever an action failed with. */
+export const failureText = (e: unknown) =>
+  typeof e === "string"
+    ? e
+    : typeof e === "object" && e !== null && "message" in e
+      ? String(e.message)
+      : String(e);
 
 const openBrowser = (url: string) =>
   exec(
@@ -248,21 +342,60 @@ const openBrowser = (url: string) =>
  */
 const RANDOM_PORTS = { from: 49152, count: 16384 };
 
+/**
+ * Where the fleet's app is hosted, when it has a hub: the relay's tailnet
+ * address, with who may open it. None when the fleet has no relay URL, or
+ * this machine is not in a fleet (or its setup stopped part-way).
+ */
+const hostedApp = Effect.gen(function* () {
+  const config = yield* loadConfig.pipe(Effect.option);
+  if (Option.isNone(config)) return Option.none();
+  if (Option.isSome(yield* unfinishedRun(process.env["HOME"] ?? ""))) return Option.none();
+  const url = config.value.settings.relay?.url?.replace(/\/+$/, "");
+  if (url === undefined || url === "") return Option.none();
+  return Option.some({ url: `${url}/`, allow: config.value.settings.ui?.allow ?? [] });
+});
+
 export const uiCommand = Command.make("ui", {
   port: Flag.Int("port").pipe(
-    Flag.withDescription("Port on 127.0.0.1; a random one when not given."),
+    Flag.withDescription("Port on 127.0.0.1 with --local; a random one when not given."),
     Flag.optional,
   ),
   noOpen: Flag.Boolean("no-open").pipe(
     Flag.withDescription("Print the address instead of opening a browser."),
     Flag.withDefault(false),
   ),
+  local: Flag.Boolean("local").pipe(
+    Flag.withDescription(
+      "Serve the app on this machine's 127.0.0.1, even when the fleet's hub hosts it. Setup always runs here.",
+    ),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription(
-    "Open T3 Fleet in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config.",
+    "Open T3 Fleet in the browser: environments, findings and fixes, proposals, alerts, skills, MCP, models, config. On a fleet with a hub, the hub hosts it on the tailnet.",
   ),
-  Command.withHandler(({ port, noOpen }) =>
-    serveUi({ port: Option.getOrNull(port), open: !noOpen }).pipe(reportUserErrors),
+  Command.withHandler(({ port, noOpen, local }) =>
+    Effect.gen(function* () {
+      const hosted = local || Option.isSome(port) ? Option.none() : yield* hostedApp;
+      if (Option.isNone(hosted))
+        return yield* serveUi({ port: Option.getOrNull(port), open: !noOpen });
+      const { url, allow } = hosted.value;
+      yield* Console.log(
+        [
+          `T3 Fleet is on your hub: ${url}`,
+          allow.length === 0
+            ? "no Tailscale login may open it yet: add yours to [ui] allow in t3-fleet.toml (an authority commits it)"
+            : `it opens for ${allow.join(", ")}, from any device on the tailnet signed in as one of them`,
+          "proposals are decided on an authority (t3-fleet approve, or t3-fleet ui --local there); --local serves the app on this machine",
+        ].join("\n"),
+      );
+      if (!noOpen) {
+        const opened = yield* openBrowser(url);
+        if (opened.code !== 0)
+          yield* Console.log("could not open a browser; open the address above");
+      }
+    }).pipe(reportUserErrors),
   ),
 );
 
@@ -326,17 +459,7 @@ export const serveUi = ({
     const services = yield* Effect.context<NodeServices.NodeServices | HttpClient.HttpClient>();
     const closed = <A, E>(
       effect: Effect.Effect<A, E, NodeServices.NodeServices | HttpClient.HttpClient>,
-    ) =>
-      effect.pipe(
-        Effect.provide(services),
-        Effect.mapError((e) =>
-          typeof e === "string"
-            ? e
-            : typeof e === "object" && e !== null && "message" in e
-              ? String(e.message)
-              : String(e),
-        ),
-      );
+    ) => effect.pipe(Effect.provide(services), Effect.mapError(failureText));
     /** An action run against the config as it is now, not as it was at start. */
     const live = <A, E>(
       action: (
@@ -410,71 +533,7 @@ export const serveUi = ({
               ? Effect.fail(`unknown machine: ${node}`)
               : Effect.succeed(describeMerged(found.settings));
           }),
-        skills: {
-          list: live((config) => listSkills(config.repo)),
-          lookup: (source) => live((config) => lookupSource(config.repo, source)),
-          add: (source, names, as) =>
-            live((config) =>
-              underSyncLock(
-                Effect.gen(function* () {
-                  // What is there now, edits waiting to be proposed too, for putting back on a refusal.
-                  const before = yield* snapshot(config.repo, ["skills"]);
-                  const paths = yield* addSkills(config.repo, source, names, as);
-                  const added = paths
-                    .filter((p) => p !== "skills/SOURCES.json")
-                    .map((p) => p.slice("skills/".length));
-                  return {
-                    paths,
-                    landed: yield* land(
-                      config,
-                      paths,
-                      `Add skill${added.length === 1 ? "" : "s"} ${added.join(", ")} from ${source}`,
-                      before,
-                    ),
-                  };
-                }),
-              ),
-            ),
-          preview: (names) => live((config) => underSyncLock(previewUpdate(config.repo, names))),
-          update: (names, digest) =>
-            live((config) =>
-              underSyncLock(
-                Effect.gen(function* () {
-                  // What is there now, edits waiting to be proposed too, for putting back on a refusal.
-                  const before = yield* snapshot(config.repo, ["skills"]);
-                  const paths = yield* keepUpdate(config.repo, names, digest);
-                  return {
-                    paths,
-                    landed: yield* land(
-                      config,
-                      paths,
-                      `Update skill${paths.length === 1 ? "" : "s"} from upstream`,
-                      before,
-                    ),
-                  };
-                }),
-              ),
-            ),
-          remove: (names) =>
-            live((config) =>
-              underSyncLock(
-                Effect.gen(function* () {
-                  // What is there now, edits waiting to be proposed too, for putting back on a refusal.
-                  const before = yield* snapshot(config.repo, ["skills"]);
-                  const paths = yield* removeSkills(config.repo, names);
-                  return {
-                    paths,
-                    landed: yield* land(
-                      config,
-                      paths,
-                      `Remove skill${names.length === 1 ? "" : "s"} ${names.join(", ")}`,
-                      before,
-                    ),
-                  };
-                }),
-              ),
-            ),
-        },
+        skills: skillsActions(live),
       },
     } satisfies Omit<UiServerOptions, "port">;
 

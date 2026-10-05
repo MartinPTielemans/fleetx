@@ -1,6 +1,12 @@
 /**
- * t3-fleet relay serve   run the relay (on the node with the relay role)
- * t3-fleet listen        follow the relay and sync as soon as the branch moves
+ * t3-fleet relay serve   run the relay (on the node with the relay role), and
+ *                        the app beside it, for the tailnet (hubUi.ts)
+ * t3-fleet listen        follow the relay: sync as soon as the branch moves,
+ *                        and answer fix requests from the app on the hub
+ *
+ * Fix requests are answered where they run (core FixRequest.ts): by each
+ * node's listener, and on the relay node, which runs no listener, by the
+ * relay itself following its own events on loopback.
  */
 // The HTTP server itself has no Effect equivalent; T3 Code builds its server the same way.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -18,16 +24,67 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import { runFixes } from "@t3-fleet/core/Fix";
+import { answerFixRequest, fetchFixRequest, sendFixProgress } from "@t3-fleet/core/FixRequest";
 import { decodeModelsSettings, upstreamBases, upstreamsOf } from "@t3-fleet/core/models/Recipes";
 import { git, out } from "@t3-fleet/core/Git";
 import { relayLayer } from "@t3-fleet/core/Relay";
-import { listen, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
+import { listen, localSecrets, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { ensureIdentity } from "@t3-fleet/core/Secrets";
-import { syncRun } from "@t3-fleet/core/Sync";
+import { ownCheck, readStates, syncRun } from "@t3-fleet/core/Sync";
+import { withSyncLock } from "@t3-fleet/core/SyncLock";
 
 import packageJson from "../package.json" with { type: "json" };
 
-import { reportUserErrors, untilNewBuild } from "./shared.ts";
+import { hubUiLayer } from "./hubUi.ts";
+import { ownBundle, reportUserErrors, untilNewBuild } from "./shared.ts";
+import { failureText, loadAssets } from "./ui.ts";
+
+const timestamped = (line: string) =>
+  DateTime.now.pipe(Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)));
+
+/**
+ * Answer the fix request `id` if it names this node: check here again, run
+ * only what this node proposes, report through the relay at `url`; then sync,
+ * so the hub sees the machine as it is now. Holds the sync lock from the
+ * check to the last fix, waiting for a sync already running.
+ */
+const answerHere = (url: string, token: string) => (node: string, id: string) =>
+  Effect.gen(function* () {
+    const config = yield* loadConfig;
+    if (node !== config.self) return;
+    const self = config.nodes.find((n) => n.name === config.self);
+    if (self === undefined) return;
+    const request = yield* fetchFixRequest(url, token, id);
+    if (request === null) return;
+    yield* timestamped(`the hub asks for ${request.fixes.length} fix(es) here`);
+    const bundle = yield* ownBundle.pipe(Effect.orElseSucceed(() => ""));
+    const local = { ...self, ssh: null };
+    const answered = yield* withSyncLock(
+      answerFixRequest({
+        self: config.self,
+        request,
+        progress: (p) => sendFixProgress(url, token, id, p),
+        findings: readStates(config.repo).pipe(
+          Effect.flatMap((others) => ownCheck(config, self, others)),
+          Effect.map((r) => r.findings),
+          Effect.mapError(failureText),
+        ),
+        run: (fixes) => runFixes([local], fixes, config.repo, bundle, config.repo),
+        secrets: yield* localSecrets,
+      }),
+      Effect.fail("busy"),
+      { children: true },
+    ).pipe(
+      Effect.retry({ times: 24, schedule: Schedule.spaced(Duration.seconds(5)) }),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!answered) return;
+    yield* timestamped("answered the hub; syncing");
+    yield* syncRun(config, { apply: false }).pipe(Effect.ignore);
+  }).pipe(
+    Effect.catchCause((cause) => timestamped(`answering a fix request failed: ${String(cause)}`)),
+  );
 
 /** Every upstream base some node's [models] declares: where /egress may forward. */
 const egressBasesOf = (config: Config) => [
@@ -59,10 +116,12 @@ const serve = Command.make("serve").pipe(
         hub?: boolean;
       };
       const { identity } = yield* ensureIdentity;
-      // Followed as sync updates the config repo; a read that fails keeps the last good set.
+      // Followed as sync updates the config repo; a read that fails keeps the last good one.
+      let current = config;
       let egressBases = egressBasesOf(config);
       yield* loadConfig.pipe(
         Effect.map((c) => {
+          current = c;
           egressBases = egressBasesOf(c);
         }),
         Effect.ignore,
@@ -73,6 +132,22 @@ const serve = Command.make("serve").pipe(
       yield* Console.log(
         `relay on 127.0.0.1:${port}; ${hub ? "MCP hub serving the repo's hosted servers" : `MCP gateway for ${Object.keys(mcp.ports ?? {}).join(", ") || "no servers"}`}`,
       );
+      const assets = yield* loadAssets.pipe(Effect.orElseSucceed(() => new Map()));
+      const url = config.settings.relay?.url ?? null;
+      yield* Console.log(
+        url === null
+          ? "the app is not served: [relay] url is not set"
+          : `the app on ${url}, for ${(config.settings.ui?.allow ?? []).join(", ") || "nobody yet ([ui] allow)"}`,
+      );
+      // The relay node runs no listener: the relay answers fix requests for it, following itself.
+      const loopback = `http://127.0.0.1:${port}`;
+      yield* listen(
+        config,
+        () => Effect.void,
+        () => Effect.void,
+        answerHere(loopback, token),
+        loopback,
+      ).pipe(Effect.ignore, Effect.forkDetach);
       const routes = relayLayer({
         token,
         repo: config.repo,
@@ -87,6 +162,13 @@ const serve = Command.make("serve").pipe(
           version: packageJson.version,
         },
         egressBases: () => egressBases,
+        extra: (relay) =>
+          hubUiLayer(relay, {
+            config: Effect.sync(() => current),
+            port,
+            relayToken: token,
+            assets,
+          }),
       });
       return yield* untilNewBuild(
         Layer.launch(
@@ -114,10 +196,9 @@ export const listenCommand = Command.make("listen").pipe(
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const log = (line: string) =>
-        DateTime.now.pipe(
-          Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)),
-        );
+      const log = timestamped;
+      const url = config.settings.relay?.url?.replace(/\/+$/, "") ?? "";
+      const token = yield* secretVar(RELAY_TOKEN);
       return yield* untilNewBuild(
         listen(
           config,
@@ -142,6 +223,7 @@ export const listenCommand = Command.make("listen").pipe(
               );
             }),
           log,
+          answerHere(url, token),
         ),
       );
     }).pipe(reportUserErrors),

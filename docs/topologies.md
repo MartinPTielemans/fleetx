@@ -5,10 +5,16 @@ Topology is configuration. Every node has one or more roles:
 | role        | does                                                                                                  |
 | ----------- | ----------------------------------------------------------------------------------------------------- |
 | `authority` | approves proposals, changes secrets; its own changes under `auto_commit` paths are committed directly |
-| `relay`     | runs `t3-fleet relay serve`: events, published state, the MCP hub (optional)                          |
+| `relay`     | runs `t3-fleet relay serve`: events, published state, the app on the tailnet, the MCP hub (optional)  |
 | `member`    | converges, reports, proposes                                                                          |
 
 Git is always the hub. A relay only makes things faster.
+
+You don't have to choose a layout by hand. The [setup wizard](design/setup-wizard.md)
+asks what machines you have and recommends one: your own computer as the
+authority, an always-on machine as the hub. It checks that machine over ssh
+from your computer and sets it up, so you don't run setup on it yourself.
+`t3-fleet setup` does the same in the terminal.
 
 ## One laptop
 
@@ -54,6 +60,24 @@ server and publishes it on the tailnet; every other node runs `t3-fleet listen`
 and syncs seconds after the branch moves. A laptop that slept catches up on
 the events it missed. Without tailscale, set `[relay] url` once the server
 can be reached.
+
+### The app on the hub
+
+The relay also serves T3 Fleet's web app, at its tailnet address, to the
+Tailscale logins in `[ui] allow` (setup writes yours); `t3-fleet ui` opens it
+there. It is built from what machines report, sends each fix to the machine
+it changes, and never decides proposals. See [the CLI](cli.md#on-the-hub).
+
+What the hub can and cannot do, should it be compromised: it can read what
+machines report (no secret values: a fix whose command holds one is not
+reported, and outputs have them taken out), and ask any machine for fixes, but
+a machine runs only a fix its own check proposes, exactly as it would propose
+it, and its interruption confirmed. It cannot approve a proposal, its own or
+another's. It holds the relay token, like every machine, so it could publish
+false reports. A process on the hub that can reach its loopback port could
+pose as an allowed login; such a process already runs where that token is.
+If the hub is also an authority (one machine doing both), it can commit to the
+repo anyway, as any authority can.
 
 ### The MCP hub
 
