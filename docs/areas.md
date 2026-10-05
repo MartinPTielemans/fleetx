@@ -13,6 +13,18 @@ Settings below go in a node file, a profile, or `[defaults]` in t3-fleet.toml.
 channel; each enabled provider launched with the T3 server's own environment.
 `[t3] channel = "nightly"` makes a node follow a channel.
 
+Updating T3 restarts its server (on a Mac, the desktop app around it), which
+stops any thread running there, so by default T3 Fleet only offers the update.
+`[t3] update = "when-idle"` lets sync do it: `t3-fleet t3 update --if-idle`
+asks T3 which threads are busy (with T3 Fleet's read-only token) and updates
+only when none is, trying again on the next sync otherwise. Before restarting
+it turns on T3's `continueThreadsAfterServerUpdate`, so a thread that starts in
+between resumes. A CLI install updates with its own `t3 update`; the desktop
+app, which installs only when asked in its UI, is downloaded from the release,
+checked against the release's sha512 and the installed app's signing team,
+and swapped in while it is quit. Add `t3` to `[fleet] apply` if you set
+`apply` yourself.
+
 **Agent CLIs.** Claude Code (native installer, `~/.local/bin/claude`) and Codex
 (npm under `~/.local`). `[agents.claude] policy = "track"` (default),
 `"pin:2.1.288"`, or `"manual"`.

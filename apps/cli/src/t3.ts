@@ -2,6 +2,9 @@
  * t3-fleet t3 connect   give T3 Fleet a read-only token for this machine's T3 server,
  *                     so provider logins and health come from T3 itself
  *                     (the fix for t3-access; see T3Access.ts)
+ * t3-fleet t3 update [--if-idle]   update this machine's T3 to its channel's newest
+ *                     release; with --if-idle only while no thread runs
+ *                     (the fix for t3-behind under [t3] update = "when-idle"; see T3Update.ts)
  */
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
@@ -9,7 +12,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
-import { Command } from "effect/unstable/cli";
+import { Command, Flag } from "effect/unstable/cli";
 
 import { exec } from "@t3-fleet/core/Exec";
 import {
@@ -18,6 +21,7 @@ import {
   t3AccessPath,
   t3CliFromCommandLine,
 } from "@t3-fleet/core/T3Access";
+import { updateT3 } from "@t3-fleet/core/T3Update";
 
 import { reportUserErrors } from "./shared.ts";
 
@@ -71,7 +75,24 @@ const connect = Command.make("connect").pipe(
   ),
 );
 
+const update = Command.make("update", {
+  ifIdle: Flag.Boolean("if-idle").pipe(
+    Flag.withDescription("Only while no thread is running here; otherwise say why and wait."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Update this machine's T3 (a CLI install, or the desktop app) to its channel's newest release.",
+  ),
+  Command.withHandler(({ ifIdle }) =>
+    updateT3({ ifIdle }).pipe(
+      Effect.flatMap((line) => Console.log(line)),
+      reportUserErrors,
+    ),
+  ),
+);
+
 export const t3Command = Command.make("t3").pipe(
-  Command.withDescription("T3 Fleet's access to T3 Code on this machine."),
-  Command.withSubcommands([connect]),
+  Command.withDescription("T3 Fleet's access to T3 Code on this machine, and keeping it current."),
+  Command.withSubcommands([connect, update]),
 );

@@ -147,6 +147,44 @@ describe("diagnose", () => {
     expect(finding?.fix?.disrupts).toContain("server");
   });
 
+  it("under [t3] update = when-idle, any T3 behind gets the idle-aware update as a safe fix, desktop app too", () => {
+    const behind = (runtimeBinary: string | null) =>
+      machine(
+        {},
+        {
+          descriptor: {
+            environmentId: "e",
+            label: "l",
+            serverVersion: "0.0.46-nightly.20261003.2623",
+          },
+          runtimeBinary,
+        },
+      );
+    const result = (name: string, runtimeBinary: string | null) => {
+      const r = ok(name, behind(runtimeBinary));
+      return {
+        ...r,
+        node: {
+          ...r.node,
+          settings: { table: { t3: { update: "when-idle" } }, provenance: new Map() },
+        },
+      };
+    };
+    const server = result("server", "/home/u/.t3/runtime/versions/0.0.46-nightly.20261003.2623/t3");
+    const laptop = result("laptop", null);
+    for (const r of [server, laptop]) {
+      const finding = diagnose([r], latest, settings, [r.node]).find((f) => f.key === "t3-behind");
+      expect(finding?.fix).toEqual({ command: "t3-fleet t3 update --if-idle", safe: true });
+      expect(finding?.detail).toContain("no thread is running");
+    }
+    // Without the setting the desktop app keeps no fix, and says how to get one.
+    const manual = diagnose([ok("laptop", behind(null))], latest, settings).find(
+      (f) => f.key === "t3-behind",
+    );
+    expect(manual?.fix).toBeUndefined();
+    expect(manual?.detail).toContain('update = "when-idle"');
+  });
+
   it("says when the newest releases could not be looked up, instead of leaving t3-behind out", () => {
     const unknown: Latest = {
       agents: { claude: null, codex: "0.160.0" },

@@ -265,6 +265,12 @@ const channelOf = (settings: unknown): string | null => {
   return typeof raw === "string" ? raw : null;
 };
 
+/** How a node's T3 is kept current, from `[t3] update`: "when-idle" lets sync update it when no thread runs. */
+const updateOf = (settings: unknown): "manual" | "when-idle" =>
+  (settings as { t3?: { update?: unknown } } | undefined)?.t3?.update === "when-idle"
+    ? "when-idle"
+    : "manual";
+
 /** A problem as an older probe reported it, text only; its kind is read from the text. */
 const legacyProblem = (title: string): { kind: string; title: string } => ({
   kind: /did not answer/.test(title)
@@ -286,6 +292,7 @@ const t3Findings = (
   obs: MachineObservation,
   latest: Latest,
   wantChannel: string | null = null,
+  update: "manual" | "when-idle" = "manual",
 ): Array<Finding> => {
   const out: Array<Finding> = [];
   const t3 = obs.t3;
@@ -370,23 +377,37 @@ const t3Findings = (
           ? "warn"
           : "info";
       const channel = cliReleaseChannelOf(version);
+      // When idle, sync updates it itself: the command waits while a thread runs.
+      const idle =
+        update === "when-idle"
+          ? {
+              command: "t3-fleet t3 update --if-idle",
+              safe: true,
+            }
+          : undefined;
       const how =
-        t3.runtimeBinary !== null
+        idle ??
+        (t3.runtimeBinary !== null
           ? {
               command: `${tilde(t3.runtimeBinary)} update --channel ${channel} --yes`,
               safe: false,
               disrupts: `restarts the T3 server on ${node}; threads running there stop`,
             }
-          : undefined;
+          : undefined);
       out.push({
         node,
         key: "t3-behind",
         severity,
         area: "t3",
         title: `T3 is ${behind === null ? "behind" : `${behind} ${channel} release${behind === 1 ? "" : "s"} behind`} (${versionPair(version, newest)})`,
-        ...(how === undefined
-          ? { detail: "the desktop app updates itself; restart it to apply a downloaded update" }
-          : { fix: how }),
+        ...(idle !== undefined
+          ? { detail: "sync updates it when no thread is running here", fix: idle }
+          : how === undefined
+            ? {
+                detail:
+                  'the desktop app updates when asked in its UI; [t3] update = "when-idle" lets sync do it',
+              }
+            : { fix: how }),
       });
     }
   }
@@ -799,7 +820,15 @@ export const diagnose = (
         ...agentFindings(r.node.name, agent, latest, policyOf(nodeSettings, agent.name)),
       );
     }
-    findings.push(...t3Findings(r.node.name, r.observation, latest, channelOf(nodeSettings)));
+    findings.push(
+      ...t3Findings(
+        r.node.name,
+        r.observation,
+        latest,
+        channelOf(nodeSettings),
+        updateOf(nodeSettings),
+      ),
+    );
     findings.push(...providerFindings(r.node.name, r.observation, proxy));
     findings.push(...proxyFindings(r.node.name, r.observation, proxy));
     findings.push(...syncFindings(r.node.name, r.observation, syncIntervalOf(nodeSettings)));
