@@ -133,8 +133,8 @@ export const UiProbe = Schema.Struct({
   fleet: UiProbeItem,
   /**
    * Whether the hub can serve the fleet app on the tailnet (setup/Remote.ts
-   * appItem). "warn" when it cannot (its OS, or tailscaled running as a user
-   * on a Mac): its label is the line to show, the app opens locally on each
+   * appItem). "warn" when it cannot (its OS; tailscaled running as a user on
+   * a Mac, or on Linux other than as an installed systemd service): its label is the line to show, the app opens locally on each
    * machine instead, and setup writes [ui] hosted = false, so the state's
    * fleetUrl stays null. "unknown" when it could not be told (Tailscale not
    * running); the hub's relay still refuses whoever it cannot place. Absent

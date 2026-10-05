@@ -29,8 +29,14 @@
  *   and tailscaled made the   loopback alone would let any program on the hub
  *   connection                connect and set the headers itself. The kernel
  *                             says whose socket the other end of the connection
- *                             is. On Linux (/proc/net/tcp) it must be root's or
- *                             the user tailscaled runs as. On macOS (the TCP
+ *                             is. On Linux (/proc/net/tcp) it must be root's, as
+ *                             tailscaled is when installed as a package; or, for
+ *                             a tailscaled run as a user, that user's, but only
+ *                             when systemd started it as its tailscaled unit
+ *                             (MainPID) from an installed program: root's, in
+ *                             root's directories, none writable by anyone else.
+ *                             A process merely named tailscaled, which anyone
+ *                             can start, says nothing. On macOS (the TCP
  *                             table sysctl gives, net.inet.tcp.pcblist_n) it
  *                             must be root's (the standalone app's system
  *                             extension, or tailscaled as a daemon), or the
@@ -50,11 +56,12 @@
  *
  * What remains: root on the hub (or the user tailscaled runs as, when that is
  * not root, on Linux) can pose as any login; it can read every secret there
- * anyway. A hub that is neither Linux nor macOS, or a Mac whose tailscaled runs
+ * anyway. A hub that is neither Linux nor macOS, a Mac whose tailscaled runs
  * as a user (the open-source daemon with userspace networking, which no
- * signature names), cannot tell its connections apart, so its app refuses
- * everyone; setup notes it (`[ui] hosted = false`) and `t3-fleet ui` serves the
- * app on each machine instead.
+ * signature names), or a Linux hub whose tailscaled runs as a user other than
+ * under its systemd unit from an installed program, cannot tell its
+ * connections apart, so its app refuses everyone; setup notes it (`[ui]
+ * hosted = false`) and `t3-fleet ui` serves the app on each machine instead.
  *
  * Passing the gate is not a session: the app still trades it for a token,
  * bound to that login, which every /api request sends as a header (UiServer.ts).
@@ -247,12 +254,122 @@ export const socketOwner = (procNet: string, connection: Connection): number | n
   return null;
 };
 
-/** The real uid in a /proc/<pid>/status text, when it is tailscaled's. */
-export const tailscaledUid = (status: string): number | null => {
-  if (!/^Name:\s*tailscaled\s*$/m.test(status)) return null;
+// ── on Linux ───────────────────────────────────────────────────────────
+
+/** The real uid in a /proc/<pid>/status text; null when it has none. */
+export const statusUid = (status: string): number | null => {
   const uid = /^Uid:\s*(\d+)/m.exec(status)?.[1];
   return uid === undefined ? null : Number(uid);
 };
+
+/** Who owns a path, and its permission bits. */
+export interface PathOwner {
+  readonly uid: number;
+  readonly mode: number;
+}
+
+/** `path` and every directory above it, up to the root. */
+const withParents = (path: string) => {
+  const all = [path];
+  for (let at = path; at !== "/" && at !== "";)
+    all.push((at = at.slice(0, at.lastIndexOf("/")) || "/"));
+  return all;
+};
+
+/**
+ * Whether `exe`, a program's absolute path as /proc/<pid>/exe resolves it, is
+ * an installed tailscaled: named tailscaled, and it and every directory above
+ * it are root's and writable by no one else, so no user could have put it
+ * there or changed it. A program replaced while it runs reads "(deleted)",
+ * whose path no longer exists: not one. `owner` is null for a path it cannot
+ * read, which is not one either.
+ */
+export const installedTailscaled = (
+  exe: string,
+  owner: (path: string) => PathOwner | null,
+): boolean => {
+  if (!exe.startsWith("/") || exe.split("/").at(-1) !== "tailscaled") return false;
+  return withParents(exe).every((path) => {
+    const o = owner(path);
+    return o !== null && o.uid === 0 && (o.mode & 0o022) === 0;
+  });
+};
+
+/** What the Linux check reads besides /proc's tables: commands and files in practice, fakes in tests. */
+export interface LinuxLookup {
+  /**
+   * tailscaled's main process, as systemd tracks it: the system unit's, else
+   * the relay's user's own unit's. Null when neither runs.
+   */
+  readonly mainPid: Effect.Effect<number | null, never, ChildProcessSpawner.ChildProcessSpawner>;
+  /** The program process `pid` runs (/proc/<pid>/exe); null when it cannot be read. */
+  readonly exe: (pid: number) => Effect.Effect<string | null, never, FileSystem.FileSystem>;
+  /** Owners of a path and of each directory above it, read together; null for one that cannot be read. */
+  readonly owners: (
+    paths: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyMap<string, PathOwner | null>, never, FileSystem.FileSystem>;
+}
+
+const unitMainPid = (user: boolean) =>
+  exec({
+    command: "systemctl",
+    args: [...(user ? ["--user"] : []), "show", "-p", "MainPID", "--value", "tailscaled.service"],
+    timeout: Duration.seconds(5),
+  }).pipe(
+    Effect.map((r) => {
+      const pid = r.code === 0 ? Number(r.stdout.trim()) : 0;
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    }),
+  );
+
+export const liveLinuxLookup: LinuxLookup = {
+  mainPid: Effect.gen(function* () {
+    return (yield* unitMainPid(false)) ?? (yield* unitMainPid(true));
+  }),
+  exe: (pid) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      return yield* fs.readLink(`/proc/${pid}/exe`).pipe(Effect.orElseSucceed(() => null));
+    }),
+  owners: (paths) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const owners = new Map<string, PathOwner | null>();
+      for (const path of paths) {
+        // stat follows a symlink: the path itself must not be one.
+        const link = yield* fs.readLink(path).pipe(Effect.option);
+        const info = yield* fs.stat(path).pipe(Effect.option);
+        owners.set(
+          path,
+          link._tag === "None" && info._tag === "Some" && info.value.uid._tag === "Some"
+            ? { uid: info.value.uid.value, mode: info.value.mode }
+            : null,
+        );
+      }
+      return owners;
+    }),
+};
+
+/**
+ * The uid tailscaled runs as, when it is not root: that of the process
+ * systemd started as its tailscaled unit, when that process runs an
+ * installed tailscaled (installedTailscaled). Null otherwise: a program
+ * merely named tailscaled, which any user can start, is not it.
+ */
+export const tailscaledUser = (proc: string, lookup: LinuxLookup) =>
+  Effect.gen(function* () {
+    const pid = yield* lookup.mainPid;
+    if (pid === null) return null;
+    const fs = yield* FileSystem.FileSystem;
+    const status = yield* fs
+      .readFileString(`${proc}/${pid}/status`)
+      .pipe(Effect.orElseSucceed(() => ""));
+    const uid = statusUid(status);
+    const exe = yield* lookup.exe(pid);
+    if (uid === null || exe === null) return null;
+    const owners = yield* lookup.owners(exe.startsWith("/") ? withParents(exe) : []);
+    return installedTailscaled(exe, (path) => owners.get(path) ?? null) ? uid : null;
+  });
 
 // ── on macOS ────────────────────────────────────────────────────────────
 
@@ -443,14 +560,16 @@ export const unservedPlatform = (platform: string): string | null =>
 
 /**
  * Whether tailscaled made `connection`: on Linux, the asking socket is root's,
- * or the user tailscaled runs as; on macOS, see servedOnDarwin. Null when it
- * did; why not, otherwise.
+ * or that of the user an installed tailscaled runs as under systemd
+ * (tailscaledUser); on macOS, see servedOnDarwin. Null when it did; why not,
+ * otherwise.
  */
 export const servedByTailscale = (
   connection: Connection | null,
   platform: string = process.platform,
   proc = "/proc",
   darwin: DarwinLookup = liveDarwinLookup,
+  linux: LinuxLookup = liveLinuxLookup,
 ) =>
   Effect.gen(function* () {
     const unserved = unservedPlatform(platform);
@@ -466,12 +585,6 @@ export const servedByTailscale = (
     }
     if (owner === null) return "Who connected could not be told.";
     if (owner === 0) return null;
-    const pids = (yield* fs
-      .readDirectory(proc)
-      .pipe(Effect.orElseSucceed(() => [] as Array<string>))).filter((p) => /^\d+$/.test(p));
-    for (const pid of pids) {
-      const uid = tailscaledUid(yield* read(`${proc}/${pid}/status`));
-      if (uid === owner) return null;
-    }
+    if ((yield* tailscaledUser(proc, linux)) === owner) return null;
     return "This request did not come through tailscale serve: another program on the hub made it.";
   });

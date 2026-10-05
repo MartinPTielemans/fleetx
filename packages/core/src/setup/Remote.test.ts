@@ -171,8 +171,20 @@ describe("a hub in another fleet", () => {
 
 describe("whether the hub can serve the fleet app", () => {
   const PS = (lines: ReadonlyArray<string>) => lines.join("\n");
+  // What LINUX_APP_PROBE prints for systemd running /usr/sbin/tailscaled as uid 1000.
+  const INSTALLED_USER_TAILSCALED = [
+    "1000 tailscaled",
+    "main 1000 /usr/sbin/tailscaled",
+    "0 755 /usr/sbin/tailscaled",
+    "0 755 /usr/sbin",
+    "0 755 /usr",
+    "0 755 /",
+  ];
   it("can on Linux, and on a Mac whose Tailscale runs as root or from the App Store", () => {
-    expect(appItem("Linux", null).state).toBe("ok");
+    // tailscaled as root, as Tailscale's package runs it.
+    expect(appItem("Linux", PS(["0 tailscaled"])).state).toBe("ok");
+    // tailscaled as a user (userspace networking), systemd's unit, from an installed program.
+    expect(appItem("Linux", PS(INSTALLED_USER_TAILSCALED)).state).toBe("ok");
     // The standalone app's system extension, root.
     const standalone = PS([
       "    0 /sbin/launchd",
@@ -191,6 +203,38 @@ describe("whether the hub can serve the fleet app", () => {
         ]),
       ).state,
     ).toBe("ok");
+  });
+
+  it("cannot on Linux when tailscaled runs as a user other than as an installed service", () => {
+    // A program a user named tailscaled, and no unit.
+    const spoof = appItem("Linux", PS(["1000 tailscaled"]));
+    expect(spoof.state).toBe("warn");
+    expect(spoof.label).toContain("The fleet app will open locally on this computer instead");
+    expect(spoof.remedy).toContain("as root");
+    // A unit whose program is not root's, or sits in a directory others can write.
+    expect(
+      appItem(
+        "Linux",
+        PS([
+          "1000 tailscaled",
+          "main 1000 /tmp/tailscaled",
+          "1000 755 /tmp/tailscaled",
+          "0 1777 /tmp",
+          "0 755 /",
+        ]),
+      ).state,
+    ).toBe("warn");
+    expect(
+      appItem(
+        "Linux",
+        PS(INSTALLED_USER_TAILSCALED.map((l) => (l === "0 755 /usr/sbin" ? "0 775 /usr/sbin" : l))),
+      ).state,
+    ).toBe("warn");
+    // Its program could not be read (another user's process): only the name line.
+    expect(appItem("Linux", PS(["999 tailscaled"])).state).toBe("warn");
+    // Tailscale not running, or the probe not read: nothing is decided.
+    expect(appItem("Linux", "").state).toBe("unknown");
+    expect(appItem("Linux", null).state).toBe("unknown");
   });
 
   it("cannot on a Mac whose tailscaled runs as a user, or another OS: the app opens here", () => {

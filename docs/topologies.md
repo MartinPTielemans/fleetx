@@ -95,15 +95,23 @@ the relay asks the hub's kernel whose socket opened each connection to its
 loopback port, and refuses any other program on the hub, the relay's own user
 included:
 
-| Hub                                                                                   | Serves the app to                                                                           |
-| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Linux                                                                                 | connections of root's, or of the user tailscaled runs as (`/proc/net/tcp`)                  |
-| macOS, the standalone Tailscale app (system extension, root)                          | connections of root's (the kernel's TCP table, `net.inet.tcp.pcblist_n`)                    |
-| macOS, open-source `tailscaled` as a daemon (`sudo tailscaled install-system-daemon`) | connections of root's                                                                       |
-| macOS, the App Store Tailscale app (its extension runs as you)                        | the extension's own connections only, by its code signature, checked on the running process |
-| macOS with `tailscaled` run as a user; any other OS                                   | no one: setup writes `[ui] hosted = false` and `t3-fleet ui` serves the app on each machine |
+| Hub                                                                                                      | Serves the app to                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux, tailscaled as root (Tailscale's package)                                                          | connections of root's (`/proc/net/tcp`)                                                                                                                                                         |
+| Linux, tailscaled run as a user by its systemd unit, from an installed program                           | connections of root's, or of that user: only the unit's main process (`MainPID`) counts, and only when the program it runs, and every directory above it, is root's and writable by no one else |
+| macOS, the standalone Tailscale app (system extension, root)                                             | connections of root's (the kernel's TCP table, `net.inet.tcp.pcblist_n`)                                                                                                                        |
+| macOS, open-source `tailscaled` as a daemon (`sudo tailscaled install-system-daemon`)                    | connections of root's                                                                                                                                                                           |
+| macOS, the App Store Tailscale app (its extension runs as you)                                           | the extension's own connections only, by its code signature, checked on the running process                                                                                                     |
+| Linux with `tailscaled` run as a user any other way; macOS with `tailscaled` run as a user; any other OS | no one: setup writes `[ui] hosted = false` and `t3-fleet ui` serves the app on each machine                                                                                                     |
 
-Root on the hub is out of reach of any of this. If the hub is also an
+A program's name proves nothing: any user can copy a program to
+`/tmp/tailscaled` and run it, so the relay never trusts a uid because a process
+of that name runs as it. When it cannot tell who tailscaled is (systemd not
+answering, the program unreadable or replaced since it started), it refuses.
+
+Root on the hub is out of reach of any of this, and so is the user a
+trusted tailscaled runs as, when that is not root: any program of theirs can
+pose as any login. If the hub is also an
 authority (one machine doing both), it can commit to the repo anyway, as any
 authority can.
 

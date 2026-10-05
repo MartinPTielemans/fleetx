@@ -120,7 +120,7 @@ export interface HubUiOptions {
   readonly assets: ReadonlyMap<string, UiAsset>;
 }
 
-/** Who made each open connection, as servedBy answered it (macOS only). */
+/** Who made each open connection, as servedBy answered it. */
 const answered = new WeakMap<object, string | null>();
 
 const socketOf = (source: unknown): object | null => {
@@ -178,16 +178,16 @@ export const hubUiLayer = (relay: RelayHandle, options: HubUiOptions) =>
             ),
           ),
           servedBy: (request) => {
-            // On macOS a connection is looked up once: a code-signature check takes a
-            // tenth of a second, and who made a connection cannot change while it is open.
+            // A connection is looked up once: a code-signature check (macOS) or systemctl
+            // (Linux, tailscaled not root) takes a while, and who made a connection cannot
+            // change while it is open.
             const socket = socketOf(request.source);
             const known = socket === null ? undefined : answered.get(socket);
             if (known !== undefined) return Effect.succeed(known);
             return servedByTailscale(connectionOf(request.source)).pipe(
               Effect.tap((answer) =>
                 Effect.sync(() => {
-                  if (socket !== null && process.platform === "darwin")
-                    answered.set(socket, answer);
+                  if (socket !== null) answered.set(socket, answer);
                 }),
               ),
               Effect.provide(services),

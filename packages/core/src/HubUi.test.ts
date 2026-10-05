@@ -24,11 +24,16 @@ import {
   decodeHeaderValue,
   identify,
   liveDarwinLookup,
+  liveLinuxLookup,
   refusedPage,
   servedByTailscale,
+  installedTailscaled,
   socketOwner,
-  tailscaledUid,
+  statusUid,
+  tailscaledUser,
   type DarwinLookup,
+  type LinuxLookup,
+  type PathOwner,
   type HubGate,
 } from "./HubUi.ts";
 import { mergeLayers } from "./Settings.ts";
@@ -407,8 +412,9 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     expect(socketOwner(TCP, { remotePort: 41000, localPort: 8399 })).toBe(0);
     expect(socketOwner(TCP, { remotePort: 42000, localPort: 8399 })).toBe(1000);
     expect(socketOwner(TCP, { remotePort: 43000, localPort: 8399 })).toBe(null);
-    expect(tailscaledUid("Name:\ttailscaled\nUid:\t0\t0\t0\t0\n")).toBe(0);
-    expect(tailscaledUid("Name:\tnode\nUid:\t1000\t1000\t1000\t1000\n")).toBe(null);
+    expect(statusUid("Name:\ttailscaled\nUid:\t0\t0\t0\t0\n")).toBe(0);
+    expect(statusUid("Name:\tnode\nUid:\t1000\t1000\t1000\t1000\n")).toBe(1000);
+    expect(statusUid("Name:\tnode\n")).toBe(null);
     expect(connectionOf({ socket: { remotePort: 41000, localPort: 8399 } })).toEqual({
       remotePort: 41000,
       localPort: 8399,
@@ -416,25 +422,174 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     expect(connectionOf(new Request("http://x/"))).toBe(null);
   });
 
-  it("lets in tailscaled's connections only, and on a hub that is not Linux none", async () => {
+  // A Linux hub as the relay's check sees it. Where systemd's tailscaled unit runs
+  // (`main`: its MainPID, null for none), the program each process runs, and who
+  // owns what, as stat says: an installed /usr/sbin/tailscaled by default.
+  const INSTALLED: Record<string, PathOwner> = {
+    "/": { uid: 0, mode: 0o755 },
+    "/usr": { uid: 0, mode: 0o755 },
+    "/usr/sbin": { uid: 0, mode: 0o755 },
+    "/usr/sbin/tailscaled": { uid: 0, mode: 0o755 },
+    "/tmp": { uid: 0, mode: 0o1777 },
+    "/tmp/tailscaled": { uid: 1000, mode: 0o755 },
+    "/srv": { uid: 0, mode: 0o755 },
+    "/srv/user": { uid: 1000, mode: 0o750 },
+    "/srv/user/tailscaled": { uid: 1000, mode: 0o755 },
+    "/usr/bin": { uid: 0, mode: 0o755 },
+    "/usr/bin/sleep": { uid: 0, mode: 0o755 },
+  };
+  const linux = (
+    main: number | null,
+    exes: Record<number, string>,
+    owners: Record<string, PathOwner> = INSTALLED,
+  ): LinuxLookup => ({
+    mainPid: Effect.succeed(main),
+    exe: (pid) => Effect.succeed(exes[pid] ?? null),
+    owners: (paths) => Effect.succeed(new Map(paths.map((p) => [p, owners[p] ?? null]))),
+  });
+  const procWith = (statuses: Record<number, string>) => {
     const proc = fs.mkdtempSync(join(tmpdir(), "t3-fleet-proc-"));
     fs.mkdirSync(join(proc, "net"));
     fs.writeFileSync(join(proc, "net/tcp"), TCP);
     fs.writeFileSync(join(proc, "net/tcp6"), "header\n");
-    const check = (remotePort: number, platform = "linux") =>
+    for (const [pid, status] of Object.entries(statuses)) {
+      fs.mkdirSync(join(proc, pid));
+      fs.writeFileSync(join(proc, pid, "status"), status);
+    }
+    return proc;
+  };
+  const status = (uid: number, name = "tailscaled") =>
+    `Name:\t${name}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`;
+  const checkOn =
+    (proc: string, lookup: LinuxLookup = linux(null, {})) =>
+    (remotePort: number, platform = "linux") =>
       Effect.runPromise(
-        servedByTailscale({ remotePort, localPort: 8399 }, platform, proc).pipe(
-          Effect.provide(NodeServices.layer),
-        ),
+        servedByTailscale(
+          { remotePort, localPort: 8399 },
+          platform,
+          proc,
+          liveDarwinLookup,
+          lookup,
+        ).pipe(Effect.provide(NodeServices.layer)),
       );
+
+  it("lets in tailscaled's connections only, and on a hub that is not Linux none", async () => {
+    const check = checkOn(procWith({}));
     expect(await check(41000)).toBe(null);
     expect(await check(42000)).toContain("another program on the hub");
     expect(await check(43000)).toContain("could not be told");
     expect(await check(41000, "freebsd")).toContain("only a Linux or macOS hub can");
-    // tailscaled run as uid 1000 (userspace networking): that user's connections are its.
-    fs.mkdirSync(join(proc, "77"));
-    fs.writeFileSync(join(proc, "77/status"), "Name:\ttailscaled\nUid:\t1000\t1000\t1000\t1000\n");
-    expect(await check(42000)).toBe(null);
+  });
+
+  it("trusts root's connections without asking who tailscaled is", async () => {
+    // The usual install: tailscaled runs as root under systemd. Root's socket is let in,
+    // and no other uid is, even one with a program named tailscaled.
+    const proc = procWith({ 1: status(0), 77: status(1000) });
+    const lookup = linux(1, { 1: "/usr/sbin/tailscaled", 77: "/tmp/tailscaled" });
+    expect(await checkOn(proc, lookup)(41000)).toBe(null);
+    expect(await checkOn(proc, lookup)(42000)).toContain("another program on the hub");
+    // Root is root, even when systemd cannot be asked.
+    const failing: LinuxLookup = { ...lookup, mainPid: Effect.succeed(null) };
+    expect(await checkOn(proc, failing)(41000)).toBe(null);
+  });
+
+  it("refuses a program a user named tailscaled (cp /bin/sleep /tmp/tailscaled)", async () => {
+    // No tailscaled unit, and uid 1000 runs /tmp/tailscaled: once its name was enough.
+    const spoof = procWith({ 77: status(1000) });
+    expect(await checkOn(spoof, linux(null, { 77: "/tmp/tailscaled" }))(42000)).toContain(
+      "another program on the hub",
+    );
+    // A user's own systemd unit named tailscaled, running that copy, or an installed
+    // program by another name, is not it either.
+    expect(await checkOn(spoof, linux(77, { 77: "/tmp/tailscaled" }))(42000)).toContain(
+      "another program on the hub",
+    );
+    expect(await checkOn(spoof, linux(77, { 77: "/srv/user/tailscaled" }))(42000)).toContain(
+      "another program on the hub",
+    );
+    expect(await checkOn(spoof, linux(77, { 77: "/usr/bin/sleep" }))(42000)).toContain(
+      "another program on the hub",
+    );
+  });
+
+  it("trusts a tailscaled run as a user only as systemd's unit, from an installed program", async () => {
+    // userspace networking: systemd runs /usr/sbin/tailscaled as uid 1000.
+    const proc = procWith({ 77: status(1000) });
+    expect(await checkOn(proc, linux(77, { 77: "/usr/sbin/tailscaled" }))(42000)).toBe(null);
+    // The same, but the program or a directory above it is a user's to change.
+    const writable = { ...INSTALLED, "/usr/sbin": { uid: 0, mode: 0o775 } };
+    expect(
+      await checkOn(proc, linux(77, { 77: "/usr/sbin/tailscaled" }, writable))(42000),
+    ).toContain("another program on the hub");
+    const owned = { ...INSTALLED, "/usr/sbin/tailscaled": { uid: 1000, mode: 0o755 } };
+    expect(await checkOn(proc, linux(77, { 77: "/usr/sbin/tailscaled" }, owned))(42000)).toContain(
+      "another program on the hub",
+    );
+    // Its main process runs as another user than the socket's.
+    expect(
+      await checkOn(
+        procWith({ 77: status(1001) }),
+        linux(77, { 77: "/usr/sbin/tailscaled" }),
+      )(42000),
+    ).toContain("another program on the hub");
+  });
+
+  it("refuses when what tailscaled is cannot be read", async () => {
+    const proc = procWith({ 77: status(1000) });
+    const refused = "another program on the hub";
+    // systemd not asked, or no unit.
+    expect(await checkOn(proc, linux(null, { 77: "/usr/sbin/tailscaled" }))(42000)).toContain(
+      refused,
+    );
+    // Its program not readable (another user's process), or replaced since it started.
+    expect(await checkOn(proc, linux(77, {}))(42000)).toContain(refused);
+    expect(
+      await checkOn(proc, linux(77, { 77: "/usr/sbin/tailscaled (deleted)" }))(42000),
+    ).toContain(refused);
+    // Its status gone (the process exited), or a directory that cannot be read.
+    expect(await checkOn(procWith({}), linux(77, { 77: "/usr/sbin/tailscaled" }))(42000)).toContain(
+      refused,
+    );
+    const { "/usr": _usr, ...unreadable } = INSTALLED;
+    expect(
+      await checkOn(proc, linux(77, { 77: "/usr/sbin/tailscaled" }, unreadable))(42000),
+    ).toContain(refused);
+  });
+
+  it("knows an installed tailscaled by its path and owners", () => {
+    const owner = (p: string) => INSTALLED[p] ?? null;
+    expect(installedTailscaled("/usr/sbin/tailscaled", owner)).toBe(true);
+    expect(installedTailscaled("/tmp/tailscaled", owner)).toBe(false);
+    expect(installedTailscaled("/usr/bin/sleep", owner)).toBe(false);
+    expect(installedTailscaled("usr/sbin/tailscaled", owner)).toBe(false);
+    expect(installedTailscaled("/usr/sbin/tailscaled", () => null)).toBe(false);
+  });
+
+  it("reads owners with stat, and a symlink as no owner", async () => {
+    const dir = fs.mkdtempSync(join(tmpdir(), "t3-fleet-owners-"));
+    fs.writeFileSync(join(dir, "tailscaled"), "");
+    fs.chmodSync(join(dir, "tailscaled"), 0o755);
+    fs.symlinkSync("/bin/sh", join(dir, "link"));
+    const owners = await Effect.runPromise(
+      liveLinuxLookup
+        .owners(["/", join(dir, "tailscaled"), join(dir, "link"), join(dir, "missing")])
+        .pipe(Effect.provide(NodeServices.layer)),
+    );
+    expect(owners.get("/")?.uid).toBe(0);
+    expect(owners.get(join(dir, "tailscaled"))).toMatchObject({ uid: process.getuid?.() });
+    expect((owners.get(join(dir, "tailscaled"))?.mode ?? 0) & 0o777).toBe(0o755);
+    expect(owners.get(join(dir, "link"))).toBe(null);
+    expect(owners.get(join(dir, "missing"))).toBe(null);
+  });
+
+  it.skipIf(process.platform !== "linux")("reads this machine's own processes", async () => {
+    // Under the real lookup, this test's own process is no tailscaled.
+    const uid = await Effect.runPromise(
+      tailscaledUser("/proc", { ...liveLinuxLookup, mainPid: Effect.succeed(process.pid) }).pipe(
+        Effect.provide(NodeServices.layer),
+      ),
+    );
+    expect(uid).toBe(null);
   });
 
   // ── macOS ──
