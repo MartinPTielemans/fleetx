@@ -11,9 +11,11 @@
 #
 # The summary names a commit by its first seven hex digits only, so a commit
 # crafted to share them could pass as reviewed. A review therefore also counts
-# only if it completed after this gate first saw the head commit: the first
-# `codex-review` status on it, which `--seen` posts (pending) as soon as a
-# commit becomes the head. A status belongs to a commit, not a pull request, so
+# only if it completed after this gate first saw the head commit in this pull
+# request: the pending status `--seen` posts as soon as a commit becomes the
+# head, told apart from every other status by its link (…/pull/N#seen), so a
+# record made for another pull request, or an ordinary pending status, never
+# counts. A status belongs to a commit, not a pull request, so
 # a head that two open pull requests share stays pending: a review of one must
 # not pass the other. What it cannot rule out is a review of an older
 # commit with the same prefix completing after that; and the status itself is
@@ -46,6 +48,8 @@ api() {
   return 1
 }
 
+url="https://github.com/$repo/pull/$pr"
+
 post() {
   echo "${1:0:7}: $2: $3"
   [[ $mode == --dry-run ]] && return 0
@@ -53,21 +57,33 @@ post() {
     -f state="$2" \
     -f context=codex-review \
     -f description="${3:0:140}" \
-    -f target_url="https://github.com/$repo/pull/$pr"
+    -f target_url="$url"
 }
 
-# When this gate first posted a status on commit $1, in epoch seconds; empty if never.
+# When --seen recorded commit $1 for this pull request, in epoch seconds; empty if never.
 seen_at() {
-  api --paginate --slurp "repos/$repo/commits/$1/statuses" | jq -r '
+  api --paginate --slurp "repos/$repo/commits/$1/statuses" | jq -r --arg seen "$url#seen" '
     add // []
-    | map(select(.context == "codex-review" and .creator.login == "github-actions[bot]"))
+    | map(select(.context == "codex-review" and .creator.login == "github-actions[bot]"
+                 and .target_url == $seen))
     | map(.created_at | fromdateiso8601) | min // empty'
+}
+
+# Records that this pull request's head is commit $1; prints when, in epoch seconds.
+record() {
+  echo "${1:0:7}: pending: recorded as the head" >&2
+  api -X POST "repos/$repo/statuses/$1" \
+    -f state=pending \
+    -f context=codex-review \
+    -f description="waiting for Codex to review ${1:0:7}" \
+    -f target_url="$url#seen" \
+    --jq '.created_at | fromdateiso8601'
 }
 
 # Only a commit seen for the first time: a pull request reopened on a head it
 # already had keeps that head's record and status.
 if [[ $mode == --seen ]]; then
-  [[ -z $(seen_at "$4") ]] && post "$4" pending "waiting for Codex to review ${4:0:7}"
+  [[ -n $(seen_at "$4") ]] || record "$4" >/dev/null
   exit 0
 fi
 
@@ -96,6 +112,12 @@ cell() { awk -F'|' -v n="$1" '{ gsub(/^[ \t`]+|[ \t`]+$/, "", $n); print $n }'; 
 row() { grep -F "**$1**" <<<"$summary" | head -n 1 || true; }
 covers_head() { [[ ${#1} -ge 7 && $head == "$1"* ]]; }
 
+# A head --seen never recorded (a pull request open before this gate, say) is
+# recorded now; a review completing from here on counts.
+if [[ -z $first_seen && $mode != --dry-run ]]; then
+  first_seen=$(record "$head")
+fi
+
 state=pending
 code=$(row "Code Review")
 if [[ -z $code ]]; then
@@ -114,7 +136,8 @@ else
     description="$short is also the head of $sharing; give each pull request its own commit"
   elif [[ -z $first_seen ]]; then
     description="this gate has not seen $short become the head yet; comment @codex review"
-  elif [[ $(when "$code") -le $first_seen ]]; then
+  # Statuses carry whole seconds; a review completing within the record's second counts.
+  elif [[ $(when "$code") -lt $first_seen ]]; then
     description="Codex's review of ${commit} finished before $short was pushed; comment @codex review"
   elif [[ -n $security ]] && covers_head "$(cell 4 <<<"$security")" &&
     [[ $(cell 3 <<<"$security") == *Running* ]]; then
