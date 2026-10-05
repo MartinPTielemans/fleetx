@@ -476,7 +476,11 @@ describe("a member leaving", () => {
     put(hubHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
     put(hubHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
     put(f.hub, "secrets/secrets.env.age", await encrypt(Object.values(f.recipients), "API=two\n"));
-    put(f.hub, "t3-fleet.toml", '[fleet]\nbranch = "main"\n\n[notify]\ndesktop = ["hub", "laptop"]\n');
+    put(
+      f.hub,
+      "t3-fleet.toml",
+      '[fleet]\nbranch = "main"\n\n[notify]\ndesktop = ["hub", "laptop"]\n',
+    );
     commitAll(f.hub, "new secret");
     const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) throw new Error("no proposal");

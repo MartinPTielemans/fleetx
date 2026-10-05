@@ -498,7 +498,12 @@ export const bringUpHub = (input: {
         );
     }
     yield* input.onStep(`Installing T3 Fleet on ${input.ssh}`);
-    yield* checked(input.ssh, installEngineScript(bundle.bundle, bundle.digest), "Installing T3 Fleet", 120);
+    yield* checked(
+      input.ssh,
+      installEngineScript(bundle.bundle, bundle.digest),
+      "Installing T3 Fleet",
+      120,
+    );
     const cli = `node "$HOME/${SHARE_DIR}/${BUNDLE_FILE}"`;
     const resume = saved !== null && saved.finishedAt === null;
     if (saved?.finishedAt != null) {

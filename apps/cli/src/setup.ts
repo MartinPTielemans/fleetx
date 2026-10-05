@@ -602,7 +602,9 @@ const resumeHub = (home: string) =>
       yield* Console.log(`\nBringing up ${hub.node}, the hub`);
       yield* updateHub(home, (h) => ({ ...h, error: null }));
       yield* bringUp(hub, (line) => Console.log(line), home).pipe(
-        Effect.tapError((why) => updateHub(home, (h) => ({ ...h, error: why })).pipe(Effect.ignore)),
+        Effect.tapError((why) =>
+          updateHub(home, (h) => ({ ...h, error: why })).pipe(Effect.ignore),
+        ),
         Effect.mapError(
           (why) =>
             `${hub.node}'s bring-up stopped: ${why}. Fix that, then \`t3-fleet setup --resume\` (or \`t3-fleet setup --abandon\` to take it out of the fleet)`,
@@ -628,10 +630,7 @@ const resumeRun = (progress: Progress, flags: Flags) =>
     yield* Console.log(
       `Resuming setup of ${progress.node} (${MODE_LINE[progress.mode]}); done: ${progress.done.join(", ") || "nothing yet"}`,
     );
-    return yield* withRunLock(
-      process.env["HOME"] ?? "",
-      runSteps(input, raw, progress),
-    );
+    return yield* withRunLock(process.env["HOME"] ?? "", runSteps(input, raw, progress));
   });
 
 const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>

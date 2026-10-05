@@ -26,13 +26,32 @@
  *   not through Funnel         the app is never served to the internet
  *   with a login in [ui] allow the logins the fleet lets in
  *
- * What it cannot tell apart: another process on the hub itself that connects
- * to the loopback port and sets the headers. Such a process already runs where
- * the relay token is; see docs/topologies.md for what that means.
+ *   and tailscaled made the   loopback alone would let any program on the hub
+ *   connection                connect and set the headers itself. On Linux the
+ *                             kernel says whose socket the other end of the
+ *                             connection is (/proc/net/tcp): it must be root's
+ *                             or the user tailscaled runs as. A program run by
+ *                             anyone else, the relay's own user included, is
+ *                             refused (servedByTailscale)
+ *
+ * Why not a Unix socket for tailscale serve to proxy to, which only the
+ * relay's user could open: since Tailscale 1.98.9 (TS-2026-005) only root may
+ * set a Unix socket as a Serve target, and the relay sets its Serve up
+ * unattended, as its own user. Why not Tailscale's whois: the connection
+ * reaching the relay is tailscaled's own, from 127.0.0.1, and a forged
+ * request can name any device's address in a header.
+ *
+ * What remains: root on the hub (or the user tailscaled runs as, when that is
+ * not root) can pose as any login; it can read every secret there anyway. A
+ * hub that is not Linux cannot tell its connections apart, so its app refuses
+ * everyone; `t3-fleet ui --local` on an authority serves the app there.
  *
  * Passing the gate is not a session: the app still trades it for a token,
  * bound to that login, which every /api request sends as a header (UiServer.ts).
  */
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+
 export interface HubGate {
   /** `[relay] url`: the only Host and Origin the app answers to. */
   readonly url: string;
@@ -172,3 +191,82 @@ ${add}
 </body></html>
 `;
 };
+
+// ── who made the connection ─────────────────────────────────────────────
+
+/** The two ports of a TCP connection, as the server saw them. */
+export interface Connection {
+  /** The asking side's port: its socket on this machine, on loopback. */
+  readonly remotePort: number;
+  /** The relay's own port. */
+  readonly localPort: number;
+}
+
+/** The connection under a request, from the Node request it came as; null when it cannot be told. */
+export const connectionOf = (source: unknown): Connection | null => {
+  const socket = (source as { socket?: { remotePort?: unknown; localPort?: unknown } } | null)
+    ?.socket;
+  const remotePort = socket?.remotePort;
+  const localPort = socket?.localPort;
+  return typeof remotePort === "number" && typeof localPort === "number"
+    ? { remotePort, localPort }
+    : null;
+};
+
+/**
+ * The uid owning the asking end of `connection`, from /proc/net/tcp or tcp6
+ * text: the socket whose local port is the connection's remote port, talking
+ * to the relay's port. Null when no such socket is listed.
+ */
+export const socketOwner = (procNet: string, connection: Connection): number | null => {
+  const hex = (n: number) => n.toString(16).toUpperCase().padStart(4, "0");
+  const local = `:${hex(connection.remotePort)}`;
+  const remote = `:${hex(connection.localPort)}`;
+  for (const line of procNet.split("\n").slice(1)) {
+    // sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid ...
+    const f = line.trim().split(/\s+/);
+    const [, at, to, , , , , uid] = f;
+    if (at?.endsWith(local) && to?.endsWith(remote) && uid !== undefined && /^\d+$/.test(uid))
+      return Number(uid);
+  }
+  return null;
+};
+
+/** The real uid in a /proc/<pid>/status text, when it is tailscaled's. */
+export const tailscaledUid = (status: string): number | null => {
+  if (!/^Name:\s*tailscaled\s*$/m.test(status)) return null;
+  const uid = /^Uid:\s*(\d+)/m.exec(status)?.[1];
+  return uid === undefined ? null : Number(uid);
+};
+
+/**
+ * Whether tailscaled made `connection`, on Linux: the asking socket is root's,
+ * or the user tailscaled runs as. Null when it did; why not, otherwise.
+ */
+export const servedByTailscale = (
+  connection: Connection | null,
+  platform: string = process.platform,
+  proc = "/proc",
+) =>
+  Effect.gen(function* () {
+    if (platform !== "linux")
+      return "This hub cannot tell tailscale serve from another program on it (only a Linux hub can), so its app opens for no one. Open the app on your computer with t3-fleet ui --local.";
+    if (connection === null) return "Who connected could not be told.";
+    const fs = yield* FileSystem.FileSystem;
+    const read = (file: string) => fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
+    let owner: number | null = null;
+    for (const table of ["net/tcp", "net/tcp6"]) {
+      owner = socketOwner(yield* read(`${proc}/${table}`), connection);
+      if (owner !== null) break;
+    }
+    if (owner === null) return "Who connected could not be told.";
+    if (owner === 0) return null;
+    const pids = (yield* fs
+      .readDirectory(proc)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>))).filter((p) => /^\d+$/.test(p));
+    for (const pid of pids) {
+      const uid = tailscaledUid(yield* read(`${proc}/${pid}/status`));
+      if (uid === owner) return null;
+    }
+    return "This request did not come through tailscale serve: another program on the hub made it.";
+  });

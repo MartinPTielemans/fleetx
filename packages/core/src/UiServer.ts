@@ -200,6 +200,12 @@ export interface UiHubAccess {
   readonly gate: Effect.Effect<HubGate>;
   /** The authorities: proposals are decided there, never on the hub. */
   readonly approveOn: Effect.Effect<ReadonlyArray<string>>;
+  /**
+   * Whether tailscale serve made the request's connection, not another
+   * program on the hub (HubUi.servedByTailscale): null when it did, why not
+   * otherwise.
+   */
+  readonly servedBy: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<string | null>;
 }
 
 export interface UiServerOptions {
@@ -859,7 +865,20 @@ export const uiLayer = (options: UiServerOptions) =>
             { headers: request.headers, remoteAddress: Option.getOrNull(request.remoteAddress) },
             yield* options.hub.gate,
           );
-          return who.ok ? ({ login: who.login } as const) : ({ refused: who } as const);
+          if (!who.ok) return { refused: who } as const;
+          // The headers say who is asking only when tailscale serve set them.
+          const notServed = yield* options.hub.servedBy(request);
+          if (notServed !== null)
+            return {
+              refused: {
+                ok: false,
+                status: 403,
+                title: "Not through Tailscale",
+                message: notServed,
+                login: null,
+              },
+            } as const;
+          return { login: who.login } as const;
         });
 
       /** Guard, then run: every /api route goes through here. */

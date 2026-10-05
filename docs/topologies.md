@@ -76,14 +76,19 @@ it changes, and never decides proposals. See [the CLI](cli.md#on-the-hub).
 
 What the hub can and cannot do, should it be compromised: it can read what
 machines report (no secret values: a fix whose command holds one is not
-reported, and outputs have them taken out), and ask any machine for fixes, but
-a machine runs only a fix its own check proposes, exactly as it would propose
-it, and its interruption confirmed. It cannot approve a proposal, its own or
-another's. It holds the relay token, like every machine, so it could publish
-false reports. A process on the hub that can reach its loopback port could
-pose as an allowed login; such a process already runs where that token is.
-If the hub is also an authority (one machine doing both), it can commit to the
-repo anyway, as any authority can.
+reported, and outputs have them taken out in full before anything is cut
+short), and ask any machine for fixes, but a machine runs only a fix its own
+check proposes, exactly as it would propose it, and its interruption
+confirmed, once per request. It cannot approve a proposal, its own or
+another's, and setting it up approves nothing of its own but its proposed
+secrets: a change to its node file (a role, a profile, a setting) waits for
+you like any proposal. It holds the relay token, like every machine, so it
+could publish false reports. Only tailscale serve can say who is asking: a
+program on the hub that connects to the relay's loopback port is refused
+unless it runs as root or as tailscaled's user (Linux tells; a hub that is not
+Linux serves the app to no one). Root on the hub is out of reach of any of
+this. If the hub is also an authority (one machine doing both), it can commit
+to the repo anyway, as any authority can.
 
 ### The MCP hub
 

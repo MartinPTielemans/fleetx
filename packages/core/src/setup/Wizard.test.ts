@@ -259,7 +259,9 @@ describe("the setup wizard's engine", () => {
     await run(admitHub(await run(loadConfig), { ...hub, mcp: true }, "me@example.com"));
     expect(mcpOf()["hub"]).toBeUndefined();
     const hosted = await run(hostMcp(await run(loadConfig), { ...hub, mcp: true }));
-    expect(hosted[0]).toMatch(/^\[defaults\.mcp\] hub in t3-fleet\.toml: your MCP servers run on hub/);
+    expect(hosted[0]).toMatch(
+      /^\[defaults\.mcp\] hub in t3-fleet\.toml: your MCP servers run on hub/,
+    );
     expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://hub.tailnet.ts.net:8399" });
     expect(await run(hostMcp(await run(loadConfig), { ...hub, mcp: true }))).toEqual([
       "your MCP servers run on hub already",

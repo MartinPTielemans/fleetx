@@ -192,7 +192,8 @@ export const dropTable = (text: string, path: ReadonlyArray<string>): Edit => {
   if (at(parsed, path) === undefined) return { text };
   const lines = text.split("\n");
   const found = section(lines, path);
-  if (found === null) return { error: `[${what}] is not a table of its own here; remove it by hand` };
+  if (found === null)
+    return { error: `[${what}] is not a table of its own here; remove it by hand` };
   lines.splice(found.start, found.end - found.start);
   const after = `${lines.join("\n").replace(/\n+$/, "")}\n`;
   const again = parse(after);

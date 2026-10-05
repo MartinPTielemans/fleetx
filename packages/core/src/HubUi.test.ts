@@ -1,3 +1,10 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { join } from "node:path";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -10,7 +17,16 @@ import { describe, expect, it } from "vite-plus/test";
 import { UiJob, UiSession, UiSessionGrant, UiStatus } from "./Api.ts";
 import type { Node } from "./Config.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
-import { decodeHeaderValue, identify, refusedPage, type HubGate } from "./HubUi.ts";
+import {
+  connectionOf,
+  decodeHeaderValue,
+  identify,
+  refusedPage,
+  servedByTailscale,
+  socketOwner,
+  tailscaledUid,
+  type HubGate,
+} from "./HubUi.ts";
 import { mergeLayers } from "./Settings.ts";
 import { uiLayer, type UiActions } from "./UiServer.ts";
 
@@ -184,6 +200,13 @@ const serveOnHub = () => {
       hub: {
         gate: Effect.succeed({ url: URL_, allow: ["Me@Example.com", "you@example.com"] }),
         approveOn: Effect.succeed(["laptop"]),
+        // A test's stand-in for who made the connection: tailscale serve, unless it says otherwise.
+        servedBy: (request) =>
+          Effect.succeed(
+            request.headers["x-test-made-by"] === undefined
+              ? null
+              : "This request did not come through tailscale serve: another program on the hub made it.",
+          ),
       },
     }).pipe(Layer.provide(FetchHttpClient.layer)),
     {
@@ -342,5 +365,71 @@ describe("the app on the hub", () => {
     expect(job?.applied?.results).toMatchObject([{ id: "laptop:claude-behind", ok: true }]);
     expect(hub.applied).toEqual(["laptop:claude-behind"]);
     await hub.dispose();
+  });
+});
+
+describe("a program on the hub posing as tailscale serve (review A-G)", () => {
+  it("gets no session and no app, whatever login it names", async () => {
+    const hub = serveOnHub();
+    try {
+      const forged = { "x-test-made-by": "a local program", "x-t3-fleet-hub": "1" };
+      const session = await hub.raw("/api/session", { method: "POST", headers: forged });
+      expect(session.status).toBe(403);
+      expect(await session.text()).toContain("did not come through tailscale serve");
+      expect((await hub.raw("/", { headers: forged })).status).toBe(403);
+      // With a session someone else was granted, too.
+      const token = await hub.grant();
+      const status = await hub.raw("/api/status", {
+        headers: { ...forged, "x-t3-fleet-token": token },
+      });
+      expect(status.status).toBe(403);
+    } finally {
+      await hub.dispose();
+    }
+  });
+
+  // What /proc/net/tcp lists on a hub where tailscaled (root) proxies 127.0.0.1:41000 to the relay on 8399,
+  // and a program of uid 1000 connected from 127.0.0.1:42000.
+  const TCP = [
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+    "   0: 0100007F:20CF 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1",
+    "   1: 0100007F:A028 0100007F:20CF 01 00000000:00000000 00:00000000 00000000     0        0 2 1",
+    "   2: 0100007F:20CF 0100007F:A028 01 00000000:00000000 00:00000000 00000000  1000        0 3 1",
+    "   3: 0100007F:A410 0100007F:20CF 01 00000000:00000000 00:00000000 00000000  1000        0 4 1",
+    "",
+  ].join("\n");
+
+  it("reads whose socket asked from the kernel's table", () => {
+    expect(socketOwner(TCP, { remotePort: 41000, localPort: 8399 })).toBe(0);
+    expect(socketOwner(TCP, { remotePort: 42000, localPort: 8399 })).toBe(1000);
+    expect(socketOwner(TCP, { remotePort: 43000, localPort: 8399 })).toBe(null);
+    expect(tailscaledUid("Name:\ttailscaled\nUid:\t0\t0\t0\t0\n")).toBe(0);
+    expect(tailscaledUid("Name:\tnode\nUid:\t1000\t1000\t1000\t1000\n")).toBe(null);
+    expect(connectionOf({ socket: { remotePort: 41000, localPort: 8399 } })).toEqual({
+      remotePort: 41000,
+      localPort: 8399,
+    });
+    expect(connectionOf(new Request("http://x/"))).toBe(null);
+  });
+
+  it("lets in tailscaled's connections only, and on a hub that is not Linux none", async () => {
+    const proc = fs.mkdtempSync(join(tmpdir(), "t3-fleet-proc-"));
+    fs.mkdirSync(join(proc, "net"));
+    fs.writeFileSync(join(proc, "net/tcp"), TCP);
+    fs.writeFileSync(join(proc, "net/tcp6"), "header\n");
+    const check = (remotePort: number, platform = "linux") =>
+      Effect.runPromise(
+        servedByTailscale({ remotePort, localPort: 8399 }, platform, proc).pipe(
+          Effect.provide(NodeServices.layer),
+        ),
+      );
+    expect(await check(41000)).toBe(null);
+    expect(await check(42000)).toContain("another program on the hub");
+    expect(await check(43000)).toContain("could not be told");
+    expect(await check(41000, "darwin")).toContain("only a Linux hub can");
+    // tailscaled run as uid 1000 (userspace networking): that user's connections are its.
+    fs.mkdirSync(join(proc, "77"));
+    fs.writeFileSync(join(proc, "77/status"), "Name:\ttailscaled\nUid:\t1000\t1000\t1000\t1000\n");
+    expect(await check(42000)).toBe(null);
   });
 });

@@ -417,8 +417,7 @@ export const upkeepEdits = (
     );
   }
   if (upkeep.desktop === true) out.push((t) => addToList(t, ["notify"], "desktop", [node]));
-  if (upkeep.desktop === false)
-    out.push((t) => removeFromList(t, ["notify"], "desktop", [node]));
+  if (upkeep.desktop === false) out.push((t) => removeFromList(t, ["notify"], "desktop", [node]));
   if (upkeep.ntfy !== null) out.push((t) => setKey(t, ["notify"], "ntfy", NTFY_SECRET));
   const hub = upkeep.mcpHub;
   if (hub != null && hub !== false) out.push((t) => mcpHubEdits(t, hub.gateway));

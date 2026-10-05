@@ -379,10 +379,7 @@ export const bringUp = (
     const config = yield* loadConfig.pipe(Effect.mapError(message));
     yield* requireAuthority(config);
     // Read again before each step that changes the fleet: the repo may have changed under it.
-    const authorityNow = loadConfig.pipe(
-      Effect.mapError(message),
-      Effect.tap(requireAuthority),
-    );
+    const authorityNow = loadConfig.pipe(Effect.mapError(message), Effect.tap(requireAuthority));
     const [admit, join, key, review, sync, publish] = hubStepTitles(hub);
     yield* step(admit ?? "");
     const owner = yield* tailscaleLogin;

@@ -120,7 +120,7 @@ describe("TomlEdit", () => {
 
 describe("notes, removing from a list, dropping a table", () => {
   it("replaces a setting's note with the new one when its value changes (review B-LOW)", () => {
-    const on = setKey("[fleet]\nbranch = \"main\"\n", ["fleet"], "apply", ["a"], "updates on");
+    const on = setKey('[fleet]\nbranch = "main"\n', ["fleet"], "apply", ["a"], "updates on");
     if ("error" in on) throw new Error(on.error);
     const off = setKey(on.text, ["fleet"], "apply", ["b"], "updates off");
     if ("error" in off) throw new Error(off.error);
@@ -137,7 +137,8 @@ describe("notes, removing from a list, dropping a table", () => {
   });
 
   it("drops a table, the rest as it was", () => {
-    const text = '[fleet]\nbranch = "main"\n\n[relay]\nport = 8399\nurl = "x"\n\n[ui]\nallow = ["me"]\n';
+    const text =
+      '[fleet]\nbranch = "main"\n\n[relay]\nport = 8399\nurl = "x"\n\n[ui]\nallow = ["me"]\n';
     expect(dropTable(text, ["relay"])).toEqual({
       text: '[fleet]\nbranch = "main"\n\n[ui]\nallow = ["me"]\n',
     });
