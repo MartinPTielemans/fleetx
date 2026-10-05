@@ -55,6 +55,7 @@ import { preflight, type Preflight } from "./Preflight.ts";
 import {
   bringUp,
   dropHub,
+  otherRelay,
   readHub,
   requireAuthority,
   undoAdmission,
@@ -65,7 +66,7 @@ import {
 import { hostingPlan } from "./HubHosting.ts";
 import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
 import { pinOwnBundle, probeHub } from "./Remote.ts";
-import { SELF_SERVER } from "./Repo.ts";
+import { remoteGitEnv, SELF_SERVER } from "./Repo.ts";
 import {
   abandonRun,
   decideRun,
@@ -76,6 +77,7 @@ import {
   prepare,
   resumeInput,
   RUN_ELSEWHERE,
+  runLockPath,
   runningElsewhere,
   runSteps,
   savedSteps,
@@ -87,7 +89,7 @@ import {
   type PrepareRequest,
 } from "./Session.ts";
 import { clearAbandoned } from "./State.ts";
-import { waitForSyncLock } from "../SyncLock.ts";
+import { waitForSyncLock, withMachineLock } from "../SyncLock.ts";
 
 /** A job apply starts: the local setup, then the hub. */
 export interface SetupJob {
@@ -312,9 +314,15 @@ export const toUiPlan = (
 };
 
 /** What a digest of a plan covers: everything it read and decided, never where its scratch clone was. */
-export const fingerprint = (p: Prepared, request: unknown, missing: ReadonlyArray<unknown>) => {
+export const fingerprint = (
+  p: Prepared,
+  request: unknown,
+  missing: ReadonlyArray<unknown>,
+  hub: HubRequest | null = null,
+) => {
   const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))({
     request,
+    hub,
     mode: p.mode,
     node: p.node,
     checkout: p.checkout,
@@ -343,13 +351,13 @@ export const fingerprint = (p: Prepared, request: unknown, missing: ReadonlyArra
 };
 
 /** Whether a remote holds no branch yet: an empty repository to push a new fleet to. */
-const isEmptyRemote = (url: string) =>
+export const isEmptyRemote = (url: string) =>
   Effect.gen(function* () {
     const listed = yield* exec({
       command: "git",
       args: ["ls-remote", "--heads", url],
       timeout: Duration.seconds(30),
-      env: { GIT_TERMINAL_PROMPT: "0" },
+      env: yield* remoteGitEnv,
     });
     if (listed.code !== 0)
       return yield* Effect.fail(
@@ -444,7 +452,6 @@ const preflightRefusal = (pre: Preflight) => {
 
 interface Planned {
   readonly request: UiSetupPlanRequest;
-  readonly hub: HubRequest | null;
 }
 
 /** The wizard's engine, with what only the command can do. */
@@ -452,6 +459,8 @@ export const make = (hooks: {
   readonly t3Connect: Effect.Effect<string, string, ProbeServices>;
   /** Where scratch clones go; TMPDIR otherwise. */
   readonly scratchDir?: string;
+  /** The check of a hub over ssh; Remote.probeHub, unless a test fakes the hub. */
+  readonly probeHub?: typeof probeHub;
 }) =>
   Effect.gen(function* () {
     const services = yield* Effect.context<ProbeServices>();
@@ -463,6 +472,7 @@ export const make = (hooks: {
       b.toString(16).padStart(2, "0"),
     ).join("");
     const plans = yield* Ref.make<ReadonlyMap<string, Planned>>(new Map());
+    const checkHub = hooks.probeHub ?? probeHub;
     const home = () => process.env["HOME"] ?? "";
 
     const scratchFor = Clock.currentTimeMillis.pipe(
@@ -490,6 +500,49 @@ export const make = (hooks: {
           "an earlier setup stopped part-way: continue it (resume) or drop it (abandon) first",
         );
     });
+
+    /** The hub asked for, as a check of it finds it now; refused with why when it cannot be the hub. */
+    const hubOf = (
+      p: Prepared,
+      asked: NonNullable<UiSetupPlanRequest["hub"]>,
+      config: Config | null,
+    ) =>
+      Effect.gen(function* () {
+        // The fleet this plan is for: the hub may be in it already, never in another.
+        const fleetRepo =
+          p.mode === "join" || p.mode === "first"
+            ? (p.url ??
+              (p.remoteTarget !== null && "url" in p.remoteTarget ? p.remoteTarget.url : null))
+            : out(yield* git(p.checkout, ["remote", "get-url", "origin"])) || null;
+        const probed = yield* checkHub(asked.ssh, fleetRepo);
+        if (!probed.reachable)
+          return yield* Effect.fail(`cannot reach ${asked.ssh}: ${probed.error ?? "no answer"}`);
+        if (!probed.ready) {
+          const lacking = [probed.fleet, probed.node, probed.git, probed.t3, probed.service]
+            .filter((i) => i.state === "missing")
+            .map((i) => `${i.label}${i.remedy === null ? "" : ` (${i.remedy})`}`);
+          return yield* Effect.fail(
+            `${asked.ssh} is not ready to be the hub${lacking.length > 0 ? `: ${lacking.join("; ")}` : ""}`,
+          );
+        }
+        if (asked.mcp && probed.relayUrl === null)
+          return yield* Effect.fail(
+            `${asked.ssh} has no tailnet address for your machines to reach its MCP servers at: set up tailscale there, or leave MCP hosting off`,
+          );
+        const hub: HubRequest = {
+          node: asked.node,
+          ssh: asked.ssh,
+          relayUrl: probed.relayUrl,
+          mcp: asked.mcp,
+          ...(probed.app?.state === "warn" ? { hostsApp: false } : {}),
+          error: null,
+        };
+        // A fleet with a relay of its own keeps it: admission would refuse this hub (Hub.otherRelay).
+        const taken =
+          config === null ? null : otherRelay(config, config.settings.relay?.url ?? null, hub);
+        if (taken !== null) return yield* Effect.fail(taken);
+        return hub;
+      });
 
     /** Read everything, and plan: what the plan screen shows, and what apply re-reads to compare. */
     const planned = (request: UiSetupPlanRequest, scratch: string) =>
@@ -528,11 +581,13 @@ export const make = (hooks: {
           return yield* Effect.fail(
             `${p.node} is not an authority, so it cannot set up the fleet's hub: run this on an authority, or have one give ${p.node} the authority role`,
           );
+        // The hub as it is now: apply checks it again, so a plan says what bring-up will write.
+        const hub = request.hub === null ? null : yield* hubOf(p, request.hub, config);
         const missing = missingOf(p, request);
         const digest = yield* Effect.promise(() =>
-          sha256(`${key}\n${fingerprint(p, request, missing)}`),
+          sha256(`${key}\n${fingerprint(p, request, missing, hub)}`),
         );
-        return { p, missing, digest, config };
+        return { p, missing, digest, config, hub };
       });
 
     const state: SetupActions["state"] = closed(
@@ -601,43 +656,9 @@ export const make = (hooks: {
         Effect.gen(function* () {
           yield* mayStart;
           const scratch = yield* scratchFor;
-          const { p, missing, digest } = yield* planned(request, scratch).pipe(
+          const { p, missing, digest, hub } = yield* planned(request, scratch).pipe(
             Effect.ensuring(removeScratch(scratch)),
           );
-          let hub: HubRequest | null = null;
-          if (request.hub !== null) {
-            // The fleet this plan is for: the hub may be in it already, never in another.
-            const fleetRepo =
-              p.mode === "join" || p.mode === "first"
-                ? (p.url ??
-                  (p.remoteTarget !== null && "url" in p.remoteTarget ? p.remoteTarget.url : null))
-                : out(yield* git(p.checkout, ["remote", "get-url", "origin"])) || null;
-            const probed = yield* probeHub(request.hub.ssh, fleetRepo);
-            if (!probed.reachable)
-              return yield* Effect.fail(
-                `cannot reach ${request.hub.ssh}: ${probed.error ?? "no answer"}`,
-              );
-            if (!probed.ready) {
-              const lacking = [probed.fleet, probed.node, probed.git, probed.t3, probed.service]
-                .filter((i) => i.state === "missing")
-                .map((i) => `${i.label}${i.remedy === null ? "" : ` (${i.remedy})`}`);
-              return yield* Effect.fail(
-                `${request.hub.ssh} is not ready to be the hub${lacking.length > 0 ? `: ${lacking.join("; ")}` : ""}`,
-              );
-            }
-            if (request.hub.mcp && probed.relayUrl === null)
-              return yield* Effect.fail(
-                `${request.hub.ssh} has no tailnet address for your machines to reach its MCP servers at: set up tailscale there, or leave MCP hosting off`,
-              );
-            hub = {
-              node: request.hub.node,
-              ssh: request.hub.ssh,
-              relayUrl: probed.relayUrl,
-              mcp: request.hub.mcp,
-              ...(probed.app?.state === "warn" ? { hostsApp: false } : {}),
-              error: null,
-            };
-          }
           const input = decideRun(p, {
             choices: {},
             entered: [],
@@ -657,7 +678,7 @@ export const make = (hooks: {
           // The newest plans only: an old id is as good as stale.
           yield* Ref.update(plans, (all) => {
             const next = new Map(all);
-            next.set(digest, { request, hub });
+            next.set(digest, { request });
             return new Map([...next].slice(-8));
           });
           return toUiPlan(p, input, { planId: digest, missing, hub, remote });
@@ -718,8 +739,8 @@ export const make = (hooks: {
         Effect.flatMap((lines) => Effect.forEach([`${input.node} is set up.`, ...lines], step)),
       );
 
-    const abandon: SetupActions["abandon"] = Effect.gen(function* () {
-      if (yield* runningElsewhere(home())) return yield* new RunningElsewhere();
+    /** Abandoning, once the run lock is held. */
+    const abandonHeld = Effect.gen(function* () {
       const hub = yield* readHub(home());
       // What the hub's admission committed comes out again first; when it cannot, the hub stays to retry.
       const undone = Option.isSome(hub) ? yield* undoAdmission(hub.value, home()) : [];
@@ -740,7 +761,12 @@ export const make = (hooks: {
           `To add a hub later, set it up again from here (t3-fleet ui).`,
         );
       return lines;
-    }).pipe(
+    });
+
+    // Holding the run lock throughout: no setup here starts or resumes while what it would use is taken out.
+    const abandon: SetupActions["abandon"] = Effect.suspend(() =>
+      withMachineLock(runLockPath(home()), abandonHeld, new RunningElsewhere()),
+    ).pipe(
       Effect.provide(services),
       Effect.mapError((e) => (Schema.is(RunningElsewhere)(e) ? e : message(e))),
     );
@@ -791,7 +817,8 @@ export const make = (hooks: {
               "this machine or the fleet changed since the plan was made: plan again, and review what changed",
           });
         }
-        const { p, missing } = now;
+        // The hub as checked just now, which the digest covers: what the plan showed is what is written.
+        const { p, missing, hub } = now;
         // Every choice names a conflict of this plan and one of its choices; a missing one takes the default.
         const choices: Record<string, Choice> = {};
         for (const [id, value] of Object.entries(request.choices)) {
@@ -837,11 +864,11 @@ export const make = (hooks: {
               Effect.gen(function* () {
                 const progress = yield* startRun(p, input, step);
                 // Saved once the run is: a hub without a run to resume would show a setup that is not.
-                if (found.hub !== null) yield* writeHub(p.home, found.hub);
+                if (hub !== null) yield* writeHub(p.home, hub);
                 yield* stepsOf(input, p.found.raw, progress, step);
               }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
             );
-        return found.hub === null ? [local] : [local, hubJob(found.hub)];
+        return hub === null ? [local] : [local, hubJob(hub)];
       }).pipe(
         Effect.provide(services),
         Effect.mapError((e) =>
@@ -892,7 +919,7 @@ export const make = (hooks: {
             config === null
               ? ""
               : out(yield* git(config.repo, ["remote", "get-url", "origin"]).pipe(Effect.orDie));
-          return yield* probeHub(ssh, own !== "" ? own : (repo ?? null));
+          return yield* checkHub(ssh, own !== "" ? own : (repo ?? null));
         }).pipe(Effect.provide(services)),
       plan,
       apply,

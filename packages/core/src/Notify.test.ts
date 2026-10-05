@@ -132,6 +132,17 @@ describe("routing", () => {
     expect(received.every((r) => r.n.title.includes("laptop"))).toBe(true);
     expect(deliveryChannels(config(false, "hub"), "sync")).toEqual(["ntfy"]);
   });
+  it("a [relay] without a url is none yet: each sync delivers, as without one (PR #47)", () => {
+    // No machine listens to or reports to a relay it has no address for.
+    const urlless = (self = "laptop") => {
+      const c = config(true, self);
+      return { ...c, settings: { ...c.settings, relay: { port: 8399 } } };
+    };
+    expect(deliveryChannels(urlless(), "sync")).toEqual(["ntfy", "desktop"]);
+    expect(deliveryChannels(urlless(), "listen")).toEqual([]);
+    expect(deliveryChannels(urlless("hub"), "relay")).toEqual([]);
+    expect(deliveryChannels(urlless("hub"), "sync")).toEqual(["ntfy"]);
+  });
 });
 
 it("dedupes resync, two concurrent listeners, and restart with a fresh caller", async () => {
@@ -215,7 +226,10 @@ it("summarizes old backlog even after a cold start", async () => {
 it("keeps a failed delivery eligible and surfaces failure without secret transport details", async () => {
   const dir = home();
   process.env["HOME"] = dir;
-  const c = { ...config(), settings: { notify: { desktop: ["laptop"] }, relay: {} } };
+  const c = {
+    ...config(),
+    settings: { notify: { desktop: ["laptop"] }, relay: { url: "http://hub.tailnet.ts.net" } },
+  };
   await started(dir, c);
   const lines = await run(
     deliverAlerts(c, [state(alert())], "listen", {

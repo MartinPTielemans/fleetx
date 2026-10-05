@@ -10,7 +10,9 @@
  * page says so: someone else opened the link.
  *
  * On the hub there is no ticket: the hub knows who is asking from Tailscale,
- * and gives a login it lets in a token of its own (core HubUi.ts).
+ * and gives a login it lets in a token of its own (core HubUi.ts). Its tokens
+ * live as long as the relay: after a restart a call answered 401 asks the hub
+ * for a new one, once, and is made again with it.
  */
 import {
   HubCall,
@@ -129,6 +131,22 @@ export async function startSession(): Promise<SessionStart> {
   };
 }
 
+/**
+ * A new token from the hub, for one that stopped working (its relay
+ * restarted); false when this is not the hub or it lets this login in no
+ * longer. Calls answered 401 at once share one exchange.
+ */
+let renewing: Promise<boolean> | null = null;
+const renewHubSession = () => {
+  renewing ??= hubSession()
+    .then((started) => started?.ok === true)
+    .catch(() => false)
+    .finally(() => {
+      renewing = null;
+    });
+  return renewing;
+};
+
 /** A session from the hub, or null when this is `t3-fleet ui` on a machine (it wants a ticket). */
 async function hubSession(): Promise<SessionStart | null> {
   let response: Response;
@@ -168,19 +186,23 @@ export const isUnavailable = (error: unknown) =>
 export const isUnauthorized = (error: unknown) => error instanceof ApiError && error.status === 401;
 
 async function request(method: "GET" | "POST", path: string, body?: unknown): Promise<string> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method,
-      headers: {
-        "x-t3-fleet-token": token(),
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  } catch {
-    throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
-  }
+  const send = async () => {
+    try {
+      return await fetch(path, {
+        method,
+        headers: {
+          "x-t3-fleet-token": token(),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch {
+      throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
+    }
+  };
+  let response = await send();
+  // The hub forgot this token (its relay restarted): a new one, once, then the same call again.
+  if (response.status === 401 && (await renewHubSession())) response = await send();
   const text = await response.text();
   if (!response.ok)
     throw new ApiError(

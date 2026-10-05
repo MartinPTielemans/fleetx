@@ -216,42 +216,158 @@ ${add}
 
 // ── who made the connection ─────────────────────────────────────────────
 
-/** The two ports of a TCP connection, as the server saw them. */
+/** A TCP connection's two ends, as the server saw them. */
 export interface Connection {
-  /** The asking side's port: its socket on this machine, on loopback. */
+  /** The asking side: its socket on this machine, on loopback. */
+  readonly remoteAddress: string;
   readonly remotePort: number;
-  /** The relay's own port. */
+  /** The relay's own end. */
+  readonly localAddress: string;
   readonly localPort: number;
 }
 
 /** The connection under a request, from the Node request it came as; null when it cannot be told. */
 export const connectionOf = (source: unknown): Connection | null => {
-  const socket = (source as { socket?: { remotePort?: unknown; localPort?: unknown } } | null)
-    ?.socket;
-  const remotePort = socket?.remotePort;
-  const localPort = socket?.localPort;
-  return typeof remotePort === "number" && typeof localPort === "number"
-    ? { remotePort, localPort }
+  const socket = (
+    source as {
+      socket?: {
+        remoteAddress?: unknown;
+        remotePort?: unknown;
+        localAddress?: unknown;
+        localPort?: unknown;
+      };
+    } | null
+  )?.socket;
+  const { remoteAddress, remotePort, localAddress, localPort } = socket ?? {};
+  return typeof remoteAddress === "string" &&
+    typeof remotePort === "number" &&
+    typeof localAddress === "string" &&
+    typeof localPort === "number"
+    ? { remoteAddress, remotePort, localAddress, localPort }
     : null;
 };
 
 /**
- * The uid owning the asking end of `connection`, from /proc/net/tcp or tcp6
- * text: the socket whose local port is the connection's remote port, talking
- * to the relay's port. Null when no such socket is listed.
+ * An address as its 16 bytes, an IPv4 one as IPv6 maps it (::ffff:a.b.c.d);
+ * null for one that does not read as an address.
  */
-export const socketOwner = (procNet: string, connection: Connection): number | null => {
-  const hex = (n: number) => n.toString(16).toUpperCase().padStart(4, "0");
-  const local = `:${hex(connection.remotePort)}`;
-  const remote = `:${hex(connection.localPort)}`;
+export const addressBytes = (address: string): Uint8Array | null => {
+  const v4 = (text: string) => {
+    const parts = text.split(".");
+    if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) < 256))
+      return null;
+    return parts.map(Number);
+  };
+  const bytes = new Uint8Array(16);
+  const plain = v4(address);
+  if (plain !== null) {
+    bytes.set([0xff, 0xff, ...plain], 10);
+    return bytes;
+  }
+  if (!address.includes(":") || address.includes("%")) return null;
+  // A trailing dotted IPv4 (::ffff:127.0.0.1) is two groups.
+  let text = address.toLowerCase();
+  const dotted = /:(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted !== null) {
+    const tail = v4(dotted[1] ?? "");
+    if (tail === null) return null;
+    const [a = 0, b = 0, c = 0, d = 0] = tail;
+    text = `${text.slice(0, dotted.index)}:${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (half: string) => (half === "" ? [] : half.split(":"));
+  const head = groups(halves[0] ?? "");
+  const tail = halves.length === 2 ? groups(halves[1] ?? "") : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
+  const all = [...head, ...Array<string>(halves.length === 2 ? fill : 0).fill("0"), ...tail];
+  for (const [i, g] of all.entries()) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    const n = Number.parseInt(g, 16);
+    bytes[i * 2] = n >> 8;
+    bytes[i * 2 + 1] = n & 0xff;
+  }
+  return bytes;
+};
+
+/** Whether 16 address bytes are loopback: ::1, or 127/8 as IPv6 maps it. */
+const loopbackBytes = (b: Uint8Array) => {
+  const zeros = (from: number, to: number) => b.subarray(from, to).every((x) => x === 0);
+  if (zeros(0, 15) && b[15] === 1) return true;
+  return zeros(0, 10) && b[10] === 0xff && b[11] === 0xff && b[12] === 127;
+};
+
+/** Whether this machine stores a word's low byte first, as /proc writes its addresses then. */
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/**
+ * An address as /proc/net/tcp or tcp6 writes it: each 32-bit word in hex, in
+ * the machine's own byte order. As 16 bytes, an IPv4 one mapped; null when
+ * it does not read as one.
+ */
+export const procAddressBytes = (
+  hex: string,
+  littleEndian: boolean = LITTLE_ENDIAN,
+): Uint8Array | null => {
+  if (!/^(?:[0-9A-Fa-f]{8}){1,4}$/.test(hex) || (hex.length !== 8 && hex.length !== 32))
+    return null;
+  const raw = new Uint8Array(hex.length / 2);
+  for (let word = 0; word < hex.length / 8; word++)
+    for (let i = 0; i < 4; i++) {
+      const at = word * 8 + (littleEndian ? (3 - i) * 2 : i * 2);
+      raw[word * 4 + i] = Number.parseInt(hex.slice(at, at + 2), 16);
+    }
+  if (raw.length === 16) return raw;
+  const bytes = new Uint8Array(16);
+  bytes.set([0xff, 0xff, ...raw], 10);
+  return bytes;
+};
+
+const TCP_ESTABLISHED = "01";
+
+/**
+ * The uid owning the asking end of `connection`, from /proc/net/tcp or tcp6
+ * text: the one established socket whose local end is the connection's
+ * remote end and whose other end is the relay's, address and port each, both
+ * on loopback. A socket closing (TIME_WAIT and the like), or one on another
+ * 127/8 address with the same ports, is not it. Null when there is no such
+ * socket, or more than one.
+ */
+export const socketOwner = (
+  procNet: string,
+  connection: Connection,
+  littleEndian: boolean = LITTLE_ENDIAN,
+): number | null => {
+  const asking = addressBytes(connection.remoteAddress);
+  const relay = addressBytes(connection.localAddress);
+  if (asking === null || relay === null || !loopbackBytes(asking) || !loopbackBytes(relay))
+    return null;
+  const same = (a: Uint8Array | null, b: Uint8Array) => a !== null && a.every((x, i) => x === b[i]);
+  const end = (field: string | undefined) => {
+    const [address, port] = (field ?? "").split(":");
+    return {
+      address: procAddressBytes(address ?? "", littleEndian),
+      port: /^[0-9A-Fa-f]{4}$/.test(port ?? "") ? Number.parseInt(port ?? "", 16) : -1,
+    };
+  };
+  const owners: Array<number> = [];
   for (const line of procNet.split("\n").slice(1)) {
     // sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid ...
-    const f = line.trim().split(/\s+/);
-    const [, at, to, , , , , uid] = f;
-    if (at?.endsWith(local) && to?.endsWith(remote) && uid !== undefined && /^\d+$/.test(uid))
-      return Number(uid);
+    const [, at, to, state, , , , uid] = line.trim().split(/\s+/);
+    if (state !== TCP_ESTABLISHED || uid === undefined || !/^\d+$/.test(uid)) continue;
+    const here = end(at);
+    const there = end(to);
+    if (
+      here.port === connection.remotePort &&
+      there.port === connection.localPort &&
+      same(here.address, asking) &&
+      same(there.address, relay)
+    )
+      owners.push(Number(uid));
   }
-  return null;
+  const [only] = owners;
+  return owners.length === 1 && only !== undefined ? only : null;
 };
 
 // ── on Linux ───────────────────────────────────────────────────────────

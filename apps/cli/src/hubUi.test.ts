@@ -85,6 +85,29 @@ describe("the hub's check, made of reports", () => {
     expect(byId.get("desk:codex-behind")?.detail).toContain("does not report its fixes");
   });
 
+  it("shows a finding in two machines' reports once, as the newest report has it (PR #47)", () => {
+    // desk runs laptop's fix (fix.on), so both publish it; laptop reported last.
+    const finding = (title: string) => ({
+      node: "laptop",
+      key: "relay-down",
+      severity: "error" as const,
+      area: "relay",
+      title,
+      fix: { command: "t3-fleet relay restart", safe: true, on: "desk" },
+    });
+    const check = reportedCheck(
+      config,
+      [
+        state({ node: "laptop", at: 2_000, format: 2, findings: [finding("as laptop saw it")] }),
+        state({ node: "desk", at: 1_000, format: 2, findings: [finding("as desk saw it")] }),
+      ],
+      latest,
+    );
+    expect(check.report.findings.map((f) => f.title)).toEqual(["as laptop saw it"]);
+    const status = toUiStatus(check, 3_000);
+    expect(status.findings.map((f) => f.id)).toEqual(["laptop:relay-down"]);
+  });
+
   it("says a machine that never reported is not reported, and shows when each one did", () => {
     const status = toUiStatus(
       reportedCheck(config, [state({ node: "laptop", at: 1_234, format: 2 })], latest),

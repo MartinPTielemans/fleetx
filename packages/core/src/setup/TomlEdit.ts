@@ -217,7 +217,10 @@ export const dropKey = (text: string, path: ReadonlyArray<string>, key: string):
   if (typeof parsed === "string") return { error: `${what}: the file does not parse (${parsed})` };
   if (at(parsed, [...path, key]) === undefined) return { text };
   const lines = text.split("\n");
-  const found = section(lines, path);
+  // A top-level key: the lines before the first table.
+  const first = lines.findIndex((l) => /^\s*\[/.test(l));
+  const found =
+    path.length === 0 ? { start: -1, end: first < 0 ? lines.length : first } : section(lines, path);
   const keyPattern = new RegExp(`^\\s*${escape(tomlKey(key))}\\s*=`);
   const existing =
     found === null
@@ -226,6 +229,9 @@ export const dropKey = (text: string, path: ReadonlyArray<string>, key: string):
   if (found === null || existing < 0 || valueExtent(lines, existing, found.end).last !== existing)
     return { error: `${what}: could not remove it safely; remove it by hand` };
   lines.splice(existing, 1);
+  // Not two blank lines where one key was between them (setKey's own separator, say).
+  if (existing > 0 && lines[existing] === "" && lines[existing - 1] === "")
+    lines.splice(existing, 1);
   const after = lines.join("\n");
   const again = parse(after);
   if (typeof again === "string") return { error: `${what}: the result would not parse (${again})` };

@@ -49,11 +49,16 @@ const encodeIdentity = Schema.encodeSync(
 );
 export const alertIdentity = (a: Alert) => encodeIdentity([a.at, a.node, a.kind, a.message]);
 
-/** With a configured relay, only its service pushes. A member's sync never takes over. */
+/**
+ * With a relay the machines can reach, only its service pushes. A member's
+ * sync never takes over. A [relay] without a url is none yet: no machine
+ * reports to it or listens to it, so each machine's sync delivers its own.
+ */
 export const deliveryChannels = (config: Config, source: "sync" | "relay" | "listen") => {
   const notify = config.settings.notify;
   if (notify === undefined) return [];
-  const hasRelay = config.settings.relay !== undefined;
+  const url = config.settings.relay?.url;
+  const hasRelay = url !== undefined && url !== "";
   const desktop = notify.desktop?.includes(config.self) === true;
   const channels: Array<Channel> = [];
   if (

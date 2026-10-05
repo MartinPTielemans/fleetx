@@ -68,13 +68,14 @@ import {
   movedLines,
   moveServersToHub,
   relayEdits,
+  relayUrlIn,
   rolesOf,
 } from "./Apply.ts";
 import { PROPOSED_SECRETS } from "./Plan.ts";
 import { hubStepTitles } from "./PlanWords.ts";
 import { bringUpHub, hubMembership, membershipProblem } from "./Remote.ts";
 import { newNodeFile } from "./Repo.ts";
-import { dropKey, dropTable, setKey, type Edit } from "./TomlEdit.ts";
+import { dropKey, dropTable, removeFromList, setKey, type Edit } from "./TomlEdit.ts";
 
 /** What admission added to the repo, so an abandoned bring-up can take it out again. */
 export const Admitted = Schema.Struct({
@@ -88,6 +89,10 @@ export const Admitted = Schema.Struct({
   token: Schema.Boolean,
   /** `[ui] hosted = false`, added to a [ui] admission did not create. */
   hosted: Schema.optionalKey(Schema.Boolean),
+  /** The relay role, added to a node file that was there before. */
+  relayRole: Schema.optionalKey(Schema.Boolean),
+  /** `ssh`, added to a node file that was there before. */
+  ssh: Schema.optionalKey(Schema.Boolean),
 });
 export type Admitted = typeof Admitted.Type;
 
@@ -217,6 +222,23 @@ export const tailscaleLogin = Effect.gen(function* () {
 });
 
 /**
+ * Why `hub` cannot be made the fleet's hub when the fleet has a relay already:
+ * another machine holds the relay role, or [relay] url (`url`) names another
+ * address. Null when it has none, or the relay is `hub` itself (a resume).
+ * Moving the relay is a person's decision, made by hand, never a side effect
+ * of setup.
+ */
+export const otherRelay = (config: Config, url: string | null, hub: HubRequest): string | null => {
+  const holder = config.nodes.find((n) => n.name !== hub.node && n.roles.includes("relay"));
+  const how = `To move the hub, take the relay role off the old one (its nodes/<name>.toml) and [relay] out of ${FLEET_FILE} on an authority, commit and push, then set ${hub.node} up again`;
+  if (holder !== undefined)
+    return `${holder.name} is the fleet's hub (its relay) already, so ${hub.node} cannot be one as well: every machine reaches the one relay [relay] url names. ${how}`;
+  if (url !== null && url !== hub.relayUrl)
+    return `the fleet's relay is at ${url} already${hub.relayUrl === null ? "" : `, not at ${hub.relayUrl} where ${hub.node} answers`}, so ${hub.node} cannot be made the hub over it. ${how}`;
+  return null;
+};
+
+/**
  * The hub in the repo: its node file, [relay], the relay token, and `owner`
  * (this machine's Tailscale login) as the one login the app on the hub opens
  * for. Only what is missing is written; committed and pushed in one commit.
@@ -228,10 +250,19 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
   underSyncLock(
     Effect.gen(function* () {
       yield* requireAuthority(config);
+      if (hub.mcp === true && hub.relayUrl === null)
+        return yield* Effect.fail(
+          `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
+        );
       const fs = yield* FileSystem.FileSystem;
       const repo = config.repo;
       const paths = [`nodes/${hub.node}.toml`, FLEET_FILE, ...SECRETS_FILES];
       yield* refuseDirty(repo, paths);
+      // One relay: machines reach the one [relay] url names, so a second hub would split them.
+      const fleetFile = `${repo}/${FLEET_FILE}`;
+      const fleetBefore = yield* fs.readFileString(fleetFile);
+      const taken = otherRelay(config, relayUrlIn(fleetBefore), hub);
+      if (taken !== null) return yield* Effect.fail(taken);
       const lines: Array<string> = [];
       const added: { -readonly [K in keyof Admitted]: Admitted[K] } = {
         node: false,
@@ -244,22 +275,25 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
       const nodeBefore = nodeExisted
         ? yield* fs.readFileString(nodeFile)
         : newNodeFile(hub.node, ["member", "relay"], "t3-fleet setup");
-      const nodeAfter = yield* edited(`nodes/${hub.node}.toml`, nodeBefore, [
+      const withRole = yield* edited(`nodes/${hub.node}.toml`, nodeBefore, [
         (t) => {
           const roles = rolesOf(t);
           return roles.includes("relay")
             ? { text: t }
             : setKey(t, [], "roles", [...roles, "relay"]);
         },
+      ]);
+      const nodeAfter = yield* edited(`nodes/${hub.node}.toml`, withRole, [
         (t) => (/^ssh\s*=/m.test(t) ? { text: t } : setKey(t, [], "ssh", hub.ssh)),
       ]);
       if (nodeAfter !== nodeBefore || !nodeExisted) {
         yield* fs.writeFileString(nodeFile, nodeAfter);
         added.node = !nodeExisted;
+        // Into a node file that was there: each edit, so an abandon takes out only those.
+        if (nodeExisted && withRole !== nodeBefore) added.relayRole = true;
+        if (nodeExisted && nodeAfter !== withRole) added.ssh = true;
         lines.push(`nodes/${hub.node}.toml: the relay, reached at ${hub.ssh}`);
       }
-      const fleetFile = `${repo}/${FLEET_FILE}`;
-      const fleetBefore = yield* fs.readFileString(fleetFile);
       let fleetAfter = fleetBefore;
       if (!/^\[relay\]/m.test(fleetAfter)) {
         fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [(t) => relayEdits(t, hub.relayUrl)]);
@@ -277,10 +311,6 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
           `relay in [fleet] apply: sync runs the relay on ${hub.node} and a listener on every other machine`,
         );
       }
-      if (hub.mcp === true && hub.relayUrl === null)
-        return yield* Effect.fail(
-          `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
-        );
       const uiBefore = /^\[ui\]/m.test(fleetAfter);
       if (owner !== null && config.settings.ui?.allow === undefined && !uiBefore) {
         fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [
@@ -506,6 +536,10 @@ export const bringUp = (
         ...((h.admitted?.hosted ?? false) || admitted.added.hosted === true
           ? { hosted: true }
           : {}),
+        ...((h.admitted?.relayRole ?? false) || admitted.added.relayRole === true
+          ? { relayRole: true }
+          : {}),
+        ...((h.admitted?.ssh ?? false) || admitted.added.ssh === true ? { ssh: true } : {}),
       },
     })).pipe(Effect.ignore);
     for (const line of admitted.lines) yield* step(`✓ ${line}`);
@@ -697,12 +731,34 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
       lines.push(
         `${hub.node} was in the fleet before, so it stays, and so does its key among the secrets' recipients`,
       );
-    if (added !== undefined && (added.relay || added.ui || added.token || added.hosted === true)) {
+    // Edits to a node file that was there before (its file stays, with what it had).
+    const nodeEdits =
+      added !== undefined && !added.node && (added.relayRole === true || added.ssh === true);
+    if (
+      added !== undefined &&
+      (added.relay || added.ui || added.token || added.hosted === true || nodeEdits)
+    ) {
       const fs = yield* FileSystem.FileSystem;
+      const nodePath = `nodes/${hub.node}.toml`;
+      const paths = [FLEET_FILE, ...SECRETS_FILES, ...(nodeEdits ? [nodePath] : [])];
       const rev = yield* waitForSyncLock(
         Effect.gen(function* () {
-          yield* refuseDirty(repo, [FLEET_FILE, ...SECRETS_FILES]);
+          yield* refuseDirty(repo, paths);
           yield* pullBranch(repo, config.branch, "rebase");
+          if (nodeEdits) {
+            const nodeFile = `${repo}/${nodePath}`;
+            const text = yield* fs.readFileString(nodeFile).pipe(Effect.orElseSucceed(() => null));
+            if (text !== null) {
+              const restored = yield* edited(nodePath, text, [
+                (t) =>
+                  added.relayRole === true
+                    ? removeFromList(t, [], "roles", ["relay"])
+                    : { text: t },
+                (t) => (added.ssh === true ? dropKey(t, [], "ssh") : { text: t }),
+              ]);
+              if (restored !== text) yield* fs.writeFileString(nodeFile, restored);
+            }
+          }
           const fleetFile = `${repo}/${FLEET_FILE}`;
           const before = yield* fs.readFileString(fleetFile);
           const after = yield* edited(FLEET_FILE, before, [
@@ -720,7 +776,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
           }
           return yield* commitAndPush(
             repo,
-            [FLEET_FILE, ...SECRETS_FILES],
+            paths,
             `Undo making ${hub.node} the relay: its setup as the hub was abandoned`,
           );
         }),
@@ -731,6 +787,8 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
           ...(added.ui ? ["[ui]"] : []),
           ...(added.hosted === true && !added.ui ? ["[ui] hosted"] : []),
           ...(added.token ? [RELAY_TOKEN] : []),
+          ...(nodeEdits && added.relayRole === true ? [`${hub.node}'s relay role`] : []),
+          ...(nodeEdits && added.ssh === true ? [`${hub.node}'s ssh`] : []),
         ].join(", ")}${rev === "nothing to commit" ? " (gone already)" : ` (${rev})`}`,
       );
     }

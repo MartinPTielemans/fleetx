@@ -160,6 +160,19 @@ describe("notes, removing from a list, dropping a table", () => {
     expect(dropKey('[ui]\nallow = [\n  "me",\n]\n', ["ui"], "allow")).toHaveProperty("error");
   });
 
+  it("drops a top-level key, never a table's key of the same name (PR #47)", () => {
+    const node = '# nodes/hub.toml\nroles = ["member"]\nssh = "me@hub"\n\n[engine]\nssh = "x"\n';
+    expect(dropKey(node, [], "ssh")).toEqual({
+      text: '# nodes/hub.toml\nroles = ["member"]\n\n[engine]\nssh = "x"\n',
+    });
+    expect(dropKey('roles = ["member"]\n', [], "ssh")).toEqual({ text: 'roles = ["member"]\n' });
+    // What setKey added before the first table comes out as it went in.
+    const before = 'roles = ["member"]\n\n[engine]\ntimer = true\n';
+    const added = setKey(before, [], "ssh", "me@hub");
+    if ("error" in added) throw new Error(added.error);
+    expect(dropKey(added.text, [], "ssh")).toEqual({ text: before });
+  });
+
   it("adds a top-level key to a file without tables and keeps the newline that ends it (N1)", () => {
     const edit = setKey('# nodes/hub.toml\nroles = ["member", "relay"]\n', [], "ssh", "hub");
     if ("error" in edit) throw new Error(edit.error);

@@ -83,32 +83,39 @@ export const reportedCheck = (
       ms: 0,
     };
   });
-  const findings = states
-    .filter((s) => names.has(s.node))
-    .flatMap((s) =>
-      s.findings.map((f): Finding => {
-        const old = (s.format ?? 1) < REPORT_FORMAT;
-        const detail =
-          old && f.fix === undefined
-            ? f.detail === undefined
-              ? NO_FIXES_REPORTED
-              : `${f.detail} (${NO_FIXES_REPORTED})`
-            : f.detail;
-        return {
-          node: f.node,
-          key: f.key,
-          severity: f.severity,
-          area: f.area,
-          title: f.title,
-          ...(detail === undefined ? {} : { detail }),
-          ...(f.fix === undefined ? {} : { fix: f.fix }),
-        };
-      }),
-    );
+  // A finding another machine fixes (fix.on) is in both machines' reports: once, from the newest.
+  const newest = new Map<string, { readonly at: number; readonly finding: Finding }>();
+  for (const s of states.filter((s) => names.has(s.node)))
+    for (const f of s.findings) {
+      const id = `${f.node}\0${f.key}`;
+      const kept = newest.get(id);
+      if (kept === undefined || s.at > kept.at) newest.set(id, { at: s.at, finding: shown(s, f) });
+    }
+  const findings = [...newest.values()].map((n) => n.finding);
   return {
     report: { results, latest, findings, elapsedMs: 0 },
     states,
     accepted: config.settings.accept ?? [],
+  };
+};
+
+/** A finding as a report published it; one from an older T3 Fleet says why it has no fix. */
+const shown = (s: NodeState, f: NodeState["findings"][number]): Finding => {
+  const old = (s.format ?? 1) < REPORT_FORMAT;
+  const detail =
+    old && f.fix === undefined
+      ? f.detail === undefined
+        ? NO_FIXES_REPORTED
+        : `${f.detail} (${NO_FIXES_REPORTED})`
+      : f.detail;
+  return {
+    node: f.node,
+    key: f.key,
+    severity: f.severity,
+    area: f.area,
+    title: f.title,
+    ...(detail === undefined ? {} : { detail }),
+    ...(f.fix === undefined ? {} : { fix: f.fix }),
   };
 };
 
