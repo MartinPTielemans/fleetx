@@ -1,4 +1,4 @@
-/** Eight views, one path each; the server answers every path with the app. */
+/** Nine views, one path each; the server answers every path with the app. */
 import { useEffect, useState, type MouseEvent } from "react";
 
 export const VIEWS = [
@@ -10,6 +10,7 @@ export const VIEWS = [
   "mcp",
   "models",
   "config",
+  "machines",
 ] as const;
 export type View = (typeof VIEWS)[number];
 

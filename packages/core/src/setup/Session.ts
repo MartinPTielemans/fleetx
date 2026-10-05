@@ -559,6 +559,10 @@ export const finishedLines = (input: SetupInput) =>
           "An authority's next sync adds this machine's key; then it reads the fleet's secrets.",
         );
     }
+    if (input.extras.relay !== null && !input.commits)
+      lines.push(
+        `Once an authority approves ${input.node} (t3-fleet approve ${input.node} there), its sync starts the relay here, and the app ${input.node} hosts opens for that authority's Tailscale login ([ui] allow); add others to [ui] allow on an authority.`,
+      );
     return lines as ReadonlyArray<string>;
   });
 

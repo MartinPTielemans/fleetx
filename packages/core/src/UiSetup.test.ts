@@ -114,6 +114,7 @@ const fakeSetup = () => {
         tailscale: { state: "ok", label: "tailscale", remedy: null },
         docker: { state: "missing", label: "no docker", remedy: "install docker" },
         service: { state: "ok", label: "systemd", remedy: null },
+        fleet: { state: "ok", label: "In no fleet yet", remedy: null },
         relayUrl: "https://hub.tailnet.ts.net:8399",
         ready: true,
       }),

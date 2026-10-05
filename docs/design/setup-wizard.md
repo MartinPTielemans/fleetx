@@ -66,16 +66,20 @@ Each screen decides one thing.
    signed in), an existing repository URL (joining a fleet, or one made by
    hand), or local only, with a remote added later.
 4. **The hub, checked.** Only when the layout has one. You give its ssh
-   address and this computer checks it, read-only: Node, git, T3, tailscale,
+   address and this computer checks it, read-only: that it is in no other
+   fleet (nor part-way through another's setup), Node, git, T3, tailscale,
    docker, and a service manager. Each missing item says how to fix it.
-   Tailscale and docker are recommended, not required.
+   Tailscale and docker are recommended, not required. A machine in another
+   fleet is refused here, and again before the bring-up writes anything.
 5. **The plan.** What setup would add, what is already the same, each
    conflict with a diff and a default, what it leaves alone and why, every
    credential it found (by name, never the value), and every step in order,
    including what the hub will be asked to do. Credentials a server needs and
    did not find are asked for here.
 6. **Apply.** A job with live progress. This computer first, then the hub.
-7. **Invite.** The line another machine runs to join, per machine.
+7. **Invite.** The line another machine runs to join, per machine, and a test
+   notification. Both stay in the fleet app afterwards, under Add machines,
+   on an authority.
 
 ## Choices and defaults
 
@@ -93,8 +97,9 @@ and the plan lists what each writes before anything is.
 
 - **Upkeep is deterministic.** Updates are sync applying safe fixes; no agent
   turn is needed to keep machines current. Off, sync still applies `engine`,
-  `secrets`, `dotfiles`, `instructions` and `mcp`, so the machines stay the
-  fleet's; updates and new skills wait for the user. Only a new fleet takes
+  `secrets`, `dotfiles`, `instructions`, `mcp` and `relay`, so the machines
+  stay the fleet's (the relay's services are its plumbing, not software of the
+  user's); updates and new skills wait for the user. Only a new fleet takes
   this choice: a fleet being joined keeps its own `[fleet] apply`.
 - **Notifications need no agent either.** The ntfy topic is 128 random bits
   on ntfy.sh, made in the browser (or by the terminal), shown once with a copy
@@ -105,7 +110,11 @@ and the plan lists what each writes before anything is.
 - **The MCP hub is opt-in** because it moves every OAuth login: until each is
   signed in on the hub, those servers stop working on every machine. It needs
   the hub's tailnet address; without tailscale there the switch is off and
-  says why. The hub's plan steps say "relay and MCP hub" exactly when it is on.
+  says why. The hub's plan steps say "relay and MCP hub" exactly when it is on,
+  and the plan lists each server: the plain https ones move to the hub
+  (`remote`); one that runs a command, sends its own headers, speaks SSE or
+  has a secret in its URL stays on each machine, with that reason
+  (`setup/HubHosting.ts`).
 
 ## The layout recommendation
 
@@ -130,9 +139,14 @@ not stop it, and reopening the wizard shows where it is.
   skills and instructions, installs the timer, declares T3 Fleet's MCP server,
   and syncs once.
 - The `setup-hub` job then brings the hub up over ssh from this computer
-  (install T3 Fleet there, join the fleet, run the relay as a service, and
-  host the MCP servers when that was chosen). The steps are listed on the plan
-  screen before anything runs, in the words the job reports them
+  (install T3 Fleet there, join the fleet, sync it so it runs the relay as a
+  service, and host the MCP servers when that was chosen). It is done only
+  once the relay answers on the hub (`t3-fleet relay health`); it says too
+  whether the relay's tailnet address answers from this computer. Last, this
+  computer syncs, so its listener runs now; the fleet's other machines start
+  theirs on their next sync. A sync running here or on the hub when a step
+  needs it is waited for, never taken for done. The steps are listed on the
+  plan screen before anything runs, in the words the job reports them
   (`setup/PlanWords.ts`).
 
 ## The HTTP contract

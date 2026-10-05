@@ -87,6 +87,7 @@ const unavailable = (ssh: string, error: string): UiProbe => {
     tailscale: unknown("Tailscale", remedy),
     docker: unknown("Docker", remedy),
     service: unknown("Service manager", remedy),
+    fleet: unknown("Its fleet membership", remedy),
     relayUrl: null,
     ready: false,
   };
@@ -134,8 +135,12 @@ const serviceProbe = (os: string) =>
         ].join("\n")
       : "exit 127";
 
-/** Read-only, including on a machine without Node. Every command has an SSH and process timeout. */
-export const probeHub = (ssh: string) =>
+/**
+ * Read-only, including on a machine without Node. Every command has an SSH and
+ * process timeout. `repo` is the fleet the hub would join, when known: a hub
+ * in it already is welcome, one in any other fleet is not (`fleet`).
+ */
+export const probeHub = (ssh: string, repo: string | null = null) =>
   Effect.gen(function* () {
     if (!validSshDestination(ssh))
       return unavailable(ssh, "Enter an SSH host or user@host, without options or spaces.");
@@ -300,6 +305,15 @@ export const probeHub = (ssh: string) =>
                   ? "Log in to the hub's macOS desktop as the SSH user so launchd has a GUI session, then check again."
                   : "Use a Linux host with systemd. Ensure systemctl --user show-environment works for the SSH user and enable linger with sudo loginctl enable-linger $(id -un).",
               );
+    const fleet = yield* hubMembership(ssh).pipe(
+      Effect.map((m) => fleetItem(m, repo)),
+      Effect.orElseSucceed(() =>
+        unknown(
+          "Its fleet membership",
+          "Check ~/.config/t3-fleet/config.toml on the hub (and t3-fleet status there), then check again.",
+        ),
+      ),
+    );
     return {
       ssh,
       reachable: true,
@@ -312,9 +326,115 @@ export const probeHub = (ssh: string) =>
       tailscale,
       docker,
       service,
+      fleet,
       relayUrl,
-      ready: [node, git, service].every((i) => i.state === "ok"),
+      ready: [node, git, service, fleet].every((i) => i.state === "ok"),
     } satisfies UiProbe;
+  });
+
+/** What a machine says of its own fleet: the one it is in, and a setup started and not finished. */
+export interface Membership {
+  /** The fleet it is in (its checkout's origin) and its name there; null when in none. */
+  readonly fleet: { readonly repo: string; readonly node: string } | null;
+  /** A setup started there and not finished: for which repository (null: a new fleet) and name. */
+  readonly unfinished: { readonly repo: string | null; readonly node: string } | null;
+}
+
+/** One repository however its URL is written: https or ssh, scp-like `host:path`, with or without `.git`. */
+export const repoKey = (url: string) =>
+  url
+    .trim()
+    .replace(/^[a-z+]+:\/\//i, "")
+    .replace(/^[^@/]+@/, "")
+    .replace(/^([^/:]+):(?!\d+\/)/, "$1/")
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "")
+    .replace(/^[^/]+/, (host) => host.toLowerCase());
+
+const sameRepo = (a: string, b: string) => repoKey(a) === repoKey(b);
+
+/**
+ * Why the machine with `m` cannot be made `node`, the hub of the fleet in
+ * `repo` (null: a fleet not made yet); null when it can. In another fleet, or
+ * part-way through another's setup, it is refused before anything is written.
+ */
+export const membershipProblem = (
+  m: Membership,
+  repo: string | null,
+  node: string | null = null,
+): string | null => {
+  if (m.fleet !== null) {
+    if (repo === null || !sameRepo(m.fleet.repo, repo))
+      return `It is already in another fleet (${cleanUrl(m.fleet.repo) || "a repository without a remote"}), as ${m.fleet.node}. Take it out of that fleet first (t3-fleet leave on it), or choose another machine for the hub.`;
+    if (node !== null && m.fleet.node !== node)
+      return `It is in this fleet already, as ${m.fleet.node}: name the hub ${m.fleet.node}.`;
+    return null;
+  }
+  if (m.unfinished !== null) {
+    const ours =
+      repo !== null &&
+      m.unfinished.repo !== null &&
+      sameRepo(m.unfinished.repo, repo) &&
+      (node === null || m.unfinished.node === node);
+    if (!ours)
+      return `It has an unfinished setup of ${m.unfinished.repo === null ? "a new fleet" : cleanUrl(m.unfinished.repo)}, as ${m.unfinished.node}. Finish it there with t3-fleet setup --resume, or drop it with t3-fleet setup --abandon, then check it again.`;
+  }
+  return null;
+};
+
+/** The probe's line for `m`: free to join, in this fleet, or refused with why. */
+export const fleetItem = (m: Membership, repo: string | null): UiProbeItem => {
+  const problem = membershipProblem(m, repo);
+  if (problem !== null)
+    return item(
+      "missing",
+      m.fleet !== null
+        ? `Already in another fleet: ${cleanUrl(m.fleet.repo) || "a repository without a remote"}`
+        : `An unfinished setup of ${m.unfinished?.repo == null ? "a new fleet" : cleanUrl(m.unfinished.repo)}`,
+      problem,
+    );
+  if (m.fleet !== null) return item("ok", `In this fleet already, as ${m.fleet.node}`);
+  if (m.unfinished !== null)
+    return item(
+      "ok",
+      `Part-way through joining this fleet, as ${m.unfinished.node}: setup goes on`,
+    );
+  return item("ok", "In no fleet yet");
+};
+
+/** The fleet `ssh` is in, and any setup it has not finished, read there (read-only). */
+export const hubMembership = (ssh: string) =>
+  Effect.gen(function* () {
+    const saved = yield* decodeProgress(
+      yield* checked(ssh, progressScript, "Reading setup progress", 15),
+    ).pipe(
+      Effect.mapError(
+        () => "The hub's saved setup (~/.local/state/t3-fleet/setup.json) is unreadable.",
+      ),
+    );
+    const local = yield* checked(ssh, localConfigScript, "Reading the hub's fleet membership", 15);
+    const unfinished =
+      saved !== null && saved.finishedAt === null ? { repo: saved.url, node: saved.node } : null;
+    if (local.trim() === "") return { fleet: null, unfinished } satisfies Membership;
+    const config = yield* Effect.try({
+      try: () => parseToml(local),
+      catch: () => "The hub's fleet config (~/.config/t3-fleet/config.toml) is unreadable.",
+    }).pipe(
+      Effect.flatMap(decodeLocalConfig),
+      Effect.mapError(
+        () => "The hub's fleet config (~/.config/t3-fleet/config.toml) is unreadable.",
+      ),
+    );
+    const origin = yield* checked(
+      ssh,
+      `git -C ${shPath(config.repo)} remote get-url origin 2>/dev/null || true`,
+      "Checking the hub's repository",
+      15,
+    );
+    return {
+      fleet: { repo: origin.trim(), node: config.node },
+      unfinished,
+    } satisfies Membership;
   });
 
 /** The hub half only. Approval, secrets access and the relay's first sync belong to the authority. */
@@ -462,7 +582,9 @@ export const bringUpHub = (input: {
         (saved.url !== null && cleanUrl(saved.url) !== cleanUrl(input.repoUrl)))
     )
       return yield* Effect.fail(
-        "The hub already has a setup for another node or repository. Finish it with t3-fleet setup --resume there, or deliberately abandon it with t3-fleet setup --abandon, before setting up this hub.",
+        saved.finishedAt === null
+          ? `The hub has an unfinished setup of ${saved.url === null ? "a new fleet" : cleanUrl(saved.url)}, as ${saved.node}. Finish it with t3-fleet setup --resume there, or drop it with t3-fleet setup --abandon, before setting up this hub.`
+          : `The hub was set up for ${saved.url === null ? "a fleet of its own" : cleanUrl(saved.url)}, as ${saved.node}. If it is still in that fleet, take it out first (t3-fleet leave there), or choose another machine for the hub.`,
       );
     // setup with an existing local membership ignores positional repo/name. Refuse a different
     // fleet before installing anything, including when its old progress file has been removed.
@@ -485,7 +607,7 @@ export const bringUpHub = (input: {
       );
       if (config.node !== input.node)
         return yield* Effect.fail(
-          "The hub belongs to another node. Check ~/.config/t3-fleet/config.toml on the hub before trying again.",
+          `The hub is in a fleet as ${config.node}, not ${input.node}. Check ~/.config/t3-fleet/config.toml on the hub before trying again.`,
         );
       const origin = yield* checked(
         input.ssh,
@@ -494,7 +616,7 @@ export const bringUpHub = (input: {
       );
       if (cleanUrl(origin.trim()) !== cleanUrl(input.repoUrl))
         return yield* Effect.fail(
-          "The hub belongs to another repository. Check its fleet checkout and origin remote before trying again.",
+          `The hub is already in another fleet (${cleanUrl(origin.trim()) || "a repository without a remote"}). Take it out of that fleet first (t3-fleet leave there), or choose another machine for the hub.`,
         );
     }
     yield* input.onStep(`Installing T3 Fleet on ${input.ssh}`);

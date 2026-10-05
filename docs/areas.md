@@ -70,8 +70,12 @@ through with `t3-fleet secrets allow`.
 ## relay
 
 With `[relay]` in t3-fleet.toml: the relay service on the node with the relay
-role (published to the tailnet), and a listener on every other node. Neither
-service is offered before the machine has the relay token; on the relay node,
+role (published to the tailnet), and a listener on every other node. These are
+the fleet's own plumbing, so the area is among those sync always applies (the
+default `[fleet] apply`, and the list setup writes); without `[relay]` it finds
+nothing. Neither service is offered before the machine has the relay token,
+nor where the service manager cannot take one (no systemd user session, say:
+status says so, and what to enable); on the relay node,
 status also says when Tailscale or Docker (for `container` and `registry` hub
 servers) is missing. A
 listener that reconnects gets the events it missed; when the relay cannot
@@ -458,6 +462,13 @@ uses an HTTP POST, a five-second timeout, and up to three attempts with exponent
 backoff starting at 250 milliseconds for transport failures, HTTP 429 and 5xx.
 Problems have high priority and a warning tag; recoveries have low priority and a
 check-mark tag. Failed sends remain eligible for the next delivery pass.
+
+A machine's first report is a baseline: what is wrong when it is set up is in
+its findings, not pushed, and its going away later is not pushed either. A
+machine's own failing sync is announced by the run's streak alone ("failing",
+then "recovered"), never also as a problem. A relay or listener's first pass
+takes the alerts machines published before it as already seen (until then each
+machine delivered its own); `t3-fleet alerts` still lists them.
 
 Each machine persists a separate notification ledger under
 `~/.local/state/t3-fleet/`. A dead-owner-aware process lock serializes senders.

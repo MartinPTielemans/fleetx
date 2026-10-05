@@ -10,6 +10,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
@@ -45,6 +46,7 @@ import {
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
 import { describeProposed } from "@t3-fleet/core/ProposedSecrets";
+import { allowOwner } from "@t3-fleet/core/setup/Hub";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -62,20 +64,39 @@ export const syncCommand = Command.make("sync", {
     Flag.withDescription("Report only; run no fixes."),
     Flag.withDefault(false),
   ),
+  wait: Flag.Boolean("wait").pipe(
+    Flag.withDescription(
+      "When another sync is running, wait for it (up to ten minutes) and then sync, rather than leaving it to that one.",
+    ),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription(
     "Propose, pull, converge this machine, publish its state. What the timer runs.",
   ),
-  Command.withHandler(({ noApply }) =>
+  Command.withHandler(({ noApply, wait }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const result = yield* syncRun(config, { apply: !noApply });
+      const once = syncRun(config, { apply: !noApply });
+      const result = wait
+        ? yield* once.pipe(
+            Effect.repeat({
+              while: (r) => r.state === null,
+              schedule: Schedule.spaced(Duration.seconds(5)),
+              times: 120,
+            }),
+          )
+        : yield* once;
       for (const line of result.lines) yield* Console.log(line);
       if (result.state !== null) {
         yield* Console.log(
           `${result.state.result === "ok" ? "synced" : "sync incomplete"} at ${result.state.rev}: ${result.state.message}`,
         );
         if (result.state.result !== "ok") process.exitCode = 1;
+      } else if (wait) {
+        // Told to sync, and it did not: the caller (setup, over ssh) must not take that for done.
+        yield* Console.error("another sync was still running after ten minutes; nothing synced");
+        process.exitCode = 1;
       }
     }).pipe(reportUserErrors),
   ),
@@ -226,6 +247,8 @@ export const approveCommand = Command.make("approve", {
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
       for (const line of notes) yield* Console.log(line);
+      // A relay approved from here: the app it hosts opens for this machine's Tailscale login.
+      for (const line of yield* allowOwner) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );

@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -17,6 +18,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { describe, expect, it } from "vite-plus/test";
 
 import { loadConfigFrom, type Config } from "./Config.ts";
+import type { Finding } from "./Diagnose.ts";
 import {
   commitAndPush,
   pullBranch,
@@ -27,11 +29,12 @@ import {
   snapshot,
   statusEntries,
   unmergedHits,
+  why,
 } from "./Git.ts";
 import { lastSyncPath } from "./Probe.ts";
 import { addSkills, keepUpdate, land, previewUpdate, removeSkills } from "./SkillSources.ts";
 import { approve, listProposals, reject, settleRejection } from "./Staging.ts";
-import { exchange, readStates, report } from "./Sync.ts";
+import { convergeFixes, exchange, lastReportPath, readStates, report } from "./Sync.ts";
 import { allowSecret, lineHash, refusal } from "./SecretScan.ts";
 import { stateDir } from "./Names.ts";
 import {
@@ -41,6 +44,7 @@ import {
   syncLockPath,
   takeSyncLock,
   underSyncLock,
+  waitForSyncLock,
   withSyncLock,
 } from "./SyncLock.ts";
 import { exec } from "./Exec.ts";
@@ -121,6 +125,22 @@ const makeFleet = (toml = '[fleet]\nauto_approve = ["skills/"]\n') => {
     );
   return { root, origin, hub, laptop, desktop, config, sync };
 };
+
+describe("why git failed (N5)", () => {
+  it("names git's fatal and error lines, not the advice after them", () => {
+    const result = (stderr: string) => ({ stdout: "", stderr, code: 128, timedOut: false });
+    expect(
+      why(
+        result(
+          "fatal: '/srv/remote/gone.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+        ),
+      ),
+    ).toBe(
+      "fatal: '/srv/remote/gone.git' does not appear to be a git repository; fatal: Could not read from remote repository.",
+    );
+    expect(why(result("hint: something\nnot a fatal one\n"))).toBe("not a fatal one");
+  });
+});
 
 describe("git's own lists", () => {
   it("reads paths with spaces, quotes and renames from -z output", () => {
@@ -1204,12 +1224,16 @@ describe("reporting a run", () => {
     const config = await f.config(f.hub, "hub");
     const previous = async () =>
       Option.fromNullishOr((await run(readStates(f.hub))).find((s) => s.node === "hub"));
+    await run(report(outcome(config, "hub", 0, [])));
     await run(
-      report(outcome(config, "hub", 1, [{ key: "sync-failing", title: "failed 3 times" }])),
+      report({
+        ...outcome(config, "hub", 1, [{ key: "claude-down", title: "claude failed 3 times" }]),
+        previous: await previous(),
+      }),
     );
     await run(
       report({
-        ...outcome(config, "hub", 2, [{ key: "sync-failing", title: "failed 4 times" }]),
+        ...outcome(config, "hub", 2, [{ key: "claude-down", title: "claude failed 4 times" }]),
         previous: await previous(),
       }),
     );
@@ -1217,8 +1241,97 @@ describe("reporting a run", () => {
       report({ ...outcome(config, "hub", 3, []), previous: await previous() }),
     );
     expect(state.alerts.map((a) => [a.at, a.kind, a.message])).toEqual([
-      [1, "problem", "failed 3 times"],
-      [3, "resolved", "failed 4 times"],
+      [1, "problem", "claude failed 3 times"],
+      [3, "resolved", "claude failed 4 times"],
+    ]);
+  });
+
+  it("announces nothing in a machine's first report, nor the end of what it never announced", async () => {
+    const f = makeFleet();
+    const config = await f.config(f.hub, "hub");
+    const previous = async () =>
+      Option.fromNullishOr((await run(readStates(f.hub))).find((s) => s.node === "hub"));
+    // Setup's first sync: whatever is wrong at the start is in the findings, not pushed.
+    const first = await run(
+      report(
+        outcome(config, "hub", 1, [
+          { key: "relay-token-missing", title: "the relay cannot start" },
+          { key: "secrets-unreadable", title: "cannot read the secrets yet" },
+        ]),
+      ),
+    );
+    expect(first.alerts).toEqual([]);
+    // Once approved, those go away quietly; a problem that is new is announced, and its end too.
+    await run(
+      report({
+        ...outcome(config, "hub", 2, [
+          { key: "relay-token-missing", title: "the relay cannot start" },
+          { key: "t3-down", title: "T3 is not running" },
+        ]),
+        previous: await previous(),
+      }),
+    );
+    const last = await run(
+      report({ ...outcome(config, "hub", 3, []), previous: await previous() }),
+    );
+    expect(last.alerts.map((a) => [a.at, a.kind, a.message])).toEqual([
+      [2, "problem", "T3 is not running"],
+      [3, "resolved", "T3 is not running"],
+    ]);
+    expect(last.unalerted).toBeUndefined();
+  });
+
+  it("raises no problem for its own failing streak: the run's failing and recovered alerts say it", async () => {
+    const f = makeFleet();
+    const config = await f.config(f.hub, "hub");
+    const previous = async () =>
+      Option.fromNullishOr((await run(readStates(f.hub))).find((s) => s.node === "hub"));
+    await run(report(outcome(config, "hub", 0, [])));
+    for (const at of [1, 2, 3])
+      await run(report({ ...outcome(config, "hub", at, [], true), previous: await previous() }));
+    // The run that recovers still reads the last run's record: streak 3, as a finding.
+    const recovered = await run(
+      report({
+        ...outcome(config, "hub", 4, [
+          { key: "sync-failing", title: "fleet sync failed 3 times in a row" },
+        ]),
+        previous: await previous(),
+      }),
+    );
+    const next = await run(
+      report({ ...outcome(config, "hub", 5, []), previous: await previous() }),
+    );
+    expect(next.alerts.map((a) => [a.at, a.kind])).toEqual([
+      [3, "failing"],
+      [4, "recovered"],
+    ]);
+    expect(recovered.alerts.some((a) => a.kind === "problem")).toBe(false);
+  });
+
+  it("raises a problem once though its state cannot reach git: the relay heard the last one", async () => {
+    const f = makeFleet();
+    const config = await f.config(f.laptop, "laptop");
+    await run(report(outcome(config, "laptop", 1_000, [])));
+    const published = Option.fromNullishOr(
+      (await run(readStates(f.laptop))).find((s) => s.node === "laptop"),
+    );
+    git(f.laptop, "remote", "set-url", "origin", join(f.root, "gone.git"));
+    const unreachable = [
+      { key: "runtime-remote", title: "the config repo's remote is unreachable" },
+    ];
+    for (const at of [2_000, 3_000, 4_000])
+      // Each run starts from what git has, which never moves while publishing fails.
+      await run(
+        report({ ...outcome(config, "laptop", at, unreachable), previous: published }).pipe(
+          Effect.flip,
+        ),
+      );
+    const kept = JSON.parse(readFileSync(lastReportPath(process.env["HOME"] ?? ""), "utf8"));
+    expect(
+      kept.alerts.map((a: { at: number; kind: string; message: string }) => [a.at, a.kind]),
+    ).toEqual([
+      [2_000, "problem"],
+      [4_000, "failing"],
     ]);
   });
 
@@ -1237,6 +1350,99 @@ describe("reporting a run", () => {
     expect(readFileSync(lastSyncPath(process.env["HOME"] ?? ""), "utf8")).toMatch(
       /^4\tfail\t3\tpublishing state/,
     );
+  });
+});
+
+describe("a command a person started, while a sync runs (B3)", () => {
+  it("waits for the sync to finish, says so once, then runs", async () => {
+    makeFleet();
+    const token = await run(takeSyncLock);
+    if (token === null) return expect.unreachable();
+    const said: Array<string> = [];
+    const waited = run(
+      waitForSyncLock(Effect.succeed("added the node"), {
+        waiting: Effect.sync(() => void said.push("waiting")),
+        every: Duration.millis(20),
+      }),
+    );
+    await run(Effect.sleep(Duration.millis(150)));
+    await run(releaseSyncLock(token));
+    expect(await waited).toBe("added the node");
+    expect(said).toEqual(["waiting"]);
+  });
+
+  it("gives up after its patience, saying why", async () => {
+    makeFleet();
+    const token = await run(takeSyncLock);
+    if (token === null) return expect.unreachable();
+    try {
+      const why = await run(
+        waitForSyncLock(Effect.succeed("never"), {
+          every: Duration.millis(10),
+          patience: Duration.millis(50),
+        }).pipe(Effect.flip),
+      );
+      expect(why).toMatch(/^a sync on this machine has been running for over \d+ minutes/);
+    } finally {
+      await run(releaseSyncLock(token));
+    }
+  });
+});
+
+describe("one sync's fixes", () => {
+  it("go as far as they take the machine: the secrets installed, then the relay they let start", async () => {
+    // What the machine is: each fix changes it, and the next check sees what that made possible.
+    const machine = { secrets: false, relay: false, codex: false };
+    const finding = (key: string, area: string, command = key): Finding => ({
+      node: "hub",
+      key,
+      severity: "warn",
+      area,
+      title: key,
+      fix: { command, safe: true },
+    });
+    const npm = "npm install -g --prefix ~/.local @openai/codex@latest";
+    const check = Effect.sync(() => ({
+      findings: [
+        ...(machine.secrets ? [] : [finding("secrets-install", "secrets")]),
+        ...(machine.secrets && !machine.relay ? [finding("relay-serve", "relay")] : []),
+        finding("always-broken", "relay"),
+        finding("t3-update", "t3"),
+        // Installed, then found behind "latest": the same install is not run over it again.
+        machine.codex
+          ? finding("codex-behind", "agents", npm)
+          : finding("codex-missing", "agents", npm),
+      ],
+    }));
+    const ran: Array<string> = [];
+    const result = await run(
+      Effect.gen(function* () {
+        return yield* convergeFixes(yield* check, {
+          self: "hub",
+          areas: ["secrets", "relay", "agents"],
+          run: (fixes) =>
+            Effect.sync(() =>
+              fixes.map((f) => {
+                ran.push(f.key);
+                if (f.key === "secrets-install") machine.secrets = true;
+                if (f.key === "relay-serve") machine.relay = true;
+                if (f.key === "codex-missing") machine.codex = true;
+                return { finding: f, ok: f.key !== "always-broken", summary: "" };
+              }),
+            ),
+          check,
+        });
+      }),
+    );
+    // Round two: the relay, which the secrets made possible; not the same npm install again.
+    expect(ran).toEqual(["secrets-install", "always-broken", "codex-missing", "relay-serve"]);
+    expect(result.checked.findings.map((f) => f.key)).toEqual([
+      "always-broken",
+      "t3-update",
+      "codex-behind",
+    ]);
+    expect(result.lines).toContain("could not fix: always-broken");
+    expect(result.applied).toHaveLength(4);
   });
 });
 

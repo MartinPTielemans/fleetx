@@ -93,6 +93,9 @@ const fake =
       received.push({ channel, n });
       return "delivered";
     });
+/** A relay or listener that has run before: its first catch-up, with nothing published yet, is behind it. */
+const started = (dir: string, c: Config = config(), source: "relay" | "listen" = "listen") =>
+  run(deliverAlerts(c, [], source, { home: dir, now: 0, catchUp: true, send: fake([]) }));
 
 it("decodes the agreed optional notify schema", async () => {
   const dir = home();
@@ -133,6 +136,7 @@ describe("routing", () => {
 
 it("dedupes resync, two concurrent listeners, and restart with a fresh caller", async () => {
   const dir = home();
+  await started(dir);
   const received: Array<{ channel: string; n: Notification }> = [];
   const deliver = () =>
     deliverAlerts(config(), [state(alert())], "listen", {
@@ -171,6 +175,7 @@ it("dedupes resync, two concurrent listeners, and restart with a fresh caller", 
 
 it("sends one catch-up summary after sleep and does not replay event frames", async () => {
   const dir = home();
+  await started(dir);
   const received: Array<{ channel: string; n: Notification }> = [];
   const states = [
     state(alert(), alert("laptop", 2_000, "provider healthy", "resolved")),
@@ -194,9 +199,11 @@ it("sends one catch-up summary after sleep and does not replay event frames", as
 
 it("summarizes old backlog even after a cold start", async () => {
   const received: Array<{ channel: string; n: Notification }> = [];
+  const dir = home();
+  await started(dir);
   await run(
     deliverAlerts(config(), [state(alert(), alert("laptop", 2_000))], "listen", {
-      home: home(),
+      home: dir,
       now: 200_000,
       send: fake(received),
     }),
@@ -209,6 +216,7 @@ it("keeps a failed delivery eligible and surfaces failure without secret transpo
   const dir = home();
   process.env["HOME"] = dir;
   const c = { ...config(), settings: { notify: { desktop: ["laptop"] }, relay: {} } };
+  await started(dir, c);
   const lines = await run(
     deliverAlerts(c, [state(alert())], "listen", {
       home: dir,
@@ -229,6 +237,7 @@ it("keeps a failed delivery eligible and surfaces failure without secret transpo
 it("never resets a corrupt ledger and retains an interrupted claim", async () => {
   const dir = home();
   process.env["HOME"] = dir;
+  await started(dir);
   const received: Array<{ channel: string; n: Notification }> = [];
   await run(
     deliverAlerts(config(), [state(alert())], "listen", {
@@ -263,6 +272,56 @@ it("never resets a corrupt ledger and retains an interrupted claim", async () =>
       deliverAlerts(config(), [state(alert())], "listen", { home: dir, send: fake(received) }),
     ),
   ).toEqual(["notifications: cannot read or persist delivery ledger"]);
+  expect(received).toHaveLength(1);
+});
+
+it("takes what was published before a relay or listener first ran as seen, then delivers what comes", async () => {
+  const dir = home();
+  const received: Array<{ channel: string; n: Notification }> = [];
+  // Before the relay: laptop delivered its own; hub's waited for nobody.
+  const before = [state(alert(), alert("laptop", 2_000)), state(alert("hub", 3_000))];
+  const first = await run(
+    deliverAlerts(config(true, "hub"), before, "relay", {
+      home: dir,
+      now: 4_000,
+      catchUp: true,
+      send: fake(received),
+    }),
+  );
+  expect(received).toEqual([]);
+  expect(first).toEqual(["ntfy: 3 earlier alerts taken as seen (t3-fleet alerts lists them)"]);
+  // From then on, exactly what is new, once.
+  const later = [...before, state(alert("laptop", 5_000, "relay listener stopped"))];
+  for (const _ of [1, 2])
+    await run(
+      deliverAlerts(config(true, "hub"), later, "relay", {
+        home: dir,
+        now: 5_001,
+        send: fake(received),
+      }),
+    );
+  expect(received.map((r) => r.n.body)).toEqual(["relay listener stopped"]);
+});
+
+it("delivers a live report that reaches a new relay before its first catch-up", async () => {
+  const dir = home();
+  const received: Array<{ channel: string; n: Notification }> = [];
+  const live = [state(alert("laptop", 1_000))];
+  await run(
+    deliverAlerts(config(true, "hub"), live, "relay", {
+      home: dir,
+      now: 1_001,
+      send: fake(received),
+    }),
+  );
+  await run(
+    deliverAlerts(config(true, "hub"), live, "relay", {
+      home: dir,
+      now: 1_002,
+      catchUp: true,
+      send: fake(received),
+    }),
+  );
   expect(received).toHaveLength(1);
 });
 
@@ -314,6 +373,7 @@ it("maps ntfy metadata, retries rejection with backoff, reads rotated secrets an
   writeFileSync(secrets, `PUSH_URL=${topic}`);
   try {
     const c = config(true, "hub");
+    await started(dir, c, "relay");
     expect(
       await run(deliverAlerts(c, [state(alert())], "relay", { home: dir, now: 1_001 })),
     ).toContain("ntfy: ntfy rejected notification (HTTP 503)");

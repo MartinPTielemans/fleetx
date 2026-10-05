@@ -27,7 +27,11 @@ export interface ProbeState {
   readonly error: unknown;
 }
 
-const REQUIRED: ReadonlyArray<{ key: "node" | "git" | "t3" | "service"; what: string }> = [
+const REQUIRED: ReadonlyArray<{
+  key: "fleet" | "node" | "git" | "t3" | "service";
+  what: string;
+}> = [
+  { key: "fleet", what: "Not in another fleet" },
   { key: "node", what: "Node 24 or newer" },
   { key: "git", what: "git" },
   { key: "t3", what: "T3 Code" },

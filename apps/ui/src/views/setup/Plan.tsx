@@ -747,7 +747,51 @@ function Steps({ plan }: { plan: UiSetupPlan }) {
           />
         )}
       </div>
+      {plan.hub?.mcp === true && plan.hub.servers !== undefined ? (
+        <HubServers node={plan.hub.node} servers={plan.hub.servers} />
+      ) : null}
     </Section>
+  );
+}
+
+/** With the MCP hub on: which servers it takes over, and which stay on each machine, and why. */
+function HubServers({
+  node,
+  servers,
+}: {
+  node: string;
+  servers: NonNullable<NonNullable<UiSetupPlan["hub"]>["servers"]>;
+}) {
+  const moving = servers.filter((s) => s.hub);
+  const staying = servers.filter((s) => !s.hub);
+  return (
+    <div
+      className={cn(card, "mt-3 flex flex-col gap-2 px-4 py-3")}
+      aria-label="MCP servers on the hub"
+    >
+      <span className="font-medium text-xs">Your MCP servers, once {node} hosts them</span>
+      <p className="text-pretty text-sm leading-5">
+        {moving.length === 0 ? (
+          <>None moves to {node}: none is a server it can host.</>
+        ) : (
+          <>
+            On {node}:{" "}
+            <span className="font-mono text-xs">{moving.map((s) => s.name).join(", ")}</span>. Each
+            with a login asks for it once, there.
+          </>
+        )}
+      </p>
+      {staying.length === 0 ? null : (
+        <ul className="flex flex-col gap-1">
+          {staying.map((s) => (
+            <li key={s.name} className="text-pretty text-muted-foreground text-xs leading-5">
+              <span className="font-mono text-foreground">{s.name}</span> stays on each machine:{" "}
+              {s.why}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

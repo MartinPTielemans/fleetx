@@ -40,6 +40,7 @@ import { randomBytes } from "@t3-fleet/core/hub/Policy";
 import { NTFY_SECRET, newNtfyUrl, UPDATE_WORDS, UPKEEP_DEFAULTS } from "@t3-fleet/core/Upkeep";
 import {
   settingsLines,
+  turnsMcpHubOn,
   upkeepFor,
   type Extras,
   type SetupInput,
@@ -56,6 +57,7 @@ import {
   type Plan,
 } from "@t3-fleet/core/setup/Plan";
 import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Preflight";
+import { hostingPlan, hostingWords } from "@t3-fleet/core/setup/HubHosting";
 import { settingsWords } from "@t3-fleet/core/setup/PlanWords";
 import { SELF_SERVER } from "@t3-fleet/core/setup/Repo";
 import {
@@ -74,7 +76,14 @@ import {
   unfinishedRun,
   withRunLock,
 } from "@t3-fleet/core/setup/Session";
-import { bringUp, dropHub, readHub, undoAdmission, updateHub } from "@t3-fleet/core/setup/Hub";
+import {
+  allowOwner,
+  bringUp,
+  dropHub,
+  readHub,
+  undoAdmission,
+  updateHub,
+} from "@t3-fleet/core/setup/Hub";
 import { clearAbandoned, type Progress } from "@t3-fleet/core/setup/State";
 import { unfinishedLines } from "@t3-fleet/core/setup/Unfinished";
 
@@ -534,6 +543,25 @@ const planAndApply = (flags: Flags, scratch: string) =>
             ...settings.map((l) => `  ${l}`),
           ].join("\n"),
         );
+      const hostsMcp =
+        Option.getOrElse(flags.mcpHub, () => UPKEEP_DEFAULTS.mcpHub) &&
+        (flags.relay || p.fleetRelay !== null);
+      if (hostsMcp)
+        yield* Console.log(
+          [
+            "",
+            "MCP servers, once the hub hosts them",
+            ...hostingWords(
+              "the hub",
+              hostingPlan(
+                new Map([
+                  ...p.fleet.servers,
+                  ...plan.add.servers.map((s) => [s.name, s.found.extracted.definition] as const),
+                ]),
+              ),
+            ).map((l) => `  ${l}`),
+          ].join("\n"),
+        );
       yield* Console.log("\n--plan: nothing was written.");
       return;
     }
@@ -596,14 +624,33 @@ const planAndApply = (flags: Flags, scratch: string) =>
     const settings = settingsLines(input);
     if (settings.length > 0)
       yield* Console.log(["", "Settings", ...settings.map((l) => `  ${l}`)].join("\n"));
+    if (turnsMcpHubOn(input))
+      yield* Console.log(
+        [
+          "",
+          "MCP servers, once the hub hosts them",
+          ...hostingWords(
+            "the hub",
+            hostingPlan(
+              new Map([
+                ...p.fleet.servers,
+                ...input.actions.servers.map((s) => [s.name, s.definition] as const),
+              ]),
+            ),
+          ).map((l) => `  ${l}`),
+        ].join("\n"),
+      );
 
     // 5. Apply: the run is saved first, so a resume does exactly this; one process at a time.
-    return yield* withRunLock(
+    yield* withRunLock(
       home,
       startRun(p, input, say).pipe(
         Effect.flatMap((progress) => runSteps(input, p.found.raw, progress)),
       ),
     );
+    // An authority that is its own relay: the app it hosts opens for its Tailscale login, as the wizard's would.
+    if (input.extras.relay !== null && input.commits)
+      for (const line of yield* allowOwner) yield* Console.log(line);
   });
 
 /** `--resume` with a hub still to bring up: as the wizard's resume does, from this terminal. */

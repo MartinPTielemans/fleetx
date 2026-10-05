@@ -59,5 +59,11 @@ export const NodeState = Schema.Struct({
   ),
   /** Newest last; bounded. */
   alerts: Schema.Array(Alert),
+  /**
+   * Keys of errors this node has had since its first report, which no alert
+   * ever announced (its first report is a baseline): their going away is not
+   * announced either. Absent from older reports.
+   */
+  unalerted: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type NodeState = typeof NodeState.Type;

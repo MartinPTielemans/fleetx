@@ -35,7 +35,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import type { UiAlert, UiProposal, UiSession } from "@t3-fleet/core/Api";
 import type { NodeState } from "@t3-fleet/core/State";
 import { checkNodes } from "@t3-fleet/core/Check";
-import { readHub } from "@t3-fleet/core/setup/Hub";
+import { allowOwner, readHub } from "@t3-fleet/core/setup/Hub";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
 import { git, snapshot } from "@t3-fleet/core/Git";
@@ -522,7 +522,10 @@ export const serveUi = ({
           live((config) =>
             proposalFrom(config, node, change).pipe(
               Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)),
-              Effect.map((approved) => approved.notes),
+              // A relay approved here: the app it hosts opens for this machine's Tailscale login.
+              Effect.flatMap((approved) =>
+                allowOwner.pipe(Effect.map((more) => [...approved.notes, ...more])),
+              ),
             ),
           ),
         reject: (node, change) =>

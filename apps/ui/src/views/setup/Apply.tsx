@@ -423,7 +423,7 @@ function JobSteps({
                       ? "The last try stopped:"
                       : "Not started"
                   : job.state === "done"
-                    ? "Done"
+                    ? "Every step ran; its list is on the page that started it."
                     : "Starting")}
         </div>
       ) : (

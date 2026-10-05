@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stands in for the Tailscale CLI (tailscaled does not run in these containers).
+#   status --json          Running, MagicDNS name <hostname>.tailnet.ts.net, the login in /etc/wizfe/login
+#   serve --bg --https=P T recorded; `serve status` prints it. serve-tls.mjs is what actually serves.
+host=$(hostname)
+login=$(cat /etc/wizfe/login 2>/dev/null || echo me@example.com)
+case "$1" in
+  status)
+    printf '{"BackendState":"Running","Self":{"DNSName":"%s.tailnet.ts.net.","UserID":1},"User":{"1":{"LoginName":"%s"}}}\n' "$host" "$login" ;;
+  serve)
+    shift
+    if [ "$1" = status ]; then cat /tmp/wizfe-serve 2>/dev/null || echo "No serve config"; exit 0; fi
+    port="" target=""
+    for a in "$@"; do case "$a" in --https=*) port=${a#--https=} ;; http*) target=$a ;; esac; done
+    echo "tailscale serve $*" >> /tmp/wizfe-serve.log
+    printf 'https://%s.tailnet.ts.net:%s (tailnet only)\n|-- / proxy %s\n' "$host" "$port" "$target" > /tmp/wizfe-serve
+    echo "Available within your tailnet: https://$host.tailnet.ts.net:$port/" ;;
+  *) echo "wizfe tailscale stand-in: $*" >&2; exit 1 ;;
+esac

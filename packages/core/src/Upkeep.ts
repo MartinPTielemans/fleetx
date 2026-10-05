@@ -12,8 +12,20 @@
  *   ntfy = "T3_FLEET_NTFY_URL"     name of a secret holding the ntfy topic URL; omitted = no push
  */
 
-/** Areas that keep a machine the fleet's: always applied by sync, whatever setup was told. */
-export const KEEP_AREAS = ["engine", "secrets", "dotfiles", "instructions", "mcp"] as const;
+/**
+ * Areas that keep a machine the fleet's: always applied by sync, whatever
+ * setup was told. `relay` is the fleet's own plumbing, not software of the
+ * user's: with `[relay]` in t3-fleet.toml it runs the relay on the hub and a
+ * listener on every other machine; without one it finds nothing to do.
+ */
+export const KEEP_AREAS = [
+  "engine",
+  "secrets",
+  "dotfiles",
+  "instructions",
+  "mcp",
+  "relay",
+] as const;
 
 /** Areas that bring new versions and new skills: "keep things up to date automatically". */
 export const UPDATE_AREAS = ["t3", "agents", "skills"] as const;

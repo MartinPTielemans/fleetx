@@ -19,8 +19,10 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
-import { Command } from "effect/unstable/cli";
+import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
@@ -63,10 +65,11 @@ const answerHere = (url: string, token: string) => (node: string, id: string) =>
       Effect.gen(function* () {
         const request = yield* fetchFixRequest(url, token, id);
         if (request === null || request.state !== "waiting") return false;
-        yield* timestamped(`the hub asks for ${request.fixes.length} fix(es) here`);
         return yield* answerFixRequest({
           self: config.self,
           request,
+          // Said once this run holds the request: one the hub let expire is left unsaid.
+          claimed: timestamped(`the hub asks for ${request.fixes.length} fix(es) here`),
           progress: (p) => sendFixProgress(url, token, id, p),
           findings: readStates(config.repo).pipe(
             Effect.flatMap((others) => ownCheck(config, self, others)),
@@ -190,9 +193,50 @@ const serve = Command.make("serve").pipe(
   ),
 );
 
+/** Whether the relay on this machine answers its /health on loopback. */
+const answers = (port: number) =>
+  HttpClient.HttpClient.pipe(
+    Effect.flatMap((client) =>
+      client.execute(HttpClientRequest.get(`http://127.0.0.1:${port}/health`)),
+    ),
+    Effect.map((r) => r.status === 200),
+    Effect.timeout(Duration.seconds(5)),
+    Effect.orElseSucceed(() => false),
+  );
+
+const health = Command.make("health", {
+  wait: Flag.Int("wait").pipe(
+    Flag.withDescription("Keep asking for up to this many seconds (a relay starting up)."),
+    Flag.withDefault(0),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Whether the relay on this machine answers on 127.0.0.1:[relay] port; exits 1 when it does not.",
+  ),
+  Command.withHandler(({ wait }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const port = config.settings.relay?.port ?? 8399;
+      const ok = yield* answers(port).pipe(
+        Effect.repeat({
+          until: (up) => up,
+          schedule: Schedule.spaced(Duration.seconds(2)),
+          times: Math.ceil(Math.max(0, wait) / 2),
+        }),
+        Effect.provide(FetchHttpClient.layer),
+      );
+      if (ok) return yield* Console.log(`the relay answers on 127.0.0.1:${port}`);
+      yield* Console.error(
+        `the relay does not answer on 127.0.0.1:${port}${wait > 0 ? ` (asked for ${wait}s)` : ""}; t3-fleet status here says why, and ~/.local/state/t3-fleet/serve.log what it said`,
+      );
+      process.exitCode = 1;
+    }).pipe(reportUserErrors),
+  ),
+);
+
 export const relayCommand = Command.make("relay").pipe(
   Command.withDescription("The optional always-on relay."),
-  Command.withSubcommands([serve]),
+  Command.withSubcommands([serve, health]),
 );
 
 export const listenCommand = Command.make("listen").pipe(

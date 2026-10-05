@@ -33,8 +33,9 @@ not in a fleet yet to open it. It runs only on 127.0.0.1 and answers only the ta
    after them:
    - **Keep things up to date automatically** (on): each sync updates T3 Code
      (only when no thread is running), Claude Code and Codex, and skills.
-     Off, they wait for you to apply them; MCP servers, instructions and
-     secrets are kept in place either way. This is `[fleet] apply`.
+     Off, they wait for you to apply them; MCP servers, instructions,
+     secrets and the relay's services are kept in place either way. This is
+     `[fleet] apply`.
    - **Notify me on this computer** (on): an OS notification for every fleet
      alert (`[notify] desktop`).
    - **Push to my phone with ntfy** (off): setup makes a private ntfy.sh topic
@@ -107,7 +108,7 @@ Secrets (encrypted into the repo; never in plain text)
   POSTHOG_TOKEN  phx…  posthog: header Authorization
 
 Optional extras (each asked next; skippable)
-  relay        an always-on machine gives instant sync and holds your MCP logins
+  relay        an always-on machine: instant sync, alerts for every machine, the fleet's app
   model proxy  retries, stats, a login that doesn't expire
   T3 access    provider logins and health as T3 itself sees them
 

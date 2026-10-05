@@ -147,4 +147,10 @@ describe("notes, removing from a list, dropping a table", () => {
     });
     expect(dropTable(text, ["nope"])).toEqual({ text });
   });
+
+  it("adds a top-level key to a file without tables and keeps the newline that ends it (N1)", () => {
+    const edit = setKey('# nodes/hub.toml\nroles = ["member", "relay"]\n', [], "ssh", "hub");
+    if ("error" in edit) throw new Error(edit.error);
+    expect(edit.text).toBe('# nodes/hub.toml\nroles = ["member", "relay"]\nssh = "hub"\n');
+  });
 });

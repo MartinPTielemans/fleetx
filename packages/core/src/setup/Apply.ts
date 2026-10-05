@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import type { ProbeServices } from "../Area.ts";
@@ -62,6 +63,7 @@ import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
 import { applyAreas, NTFY_SECRET } from "../Upkeep.ts";
 import type { Secret } from "./Credentials.ts";
+import { hostingOf } from "./HubHosting.ts";
 import { cleanUrl, type Discovery } from "./Discover.ts";
 import { PROPOSED_SECRETS, type Actions, type Mode } from "./Plan.ts";
 import { settingsWords } from "./PlanWords.ts";
@@ -309,7 +311,8 @@ export const restored = (
 export const writtenPaths = (input: SetupInput) => [
   ...input.actions.skills.map((s) => `skills/${s.name}`),
   ...(input.actions.skills.some((s) => s.source !== null) ? ["skills/SOURCES.json"] : []),
-  ...input.actions.servers.map((s) => `mcp/${s.name}.json`),
+  // Turning the MCP hub on rewrites every definition it can host, not only those added here.
+  ...(turnsMcpHubOn(input) ? ["mcp"] : input.actions.servers.map((s) => `mcp/${s.name}.json`)),
   ...input.actions.instructions.map((i) => i.src),
   FLEET_FILE,
   `nodes/${input.node}.toml`,
@@ -353,10 +356,25 @@ const listedDests = (text: string): ReadonlySet<unknown> => {
   }
 };
 
-export const relayEdits = (text: string, url: string | null): Edit => {
-  const port = setKey(text, ["relay"], "port", DEFAULT_RELAY_PORT);
-  if ("error" in port || url === null) return port;
-  return setKey(port.text, ["relay"], "url", url);
+/**
+ * [relay] with its port (and url, once known), and `relay` in [fleet] apply
+ * when the fleet lists its areas, so sync starts the relay and the listeners
+ * by itself (without the key, the default includes it).
+ */
+export const relayEdits = (text: string, url: string | null): Edit =>
+  edits(
+    text,
+    (t) => setKey(t, ["relay"], "port", DEFAULT_RELAY_PORT),
+    (t) => (url === null ? { text: t } : setKey(t, ["relay"], "url", url)),
+    applyRelay,
+  );
+
+/** `relay` added to [fleet] apply when the key lists areas without it; nothing when the key is not there. */
+export const applyRelay = (text: string): Edit => {
+  const apply = valueAt(text, ["fleet", "apply"]);
+  return Array.isArray(apply) && !apply.includes("relay")
+    ? addToList(text, ["fleet"], "apply", ["relay"])
+    : { text };
 };
 
 const valueAt = (text: string, path: ReadonlyArray<string>): unknown => {
@@ -379,6 +397,60 @@ export const relayUrlIn = (fleetText: string): string | null => {
 /** Whether a t3-fleet.toml pushes alerts to ntfy already ([notify] ntfy). */
 export const pushesToNtfy = (fleetText: string) =>
   valueAt(fleetText, ["notify", "ntfy"]) !== undefined;
+
+/** Whether a run turns the MCP hub on: the terminal's --relay --mcp-hub, or --mcp-hub on a fleet with a relay. */
+export const turnsMcpHubOn = (input: SetupInput) =>
+  (input.extras.relay?.mcp === true && input.extras.relay.url !== null) ||
+  (input.upkeep?.mcpHub != null && input.upkeep.mcpHub !== false);
+
+const AnyObject = Schema.Record(Schema.String, Schema.Unknown);
+
+/**
+ * The repo's MCP definitions the hub can host, rewritten for it (HubHosting.ts):
+ * what moved, what stays on each machine and why, and the files changed.
+ */
+export const moveServersToHub = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const names = (yield* fs
+      .readDirectory(`${repo}/mcp`)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+      .filter((f) => f.endsWith(".json"))
+      .sort();
+    const moved: Array<string> = [];
+    const stayed: Array<{ name: string; why: string }> = [];
+    const files: Array<string> = [];
+    for (const file of names) {
+      const name = file.slice(0, -".json".length);
+      const definition = yield* fs
+        .readFileString(`${repo}/mcp/${file}`)
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(AnyObject))), Effect.option);
+      if (Option.isNone(definition)) {
+        stayed.push({ name, why: "its definition is not a JSON object" });
+        continue;
+      }
+      const hosting = hostingOf(definition.value);
+      if (hosting.on === "machines") stayed.push({ name, why: hosting.why });
+      else if (hosting.definition !== null) {
+        yield* fs.writeFileString(`${repo}/mcp/${file}`, pretty(hosting.definition));
+        moved.push(name);
+        files.push(`mcp/${file}`);
+      }
+    }
+    return { moved, stayed, files };
+  });
+
+/** What moveServersToHub did, in the plan's words. */
+export const movedLines = (
+  node: string,
+  moved: {
+    readonly moved: ReadonlyArray<string>;
+    readonly stayed: ReadonlyArray<{ readonly name: string; readonly why: string }>;
+  },
+) => [
+  ...(moved.moved.length === 0 ? [] : [`moved to ${node}: ${moved.moved.join(", ")}`]),
+  ...moved.stayed.map((s) => `${s.name} stays on each machine: ${s.why}`),
+];
 
 /** [defaults.mcp]: the relay hosts every machine's MCP servers, reached at `gateway` (docs/topologies.md). */
 export const mcpHubEdits = (text: string, gateway: string): Edit =>
@@ -462,6 +534,8 @@ export const firstSync = (repo: string) =>
       "skills",
       "instructions",
       "dotfiles",
+      // The listener (or, on the hub, the relay) once this machine has the relay token.
+      "relay",
       ...(Option.isSome(readable) ? ["mcp"] : []),
     ];
     const result = yield* syncRun(config, { apply: true, areas });
@@ -658,6 +732,7 @@ export const setupSteps = (
           input.extras.relay === null || /^\[relay\]/m.test(t)
             ? { text: t }
             : relayEdits(t, input.extras.relay.url),
+        (t) => (input.extras.relay === null ? { text: t } : applyRelay(t)),
         (t) =>
           input.extras.relay?.mcp === true && input.extras.relay.url !== null
             ? mcpHubEdits(t, input.extras.relay.url)
@@ -672,6 +747,10 @@ export const setupSteps = (
             ]),
         ...upkeepEdits(input.upkeep, input.node),
       ]);
+      if (turnsMcpHubOn(input)) {
+        const moved = yield* moveServersToHub(repo);
+        lines.push(...movedLines("the hub", moved));
+      }
       const roles = input.extras.relay === null ? ["member"] : ["relay", "member"];
       const ignored = a.ignored.map((i) => i.name);
       yield* editToml(nodeFile, newNodeFile(input.node, roles, "t3-fleet setup"), [

@@ -29,6 +29,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import { ChildSyncLock, exec, SYNC_LOCK_ENV } from "./Exec.ts";
@@ -314,3 +315,38 @@ export const withSyncLock = <A, E, R, A2, E2, R2>(
 /** Run `effect` holding the lock, so no sync proposes or pulls the repo halfway through an edit. */
 export const underSyncLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   withSyncLock(effect, Effect.fail("a sync is running on this machine; try again in a moment"));
+
+/** How long a command a person started waits for a sync already running (waitForSyncLock). */
+export const SYNC_PATIENCE = Duration.minutes(10);
+
+/**
+ * Run `effect` holding the lock, waiting for a sync already running to
+ * finish first rather than failing: for what a person started and watches
+ * (the hub's setup, an invite), which a sync the timer fired at the same
+ * moment should only delay. `waiting` is said once, when it has to wait.
+ * Gives up after `patience` (ten minutes by default), saying why.
+ */
+export const waitForSyncLock = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options: {
+    readonly waiting?: Effect.Effect<void>;
+    readonly patience?: Duration.Duration;
+    readonly every?: Duration.Duration;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const once = withSyncLock(Effect.map(effect, Option.some), Effect.succeed(Option.none<A>()));
+    const first = yield* once;
+    if (Option.isSome(first)) return first.value;
+    if (options.waiting !== undefined) yield* options.waiting;
+    const every = options.every ?? Duration.seconds(2);
+    const patience = options.patience ?? SYNC_PATIENCE;
+    const times = Math.max(1, Math.ceil(Duration.toMillis(patience) / Duration.toMillis(every)));
+    const last = yield* once.pipe(
+      Effect.repeat({ while: (o) => Option.isNone(o), schedule: Schedule.spaced(every), times }),
+    );
+    if (Option.isSome(last)) return last.value;
+    return yield* Effect.fail(
+      `a sync on this machine has been running for over ${Math.round(Duration.toMillis(patience) / 60_000)} minutes; try again once it finishes (t3-fleet status shows it)`,
+    );
+  });

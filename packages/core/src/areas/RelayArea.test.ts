@@ -25,7 +25,7 @@ const services = Layer.mergeAll(
  * commands up with, and whatever tools a test puts there. Tailscale and
  * Docker are present because the test says so, whatever this machine has.
  */
-const relayNode = (url: string) => {
+const relayNode = (url: string, manager = true) => {
   const home = mkdtempSync(join(tmpdir(), "t3f-relay-"));
   const checkout = join(home, "fleet");
   const bin = join(home, "bin");
@@ -55,6 +55,8 @@ const relayNode = (url: string) => {
     writeFileSync(join(bin, name), `#!/bin/sh\n${script}\n`);
     chmodSync(join(bin, name), 0o755);
   };
+  // A service manager that takes services, unless a test says there is none.
+  if (manager) for (const name of ["systemctl", "launchctl"]) tool(name, "exit 0");
   return { home, bin, findings, tool };
 };
 
@@ -105,6 +107,19 @@ describe("the relay before its service", () => {
     writeFileSync(join(configDir(node.home), "secrets.env"), "T3_FLEET_RELAY_TOKEN=abc123\n");
     node.tool("docker", "exit 0");
     expect((await node.findings()).map((f) => f.key)).toEqual(["relay-serve"]);
+  });
+});
+
+describe("a machine without a service manager", () => {
+  it("is told what is missing, with no fix that would fail every sync", async () => {
+    const node = relayNode("https://relay.example.com", false);
+    mkdirSync(configDir(node.home), { recursive: true });
+    writeFileSync(join(configDir(node.home), "secrets.env"), "T3_FLEET_RELAY_TOKEN=abc123\n");
+    node.tool("docker", "exit 0");
+    const findings = await node.findings();
+    expect(findings.map((f) => f.key)).toEqual(["relay-serve"]);
+    expect(findings[0]?.title).toContain("cannot run as a service here");
+    expect(findings[0]?.fix).toBeUndefined();
   });
 });
 

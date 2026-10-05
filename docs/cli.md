@@ -136,7 +136,18 @@ walks through it. `--ui` asks the same questions in the browser.
 | `--ui`                              | sets up in the browser instead                                                                                              |
 
 A flag not given is asked, with the default shown; `--yes` takes the defaults.
-On a machine set up already only what a flag names changes.
+On a machine set up already only what a flag names changes. With `--mcp-hub`,
+the plan lists which MCP servers move to the hub and which stay on each
+machine, and why.
+
+`t3-fleet invite <name>` right after setup often meets the new timer's first
+sync: it waits for that sync (up to ten minutes, saying so) rather than
+failing. So does setting up a hub from the wizard.
+
+`t3-fleet sync` is what the timer runs; when another sync holds the machine it
+says so and leaves the work to that one. `t3-fleet sync --wait` waits for it
+instead, then syncs, and fails if it could not. `t3-fleet relay health` (with
+`--wait <seconds>`) says whether the relay on this machine answers.
 
 ## In the browser
 
@@ -214,11 +225,15 @@ Who may open it is a Tailscale login, not just being on the tailnet:
 allow = ["you@example.com"]
 ```
 
-The wizard writes the login of the authority it brought the hub up from.
-`t3-fleet setup --relay` on the server does not: add your Tailscale login
-(`tailscale status --json | jq -r .User[].LoginName` lists it) to `[ui] allow`
-in `t3-fleet.toml` on an authority, commit and push it, and the hub lets it in
-on its next sync. A request is let
+The wizard writes the login of the authority it brought the hub up from. In
+the terminal, `t3-fleet setup --relay` on the server is a proposal, and the
+authority that approves it (`t3-fleet approve`, or Proposals in its app)
+writes its own login, when the fleet has a relay and no `[ui]` yet; an
+authority that is its own relay does so at the end of its setup. Without a
+Tailscale login there to name, it says what to add: your login
+(`tailscale status --json | jq -r .User[].LoginName` lists it) in
+`[ui] allow` in `t3-fleet.toml` on an authority, committed and pushed; the hub
+lets it in on its next sync. A request is let
 in only through `tailscale serve` on the hub itself (a loopback connection,
 with the login Tailscale sets and strips from what the browser sent), with
 the hub's address as Host and Origin, not through Funnel, and with a login in

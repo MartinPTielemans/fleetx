@@ -12,8 +12,10 @@ import {
   UPDATE_AREAS,
 } from "../Upkeep.ts";
 import {
+  applyRelay,
   mcpHubEdits,
   persistable,
+  relayEdits,
   pushesToNtfy,
   restored,
   secretsToStore,
@@ -158,6 +160,33 @@ describe("flags on a machine set up already converge both ways (review B-13)", (
   });
 });
 
+describe("the relay is the fleet's own plumbing (B1)", () => {
+  it("is among the areas sync always applies, updates or not", () => {
+    expect(KEEP_AREAS).toContain("relay");
+    expect(written({ ...off, autoUpdate: false }).toml.fleet["apply"]).toContain("relay");
+  });
+
+  it("joins a fleet's own [fleet] apply when a relay is added, and leaves a fleet without the key alone", () => {
+    // A fleet set up before the relay counted (0.9.0 wrote this list).
+    const older = '[fleet]\napply = ["engine", "secrets", "dotfiles", "instructions", "mcp"]\n';
+    const edit = relayEdits(older, "https://box.tailnet.ts.net:8399");
+    if ("error" in edit) throw new Error(edit.error);
+    const toml = parseToml(edit.text) as { fleet: { apply: Array<string> }; relay: unknown };
+    expect(toml.fleet.apply).toEqual([
+      "engine",
+      "secrets",
+      "dotfiles",
+      "instructions",
+      "mcp",
+      "relay",
+    ]);
+    expect(toml.relay).toEqual({ port: 8399, url: "https://box.tailnet.ts.net:8399" });
+    expect(applyRelay(edit.text)).toEqual({ text: edit.text });
+    // Without [fleet] apply, sync's default (which has the relay) applies: nothing is written.
+    expect(applyRelay(fresh)).toEqual({ text: fresh });
+  });
+});
+
 describe("the MCP hub", () => {
   it("on: [defaults.mcp] hub, its gateway the relay's URL, the fleet's servers kept", () => {
     const edit = mcpHubEdits(fresh, "https://box.tailnet.ts.net:8399");
@@ -172,11 +201,16 @@ describe("the MCP hub", () => {
   it("the plan's hub steps are the ones bring-up says, with MCP hosting only when on", () => {
     const on = hubStepTitles({ node: "box", mcp: true });
     const no = hubStepTitles({ node: "box" });
-    // On, a sixth: the machines' MCP servers move only once the hub is up (review B-3).
-    expect(on).toHaveLength(6);
-    expect(no).toHaveLength(5);
-    expect(on[5]).toBe(
+    // On, one more: the machines' MCP servers move only once the hub is up (review B-3).
+    expect(on).toHaveLength(8);
+    expect(no).toHaveLength(7);
+    expect(on[6]).toBe(
       "Once box is up, move your machines' MCP servers to it ([defaults.mcp] hub)",
+    );
+    // B1: done only once the relay answers, and this computer listens to it.
+    expect(no[5]).toBe("Check that the relay on box answers");
+    expect(no.at(-1)).toBe(
+      "Sync this computer, so it listens to box; your other machines follow on their next sync",
     );
     expect(on[0]).toBe(
       "Add box to the fleet as its relay and MCP hub, with a new relay token among the secrets, and let your Tailscale login open the app it hosts",

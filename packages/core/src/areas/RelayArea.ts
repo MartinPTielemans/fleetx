@@ -47,6 +47,11 @@ const Observed = Schema.Struct({
   tailscaleCommand: Schema.optionalKey(Schema.String),
   /** Relay node: the hub's servers that run in Docker, and whether docker is there. */
   containers: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * Whether this machine's service manager can take a service: a systemd
+   * (user) session, or launchd's for this user. Absent in older reports.
+   */
+  manager: Schema.optionalKey(Schema.Boolean),
   docker: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
 });
 
@@ -263,6 +268,15 @@ export const RelayArea = defineArea({
           ? check.code === 0 && /state = running/.test(check.stdout)
           : check.code === 0;
       const token = yield* hasSecret(ctx.home, ctx.env, RELAY_TOKEN);
+      const manager = yield* exec({
+        command: platform === "darwin" ? "launchctl" : "systemctl",
+        args:
+          platform === "darwin"
+            ? ["print", `gui/${process.getuid?.() ?? 0}`]
+            : [...(root ? [] : ["--user"]), "show-environment"],
+        env: ctx.env,
+        timeout: Duration.seconds(5),
+      }).pipe(Effect.map((r) => r.code === 0));
       const tailnet = role === "serve" && onTailnet(ctx.relay?.url ?? null);
       const tailscaleCommand = tailnet ? yield* findTailscale(ctx.env) : null;
       const tailscale = tailnet ? tailscaleCommand !== null : null;
@@ -291,6 +305,7 @@ export const RelayArea = defineArea({
         published,
         port,
         token,
+        manager,
         tailscale,
         ...(tailscaleCommand === null ? {} : { tailscaleCommand }),
         containers,
@@ -336,7 +351,23 @@ export const RelayArea = defineArea({
           "Install Docker (https://docs.docker.com/engine/install/) and let this user run it; until then those servers do not answer.",
       });
     }
-    if (observed.token !== false && (observed.installed !== observed.want || !observed.running)) {
+    const wanted = observed.installed !== observed.want || !observed.running;
+    if (observed.token !== false && wanted && observed.manager === false) {
+      // A fix sync would fail on every run: say what is missing instead.
+      out.push({
+        node,
+        key: `relay-${observed.role}`,
+        severity: "warn",
+        area: "relay",
+        title: `the ${what} cannot run as a service here: ${observed.platform === "darwin" ? "launchd has no session for this user" : observed.root ? "systemd is not running" : "there is no systemd user session"}`,
+        detail:
+          observed.platform === "darwin"
+            ? "Log in to this Mac's desktop as this user; then sync here installs it."
+            : "On a server, enable lingering (sudo loginctl enable-linger $(id -un)) so this user's services run without a login; then sync here installs it. Without a service manager, run `t3-fleet " +
+              (observed.role === "serve" ? "relay serve" : "listen") +
+              "` some other way.",
+      });
+    } else if (observed.token !== false && wanted) {
       out.push({
         node,
         key: `relay-${observed.role}`,

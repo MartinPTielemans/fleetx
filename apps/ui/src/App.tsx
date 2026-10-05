@@ -4,6 +4,7 @@ import {
   BoxesIcon,
   GitPullRequestArrowIcon,
   MonitorIcon,
+  MonitorSmartphoneIcon,
   MoonIcon,
   PlugIcon,
   ServerIcon,
@@ -28,6 +29,7 @@ import { follow, useRoute, type View } from "./lib/router";
 import { StoreProvider, useStore } from "./lib/store";
 import { useTheme, type ThemeChoice } from "./lib/theme";
 import { cn } from "./lib/utils";
+import { AddMachinesView } from "./views/AddMachines";
 import { AlertsView } from "./views/Alerts";
 import { ConfigView } from "./views/Config";
 import { EnvironmentsView } from "./views/Environments";
@@ -48,7 +50,18 @@ const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> =
   { view: "mcp", label: "MCP", icon: <PlugIcon /> },
   { view: "models", label: "Models", icon: <ActivityIcon /> },
   { view: "config", label: "Config", icon: <SlidersHorizontalIcon /> },
+  { view: "machines", label: "Add machines", icon: <MonitorSmartphoneIcon /> },
 ];
+
+/** The views this app offers: invites only on an authority, in the app it serves itself. */
+const useNav = () => {
+  const { session } = useStore();
+  const invites = session !== null && session.authority && session.hub === undefined;
+  return NAV.filter((item) => item.view !== "machines" || invites);
+};
+
+/** Where `t3-fleet ui` serves the app on this machine; any other host is the hub's copy. */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
 type Gate =
   | { readonly kind: "loading" }
@@ -64,6 +77,8 @@ type Gate =
 export function App() {
   const [gate, setGate] = useState<Gate>({ kind: "loading" });
   const load = () => {
+    // The hub's copy of the app (on its tailnet address) has no setup to ask about: it is a fleet's.
+    if (!LOCAL_HOSTS.has(window.location.hostname)) return setGate({ kind: "fleet" });
     setGate({ kind: "loading" });
     api.setupState().then(
       (state) => {
@@ -147,12 +162,13 @@ const CONNECTION_TEXT = {
 
 function Shell() {
   const { view, rest } = useRoute();
+  const nav = useNav();
   return (
     <div className="flex h-full min-h-0">
       <Sidebar active={view} />
       <div className="flex min-w-0 flex-1 flex-col">
         <nav className="flex shrink-0 gap-1 overflow-x-auto border-b bg-sidebar px-2 py-1.5 md:hidden">
-          {NAV.map((item) => (
+          {nav.map((item) => (
             <a
               key={item.view}
               href={`/${item.view}`}
@@ -175,6 +191,7 @@ function Shell() {
             {view === "mcp" && <McpView />}
             {view === "models" && <ModelsView />}
             {view === "config" && <ConfigView node={rest} />}
+            {view === "machines" && <AddMachinesView />}
           </ErrorBoundary>
         </div>
         <JobsTray />
@@ -187,6 +204,7 @@ function Sidebar({ active }: { active: View }) {
   const { status, session, connection } = useStore();
   const problems = status?.findings.filter((f) => f.severity !== "info").length ?? 0;
   const errors = status?.findings.some((f) => f.severity === "error") ?? false;
+  const nav = useNav();
   return (
     <aside className="hidden w-(--sidebar-width) shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:flex">
       <div className="flex h-13 items-center gap-2 px-4">
@@ -197,7 +215,7 @@ function Sidebar({ active }: { active: View }) {
         )}
       </div>
       <nav className="flex flex-col gap-0.5 px-2 py-1">
-        {NAV.map((item) => (
+        {nav.map((item) => (
           <a
             key={item.view}
             href={`/${item.view}`}

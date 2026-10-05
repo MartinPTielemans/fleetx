@@ -66,11 +66,25 @@ export const git = (
 
 export const ok = (r: ExecResult) => r.code === 0;
 export const out = (r: ExecResult) => r.stdout.trim();
-export const why = (r: ExecResult) =>
-  (r.stderr.trim().split("\n").filter(Boolean).pop() ?? r.spawnError ?? `exit ${r.code}`).slice(
-    0,
-    240,
-  );
+/**
+ * Why a git command failed, in a line: its `fatal:` and `error:` lines when it
+ * has them (git's advice after them, "Please make sure you have the correct
+ * access rights / and the repository exists.", says nothing on its own), else
+ * its last line.
+ */
+export const why = (r: ExecResult) => {
+  const lines = r.stderr
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const said = lines.filter((l) => /^(?:fatal|error):/i.test(l));
+  return (
+    (said.length > 0 ? said.join("; ") : lines.pop()) ??
+    r.spawnError ??
+    `exit ${r.code}`
+  ).slice(0, 240);
+};
 
 /**
  * Write T3 Fleet's git config: the user's name and email (read once from their
