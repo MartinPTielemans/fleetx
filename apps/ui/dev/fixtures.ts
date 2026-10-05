@@ -469,7 +469,9 @@ export const fixtureResponse = (
   path: string,
   body = "",
   page = new URLSearchParams(),
-): { status: number; body: string; delay?: number } | "events" => {
+):
+  | { status: number; body: string; delay?: number; headers?: Readonly<Record<string, string>> }
+  | "events" => {
   if (path === "/api/events") return "events";
   const setup = setupResponse(method, path, body, page);
   if (setup !== null) return setup;

@@ -7,8 +7,8 @@ machine for you over ssh.
 
 ## Goals
 
-- **Visual first.** `curl … | sh` installs, the browser opens, and each screen
-  asks one thing. You see the layout before you pick it and the plan before
+- **Visual first.** `curl … | sh` installs, the browser opens (on a first
+  install on a desktop), and each screen asks one thing. You see the layout before you pick it and the plan before
   anything is written.
 - **The CLI is not left behind.** `t3-fleet setup` stays, with every flag it
   has. It is an equal way in, not a fallback.
@@ -25,13 +25,18 @@ machine for you over ssh.
 opens the wizard instead of the fleet app. The state it reads says which of
 three things it is:
 
-| stage        | the app shows                                      |
-| ------------ | -------------------------------------------------- |
-| `fresh`      | the wizard, from the first screen                  |
-| `unfinished` | a setup stopped part-way: resume it, or abandon it |
-| `member`     | the fleet app; the wizard is not needed            |
+| stage        | the app shows                                                                                                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `fresh`      | the wizard, from the first screen                                                                                                       |
+| `unfinished` | a setup stopped part-way: resume it, or abandon it                                                                                      |
+| `member`     | the fleet app; the wizard is not needed. Once a hub hosts the app, `t3-fleet ui` opens the hub's address instead (`--local` stays here) |
 
-The installer opens the browser at the end of a first install.
+At the end of a first install, run with no command, the installer runs
+`t3-fleet ui`, which opens the browser, when there is a desktop to open it on:
+a Mac, or Linux with `DISPLAY` or `WAYLAND_DISPLAY` set. Anywhere else (a
+server over ssh, say), and on an update, it prints the next command instead.
+`curl … | sh -s -- setup <url> <name>` runs that command, with the terminal as
+its input so setup can ask its questions.
 
 ## Roles: authority and hub
 
@@ -145,8 +150,12 @@ full description are in `packages/core/src/SetupApi.ts`; this is the shape.
 | `POST …/notify-test` | once set up: one test alert, as `t3-fleet notify test`  |
 
 Progress arrives as the existing `job` events on `/api/events`. A plan is only
-applied while nothing it read has changed; if something has, the wizard plans
-again and shows what moved.
+applied while nothing it read has changed; if something has, apply refuses it
+(409 with `x-t3-fleet-error: stale-plan`) and the wizard says so, with a button
+to make the plan again. The new plan is shown to review; choices made on the
+old one carry over where the same conflict and choice are still there, and
+credentials typed in stay for the names it still asks for. Every other
+refusal shows the server's own words (SetupApi.ts lists the statuses).
 
 ## Security
 
@@ -197,6 +206,3 @@ only makes things faster.
 - **A hub that is already running.** How the wizard treats a machine that
   already has a relay (adopt it, or ask to replace it) depends on the
   implementation and is not settled.
-- **Installer opening the browser.** Whether this happens on headless or
-  remote installs, or only where a browser can be opened, is left to the
-  installer.

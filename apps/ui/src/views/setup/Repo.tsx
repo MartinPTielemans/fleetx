@@ -102,7 +102,7 @@ export function RepoStep({
               value={answers.url}
               onChange={(e) => set({ url: e.currentTarget.value })}
               problem={looksLikeRemote(answers.url) ? null : "An https or ssh URL to clone"}
-              hint="If it's already a fleet, this computer joins it: what it brings is proposed, and the fleet's authority approves it."
+              hint="If it's already a fleet, this computer joins it: what it brings is proposed, the fleet's authority approves it, and the fleet keeps its own update setting."
             />
           </ChoiceCard>
           <ChoiceCard

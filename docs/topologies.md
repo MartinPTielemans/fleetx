@@ -20,7 +20,9 @@ You don't have to choose a layout by hand. The [setup wizard](design/setup-wizar
 asks what machines you have and recommends one: your own computer as the
 authority, an always-on machine as the hub. It checks that machine over ssh
 from your computer and sets it up, so you don't run setup on it yourself.
-`t3-fleet setup` does the same in the terminal.
+Only the wizard brings the hub up over ssh. In the terminal, `t3-fleet setup`
+sets up the machine it runs on: run it on the server with `--relay`, as below,
+and add your login to `[ui] allow` by hand if the hub should host the app.
 
 ## One laptop
 

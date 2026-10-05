@@ -134,8 +134,8 @@ export function HubStep({
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-dashed pt-5">
           <p className="min-w-0 flex-1 basis-64 text-muted-foreground text-xs leading-5">
-            Not ready to do this now? Set up this computer alone and add the hub later with{" "}
-            <code className="font-mono text-foreground/80">t3-fleet setup</code>.
+            Not ready to do this now? Set up this computer alone and add the hub later: run{" "}
+            <code className="font-mono text-foreground/80">t3-fleet setup … --relay</code> on it.
           </p>
           <Button size="sm" variant="ghost-muted" onClick={onSkip}>
             Skip the hub for now

@@ -31,6 +31,8 @@ import {
   UiStatus,
 } from "@t3-fleet/core/Api";
 import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
   UiInvite,
   UiNotifyTest,
   UiProbe,
@@ -147,11 +149,18 @@ async function hubSession(): Promise<SessionStart | null> {
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** The kind of refusal the server named (SETUP_ERROR_HEADER), when it named one. */
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+/** Apply refused the plan as out of date: plan again (SetupApi.ts). */
+export const isStalePlan = (error: unknown) =>
+  error instanceof ApiError && error.status === 409 && error.code === STALE_PLAN;
 
 /** The hub or the models part is not there (yet): no relay, no hub on it, or no answer. */
 export const isUnavailable = (error: unknown) =>
@@ -174,7 +183,11 @@ async function request(method: "GET" | "POST", path: string, body?: unknown): Pr
   }
   const text = await response.text();
   if (!response.ok)
-    throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
+    throw new ApiError(
+      response.status,
+      text.trim() || `${response.status} ${response.statusText}`,
+      response.headers.get(SETUP_ERROR_HEADER),
+    );
   return text;
 }
 

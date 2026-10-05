@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { SeverityIcon } from "../../components/common";
+import { Failure } from "../../components/dialogs";
 import { Button } from "../../components/ui/button";
 import { Group } from "../../components/ui/group";
 import { Spinner } from "../../components/ui/spinner";
@@ -41,6 +42,7 @@ export function MachinesStep({
   onNext,
   onRecheck,
   rechecking,
+  recheckError,
 }: {
   state: UiSetupState;
   answers: Answers;
@@ -49,6 +51,7 @@ export function MachinesStep({
   onNext: () => void;
   onRecheck: () => void;
   rechecking: boolean;
+  recheckError: unknown;
 }) {
   return (
     <StepFrame
@@ -83,13 +86,19 @@ export function MachinesStep({
             set={set}
             onRecheck={onRecheck}
             rechecking={rechecking}
+            recheckError={recheckError}
           />
 
           <Question
+            id="always-on"
             title="Is one of your machines always on?"
             help="A home server, a Mac mini, a VPS: something that doesn't go to sleep."
           >
-            <div role="radiogroup" className="grid gap-2.5 sm:grid-cols-2">
+            <div
+              role="radiogroup"
+              aria-labelledby="always-on"
+              className="grid gap-2.5 sm:grid-cols-2"
+            >
               <ChoiceCard
                 name="always-on"
                 value="yes"
@@ -152,16 +161,19 @@ function LookingAfter({
       help="T3 Fleet checks every machine each time it syncs. Choose what it does by itself, and how it tells you when something needs you. Both stay editable in your fleet's t3-fleet.toml."
     >
       <Group>
-        <Toggle
-          title="Keep things up to date automatically"
-          description={
-            answers.autoUpdate
-              ? UPDATE_WORDS.join(" · ")
-              : "Off: T3 Fleet shows what's out of date, and you apply each update yourself."
-          }
-          checked={answers.autoUpdate}
-          onChange={(autoUpdate) => set({ autoUpdate })}
-        />
+        {/* A fleet this computer joins keeps its own [fleet] apply: nothing to choose here. */}
+        {answers.repo === "url" ? null : (
+          <Toggle
+            title="Keep things up to date automatically"
+            description={
+              answers.autoUpdate
+                ? UPDATE_WORDS.join(" · ")
+                : "Off: T3 Fleet shows what's out of date, and you apply each update yourself."
+            }
+            checked={answers.autoUpdate}
+            onChange={(autoUpdate) => set({ autoUpdate })}
+          />
+        )}
         <Toggle
           title="Notify me on this computer"
           description="A notification for every fleet alert: a machine that stopped syncing, a login that ran out."
@@ -199,12 +211,14 @@ function ThisComputer({
   set,
   onRecheck,
   rechecking,
+  recheckError,
 }: {
   state: UiSetupState;
   answers: Answers;
   set: (patch: Partial<Answers>) => void;
   onRecheck: () => void;
   rechecking: boolean;
+  recheckError: unknown;
 }) {
   const problems = state.checks.filter((c) => c.severity === "error" || c.severity === "warn");
   const fine = state.checks.filter((c) => c.severity === "ok" || c.severity === "info");
@@ -250,6 +264,7 @@ function ThisComputer({
             Check again
           </Button>
         </div>
+        <Failure error={recheckError} />
         {problems.length === 0 ? null : (
           <ul className="flex flex-col gap-2">
             {problems.map((c) => (

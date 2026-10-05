@@ -31,7 +31,7 @@ import { Diff } from "../../components/Diff";
 import { Button } from "../../components/ui/button";
 import { Skeleton } from "../../components/ui/skeleton";
 import { Spinner } from "../../components/ui/spinner";
-import { ApiError } from "../../lib/api";
+import { isStalePlan } from "../../lib/api";
 import { cn, plural } from "../../lib/utils";
 import { inputClass, Prose, StepFrame } from "./parts";
 import { choiceOf, conflictNow, openConflicts, settingParts, type Choices } from "./wizard";
@@ -53,6 +53,8 @@ export interface PlanLoad {
   readonly data: UiSetupPlan | null;
   readonly loading: boolean;
   readonly error: unknown;
+  /** The plan is the answer to the answers as they are now, made without an error: it may be applied. */
+  readonly ready: boolean;
   readonly reload: () => void;
 }
 
@@ -82,7 +84,8 @@ export function PlanStep({
   onApply: () => void;
 }) {
   const plan = load.data;
-  const changed = applyError instanceof ApiError && applyError.status === 409;
+  // Apply refused the plan as out of date; any other refusal says why in its own words.
+  const changed = isStalePlan(applyError);
   return (
     <StepFrame
       width="medium"
@@ -96,7 +99,7 @@ export function PlanStep({
       back={applying ? undefined : onBack}
       hint={plan === null ? (load.loading ? "Making the plan…" : null) : null}
       actions={
-        <Button disabled={plan === null || load.loading || applying} onClick={onApply}>
+        <Button disabled={!load.ready || applying} onClick={onApply}>
           {applying ? <Spinner className="size-3.5" /> : null}
           {plan?.hub == null ? "Set up" : `Set up both machines`}
           {applying ? null : <ArrowRightIcon />}
@@ -111,7 +114,9 @@ export function PlanStep({
               className="flex flex-wrap items-center gap-3 rounded-lg border border-warning/30 bg-warning-surface px-3 py-2.5 text-sm"
             >
               <span className="min-w-0 flex-1 text-warning-foreground">
-                Something on this computer changed since this plan was made, so it wasn't applied.
+                Something on this computer or in the fleet changed since this plan was made, so it
+                wasn't applied. Make it again and review it: your choices stay where they still
+                apply.
               </span>
               <Button size="sm" variant="outline" onClick={load.reload}>
                 <RefreshCwIcon />
