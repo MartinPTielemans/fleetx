@@ -248,7 +248,7 @@ export const commitPaths = (input: SetupInput) => [
   ...SECRETS_FILES,
 ];
 
-const rolesOf = (text: string): Array<string> => {
+export const rolesOf = (text: string): Array<string> => {
   try {
     const roles = (parseToml(text) as { roles?: unknown }).roles;
     return Array.isArray(roles)
@@ -279,7 +279,7 @@ const listedDests = (text: string): ReadonlySet<unknown> => {
   }
 };
 
-const relayEdits = (text: string, url: string | null): Edit => {
+export const relayEdits = (text: string, url: string | null): Edit => {
   const port = setKey(text, ["relay"], "port", 8399);
   if ("error" in port || url === null) return port;
   return setKey(port.text, ["relay"], "url", url);
