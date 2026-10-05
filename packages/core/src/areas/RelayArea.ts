@@ -251,6 +251,7 @@ export const RelayArea = defineArea({
           ? yield* exec({
               command: "launchctl",
               args: ["print", `gui/${process.getuid?.() ?? 0}/${label(role)}`],
+              env: ctx.env,
               timeout: Duration.seconds(5),
             })
           : yield* exec({
@@ -261,6 +262,7 @@ export const RelayArea = defineArea({
                 "--quiet",
                 `${unitName(role)}.service`,
               ],
+              env: ctx.env,
               timeout: Duration.seconds(5),
             });
       const running =
