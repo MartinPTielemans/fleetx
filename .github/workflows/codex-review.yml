@@ -20,14 +20,30 @@ permissions:
   issues: read
   statuses: write
 jobs:
+  # A new head: record that the gate has seen it. Nothing can cancel this job,
+  # since a review counts only if it completed after this record.
+  seen:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: scripts
+          persist-credentials: false
+      - run: scripts/codex-review-status.sh "$REPO" "$PR" --seen "$HEAD"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+  # Codex wrote or edited a comment: read its summary again.
   status:
-    if: >-
-      github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    if: github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]'
     # On the job, so a skipped run (anyone else's comment) cannot cancel a real one.
     # Every run reads the current state, so only the newest matters.
     concurrency:
-      group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: codex-review-${{ github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
@@ -40,4 +56,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR: ${{ github.event.issue.number }}

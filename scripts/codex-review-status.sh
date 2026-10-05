@@ -12,8 +12,10 @@
 # The summary names a commit by its first seven hex digits only, so a commit
 # crafted to share them could pass as reviewed. A review therefore also counts
 # only if it completed after this gate first saw the head commit: the first
-# `codex-review` status on it, which this script posts (pending) as soon as a
-# commit becomes the head. What it cannot rule out is a review of an older
+# `codex-review` status on it, which `--seen` posts (pending) as soon as a
+# commit becomes the head. A status belongs to a commit, not a pull request, so
+# a head that two open pull requests share stays pending: a review of one must
+# not pass the other. What it cannot rule out is a review of an older
 # commit with the same prefix completing after that; and the status itself is
 # only as trusted as everyone who can run a workflow in this repository.
 #
@@ -21,25 +23,47 @@
 # ruleset requires every thread resolved.
 #
 #   scripts/codex-review-status.sh OWNER/REPO PR [--dry-run]
+#   scripts/codex-review-status.sh OWNER/REPO PR --seen SHA   (SHA just became the head)
 set -euo pipefail
 
 repo=$1
 pr=$2
-dry_run=${3:-}
+mode=${3:-}
 
 # A request that fails once (a 502, a 503) must not strand the status: the
 # event that marks a review complete may be the last one this pull request gets.
+# Only the attempt that succeeds is printed: a failed one may have written part
+# of a response.
 api() {
-  local attempt
+  local attempt out
   for attempt in 1 2 3 4; do
-    gh api "$@" && return 0
+    if out=$(gh api "$@"); then
+      [[ -n $out ]] && printf '%s\n' "$out"
+      return 0
+    fi
     [[ $attempt -lt 4 ]] && sleep $((attempt * 5))
   done
   return 1
 }
 
+post() {
+  echo "${1:0:7}: $2: $3"
+  [[ $mode == --dry-run ]] && return 0
+  api --silent -X POST "repos/$repo/statuses/$1" \
+    -f state="$2" \
+    -f context=codex-review \
+    -f description="${3:0:140}" \
+    -f target_url="https://github.com/$repo/pull/$pr"
+}
+
+if [[ $mode == --seen ]]; then
+  post "$4" pending "waiting for Codex to review ${4:0:7}"
+  exit 0
+fi
+
 head=$(api "repos/$repo/pulls/$pr" --jq .head.sha)
 short=${head:0:7}
+sharing=$(api "repos/$repo/commits/$head/pulls" --jq "[.[] | select(.state == \"open\" and .number != $pr) | \"#\(.number)\"] | join(\", \")")
 
 summary=$(
   api --paginate --slurp "repos/$repo/issues/$pr/comments" | jq -r '
@@ -81,6 +105,8 @@ else
     description="Codex is reviewing $short"
   elif [[ $status != *Completed* ]]; then
     description="Codex's review of $short did not complete; comment @codex review"
+  elif [[ -n $sharing ]]; then
+    description="$short is also the head of $sharing; give each pull request its own commit"
   elif [[ -z $first_seen ]]; then
     description="this gate has not seen $short become the head yet; comment @codex review"
   elif [[ $(when "$code") -le $first_seen ]]; then
@@ -94,10 +120,4 @@ else
   fi
 fi
 
-echo "$short: $state: $description"
-[[ $dry_run == --dry-run ]] && exit 0
-api --silent -X POST "repos/$repo/statuses/$head" \
-  -f state="$state" \
-  -f context=codex-review \
-  -f description="${description:0:140}" \
-  -f target_url="https://github.com/$repo/pull/$pr"
+post "$head" "$state" "$description"
