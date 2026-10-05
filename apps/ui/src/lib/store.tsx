@@ -69,7 +69,14 @@ interface Store {
 
 const StoreContext = createContext<Store | null>(null);
 
-export function StoreProvider({ children }: { children: ReactNode }) {
+/** `checks` false: a machine not in a fleet yet, which has no check to read. */
+export function StoreProvider({
+  children,
+  checks = true,
+}: {
+  children: ReactNode;
+  checks?: boolean;
+}) {
   const [session, setSession] = useState<UiSession | null>(null);
   const [sessionError, setSessionError] = useState<unknown>(null);
   const [status, setStatus] = useState<UiStatus | null>(null);
@@ -85,13 +92,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     api.session().then(setSession, setSessionError);
-    api.status().then((s) => {
-      setStatus(s);
-      setStatusError(null);
-    }, setStatusError);
+    if (checks)
+      api.status().then((s) => {
+        setStatus(s);
+        setStatusError(null);
+      }, setStatusError);
     const tick = window.setInterval(() => setNow(Date.now()), 5000);
     return () => window.clearInterval(tick);
-  }, []);
+  }, [checks]);
 
   useEffect(() => {
     let source: EventSource | null = null;

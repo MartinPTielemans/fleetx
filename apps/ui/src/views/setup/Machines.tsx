@@ -15,7 +15,7 @@ import { Button } from "../../components/ui/button";
 import { Spinner } from "../../components/ui/spinner";
 import { cn } from "../../lib/utils";
 import { FleetSketch } from "./FleetSketch";
-import { ChoiceCard, CopyCommand, Field, isCommand, Question, StepFrame } from "./parts";
+import { ChoiceCard, CopyCommand, Field, isCommand, Prose, Question, StepFrame } from "./parts";
 import { nodeNameProblem, type Answers } from "./wizard";
 
 export function MachinesStep({
@@ -227,7 +227,9 @@ function Problem({ check }: { check: UiSetupCheck }) {
         {check.detail === null ? null : isCommand(check.detail) ? (
           <CopyCommand command={check.detail} className="bg-background/70" />
         ) : (
-          <p className="text-pretty text-foreground/80 text-xs leading-5">{check.detail}</p>
+          <p className="text-pretty text-foreground/80 text-xs leading-5">
+            <Prose text={check.detail} />
+          </p>
         )}
       </div>
     </li>

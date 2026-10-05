@@ -20,6 +20,8 @@ export interface SetupRun {
     readonly relayUrl: string | null;
     readonly steps: ReadonlyArray<string>;
   } | null;
+  /** The repository's remote; without one there is nothing for another machine to join yet. */
+  readonly remote?: string | null;
   /** How many other machines the user said they have, for the invites. */
   readonly others: number;
   /** The furthest step each job reported, by job id: a failed job reports none. */

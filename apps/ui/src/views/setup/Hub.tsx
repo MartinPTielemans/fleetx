@@ -17,7 +17,7 @@ import { Button } from "../../components/ui/button";
 import { Skeleton } from "../../components/ui/skeleton";
 import { Spinner } from "../../components/ui/spinner";
 import { cn } from "../../lib/utils";
-import { CopyCommand, Field, inputClass, isCommand, StepFrame } from "./parts";
+import { CopyCommand, Field, inputClass, isCommand, Prose, StepFrame } from "./parts";
 import { nodeNameProblem, type Answers } from "./wizard";
 
 export interface ProbeState {
@@ -62,7 +62,7 @@ export function HubStep({
   return (
     <StepFrame
       title="Your hub"
-      lead="The always-on machine sends each change to every machine the moment it happens, hosts your MCP servers, and keeps their OAuth logins. Setup reaches it over ssh and only looks until you confirm the plan."
+      lead="The always-on machine sends each change to every machine the moment it happens, hosts your MCP servers, and keeps their OAuth logins. It also serves this app on your tailnet, so the fleet opens from any of your machines. Setup reaches it over ssh and only looks until you confirm the plan."
       back={onBack}
       hint={hint}
       actions={
@@ -324,7 +324,9 @@ function Item({
         {item.state === "ok" || item.remedy === null ? null : isCommand(item.remedy) ? (
           <CopyCommand command={item.remedy} />
         ) : (
-          <p className="text-pretty text-muted-foreground text-xs leading-5">{item.remedy}</p>
+          <p className="text-pretty text-muted-foreground text-xs leading-5">
+            <Prose text={item.remedy} />
+          </p>
         )}
       </div>
     </li>

@@ -1,6 +1,7 @@
 /** Done: what the fleet is now, the line each other machine runs to join, and the way into the fleet. */
 import {
   ArrowRightIcon,
+  ArrowUpRightIcon,
   LaptopIcon,
   MonitorSmartphoneIcon,
   PlusIcon,
@@ -20,13 +21,21 @@ import { nodeNameProblem } from "./wizard";
 
 const SUGGESTED = ["desktop", "workstation", "studio", "travel", "office", "spare"];
 
+/** "https://box.tailnet.ts.net/" → "box.tailnet.ts.net". */
+const hostOf = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
 export function DoneStep({
   run,
+  fleetUrl,
+  onLeave,
   entering,
   enterError,
   onEnter,
 }: {
   run: SetupRun | null;
+  /** The hub's copy of the app, when the hub serves it; the way in then. */
+  fleetUrl: string | null;
+  onLeave: () => void;
   entering: boolean;
   enterError: unknown;
   onEnter: () => void;
@@ -42,16 +51,35 @@ export function DoneStep({
         </span>
       }
       lead={
-        run?.hub == null
-          ? `${run?.node ?? "This computer"} holds the keys and approves what changes. Each machine you add below joins with one command.`
-          : `${run.node} holds the keys and approves what changes; ${run.hub.node} is the hub, always on for the rest. Each machine you add below joins with one command.`
+        run?.remote === null
+          ? `${run.node} holds the keys and approves what changes. Your setup is in a repository on this computer, ready for more machines once it has a remote.`
+          : run?.hub == null
+            ? `${run?.node ?? "This computer"} holds the keys and approves what changes. Each machine you add below joins with one command.`
+            : `${run.node} holds the keys and approves what changes; ${run.hub.node} is the hub, always on for the rest. Each machine you add below joins with one command.`
       }
       actions={
-        <Button disabled={entering} onClick={onEnter}>
-          {entering ? <Spinner className="size-3.5" /> : null}
-          Open your fleet
-          {entering ? null : <ArrowRightIcon />}
-        </Button>
+        fleetUrl === null ? (
+          <Button disabled={entering} onClick={onEnter}>
+            {entering ? <Spinner className="size-3.5" /> : null}
+            Open your fleet
+            {entering ? null : <ArrowRightIcon />}
+          </Button>
+        ) : (
+          <>
+            <Button variant="ghost-muted" disabled={entering} onClick={onEnter}>
+              {entering ? <Spinner className="size-3.5" /> : null}
+              Open it here
+            </Button>
+            <Button
+              render={<a href={fleetUrl} onClick={onLeave} />}
+              title={fleetUrl}
+              className="min-w-0 shrink"
+            >
+              <span className="truncate">Open your fleet at {hostOf(fleetUrl)}</span>
+              <ArrowUpRightIcon />
+            </Button>
+          </>
+        )
       }
     >
       <div className="flex flex-col gap-10">
@@ -76,36 +104,61 @@ export function DoneStep({
           )}
         </ul>
 
-        <section aria-labelledby="add-machines" className="flex flex-col gap-3">
-          <div className="flex flex-col gap-0.5 px-1">
-            <h2 id="add-machines" className="font-semibold text-sm">
-              Add your other machines
-            </h2>
-            <p className="text-pretty text-muted-foreground text-xs leading-5">
-              Name a machine to make its invite, then run the line on it. It installs T3 Fleet
-              there, brings what that machine has, and keeps it in step from then on. You can do
-              this later from the fleet too.
-            </p>
-          </div>
-          <ol className="flex flex-col gap-2.5">
-            {Array.from({ length: rows }, (_, i) => (
-              <Invite
-                key={i}
-                index={i}
-                placeholder={SUGGESTED[i % SUGGESTED.length] ?? "desktop"}
-                taken={taken}
-              />
-            ))}
-          </ol>
-          <div>
-            <Button size="sm" variant="ghost-muted" onClick={() => setRows((n) => n + 1)}>
-              <PlusIcon />
-              Another machine
-            </Button>
-          </div>
-        </section>
+        {run?.remote === null ? (
+          <NoRemote />
+        ) : (
+          <section aria-labelledby="add-machines" className="flex flex-col gap-3">
+            <div className="flex flex-col gap-0.5 px-1">
+              <h2 id="add-machines" className="font-semibold text-sm">
+                Add your other machines
+              </h2>
+              <p className="text-pretty text-muted-foreground text-xs leading-5">
+                Name a machine to make its invite, then run the line on it. It installs T3 Fleet
+                there, brings what that machine has, and keeps it in step from then on. You can do
+                this later from the fleet too.
+              </p>
+            </div>
+            <ol className="flex flex-col gap-2.5">
+              {Array.from({ length: rows }, (_, i) => (
+                <Invite
+                  key={i}
+                  index={i}
+                  placeholder={SUGGESTED[i % SUGGESTED.length] ?? "desktop"}
+                  taken={taken}
+                />
+              ))}
+            </ol>
+            <div>
+              <Button size="sm" variant="ghost-muted" onClick={() => setRows((n) => n + 1)}>
+                <PlusIcon />
+                Another machine
+              </Button>
+            </div>
+          </section>
+        )}
       </div>
     </StepFrame>
+  );
+}
+
+/** A fleet only on this computer: another machine has nothing to clone yet, so no invites. */
+function NoRemote() {
+  return (
+    <section
+      aria-labelledby="add-machines"
+      className="flex flex-col gap-3 rounded-xl border bg-card/50 p-4 shadow-xs/5"
+    >
+      <div className="flex flex-col gap-0.5">
+        <h2 id="add-machines" className="font-semibold text-sm">
+          Adding your other machines
+        </h2>
+        <p className="text-pretty text-muted-foreground text-xs leading-5">
+          They join from the fleet's repository, and yours has no remote yet. Push it to a private
+          repository, then make each machine's invite here in the fleet, or with:
+        </p>
+      </div>
+      <CopyCommand command="t3-fleet invite <name>" className="max-w-sm" />
+    </section>
   );
 }
 

@@ -53,6 +53,11 @@ export const UiSetupState = Schema.Struct({
   hub: Schema.NullOr(
     Schema.Struct({ node: Schema.String, ssh: Schema.String, error: Schema.NullOr(Schema.String) }),
   ),
+  /**
+   * Where the fleet's app is served once a hub serves it on the tailnet; null
+   * or absent without one (the app here is the way in). wizard/hub-ui owns it.
+   */
+  fleetUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type UiSetupState = typeof UiSetupState.Type;
 

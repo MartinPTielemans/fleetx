@@ -32,7 +32,7 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { Spinner } from "../../components/ui/spinner";
 import { ApiError } from "../../lib/api";
 import { cn, plural } from "../../lib/utils";
-import { inputClass, StepFrame } from "./parts";
+import { inputClass, Prose, StepFrame } from "./parts";
 import { choiceOf, conflictNow, openConflicts, type Choices } from "./wizard";
 
 const KIND: Readonly<Record<UiPlanItem["kind"], { one: string; many: string; icon: ReactNode }>> = {
@@ -745,7 +745,9 @@ function StepList({
             <span className="w-4 shrink-0 text-right text-2xs text-muted-foreground tabular-nums">
               {i + 1}
             </span>
-            <span className="text-pretty text-sm leading-5">{s}</span>
+            <span className="text-pretty text-sm leading-5">
+              <Prose text={s} />
+            </span>
           </li>
         ))}
       </ol>

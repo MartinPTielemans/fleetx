@@ -1,6 +1,14 @@
 /** The wizard's frame and the controls its steps share: the step rail, a step's page, choices, fields, a command to copy. */
 import { ArrowLeftIcon, BoxesIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 
 import { Button } from "../../components/ui/button";
 import { cn } from "../../lib/utils";
@@ -521,3 +529,25 @@ export const isCommand = (text: string) =>
   /^(?:sudo |curl |brew |apt|dnf |npm |pnpm |npx |gh |ssh|systemctl |loginctl |tailscale |docker |t3-fleet |export |mkdir |echo |cat |[a-z0-9_.-]+ -)/.test(
     text.trim(),
   ) && !/[.!]\s*$/.test(text.trim());
+
+/**
+ * A line the engine wrote, as a sentence here: its first letter capital, and
+ * `backticked` parts set as code.
+ */
+export function Prose({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(`[^`]+`)/).map((part, i) =>
+        /^`[^`]+`$/.test(part) ? (
+          <code key={i} className="rounded-sm bg-accent px-1 py-px font-mono text-[0.9em]">
+            {part.slice(1, -1)}
+          </code>
+        ) : (
+          <Fragment key={i}>
+            {i === 0 ? part.charAt(0).toUpperCase() + part.slice(1) : part}
+          </Fragment>
+        ),
+      )}
+    </>
+  );
+}

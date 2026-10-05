@@ -96,7 +96,7 @@ export function App() {
       </div>
     );
   return (
-    <StoreProvider key={gate.kind}>
+    <StoreProvider key={gate.kind} checks={gate.kind === "fleet"}>
       {gate.kind === "setup" ? (
         <SetupWizard
           initial={gate.state}

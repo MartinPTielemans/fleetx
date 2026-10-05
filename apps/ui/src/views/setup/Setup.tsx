@@ -220,6 +220,7 @@ export function SetupWizard({
           p.hub === null
             ? null
             : { node: p.hub.node, ssh: p.hub.ssh, relayUrl: p.hub.relayUrl, steps: p.hub.steps },
+        remote: p.repo.remote,
         others: answers.others,
         reached: {},
         finished: false,
@@ -240,6 +241,7 @@ export function SetupWizard({
       node: run?.node ?? state.suggestedName,
       steps: run?.steps ?? [],
       hub: run?.hub ?? null,
+      ...(run?.remote === undefined ? {} : { remote: run.remote }),
       others: run?.others ?? answers.others,
       reached: {},
       finished: false,
@@ -470,6 +472,12 @@ export function SetupWizard({
       content = (
         <DoneStep
           run={run}
+          fleetUrl={state.fleetUrl ?? null}
+          onLeave={() => {
+            // Off to the hub's copy of the app: nothing of this run is needed here again.
+            setRun(null);
+            window.sessionStorage.removeItem(ANSWERS_KEY);
+          }}
           entering={entering}
           enterError={enterError}
           onEnter={() => void enter()}

@@ -23,7 +23,7 @@ import { Spinner } from "../../components/ui/spinner";
 import type { UiJobT } from "../../lib/api";
 import { finished as jobFinished } from "../../lib/jobs";
 import { ago, cn, plural } from "../../lib/utils";
-import { CopyCommand, StepFrame } from "./parts";
+import { CopyCommand, Prose, StepFrame } from "./parts";
 import { runJobs, type SetupRun } from "./run";
 import { stepIndex, stepStates, type StepState } from "./wizard";
 
@@ -437,7 +437,7 @@ function JobSteps({
                       s === "failed" && "font-medium text-destructive-foreground",
                     )}
                   >
-                    {text}
+                    <Prose text={text} />
                   </span>
                 </div>
                 {s === "running" &&

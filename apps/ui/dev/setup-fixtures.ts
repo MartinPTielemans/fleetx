@@ -145,9 +145,16 @@ const stateOf = (sim: Sim, page: URLSearchParams): UiSetupState => ({
   github: sim.github,
   unfinished: sim.stage === "unfinished" ? sim.unfinished : null,
   hub: sim.hub,
+  // Once the hub is up it serves the fleet's app on the tailnet.
+  fleetUrl:
+    sim.stage === "member" && sim.hub === null && sim.lastPlan?.plan.hub != null
+      ? `https://${HUB_HOST}`
+      : null,
 });
 
 // ── the hub ─────────────────────────────────────────────────────────────
+
+const HUB_HOST = "box.tailnet.ts.net";
 
 const ok = (label: string): UiProbeItem => ({ state: "ok", label, remedy: null });
 
@@ -161,7 +168,7 @@ const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
         : /old/.test(ssh)
           ? "old"
           : "ready");
-  const host = "box.tailnet.ts.net";
+  const host = HUB_HOST;
   if (kind === "unreachable") {
     const unknown: UiProbeItem = { state: "unknown", label: "", remedy: null };
     return {
@@ -405,7 +412,7 @@ const planFor = (request: UiSetupPlanRequest, github: string | null): UiSetupPla
         : {
             node: request.hub.node,
             ssh: request.hub.ssh,
-            relayUrl: "https://box.tailnet.ts.net",
+            relayUrl: `https://${HUB_HOST}`,
             steps: HUB_STEPS,
           },
     steps: [
