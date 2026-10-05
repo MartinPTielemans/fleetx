@@ -238,7 +238,12 @@ in only through `tailscale serve` on the hub itself (a loopback connection,
 with the login Tailscale sets and strips from what the browser sent), with
 the hub's address as Host and Origin, not through Funnel, and with a login in
 `[ui] allow`. Tagged devices carry no login and are refused. Anyone else gets
-a page naming the login Tailscale saw and the line to add.
+a page naming the login Tailscale saw and the line to add. The hub must tell
+tailscale serve from other programs on it: a Linux hub, or a Mac whose
+Tailscale is the standalone or App Store app or a root `tailscaled`, can
+([topologies](topologies.md#the-app-on-the-hub)). Where it cannot, setup
+writes `hosted = false` under `[ui]`, and `t3-fleet ui` serves the app on
+this machine instead.
 
 There it differs from the local app in three ways. Machines are shown as
 they last reported (to the relay, else on their state branch), with when; a

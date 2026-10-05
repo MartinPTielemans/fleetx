@@ -263,6 +263,35 @@ describe("the setup wizard's engine", () => {
     expect(after["ui"]).toBeUndefined();
     expect(await run(readSecrets(repo))).not.toContain("T3_FLEET_RELAY_TOKEN");
 
+    // A hub that cannot serve the app (UiProbe.app): [ui] says so, and goes with the rest.
+    const local = await run(
+      admitHub(await run(loadConfig), { ...hub, hostsApp: false }, "me@example.com"),
+    );
+    expect(local.lines.join("\n")).toContain("hub cannot serve the fleet app");
+    expect(local.added).toEqual({ node: true, relay: true, ui: true, token: true });
+    expect(show("t3-fleet.toml")).toMatch(
+      /\[ui\]\nallow = \["me@example\.com"\]\nhosted = false\n/,
+    );
+    await run(undoAdmission({ ...hub, admitted: local.added }));
+    expect(parseToml(show("t3-fleet.toml"))).not.toHaveProperty("ui");
+    // Into a [ui] that was there already: only the key is admission's, and only it goes.
+    const plain = await run(admitHub(await run(loadConfig), hub, "me@example.com"));
+    const hostedOnly = await run(admitHub(await run(loadConfig), { ...hub, hostsApp: false }));
+    expect(hostedOnly.added).toEqual({
+      node: false,
+      relay: false,
+      ui: false,
+      token: false,
+      hosted: true,
+    });
+    expect(show("t3-fleet.toml")).toContain("hosted = false");
+    const dropped = await run(undoAdmission({ ...hub, admitted: hostedOnly.added }));
+    expect(dropped.join("\n")).toContain("took out [ui] hosted");
+    expect(show("t3-fleet.toml")).toMatch(/\[ui\]\nallow = \["me@example\.com"\]\n/);
+    expect(show("t3-fleet.toml")).not.toContain("hosted");
+    await run(undoAdmission({ ...hub, admitted: plain.added }));
+    expect(parseToml(show("t3-fleet.toml"))).not.toHaveProperty("ui");
+
     // Admitted again; [defaults.mcp] only through hostMcp, which bringUp calls once the hub synced.
     await run(admitHub(await run(loadConfig), { ...hub, mcp: true }, "me@example.com"));
     expect(mcpOf()["hub"]).toBeUndefined();
@@ -313,7 +342,7 @@ describe("the setup wizard's engine", () => {
     expect(
       await fails(admitHub(await run(loadConfig), { ...hub, relayUrl: null, mcp: true })),
     ).toContain("no relay URL");
-  });
+  }, 20_000);
 
   it("refuses a hub that is in another fleet before this fleet's repo names it (B4)", async () => {
     const show = (file: string) =>

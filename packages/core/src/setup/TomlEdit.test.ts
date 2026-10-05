@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   addToList,
   appendEntry,
+  dropKey,
   dropTable,
   edits,
   removeFromList,
@@ -146,6 +147,17 @@ describe("notes, removing from a list, dropping a table", () => {
       text: '[fleet]\nbranch = "main"\n\n[relay]\nport = 8399\nurl = "x"\n',
     });
     expect(dropTable(text, ["nope"])).toEqual({ text });
+  });
+
+  it("drops a one-line key from a table, the rest as it was", () => {
+    const text = '[ui]\nallow = ["me"]\nhosted = false # the hub cannot\n\n[relay]\nport = 8399\n';
+    expect(dropKey(text, ["ui"], "hosted")).toEqual({
+      text: '[ui]\nallow = ["me"]\n\n[relay]\nport = 8399\n',
+    });
+    expect(dropKey(text, ["ui"], "nope")).toEqual({ text });
+    expect(dropKey(text, ["nope"], "hosted")).toEqual({ text });
+    expect(dropKey("ui = { hosted = false }\n", ["ui"], "hosted")).toHaveProperty("error");
+    expect(dropKey('[ui]\nallow = [\n  "me",\n]\n', ["ui"], "allow")).toHaveProperty("error");
   });
 
   it("adds a top-level key to a file without tables and keeps the newline that ends it (N1)", () => {

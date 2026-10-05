@@ -120,6 +120,14 @@ export interface HubUiOptions {
   readonly assets: ReadonlyMap<string, UiAsset>;
 }
 
+/** Who made each open connection, as servedBy answered it (macOS only). */
+const answered = new WeakMap<object, string | null>();
+
+const socketOf = (source: unknown): object | null => {
+  const socket = (source as { socket?: unknown } | null)?.socket;
+  return typeof socket === "object" && socket !== null ? socket : null;
+};
+
 /** The app's routes on the relay. */
 export const hubUiLayer = (relay: RelayHandle, options: HubUiOptions) =>
   Layer.unwrap(
@@ -169,8 +177,22 @@ export const hubUiLayer = (relay: RelayHandle, options: HubUiOptions) =>
               config.nodes.filter((n) => n.roles.includes("authority")).map((n) => n.name),
             ),
           ),
-          servedBy: (request) =>
-            servedByTailscale(connectionOf(request.source)).pipe(Effect.provide(services)),
+          servedBy: (request) => {
+            // On macOS a connection is looked up once: a code-signature check takes a
+            // tenth of a second, and who made a connection cannot change while it is open.
+            const socket = socketOf(request.source);
+            const known = socket === null ? undefined : answered.get(socket);
+            if (known !== undefined) return Effect.succeed(known);
+            return servedByTailscale(connectionOf(request.source)).pipe(
+              Effect.tap((answer) =>
+                Effect.sync(() => {
+                  if (socket !== null && process.platform === "darwin")
+                    answered.set(socket, answer);
+                }),
+              ),
+              Effect.provide(services),
+            );
+          },
         },
         actions: {
           check: live((config) =>

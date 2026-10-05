@@ -74,7 +74,7 @@ import { PROPOSED_SECRETS } from "./Plan.ts";
 import { hubStepTitles } from "./PlanWords.ts";
 import { bringUpHub, hubMembership, membershipProblem } from "./Remote.ts";
 import { newNodeFile } from "./Repo.ts";
-import { dropTable, setKey, type Edit } from "./TomlEdit.ts";
+import { dropKey, dropTable, setKey, type Edit } from "./TomlEdit.ts";
 
 /** What admission added to the repo, so an abandoned bring-up can take it out again. */
 export const Admitted = Schema.Struct({
@@ -86,6 +86,8 @@ export const Admitted = Schema.Struct({
   ui: Schema.Boolean,
   /** The relay token among the secrets. */
   token: Schema.Boolean,
+  /** `[ui] hosted = false`, added to a [ui] admission did not create. */
+  hosted: Schema.optionalKey(Schema.Boolean),
 });
 export type Admitted = typeof Admitted.Type;
 
@@ -99,6 +101,12 @@ export const HubRequest = Schema.Struct({
    * relay URL); absent in a hub.json written before this was asked.
    */
   mcp: Schema.optionalKey(Schema.Boolean),
+  /**
+   * false when the check of the hub said it cannot serve the fleet app
+   * (UiProbe.app): admission writes `[ui] hosted = false`. Absent: it can, or
+   * a hub.json written before this was asked.
+   */
+  hostsApp: Schema.optionalKey(Schema.Boolean),
   /** Why the last bring-up stopped; null before the first, or while one runs. */
   error: Schema.NullOr(Schema.String),
   /** What admission committed, once it has (an abandon takes it out again). */
@@ -273,16 +281,26 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
         return yield* Effect.fail(
           `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
         );
-      if (
-        owner !== null &&
-        config.settings.ui?.allow === undefined &&
-        !/^\[ui\]/m.test(fleetAfter)
-      ) {
+      const uiBefore = /^\[ui\]/m.test(fleetAfter);
+      if (owner !== null && config.settings.ui?.allow === undefined && !uiBefore) {
         fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [
           (t) => setKey(t, ["ui"], "allow", [owner]),
         ]);
         added.ui = true;
         lines.push(`[ui] in ${FLEET_FILE}: the app on ${hub.node} opens for ${owner}`);
+      }
+      if (hub.hostsApp === false && config.settings.ui?.hosted === undefined) {
+        const hosted = yield* edited(FLEET_FILE, fleetAfter, [
+          (t) => setKey(t, ["ui"], "hosted", false),
+        ]);
+        if (hosted !== fleetAfter) {
+          fleetAfter = hosted;
+          if (uiBefore) added.hosted = true;
+          else added.ui = true;
+          lines.push(
+            `[ui] hosted = false in ${FLEET_FILE}: ${hub.node} cannot serve the fleet app, so t3-fleet ui opens it on each machine`,
+          );
+        }
       }
       if (fleetAfter !== fleetBefore) yield* fs.writeFileString(fleetFile, fleetAfter);
       const secrets = yield* readSecrets(repo);
@@ -485,6 +503,9 @@ export const bringUp = (
         relay: (h.admitted?.relay ?? false) || admitted.added.relay,
         ui: (h.admitted?.ui ?? false) || admitted.added.ui,
         token: (h.admitted?.token ?? false) || admitted.added.token,
+        ...((h.admitted?.hosted ?? false) || admitted.added.hosted === true
+          ? { hosted: true }
+          : {}),
       },
     })).pipe(Effect.ignore);
     for (const line of admitted.lines) yield* step(`✓ ${line}`);
@@ -676,7 +697,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
       lines.push(
         `${hub.node} was in the fleet before, so it stays, and so does its key among the secrets' recipients`,
       );
-    if (added !== undefined && (added.relay || added.ui || added.token)) {
+    if (added !== undefined && (added.relay || added.ui || added.token || added.hosted === true)) {
       const fs = yield* FileSystem.FileSystem;
       const rev = yield* waitForSyncLock(
         Effect.gen(function* () {
@@ -687,6 +708,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
           const after = yield* edited(FLEET_FILE, before, [
             (t) => (added.relay ? dropTable(t, ["relay"]) : { text: t }),
             (t) => (added.ui ? dropTable(t, ["ui"]) : { text: t }),
+            (t) => (added.hosted === true ? dropKey(t, ["ui"], "hosted") : { text: t }),
           ]);
           if (after !== before) yield* fs.writeFileString(fleetFile, after);
           if (added.token) {
@@ -707,6 +729,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
         `took out ${[
           ...(added.relay ? ["[relay]"] : []),
           ...(added.ui ? ["[ui]"] : []),
+          ...(added.hosted === true && !added.ui ? ["[ui] hosted"] : []),
           ...(added.token ? [RELAY_TOKEN] : []),
         ].join(", ")}${rev === "nothing to commit" ? " (gone already)" : ` (${rev})`}`,
       );

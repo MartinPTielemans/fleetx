@@ -98,6 +98,13 @@ const NotifySection = Schema.Struct({
  */
 const UiSection = Schema.Struct({
   allow: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * false when the hub cannot serve the app: its OS, or how Tailscale runs
+   * there, leaves it unable to tell tailscale serve from another program
+   * (HubUi.ts). `t3-fleet ui` then serves the app on each machine. Setup
+   * writes it when its check of the hub says so; absent means true.
+   */
+  hosted: Schema.optionalKey(Schema.Boolean),
 });
 
 const FleetFile = Schema.Struct({

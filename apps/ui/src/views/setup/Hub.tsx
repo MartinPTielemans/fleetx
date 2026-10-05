@@ -6,6 +6,7 @@ import {
   CircleCheckIcon,
   CircleDashedIcon,
   CircleXIcon,
+  MonitorIcon,
   PlugZapIcon,
   RadioTowerIcon,
   RefreshCwIcon,
@@ -283,6 +284,17 @@ function Checklist({
             <span className="truncate font-mono">{probe.relayUrl}</span>
           </div>
         )}
+        {probe.app?.state === "warn" ? (
+          <div className="flex items-start gap-2 border-t bg-muted/40 px-4 py-2.5 text-xs">
+            <MonitorIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+            <span
+              className="text-pretty text-muted-foreground"
+              title={probe.app.remedy ?? undefined}
+            >
+              {probe.app.label}
+            </span>
+          </div>
+        ) : null}
       </section>
       {probe.ready ? (
         <div className="flex flex-col gap-6 motion-safe:animate-enter motion-reduce:animate-fade-in">
