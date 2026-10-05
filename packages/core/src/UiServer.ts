@@ -8,7 +8,7 @@
  *   POST /api/fixes/plan, /api/fixes, /api/proposals/<node>/approve | /reject,
  *        /api/hub/servers/<name>/login | /logout | /restart,
  *        /api/skills/lookup | /add | /preview | /update | /remove
- *   GET  /api/setup/state, POST /api/setup/probe | /plan | /apply | /invite
+ *   GET  /api/setup/state, POST /api/setup/probe | /plan | /apply | /invite | /notify-test
  *                        the setup wizard (SetupApi.ts)
  *   GET  /api/events     server-sent events: the latest status first, then the
  *                        relay's, plus "check", "check-failed", "job" and
@@ -130,6 +130,7 @@ import { isLauncher } from "./Names.ts";
 import {
   UiInvite,
   UiInviteRequest,
+  UiNotifyTest,
   UiProbe,
   UiProbeRequest,
   UiSetupApplyRequest,
@@ -1566,6 +1567,19 @@ export const uiLayer = (options: UiServerOptions) =>
           .pipe(Effect.flatMap(jsonResponse(UiInvite))),
       );
 
+      const setupNotifyTest = HttpRouter.add(
+        "POST",
+        "/api/setup/notify-test",
+        api(() =>
+          options.setup === undefined
+            ? Effect.succeed(plain("no setup here", 404))
+            : options.setup.notifyTest.pipe(
+                Effect.flatMap(jsonResponse(UiNotifyTest)),
+                Effect.catch(fail(409)),
+              ),
+        ),
+      );
+
       const unknownApi = HttpRouter.add(
         "*",
         "/api/*",
@@ -1640,6 +1654,7 @@ export const uiLayer = (options: UiServerOptions) =>
         setupPlan,
         setupApply,
         setupInvite,
+        setupNotifyTest,
         eventStream,
         unknownApi,
         app,

@@ -13,8 +13,9 @@ import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import type { Config } from "./Config.ts";
+import { loadConfigFrom, type Config } from "./Config.ts";
 import { localSecretsPath } from "./Secrets.ts";
+import { deliverAlerts, deliveryChannels } from "./Notify.ts";
 import { NodeState } from "./State.ts";
 
 export const RELAY_TOKEN = "T3_FLEET_RELAY_TOKEN";
@@ -109,6 +110,16 @@ export const listen = <E, R, R2 = never>(
       );
       if (response.status !== 200) return yield* Effect.fail(`relay answered ${response.status}`);
       yield* log(`connected to ${url}`);
+      const receive = (catchUp: boolean) =>
+        Effect.gen(function* () {
+          const fresh = yield* loadConfigFrom(config.repo, config.self);
+          if (deliveryChannels(fresh, "listen").length === 0) return;
+          const states = yield* fleetFromRelay(fresh, url);
+          if (states !== null)
+            for (const line of yield* deliverAlerts(fresh, states, "listen", { catchUp }))
+              yield* log(line);
+        }).pipe(Effect.ignore);
+      yield* receive(true);
       let buffer = "";
       yield* response.stream.pipe(
         Stream.decodeText(),
@@ -124,6 +135,7 @@ export const listen = <E, R, R2 = never>(
               const rev = /"rev":"([0-9a-f]+)"/.exec(frame)?.[1] ?? "";
               if (id !== undefined) lastId = Number(id);
               if (type === "pull") yield* onPull(rev);
+              if (type === "state") yield* receive(false);
               if (type === "fix" && onFix !== undefined) {
                 const data = decodeFixEvent(/^data: (.*)$/m.exec(frame)?.[1] ?? "");
                 if (Option.isSome(data))
@@ -142,9 +154,9 @@ export const listen = <E, R, R2 = never>(
   });
 
 /** Every node's latest state as the relay has it; null when there is no relay or it does not answer. */
-export const fleetFromRelay = (config: Config) =>
+export const fleetFromRelay = (config: Config, url_?: string) =>
   Effect.gen(function* () {
-    const url = relayUrlOf(config);
+    const url = url_ ?? relayUrlOf(config);
     if (url === null) return null;
     const token = yield* secretVar(RELAY_TOKEN);
     if (token === "") return null;

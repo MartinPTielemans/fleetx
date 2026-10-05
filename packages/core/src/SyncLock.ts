@@ -173,81 +173,96 @@ const lockState = (lock: string, now: number) =>
   });
 
 /** This run's token, or null when another live run holds the lock. */
-export const takeSyncLock = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const lock = syncLockPath(process.env["HOME"] ?? "");
-  yield* fs
-    .makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true })
-    .pipe(Effect.ignore);
-  const now = yield* Clock.currentTimeMillis;
-  const boot = yield* bootId;
-  const started = yield* processIdentity(process.pid);
-  const owner: Owner = {
-    pid: process.pid,
-    start: now,
-    token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}`,
-    ...(Option.isSome(boot) ? { boot: boot.value } : {}),
-    ...(Option.isSome(started) ? { process: started.value } : {}),
-  };
-  // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
-  const create = fs.makeDirectory(lock).pipe(
-    Effect.as(true),
-    Effect.orElseSucceed(() => false),
-    Effect.flatMap((made) =>
-      made
-        ? writeOwner(lock, owner).pipe(
-            Effect.as(true),
-            Effect.catch(() =>
-              fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false)),
-            ),
-          )
-        : Effect.succeed(false),
-    ),
-  );
-  const mine = Effect.sync(() => {
-    heldHere.add(owner.token);
-    return owner.token;
-  });
-  if (yield* create) return yield* mine;
-  if ((yield* lockState(lock, now)) !== "stale") return null;
-
-  // Taking a dead run's lock over: one taker at a time, judging again under
-  // the guard, so two takers never both win. The guard is held for
-  // milliseconds; one older than a minute was left by a taker that died.
-  const guard = `${lock}.takeover`;
-  if (
-    !(yield* fs.makeDirectory(guard).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    ))
-  ) {
-    const age = yield* ageOf(guard, now);
-    if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS)
-      yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
-    return null;
-  }
-  const taken = yield* Effect.gen(function* () {
-    const state = yield* lockState(lock, now);
-    if (state === "free") return yield* create;
-    if (state === "held") return false;
-    return yield* writeOwner(lock, owner).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
-  }).pipe(Effect.ensuring(fs.remove(guard, { recursive: true }).pipe(Effect.ignore)));
-  return taken ? yield* mine : null;
-});
-
-/** Remove the lock if it is still this run's; a lock someone took over stays theirs. */
-export const releaseSyncLock = (token: string) =>
+const takeLock = (lock: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const lock = syncLockPath(process.env["HOME"] ?? "");
+    yield* fs
+      .makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true })
+      .pipe(Effect.ignore);
+    const now = yield* Clock.currentTimeMillis;
+    const boot = yield* bootId;
+    const started = yield* processIdentity(process.pid);
+    const owner: Owner = {
+      pid: process.pid,
+      start: now,
+      token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}`,
+      ...(Option.isSome(boot) ? { boot: boot.value } : {}),
+      ...(Option.isSome(started) ? { process: started.value } : {}),
+    };
+    // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
+    const create = fs.makeDirectory(lock).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+      Effect.flatMap((made) =>
+        made
+          ? writeOwner(lock, owner).pipe(
+              Effect.as(true),
+              Effect.catch(() =>
+                fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false)),
+              ),
+            )
+          : Effect.succeed(false),
+      ),
+    );
+    const mine = Effect.sync(() => {
+      heldHere.add(owner.token);
+      return owner.token;
+    });
+    if (yield* create) return yield* mine;
+    if ((yield* lockState(lock, now)) !== "stale") return null;
+
+    // Taking a dead run's lock over: one taker at a time, judging again under
+    // the guard, so two takers never both win. The guard is held for
+    // milliseconds; one older than a minute was left by a taker that died.
+    const guard = `${lock}.takeover`;
+    if (
+      !(yield* fs.makeDirectory(guard).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      ))
+    ) {
+      const age = yield* ageOf(guard, now);
+      if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS)
+        yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
+      return null;
+    }
+    const taken = yield* Effect.gen(function* () {
+      const state = yield* lockState(lock, now);
+      if (state === "free") return yield* create;
+      if (state === "held") return false;
+      return yield* writeOwner(lock, owner).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+    }).pipe(Effect.ensuring(fs.remove(guard, { recursive: true }).pipe(Effect.ignore)));
+    return taken ? yield* mine : null;
+  });
+
+/** Remove the lock if it is still this run's; a lock someone took over stays theirs. */
+const releaseLock = (lock: string, token: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const owner = yield* readOwner(lock);
     if (Option.isSome(owner) && owner.value.token === token)
       yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
     heldHere.delete(token);
   });
+
+export const takeSyncLock = Effect.suspend(() => takeLock(syncLockPath(process.env["HOME"] ?? "")));
+export const releaseSyncLock = (token: string) =>
+  releaseLock(syncLockPath(process.env["HOME"] ?? ""), token);
+
+/** An independent machine lock, with sync's dead-owner recovery and no inherited ownership. */
+export const withMachineLock = <A, E, R, B, E2, R2>(
+  lock: string,
+  effect: Effect.Effect<A, E, R>,
+  busy: Effect.Effect<B, E2, R2>,
+) =>
+  Effect.acquireUseRelease(
+    takeLock(lock),
+    (token): Effect.Effect<A | B, E | E2, R | R2> => (token === null ? busy : effect),
+    (token) => (token === null ? Effect.void : releaseLock(lock, token)),
+  );
 
 /** Whether this process was started by the run holding the lock, with its token. */
 const startedByHolder = Effect.gen(function* () {

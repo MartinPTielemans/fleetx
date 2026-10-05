@@ -597,6 +597,8 @@ const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>
       yield* Console.log(
         `Fleet alerts push to ${topic}: subscribe to it in the ntfy app. It is kept as the secret ${NTFY_SECRET}.`,
       );
+    if (input.upkeep?.desktop === true || topic != null)
+      yield* Console.log("Try the notifications: t3-fleet notify test");
   });
 
 /** Whether this machine can show an OS notification: a Mac, or a desktop session. */

@@ -33,6 +33,10 @@
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import type * as Path from "effect/Path";
+import type * as FileSystem from "effect/FileSystem";
+import type * as HttpClient from "effect/unstable/http/HttpClient";
+import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -44,6 +48,9 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
+import { loadConfigFrom } from "./Config.ts";
+import { deliverAlerts } from "./Notify.ts";
+import { readStates } from "./Sync.ts";
 import {
   advance,
   FixProgress,
@@ -74,6 +81,8 @@ export interface RelayEvent {
 
 export interface RelayOptions<R = never> {
   readonly token: string;
+  /** This relay node, enabling deterministic delivery. Omitted by embedders without notifications. */
+  readonly node?: string;
   /** The config repo on this node, watched for new commits. */
   readonly repo: string;
   readonly branch: string;
@@ -164,6 +173,38 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
         Effect.repeat(Schedule.spaced(options.pollEvery ?? Duration.seconds(20))),
         Effect.forkDetach,
       );
+
+      const notifyServices = yield* Effect.context<
+        | Path.Path
+        | FileSystem.FileSystem
+        | HttpClient.HttpClient
+        | ChildProcessSpawner.ChildProcessSpawner
+      >();
+      const notify = (catchUp: boolean) =>
+        Effect.gen(function* () {
+          if (options.node === undefined) return;
+          const config = yield* loadConfigFrom(options.repo, options.node);
+          yield* deliverAlerts(config, [...(yield* Ref.get(states)).values()], "relay", {
+            catchUp,
+          });
+        }).pipe(Effect.ignore, Effect.provide(notifyServices));
+      if (options.node !== undefined) {
+        // Rehydrate from git after restart; polling also covers reports lost while the relay was down.
+        yield* Effect.gen(function* () {
+          for (const state of yield* readStates(options.repo)) {
+            const current = (yield* Ref.get(states)).get(state.node);
+            if (current === undefined || current.at < state.at) {
+              yield* Ref.update(states, (m) => new Map(m).set(state.node, state));
+              yield* emit({ type: "state", node: state.node, rev: state.rev });
+            }
+          }
+          yield* notify(true);
+        }).pipe(
+          Effect.ignore,
+          Effect.repeat(Schedule.spaced(Duration.seconds(30))),
+          Effect.forkDetach,
+        );
+      }
 
       const authorized = Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -289,6 +330,7 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
             return HttpServerResponse.text("Not a node state", { status: 400 });
           yield* Ref.update(states, (m) => new Map(m).set(state.value.node, state.value));
           yield* emit({ type: "state", node: state.value.node, rev: state.value.rev });
+          yield* notify(false);
           return HttpServerResponse.empty({ status: 204 });
         }).pipe(
           Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),

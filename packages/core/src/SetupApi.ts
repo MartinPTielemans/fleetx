@@ -10,6 +10,7 @@
  *   POST /api/setup/plan      everything setup would do, before anything is written
  *   POST /api/setup/apply     do it, as a job ("setup"), then the hub ("setup-hub")
  *   POST /api/setup/invite    the line another machine runs to join
+ *   POST /api/setup/notify-test  one test alert through this machine's [notify] paths
  *
  * Progress comes as the existing "job" events on /api/events. A run that
  * stops part-way is "unfinished" in the state and continues with apply's
@@ -241,6 +242,13 @@ export type UiSetupApplyRequest = typeof UiSetupApplyRequest.Type;
 
 /** The job apply started: watch it with the "job" events. Null for abandon. */
 export const UiSetupStarted = Schema.Struct({ jobId: Schema.NullOr(Schema.String) });
+
+/** What `t3-fleet notify test` says, a line per path ("desktop: delivered"); `failed` when one did not go. */
+export const UiNotifyTest = Schema.Struct({
+  lines: Schema.Array(Schema.String),
+  failed: Schema.Boolean,
+});
+export type UiNotifyTest = typeof UiNotifyTest.Type;
 
 export const UiInviteRequest = Schema.Struct({ node: Schema.String });
 export const UiInvite = Schema.Struct({

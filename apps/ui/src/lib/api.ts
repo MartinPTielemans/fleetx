@@ -32,6 +32,7 @@ import {
 } from "@t3-fleet/core/Api";
 import {
   UiInvite,
+  UiNotifyTest,
   UiProbe,
   UiSetupPlan,
   UiSetupStarted,
@@ -223,6 +224,7 @@ const postProbe = post(UiProbe);
 const postSetupPlan = post(UiSetupPlan);
 const postSetupApply = post(UiSetupStarted);
 const postInvite = post(UiInvite);
+const postNotifyTest = post(UiNotifyTest);
 
 export const decodeStatusEvent = decoder(UiStatus);
 export const decodeCheckFailedEvent = decoder(UiCheckFailed);
@@ -275,6 +277,8 @@ export const api = {
   setupPlan: (request: UiSetupPlanRequest) => postSetupPlan("/api/setup/plan", request),
   setupApply: (request: UiSetupApplyRequest) => postSetupApply("/api/setup/apply", request),
   setupInvite: (node: string) => postInvite("/api/setup/invite", { node }),
+  /** Once set up: one test alert through this machine's [notify] paths. */
+  setupNotifyTest: () => postNotifyTest("/api/setup/notify-test", {}),
   /** EventSource cannot send headers; the token goes in the query instead, which only this endpoint accepts. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,
 };
@@ -297,6 +301,7 @@ export type {
 } from "@t3-fleet/core/Api";
 export type {
   UiInvite,
+  UiNotifyTest,
   UiPlanConflict,
   UiPlanItem,
   UiProbe,

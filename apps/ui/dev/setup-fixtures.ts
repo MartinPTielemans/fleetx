@@ -647,6 +647,17 @@ export const setupResponse = (
       return apply(sim, page, JSON.parse(body) as UiSetupApplyRequest);
     case "/api/setup/invite":
       return invite(body, sim.lastPlan?.plan.repo.remote ?? null);
+    case "/api/setup/notify-test": {
+      const notify = sim.lastPlan?.request.notify;
+      const lines = [
+        ...(notify?.desktop === true ? ["desktop: delivered"] : []),
+        ...(notify?.ntfy != null ? ["ntfy: delivered"] : []),
+      ];
+      return json(
+        { lines: lines.length > 0 ? lines : ["no [notify] paths configured"], failed: false },
+        900,
+      );
+    }
   }
   return { status: 404, body: "no such endpoint" };
 };

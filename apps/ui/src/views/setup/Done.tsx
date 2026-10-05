@@ -2,6 +2,7 @@
 import {
   ArrowRightIcon,
   ArrowUpRightIcon,
+  BellRingIcon,
   CircleCheckIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -14,7 +15,7 @@ import { useState, type ReactNode } from "react";
 import { Failure } from "../../components/dialogs";
 import { Button } from "../../components/ui/button";
 import { Spinner } from "../../components/ui/spinner";
-import { api, type UiInvite } from "../../lib/api";
+import { api, type UiInvite, type UiNotifyTest } from "../../lib/api";
 import { useAction } from "../../lib/store";
 import { cn } from "../../lib/utils";
 import { CopyCommand, inputClass, Prose, StepFrame } from "./parts";
@@ -109,19 +110,24 @@ export function DoneStep({
         {run?.hub?.mcp === true ? <SignIn hub={run.hub.node} /> : null}
 
         {(run?.settings ?? []).length === 0 ? null : (
-          <ul aria-label="Set for you" className="-mt-4 flex flex-col gap-1.5 px-1">
-            {(run?.settings ?? []).map((line) => (
-              <li
-                key={line}
-                className="flex items-start gap-2 text-muted-foreground text-xs leading-5"
-              >
-                <CircleCheckIcon className="mt-0.5 size-3.5 shrink-0 text-success" />
-                <span>
-                  <Prose text={settingParts(line).text} />
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="-mt-4 flex flex-col gap-3 px-1">
+            <ul aria-label="Set for you" className="flex flex-col gap-1.5">
+              {(run?.settings ?? []).map((line) => (
+                <li
+                  key={line}
+                  className="flex items-start gap-2 text-muted-foreground text-xs leading-5"
+                >
+                  <CircleCheckIcon className="mt-0.5 size-3.5 shrink-0 text-success" />
+                  <span>
+                    <Prose text={settingParts(line).text} />
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {(run?.settings ?? []).some((l) => settingParts(l).where?.startsWith("[notify]")) ? (
+              <NotifyTest />
+            ) : null}
+          </div>
         )}
 
         {run?.remote === null ? (
@@ -158,6 +164,39 @@ export function DoneStep({
         )}
       </div>
     </StepFrame>
+  );
+}
+
+/** One test alert through the paths just set up, as `t3-fleet notify test` sends it. */
+function NotifyTest() {
+  const action = useAction(api.setupNotifyTest);
+  const [result, setResult] = useState<UiNotifyTest | null>(null);
+  return (
+    <div className="flex flex-col gap-1.5 pl-5.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={action.running}
+          onClick={() => void action.start().then((r) => r !== null && setResult(r))}
+        >
+          {action.running ? <Spinner className="size-3.5" /> : <BellRingIcon />}
+          Send a test
+        </Button>
+        {result === null ? null : (
+          <span
+            aria-live="polite"
+            className={cn(
+              "text-xs",
+              result.failed ? "text-destructive-foreground" : "text-muted-foreground",
+            )}
+          >
+            {result.lines.join(" · ")}
+          </span>
+        )}
+      </div>
+      <Failure error={action.error} />
+    </div>
   );
 }
 

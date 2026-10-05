@@ -26,9 +26,11 @@ import { loadConfig, type Config } from "../Config.ts";
 import { exec } from "../Exec.ts";
 import { git, out } from "../Git.ts";
 import { sha256 } from "../Hash.ts";
+import { testNotification } from "../Notify.ts";
 import { addNode, inviteLine } from "../Init.ts";
 import type {
   UiInvite,
+  UiNotifyTest,
   UiPlanConflict,
   UiPlanItem,
   UiProbe,
@@ -89,6 +91,8 @@ export interface SetupActions {
   /** The jobs to run, in order; refused with why (a stale plan, say). None for abandon. */
   readonly apply: (request: UiSetupApplyRequest) => Effect.Effect<ReadonlyArray<SetupJob>, string>;
   readonly invite: (node: string) => Effect.Effect<UiInvite, string>;
+  /** Once set up: one test alert through this machine's [notify] paths, as `t3-fleet notify test`. */
+  readonly notifyTest: Effect.Effect<UiNotifyTest, string>;
 }
 
 /** Claude's long-lived token, which the model proxy uses: asked for like a missing credential. */
@@ -762,8 +766,18 @@ export const make = (hooks: {
         }),
       );
 
+    const notifyTest: SetupActions["notifyTest"] = closed(
+      Effect.gen(function* () {
+        const config = yield* loadConfig.pipe(
+          Effect.mapError(() => "this machine is not set up yet: finish setup first"),
+        );
+        return yield* testNotification(config);
+      }),
+    );
+
     return {
       state,
+      notifyTest,
       probe: (ssh) => probeHub(ssh).pipe(Effect.provide(services)),
       plan,
       apply,

@@ -95,7 +95,8 @@ and the plan lists what each writes before anything is.
   on ntfy.sh, made in the browser (or by the terminal), shown once with a copy
   button, and stored like any setup secret: encrypted before the first step,
   never in job events or the saved run. A fleet that pushes already keeps its
-  topic.
+  topic. Once setup is done, the last screen offers "Send a test", which sends
+  one through the paths just set up, as `t3-fleet notify test` does.
 - **The MCP hub is opt-in** because it moves every OAuth login: until each is
   signed in on the hub, those servers stop working on every machine. It needs
   the hub's tailnet address; without tailscale there the switch is off and
@@ -134,13 +135,14 @@ not stop it, and reopening the wizard shows where it is.
 `t3-fleet ui` serves a few endpoints under `/api/setup/`. The schemas and the
 full description are in `packages/core/src/SetupApi.ts`; this is the shape.
 
-| endpoint        | does                                                    |
-| --------------- | ------------------------------------------------------- |
-| `GET  …/state`  | where this machine stands, and its pre-flight checks    |
-| `POST …/probe`  | checks a candidate hub over ssh (read-only)             |
-| `POST …/plan`   | everything setup would do, before anything is written   |
-| `POST …/apply`  | does it, as a job; or resumes or abandons a stopped run |
-| `POST …/invite` | the line another machine runs to join                   |
+| endpoint             | does                                                    |
+| -------------------- | ------------------------------------------------------- |
+| `GET  …/state`       | where this machine stands, and its pre-flight checks    |
+| `POST …/probe`       | checks a candidate hub over ssh (read-only)             |
+| `POST …/plan`        | everything setup would do, before anything is written   |
+| `POST …/apply`       | does it, as a job; or resumes or abandons a stopped run |
+| `POST …/invite`      | the line another machine runs to join                   |
+| `POST …/notify-test` | once set up: one test alert, as `t3-fleet notify test`  |
 
 Progress arrives as the existing `job` events on `/api/events`. A plan is only
 applied while nothing it read has changed; if something has, the wizard plans
