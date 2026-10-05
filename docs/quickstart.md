@@ -23,9 +23,10 @@ PATH, and whether a sync timer would run here.
 
 ### In the browser
 
-After the installer, a wizard opens on your own computer (or run
-`t3-fleet ui`, or `t3-fleet setup --ui`, on a machine that is not in a fleet
-yet). It runs only on 127.0.0.1 and answers only the tab it opened. It asks:
+After a first install on your own computer (a Mac, or Linux with a desktop),
+the installer opens the wizard in your browser. Anywhere else it prints what
+to run next; run `t3-fleet ui`, or `t3-fleet setup --ui`, on a machine that is
+not in a fleet yet to open it. It runs only on 127.0.0.1 and answers only the tab it opened. It asks:
 
 1. **What machines do you have?** Whether one stays on (a home server, a Mac
    mini, a VPS), and how many others you run T3 on. And how T3 Fleet looks
@@ -150,7 +151,8 @@ flag: `--auto-update`/`--no-auto-update`, `--notify`/`--no-notify`, `--ntfy`,
 `--mcp-hub` (with `--relay`). A machine joining a fleet keeps the fleet's
 updates setting.
 
-`--plan` shows the plan and stops; it never writes anything. `--yes` takes
+`--plan` shows the plan, and the Settings these flags would set (each one
+not given at its default), and stops; it never writes anything. `--yes` takes
 every default. Without gh or `--remote`, the fleet stays local and setup
 finishes there, saying how to add a remote later. Before it changes
 anything, setup keeps a snapshot of your clients' MCP servers and every

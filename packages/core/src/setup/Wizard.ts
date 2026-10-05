@@ -83,13 +83,22 @@ export interface SetupJob {
   readonly run: (step: (text: string) => Effect.Effect<void>) => Effect.Effect<void, string>;
 }
 
+/** Apply refused a plan that is out of date: something it read changed, or its id is too old. */
+export class StalePlan extends Schema.TaggedError<StalePlan>()("StalePlan", {
+  message: Schema.String,
+}) {}
+
 /** What the server asks of the wizard's engine; Wizard.make gives the real one, tests fakes. */
 export interface SetupActions {
   readonly state: Effect.Effect<UiSetupState, string>;
   readonly probe: (ssh: string) => Effect.Effect<UiProbe>;
   readonly plan: (request: UiSetupPlanRequest) => Effect.Effect<UiSetupPlan, string>;
-  /** The jobs to run, in order; refused with why (a stale plan, say). None for abandon. */
-  readonly apply: (request: UiSetupApplyRequest) => Effect.Effect<ReadonlyArray<SetupJob>, string>;
+  /** The jobs to run, in order; refused with why, a stale plan as StalePlan. */
+  readonly apply: (
+    request: Exclude<UiSetupApplyRequest, { readonly kind: "abandon" }>,
+  ) => Effect.Effect<ReadonlyArray<SetupJob>, string | StalePlan>;
+  /** Drop the stopped run and any hub still to bring up; what the run had done, a line each. */
+  readonly abandon: Effect.Effect<ReadonlyArray<string>, string>;
   readonly invite: (node: string) => Effect.Effect<UiInvite, string>;
   /** Once set up: one test alert through this machine's [notify] paths, as `t3-fleet notify test`. */
   readonly notifyTest: Effect.Effect<UiNotifyTest, string>;
@@ -642,105 +651,122 @@ export const make = (hooks: {
         Effect.flatMap((lines) => Effect.forEach([`${input.node} is set up.`, ...lines], step)),
       );
 
-    const apply: SetupActions["apply"] = (request) =>
-      closed(
-        Effect.gen(function* () {
-          if (request.kind === "abandon") {
-            const dropped = yield* abandonRun(home());
-            const hub = yield* readHub(home());
-            if (Option.isNone(dropped) && Option.isNone(hub))
-              return yield* Effect.fail("there is no unfinished setup to abandon");
-            yield* dropHub(home());
-            return [];
-          }
-          if (request.kind === "resume") {
-            const leaving = yield* leavingRefusal(home());
-            if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
-            const unfinished = yield* unfinishedRun(home());
-            const hub = Option.getOrNull(yield* readHub(home()));
-            const jobs: Array<SetupJob> = [];
-            if (Option.isSome(unfinished)) {
-              const progress = unfinished.value;
-              const { input, raw } = yield* resumeInput(progress, yield* preflight, {
-                url: null,
-                remote: null,
-              });
-              jobs.push(
-                runJob(`Set up ${progress.node} (resumed)`, (step) =>
-                  stepsOf(input, raw, progress, step),
-                ),
-              );
-            }
-            if (hub !== null) jobs.push(hubJob(hub));
-            if (jobs.length === 0)
-              return yield* Effect.fail("there is no unfinished setup to resume");
-            return jobs;
-          }
-          const found = (yield* Ref.get(plans)).get(request.planId);
-          if (found === undefined)
-            return yield* Effect.fail("that plan is not this run's, or too old: plan again");
-          yield* mayStart;
-          const scratch = yield* scratchFor;
-          const now = yield* planned(found.request, scratch).pipe(
-            Effect.tapError(() => removeScratch(scratch)),
+    const abandon: SetupActions["abandon"] = closed(
+      Effect.gen(function* () {
+        const dropped = yield* abandonRun(home());
+        const hub = yield* readHub(home());
+        if (Option.isNone(dropped) && Option.isNone(hub))
+          return yield* Effect.fail("there is no unfinished setup to abandon");
+        yield* dropHub(home());
+        const lines: Array<string> = [];
+        if (Option.isSome(dropped)) {
+          const { stopped, report } = dropped.value;
+          if (stopped) lines.push(`It stopped at ${stopped.step}: ${stopped.why}`);
+          lines.push(...report);
+        }
+        if (Option.isSome(hub))
+          lines.push(
+            `Forgot bringing up ${hub.value.node} as the hub; what was done there stays. To add a hub later, run \`t3-fleet setup <repository> <name> --relay\` on it.`,
           );
-          if (now.digest !== request.planId) {
-            yield* removeScratch(scratch);
-            return yield* Effect.fail(
-              "this machine or the fleet changed since the plan was made: plan again, and review what changed",
+        return lines;
+      }),
+    );
+
+    const apply: SetupActions["apply"] = (request) =>
+      Effect.gen(function* () {
+        if (request.kind === "resume") {
+          const leaving = yield* leavingRefusal(home());
+          if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
+          const unfinished = yield* unfinishedRun(home());
+          const hub = Option.getOrNull(yield* readHub(home()));
+          const jobs: Array<SetupJob> = [];
+          if (Option.isSome(unfinished)) {
+            const progress = unfinished.value;
+            const { input, raw } = yield* resumeInput(progress, yield* preflight, {
+              url: null,
+              remote: null,
+            });
+            jobs.push(
+              runJob(`Set up ${progress.node} (resumed)`, (step) =>
+                stepsOf(input, raw, progress, step),
+              ),
             );
           }
-          const { p, missing } = now;
-          // Every choice names a conflict of this plan and one of its choices; a missing one takes the default.
-          const choices: Record<string, Choice> = {};
-          for (const [id, value] of Object.entries(request.choices)) {
-            const conflict = p.plan.conflicts.find((c) => c.id === id);
-            const choice = conflict?.choices.find((c) => c.value === value);
-            if (conflict === undefined || choice === undefined) {
-              yield* removeScratch(scratch);
-              return yield* Effect.fail(`not a choice in this plan: ${id} = ${value}`);
-            }
-            choices[id] = choice.value;
-          }
-          // Like the terminal: a conflict that follows a choice is only asked while it still differs.
-          for (const c of p.plan.conflicts)
-            if (!applies(c, choices, p.plan.conflicts)) delete choices[c.id];
-          const asked = new Set(missing.map((m) => m.name));
-          const unknown = Object.keys(request.values).filter((n) => !asked.has(n));
-          if (unknown.length > 0) {
-            yield* removeScratch(scratch);
-            return yield* Effect.fail(`not asked for in this plan: ${unknown.join(", ")}`);
-          }
-          const entered: Array<Secret> = Object.entries(request.values)
-            .filter(([name, value]) => name !== MODEL_TOKEN && value !== "")
-            .map(([name, value]) => ({ name, value, where: "entered during setup" }));
-          const input = decideRun(p, {
-            choices,
-            entered,
-            extras: extrasOf(p, found.request, request.values),
-            upkeep: upkeepOf(p.mode, found.request),
+          if (hub !== null) jobs.push(hubJob(hub));
+          if (jobs.length === 0)
+            return yield* Effect.fail("there is no unfinished setup to resume");
+          return jobs;
+        }
+        const found = (yield* Ref.get(plans)).get(request.planId);
+        if (found === undefined)
+          return yield* new StalePlan({
+            message: "that plan is not this run's, or too old: plan again",
           });
-          const title = `Set up ${p.node}`;
-          const local: SetupJob = p.nothing
-            ? runJob(title, (step) =>
-                Effect.gen(function* () {
-                  if (!p.pending) {
-                    if (p.record !== null) yield* clearAbandoned(p.home);
-                    return yield* step("Nothing here differs from the fleet.");
-                  }
-                  for (const line of yield* finishAbandoned(p)) yield* step(`✓ ${line}`);
-                  yield* step(`${p.node} is set up.`);
-                }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
-              )
-            : runJob(title, (step) =>
-                Effect.gen(function* () {
-                  if (found.hub !== null) yield* writeHub(p.home, found.hub);
-                  const progress = yield* startRun(p, input, step);
-                  yield* stepsOf(input, p.found.raw, progress, step);
-                }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
-              );
-          return found.hub === null ? [local] : [local, hubJob(found.hub)];
-        }),
+        yield* mayStart;
+        const scratch = yield* scratchFor;
+        const now = yield* planned(found.request, scratch).pipe(
+          Effect.tapError(() => removeScratch(scratch)),
+        );
+        if (now.digest !== request.planId) {
+          yield* removeScratch(scratch);
+          return yield* new StalePlan({
+            message:
+              "this machine or the fleet changed since the plan was made: plan again, and review what changed",
+          });
+        }
+        const { p, missing } = now;
+        // Every choice names a conflict of this plan and one of its choices; a missing one takes the default.
+        const choices: Record<string, Choice> = {};
+        for (const [id, value] of Object.entries(request.choices)) {
+          const conflict = p.plan.conflicts.find((c) => c.id === id);
+          const choice = conflict?.choices.find((c) => c.value === value);
+          if (conflict === undefined || choice === undefined) {
+            yield* removeScratch(scratch);
+            return yield* Effect.fail(`not a choice in this plan: ${id} = ${value}`);
+          }
+          choices[id] = choice.value;
+        }
+        // Like the terminal: a conflict that follows a choice is only asked while it still differs.
+        for (const c of p.plan.conflicts)
+          if (!applies(c, choices, p.plan.conflicts)) delete choices[c.id];
+        const asked = new Set(missing.map((m) => m.name));
+        const unknown = Object.keys(request.values).filter((n) => !asked.has(n));
+        if (unknown.length > 0) {
+          yield* removeScratch(scratch);
+          return yield* Effect.fail(`not asked for in this plan: ${unknown.join(", ")}`);
+        }
+        const entered: Array<Secret> = Object.entries(request.values)
+          .filter(([name, value]) => name !== MODEL_TOKEN && value !== "")
+          .map(([name, value]) => ({ name, value, where: "entered during setup" }));
+        const input = decideRun(p, {
+          choices,
+          entered,
+          extras: extrasOf(p, found.request, request.values),
+          upkeep: upkeepOf(p.mode, found.request),
+        });
+        const title = `Set up ${p.node}`;
+        const local: SetupJob = p.nothing
+          ? runJob(title, (step) =>
+              Effect.gen(function* () {
+                if (!p.pending) {
+                  if (p.record !== null) yield* clearAbandoned(p.home);
+                  return yield* step("Nothing here differs from the fleet.");
+                }
+                for (const line of yield* finishAbandoned(p)) yield* step(`✓ ${line}`);
+                yield* step(`${p.node} is set up.`);
+              }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
+            )
+          : runJob(title, (step) =>
+              Effect.gen(function* () {
+                if (found.hub !== null) yield* writeHub(p.home, found.hub);
+                const progress = yield* startRun(p, input, step);
+                yield* stepsOf(input, p.found.raw, progress, step);
+              }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
+            );
+        return found.hub === null ? [local] : [local, hubJob(found.hub)];
+      }).pipe(
+        Effect.provide(services),
+        Effect.mapError((e) => (Schema.is(StalePlan)(e) ? e : message(e))),
       );
 
     const invite: SetupActions["invite"] = (node) =>
@@ -781,6 +807,7 @@ export const make = (hooks: {
       probe: (ssh) => probeHub(ssh).pipe(Effect.provide(services)),
       plan,
       apply,
+      abandon,
       invite,
     } satisfies SetupActions;
   });

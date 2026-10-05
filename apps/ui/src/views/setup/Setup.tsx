@@ -5,28 +5,37 @@
  * fleet app once this machine is a member.
  */
 import type { UiProbe, UiSetupState } from "@t3-fleet/core/SetupApi";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { api, isUnauthorized, type UiSetupPlan } from "../../lib/api";
+import { api, isUnauthorized } from "../../lib/api";
 import { finished } from "../../lib/jobs";
 import { useEvent, useStore } from "../../lib/store";
 import { ApplyStep } from "./Apply";
 import { DoneStep } from "./Done";
 import { HubStep, type ProbeState } from "./Hub";
 import { MachinesStep } from "./Machines";
-import { StepBar, StepRail, type RailStep } from "./parts";
+import { AbandonedNote, StepBar, StepRail, type RailStep } from "./parts";
 import { PlanStep } from "./Plan";
 import { RepoStep } from "./Repo";
-import { loadRun, runJobs, saveRun, type SetupRun } from "./run";
+import { loadRun, runJobs, saveRun, type JobListing, type SetupRun } from "./run";
 import {
   blocker,
   chosen,
+  followStage,
   initialAnswers,
+  keepChoices,
+  keepCredentials,
+  NO_PLAN,
+  persistable,
+  planAnswered,
+  planAsked,
+  planReady,
   planRequest,
   stepsFor,
   suggestHubName,
   typedValues,
   type Answers,
+  type PlanLoad,
   type StepId,
 } from "./wizard";
 
@@ -85,13 +94,14 @@ export function SetupWizard({
     back !== null && run === null ? back.step : firstStep(initial, run),
   );
   const [rechecking, setRechecking] = useState(false);
+  const [recheckError, setRecheckError] = useState<unknown>(null);
   const [probe, setProbe] = useState<ProbeState>({ data: null, running: false, error: null });
-  const [plan, setPlan] = useState<{
-    data: UiSetupPlan | null;
-    key: string;
-    loading: boolean;
-    error: unknown;
-  }>({ data: null, key: "", loading: false, error: null });
+  const [plan, setPlan] = useState<PlanLoad>(NO_PLAN);
+  const planGen = useRef(0);
+  /** What the last abandon said the run had done, until dismissed. */
+  const [abandoned, setAbandoned] = useState<ReadonlyArray<string> | null>(null);
+  /** The server's job list, read after a reload or on coming back to the tab: a job it dropped is gone. */
+  const [listing, setListing] = useState<JobListing | null>(null);
   const [choices, setChoices] = useState<Readonly<Record<string, string>>>({});
   const [values, setValues] = useState<Readonly<Record<string, string>>>({});
   const [later, setLater] = useState<ReadonlySet<string>>(new Set());
@@ -106,14 +116,18 @@ export function SetupWizard({
   }, []);
   const set = useCallback((patch: Partial<Answers>) => setAnswers((a) => ({ ...a, ...patch })), []);
 
-  // Remember answers across a reload until setup starts.
+  // Remember answers across a reload until setup starts; never the ntfy topic, a secret.
   useEffect(() => {
     if (step === "apply" || step === "done") window.sessionStorage.removeItem(ANSWERS_KEY);
-    else window.sessionStorage.setItem(ANSWERS_KEY, JSON.stringify({ answers, step }));
+    else
+      window.sessionStorage.setItem(
+        ANSWERS_KEY,
+        JSON.stringify({ answers: persistable(answers), step }),
+      );
   }, [answers, step]);
 
   // A setup running that this page did not start (another tab, or before a reload): follow it.
-  const { setup: runningSetup } = runJobs(run, jobs);
+  const { setup: runningSetup, gone } = runJobs(run, jobs, listing);
   useEffect(() => {
     if (runningSetup === null || finished(runningSetup) || step === "apply" || step === "done")
       return;
@@ -153,8 +167,11 @@ export function SetupWizard({
 
   const recheck = async () => {
     setRechecking(true);
+    setRecheckError(null);
     try {
-      setState(await api.setupState());
+      adopt(await api.setupState());
+    } catch (error) {
+      setRecheckError(error);
     } finally {
       setRechecking(false);
     }
@@ -185,16 +202,27 @@ export function SetupWizard({
   const request = planRequest(answers);
   const requestKey = JSON.stringify(request);
   const makePlan = useCallback(async (body: typeof request, key: string) => {
-    setPlan((p) => ({ ...p, key, loading: true, error: null }));
+    const gen = ++planGen.current;
+    setPlan((p) => planAsked(p, key, gen));
     setApplyError(null);
     try {
       const data = await api.setupPlan(body);
-      setPlan({ data, key, loading: false, error: null });
-      setChoices({});
+      if (gen !== planGen.current) return;
+      setPlan((p) => planAnswered(p, gen, { data }));
+      // What was decided carries over where the new plan still asks it.
+      setChoices((c) => keepChoices(c, data));
+      const kept = keepCredentials(valuesRef.current, laterRef.current, data);
+      setValues(kept.values);
+      setLater(kept.later);
     } catch (error) {
-      setPlan((p) => ({ ...p, data: p.key === key ? p.data : null, loading: false, error }));
+      setPlan((p) => planAnswered(p, gen, { error }));
     }
   }, []);
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+  const laterRef = useRef(later);
+  laterRef.current = later;
+  const ready = planReady(plan, requestKey);
   useEffect(() => {
     if (step !== "plan" || plan.key === requestKey) return;
     void makePlan(request, requestKey);
@@ -202,8 +230,8 @@ export function SetupWizard({
   }, [step, requestKey, plan.key, makePlan]);
 
   const apply = async () => {
+    if (!planReady(plan, requestKey)) return;
     const p = plan.data;
-    if (p === null) return;
     setApplying(true);
     setApplyError(null);
     try {
@@ -211,7 +239,7 @@ export function SetupWizard({
         kind: "plan",
         planId: p.planId,
         choices: chosen(p, choices),
-        values: typedValues(values, later),
+        values: typedValues(values, later, p),
       });
       setRun({
         job: started.jobId,
@@ -229,6 +257,7 @@ export function SetupWizard({
                 steps: p.hub.steps,
               },
         remote: p.repo.remote,
+        commits: p.commits,
         settings: p.settings,
         others: answers.others,
         reached: {},
@@ -251,6 +280,7 @@ export function SetupWizard({
       steps: run?.steps ?? [],
       hub: run?.hub ?? null,
       ...(run?.remote === undefined ? {} : { remote: run.remote }),
+      ...(run?.commits === undefined ? {} : { commits: run.commits }),
       others: run?.others ?? answers.others,
       reached: {},
       finished: false,
@@ -258,8 +288,15 @@ export function SetupWizard({
   };
 
   const abandon = async () => {
-    await api.setupApply({ kind: "abandon" });
-    const fresh = await api.setupState();
+    const answer = await api.setupApply({ kind: "abandon" });
+    setAbandoned(answer.report ?? null);
+    // Abandoned already: a state that cannot be read now is taken as abandon leaves it, and read again later.
+    const fresh = await api.setupState().catch((): UiSetupState => ({
+      ...state,
+      stage: state.stage === "member" ? "member" : "fresh",
+      unfinished: null,
+      hub: null,
+    }));
     setState(fresh);
     // In the fleet already: only the hub's part was left, and it is forgotten.
     if (fresh.stage === "member") {
@@ -272,30 +309,70 @@ export function SetupWizard({
     setStep("machines");
   };
 
-  // The server became the fleet's ("session"), or a setup job ended: read where things stand.
-  const following = step === "apply" || step === "done";
-  useEvent("session", () => {
-    void api.setupState().then(
-      (fresh) => {
-        setState(fresh);
+  /**
+   * Where things stand, read again: kept, and acted on when it moves a wizard
+   * that is not following a run (followStage). Without this a tab left on an
+   * earlier step would offer a second setup, or miss one that stopped.
+   */
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  const onMemberRef = useRef(onMember);
+  onMemberRef.current = onMember;
+  const adopt = useCallback(
+    (fresh: UiSetupState) => {
+      setState(fresh);
+      const to = followStage(fresh, stepRef.current);
+      if (to === "member") {
         // Nothing of the run to show here (another tab ran it): straight into the fleet.
-        if (fresh.stage === "member" && fresh.hub === null && !following) {
-          setRun(null);
-          window.sessionStorage.removeItem(ANSWERS_KEY);
-          onMember();
-        }
-      },
+        setRun(null);
+        window.sessionStorage.removeItem(ANSWERS_KEY);
+        onMemberRef.current();
+      } else if (to === "apply") setStep("apply");
+    },
+    [setRun],
+  );
+  const reread = useCallback(() => {
+    void api.setupState().then(adopt, () => undefined);
+  }, [adopt]);
+  const relist = useCallback(() => {
+    const at = Date.now();
+    void api.jobs().then(
+      (all) => setListing({ at, ids: new Set(all.map((j) => j.id)) }),
       () => undefined,
     );
-  });
+  }, []);
+
+  // The server became the fleet's ("session"), or a setup job ended: read where things stand.
+  useEvent("session", reread);
   const ended = jobs
     .filter((j) => (j.kind === "setup" || j.kind === "setup-hub") && finished(j))
     .map((j) => j.id)
     .join();
   useEffect(() => {
-    if (ended === "") return;
-    void api.setupState().then(setState, () => undefined);
-  }, [ended]);
+    if (ended !== "") reread();
+  }, [ended, reread]);
+  // Back to this tab: whatever happened meanwhile (in another tab, or the terminal).
+  useEffect(() => {
+    relist();
+    const back = () => {
+      if (document.visibilityState !== "visible") return;
+      reread();
+      relist();
+    };
+    window.addEventListener("focus", back);
+    document.addEventListener("visibilitychange", back);
+    return () => {
+      window.removeEventListener("focus", back);
+      document.removeEventListener("visibilitychange", back);
+    };
+  }, [reread, relist]);
+  // The run's job is gone from the server and this machine is not part-way through setup: it was abandoned.
+  useEffect(() => {
+    if (!gone || state.stage !== "fresh" || state.hub !== null || step !== "apply") return;
+    setRun(null);
+    setAnswers(initialAnswers(state));
+    setStep("machines");
+  }, [gone, state, step, setRun]);
 
   const reached = useCallback(
     (job: string, index: number) =>
@@ -399,6 +476,7 @@ export function SetupWizard({
           onNext={next}
           onRecheck={() => void recheck()}
           rechecking={rechecking}
+          recheckError={recheckError}
         />
       );
       break;
@@ -441,6 +519,7 @@ export function SetupWizard({
             data: plan.data,
             loading: plan.loading,
             error: plan.error,
+            ready,
             reload: () => void makePlan(request, requestKey),
           }}
           choices={choices}
@@ -468,6 +547,7 @@ export function SetupWizard({
         <ApplyStep
           state={state}
           run={run}
+          listing={listing}
           jobs={jobs}
           now={now}
           onReached={reached}
@@ -501,6 +581,9 @@ export function SetupWizard({
       <div className="flex min-w-0 flex-1 flex-col">
         <StepBar steps={rail} current={step} />
         {banner}
+        {abandoned === null ? null : (
+          <AbandonedNote lines={abandoned} onDismiss={() => setAbandoned(null)} />
+        )}
         {/* Keyed by step: each opens fresh, its heading focused. */}
         <div key={step} className="flex min-h-0 flex-1 flex-col">
           {content}

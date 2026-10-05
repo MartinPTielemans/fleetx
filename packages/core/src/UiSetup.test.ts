@@ -10,6 +10,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { UiJob, UiSession, UiSessionGrant, type UiSession as Session } from "./Api.ts";
 import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
   UiInvite,
   UiNotifyTest,
   UiProbe,
@@ -18,7 +20,7 @@ import {
   UiSetupState,
   type UiSetupPlanRequest,
 } from "./SetupApi.ts";
-import type { SetupActions, SetupJob } from "./setup/Wizard.ts";
+import { StalePlan, type SetupActions, type SetupJob } from "./setup/Wizard.ts";
 import { uiLayer, type UiActions } from "./UiServer.ts";
 
 const PORT = 8396;
@@ -118,13 +120,20 @@ const fakeSetup = () => {
     plan: (r) =>
       r.node === "Laptop" ? Effect.fail('"Laptop" is not a machine name') : Effect.succeed(plan),
     apply: (r) => {
-      if (r.kind === "abandon") return Effect.succeed([]);
       if (r.kind === "resume") return Effect.fail("there is no unfinished setup to resume");
       if (r.planId !== PLAN_ID)
-        return Effect.fail("this machine or the fleet changed since the plan was made: plan again");
+        return Effect.fail(
+          new StalePlan({
+            message: "this machine or the fleet changed since the plan was made: plan again",
+          }),
+        );
       values.push(r.values);
       return Effect.succeed([job("setup", "Set up laptop"), job("setup-hub", "Bring up hub")]);
     },
+    abandon: Effect.succeed([
+      "Dropped the unfinished setup of laptop. What it did stays:",
+      "  ✓ wrote ~/fleet",
+    ]),
     invite: (node) =>
       Effect.succeed({ command: `curl -fsSL https://x/install.sh | sh -s -- setup url ${node}` }),
     notifyTest: Effect.succeed({ lines: ["desktop: delivered"], failed: false }),
@@ -245,8 +254,10 @@ describe("the UI server in setup mode", () => {
       (await server.post("/api/setup/plan", { ...request, hub: { ssh: "-x", node: "hub" } }))
         .status,
     ).toBe(400);
+    // Refused with why: not a stale plan, so the app shows the words.
     const refused = await server.post("/api/setup/plan", { ...request, node: "Laptop" });
-    expect(refused.status).toBe(409);
+    expect(refused.status).toBe(422);
+    expect(refused.headers.get(SETUP_ERROR_HEADER)).toBeNull();
     expect(await refused.text()).toContain("not a machine name");
     const planned = decode(
       UiSetupPlan,
@@ -265,6 +276,7 @@ describe("the UI server in setup mode", () => {
       values: {},
     });
     expect(response.status).toBe(409);
+    expect(response.headers.get(SETUP_ERROR_HEADER)).toBe(STALE_PLAN);
     expect(await response.text()).toContain("plan again");
     expect(await server.jobs()).toEqual([]);
     await server.dispose();
@@ -292,6 +304,7 @@ describe("the UI server in setup mode", () => {
       values: {},
     });
     expect(again.status).toBe(409);
+    expect(again.headers.get(SETUP_ERROR_HEADER)).toBeNull();
     expect(await again.text()).toContain("running already");
 
     server.setup.state.gate.open();
@@ -338,13 +351,17 @@ describe("the UI server in setup mode", () => {
     await server.dispose();
   });
 
-  it("abandons without a job, and invites", async () => {
+  it("abandons without a job, saying what the run had done, and invites", async () => {
     const server = serve();
     const abandoned = await server.post("/api/setup/apply", { kind: "abandon" });
     expect(abandoned.status).toBe(200);
-    expect(decode(UiSetupStarted, await abandoned.text())).toEqual({ jobId: null });
+    expect(decode(UiSetupStarted, await abandoned.text())).toEqual({
+      jobId: null,
+      report: ["Dropped the unfinished setup of laptop. What it did stays:", "  ✓ wrote ~/fleet"],
+    });
     const resumed = await server.post("/api/setup/apply", { kind: "resume" });
-    expect(resumed.status).toBe(409);
+    expect(resumed.status).toBe(422);
+    expect(await resumed.text()).toContain("no unfinished setup");
     const invite = decode(
       UiInvite,
       await (await server.post("/api/setup/invite", { node: "desk" })).text(),

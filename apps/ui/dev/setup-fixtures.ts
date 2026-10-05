@@ -14,6 +14,11 @@
  *   ?setup=hubfailed    in the fleet, but the hub's bring-up failed: retry or forget it
  *   &apply=fail         the run stops at "Commit and push" (resume continues it)
  *   &apply=hubfail      this computer's part works, the hub's stops
+ *   &apply=stale        apply refuses the first plan as out of date (409 stale-plan)
+ *   &apply=refuse       apply refuses with a reason (422), not a stale plan
+ *   &replan=fail        the first plan is made; every one after it fails (422)
+ *   &expire=1           a finished job is dropped a second later, as keepJobsFor
+ *                       does: reload after the run to see the page read the state
  *   &probe=ready|missing|old|unreachable   the hub probe's answer; without it,
  *                       the ssh destination decides: "…down…" or "…nope…" is
  *                       unreachable, "…bare…" lacks tailscale and docker,
@@ -21,19 +26,26 @@
  *   &fast=1             apply steps every 150ms instead of 900ms
  */
 import type { UiJob, UiSession } from "@t3-fleet/core/Api";
-import type {
-  UiPlanConflict,
-  UiProbe,
-  UiProbeItem,
-  UiSetupApplyRequest,
-  UiSetupPlan,
-  UiSetupPlanRequest,
-  UiSetupState,
+import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
+  type UiPlanConflict,
+  type UiProbe,
+  type UiProbeItem,
+  type UiSetupApplyRequest,
+  type UiSetupPlan,
+  type UiSetupPlanRequest,
+  type UiSetupState,
 } from "@t3-fleet/core/SetupApi";
 import { hubStepTitles, mcpHubLine, settingsWords } from "@t3-fleet/core/setup/PlanWords";
 import { NTFY_SECRET } from "@t3-fleet/core/Upkeep";
 
-type Answer = { status: number; body: string; delay?: number };
+type Answer = {
+  status: number;
+  body: string;
+  delay?: number;
+  headers?: Readonly<Record<string, string>>;
+};
 const json = (value: unknown, delay = 0): Answer => ({
   status: 200,
   body: JSON.stringify(value),
@@ -57,11 +69,17 @@ interface Sim {
   failedOnce: boolean;
   /** A hub asked for and not brought up yet, with why the last try stopped. */
   hub: UiSetupState["hub"];
+  /** How many plans were made (replan=fail fails all but the first). */
+  plans: number;
+  /** Apply refused a plan as stale once already (apply=stale). */
+  staleOnce: boolean;
+  /** Finished jobs are dropped a second after (expire=1). */
+  expire: boolean;
 }
 
 const sims = new Map<string, Sim>();
 const keyOf = (page: URLSearchParams) =>
-  ["setup", "apply"].map((k) => `${k}=${page.get(k) ?? ""}`).join("&");
+  ["setup", "apply", "replan", "expire"].map((k) => `${k}=${page.get(k) ?? ""}`).join("&");
 
 const fresh = (page: URLSearchParams): Sim => {
   const variant = page.get("setup");
@@ -86,6 +104,9 @@ const fresh = (page: URLSearchParams): Sim => {
         : variant === "unfinished"
           ? { node: "box", ssh: "me@box", error: null }
           : null,
+    plans: 0,
+    staleOnce: false,
+    expire: page.get("expire") === "1",
   };
 };
 
@@ -102,6 +123,8 @@ const emit = (sim: Sim, job: UiJob) => {
   sim.jobs.set(job.id, job);
   const chunk = `event: job\ndata: ${JSON.stringify(job)}\n\n`;
   for (const write of sim.streams) write(chunk);
+  if (sim.expire && (job.state === "done" || job.state === "failed"))
+    setTimeout(() => sim.jobs.delete(job.id), 1000);
 };
 
 /** Whether this page asks for the wizard at all: without ?setup the fixtures are a fleet. */
@@ -559,11 +582,29 @@ const becomeMember = (sim: Sim) => {
 const apply = (sim: Sim, page: URLSearchParams, request: UiSetupApplyRequest): Answer => {
   if (request.kind === "abandon") {
     // In the fleet, abandoning forgets the hub still to bring up; before it, the whole run.
+    const report =
+      sim.stage === "member"
+        ? []
+        : [
+            "Dropped the unfinished setup of mbp-14. What it did stays:",
+            "  ✓ snapshot of the clients' MCP servers (for t3-fleet leave)",
+            "  ✓ created the private repository octo/fleet",
+            "  ✓ wrote skills, MCP servers and instructions into ~/fleet",
+            "  ✓ made this machine's key, and stored 3 secrets",
+            "Not done: commit, config, links, timer, sync.",
+            "To finish it: run `t3-fleet setup` again. It publishes what this run wrote and runs the first sync, which registers its servers, then shows anything else that still differs.",
+            "To undo it instead:",
+            "  `git -C ~/fleet status -- skills mcp AGENTS.md` shows what it wrote; `git -C ~/fleet checkout -- <file>` puts a changed file back, and a new one can be deleted",
+          ];
+    if (sim.hub !== null)
+      report.push(
+        `Forgot bringing up ${sim.hub.node} as the hub; what was done there stays. To add a hub later, run \`t3-fleet setup <repository> <name> --relay\` on it.`,
+      );
     if (sim.stage !== "member") sim.stage = "fresh";
     sim.stopped = null;
     sim.unfinished = null;
     sim.hub = null;
-    return json({ jobId: null }, 400);
+    return json({ jobId: null, report }, 400);
   }
   const steps =
     sim.lastPlan?.plan.steps ??
@@ -591,8 +632,19 @@ const apply = (sim: Sim, page: URLSearchParams, request: UiSetupApplyRequest): A
     );
     return json({ jobId: job.id });
   }
-  if (sim.lastPlan === null || sim.lastPlan.plan.planId !== request.planId)
-    return { status: 409, body: "the plan is out of date: make it again" };
+  const stale = page.get("apply") === "stale" && !sim.staleOnce;
+  if (stale) sim.staleOnce = true;
+  if (stale || sim.lastPlan === null || sim.lastPlan.plan.planId !== request.planId)
+    return {
+      status: 409,
+      body: "this machine or the fleet changed since the plan was made: plan again, and review what changed",
+      headers: { [SETUP_ERROR_HEADER]: STALE_PLAN },
+    };
+  if (page.get("apply") === "refuse")
+    return {
+      status: 422,
+      body: "~/fleet already exists and is not empty; move it aside (or, from a terminal, choose another place with `t3-fleet setup --dir <path>`)",
+    };
   const hub = sim.lastPlan.plan.hub;
   sim.hub = hub === null ? null : { node: hub.node, ssh: hub.ssh, error: null };
   const job = runSteps(
@@ -639,6 +691,13 @@ export const setupResponse = (
     }
     case "/api/setup/plan": {
       const request = JSON.parse(body) as UiSetupPlanRequest;
+      sim.plans++;
+      if (page.get("replan") === "fail" && sim.plans > 1)
+        return {
+          status: 422,
+          body: "could not read the fleet: git clone git@github.com:octo/fleet.git: Permission denied (publickey)",
+          delay: 900,
+        };
       const plan = planFor(request, sim.github);
       sim.lastPlan = { request, plan };
       return json(plan, 1100);

@@ -128,6 +128,8 @@ import type { NodeState } from "./State.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
 import { isLauncher } from "./Names.ts";
 import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
   UiInvite,
   UiInviteRequest,
   UiNotifyTest,
@@ -139,7 +141,7 @@ import {
   UiSetupStarted,
   UiSetupState,
 } from "./SetupApi.ts";
-import type { SetupActions, SetupJob } from "./setup/Wizard.ts";
+import type { SetupActions, SetupJob, StalePlan } from "./setup/Wizard.ts";
 
 export { fixDigest } from "./Fix.ts";
 
@@ -1505,13 +1507,24 @@ export const uiLayer = (options: UiServerOptions) =>
       /** An ssh destination as ssh takes it: never an option, never more than one word. */
       const SSH_DESTINATION = /^(?!-)[A-Za-z0-9_.@:[\]%-]+$/;
 
+      /** A refusal as SetupApi.ts says: a stale plan its own 409, anything else 422 with why. */
+      const setupRefused = (e: string | StalePlan) =>
+        Effect.succeed(
+          typeof e === "string"
+            ? plain(e, 422)
+            : HttpServerResponse.text(e.message, {
+                status: 409,
+                headers: { ...SECURITY_HEADERS, [SETUP_ERROR_HEADER]: STALE_PLAN },
+              }),
+        );
+
       const setupRoute = <S extends Schema.Top & { readonly DecodingServices: never }>(
         path: `/api/setup/${string}`,
         schema: S,
         run: (
           setup: SetupActions,
           request: S["Type"],
-        ) => Effect.Effect<HttpServerResponse.HttpServerResponse, string>,
+        ) => Effect.Effect<HttpServerResponse.HttpServerResponse, string | StalePlan>,
       ) =>
         HttpRouter.add(
           "POST",
@@ -1520,7 +1533,7 @@ export const uiLayer = (options: UiServerOptions) =>
             Effect.gen(function* () {
               if (options.setup === undefined) return plain("no setup here", 404);
               const asked = yield* body(schema)(request);
-              return yield* run(options.setup, asked).pipe(Effect.catch(fail(409)));
+              return yield* run(options.setup, asked).pipe(Effect.catch(setupRefused));
             }).pipe(Effect.catch(fail(400))),
           ),
         );
@@ -1553,8 +1566,12 @@ export const uiLayer = (options: UiServerOptions) =>
       const setupApply = setupRoute("/api/setup/apply", UiSetupApplyRequest, (setup, r) =>
         startingSetup.withPermits(1)(
           Effect.gen(function* () {
-            if (yield* setupRunning)
-              return yield* Effect.fail("setup is running already; watch its job");
+            if (yield* setupRunning) return plain("setup is running already; watch its job", 409);
+            if (r.kind === "abandon")
+              return yield* jsonResponse(UiSetupStarted)({
+                jobId: null,
+                report: yield* setup.abandon,
+              });
             const jobId = yield* chain(yield* setup.apply(r));
             return yield* jsonResponse(UiSetupStarted, jobId === null ? 200 : 202)({ jobId });
           }),
@@ -1575,7 +1592,7 @@ export const uiLayer = (options: UiServerOptions) =>
             ? Effect.succeed(plain("no setup here", 404))
             : options.setup.notifyTest.pipe(
                 Effect.flatMap(jsonResponse(UiNotifyTest)),
-                Effect.catch(fail(409)),
+                Effect.catch(fail(422)),
               ),
         ),
       );

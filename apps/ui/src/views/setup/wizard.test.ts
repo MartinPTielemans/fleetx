@@ -5,11 +5,19 @@ import {
   blocker,
   chosen,
   conflictNow,
+  followStage,
   initialAnswers,
+  keepChoices,
+  keepCredentials,
   looksLikeRemote,
   nodeNameProblem,
+  NO_PLAN,
   ntfyPatch,
   openConflicts,
+  persistable,
+  planAnswered,
+  planAsked,
+  planReady,
   planRequest,
   settingParts,
   stepIndex,
@@ -150,17 +158,32 @@ describe("requests", () => {
     expect(planRequest({ ...a, autoUpdate: false, notifyDesktop: false }).autoUpdate).toBe(false);
   });
 
-  it("makes an ntfy topic once, keeps it through off and on, and sends it only while on", () => {
+  it("makes an ntfy topic when turned on, forgets it when off, and never keeps it across a reload", () => {
     const on = { ...answers(), ...ntfyPatch(answers(), true) };
     expect(on.ntfyUrl).toMatch(/^https:\/\/ntfy\.sh\/[a-z0-9]{24,}$/);
     expect(planRequest(on).notify.ntfy).toBe(on.ntfyUrl);
+    expect({ ...on, ...ntfyPatch(on, true) }.ntfyUrl).toBe(on.ntfyUrl);
     const off = { ...on, ...ntfyPatch(on, false) };
+    expect(off.ntfyUrl).toBe("");
     expect(planRequest(off).notify.ntfy).toBeNull();
-    expect({ ...off, ...ntfyPatch(off, true) }.ntfyUrl).toBe(on.ntfyUrl);
+    expect({ ...off, ...ntfyPatch(off, true) }.ntfyUrl).not.toBe(on.ntfyUrl);
+    const kept = persistable(on);
+    expect(JSON.stringify(kept)).not.toContain(on.ntfyUrl);
+    expect(kept).toMatchObject({ ntfy: false, ntfyUrl: "", node: on.node });
   });
 
-  it("leaves out credentials set later or left blank", () => {
-    expect(typedValues({ A: "1", B: "", C: "3" }, new Set(["C"]))).toEqual({ A: "1" });
+  it("sends only credentials the plan asks for, leaving out those set later or left blank", () => {
+    const plan = { missing: ["A", "B", "C"].map((name) => ({ name, why: "" })) };
+    expect(typedValues({ A: "1", B: "", C: "3", OLD: "4" }, new Set(["C"]), plan)).toEqual({
+      A: "1",
+    });
+  });
+
+  it("forgets what was typed for credentials a new plan no longer asks for", () => {
+    const plan = { missing: [{ name: "A", why: "" }] };
+    const kept = keepCredentials({ A: "1", B: "2" }, new Set(["A", "B"]), plan);
+    expect(kept.values).toEqual({ A: "1" });
+    expect([...kept.later]).toEqual(["A"]);
   });
 });
 
@@ -246,6 +269,14 @@ describe("conflicts", () => {
     });
   });
 
+  it("keeps choices across a new plan where the conflict and the choice are still there", () => {
+    const again = { conflicts: [first] } as unknown as UiSetupPlan;
+    expect(keepChoices({ [first.id]: "copy:1", [follows.id]: "mine", gone: "x" }, again)).toEqual({
+      [first.id]: "copy:1",
+    });
+    expect(keepChoices({ [first.id]: "copy:9" }, plan)).toEqual({});
+  });
+
   it("sends every open conflict's choice, defaults included, and not settled ones", () => {
     expect(chosen(plan, {})).toEqual({ [first.id]: "copy:0", [follows.id]: "fleet" });
     expect(chosen(plan, { [first.id]: "copy:1", [follows.id]: "mine" })).toEqual({
@@ -270,5 +301,55 @@ describe("progress", () => {
     expect(stepStates(3, { state: "running" }, 1)).toEqual(["done", "running", "waiting"]);
     expect(stepStates(3, { state: "failed" }, 2)).toEqual(["done", "done", "failed"]);
     expect(stepStates(3, { state: "done" }, 0)).toEqual(["done", "done", "done"]);
+  });
+});
+
+describe("making the plan", () => {
+  const a = { planId: "a" } as UiSetupPlan;
+  const b = { planId: "b" } as UiSetupPlan;
+
+  it("applies only the plan for the answers as they are now, made without an error", () => {
+    const made = planAnswered(planAsked(NO_PLAN, "k1", 1), 1, { data: a });
+    expect(planReady(made, "k1")).toBe(true);
+    // The answers changed since: not this plan.
+    expect(planReady(made, "k2")).toBe(false);
+    // Asked again: the old plan stays on screen, but cannot be applied until the answer comes.
+    const asking = planAsked(made, "k2", 2);
+    expect(asking.data).toBe(a);
+    expect(planReady(asking, "k2")).toBe(false);
+  });
+
+  it("leaves no plan to apply when making it again fails", () => {
+    const made = planAnswered(planAsked(NO_PLAN, "k1", 1), 1, { data: a });
+    const failed = planAnswered(planAsked(made, "k2", 2), 2, { error: new Error("no") });
+    expect(failed).toMatchObject({ data: null, key: "k2", loading: false });
+    expect(planReady(failed, "k2")).toBe(false);
+    expect(planReady(failed, "k1")).toBe(false);
+    // The same answers asked again and failing: the old plan goes too.
+    const again = planAnswered(planAsked(made, "k1", 2), 2, { error: new Error("no") });
+    expect(again.data).toBeNull();
+  });
+
+  it("drops an answer to an older ask, whichever comes last", () => {
+    const first = planAsked(NO_PLAN, "k1", 1);
+    const second = planAsked(first, "k2", 2);
+    const newer = planAnswered(second, 2, { data: b });
+    expect(planAnswered(newer, 1, { data: a })).toBe(newer);
+    expect(planAnswered(newer, 1, { error: new Error("late") })).toBe(newer);
+    expect(planReady(newer, "k2")).toBe(true);
+  });
+});
+
+describe("following the state", () => {
+  it("moves a wizard not following a run into the fleet, or to the run; leaves one following alone", () => {
+    const fresh = { stage: "fresh" as const, hub: null };
+    const hub = { node: "box", ssh: "me@box", error: null };
+    expect(followStage(fresh, "plan")).toBeNull();
+    expect(followStage({ stage: "member", hub: null }, "plan")).toBe("member");
+    expect(followStage({ stage: "unfinished", hub: null }, "machines")).toBe("apply");
+    expect(followStage({ stage: "member", hub }, "repo")).toBe("apply");
+    expect(followStage({ stage: "fresh", hub }, "repo")).toBe("apply");
+    expect(followStage({ stage: "member", hub: null }, "apply")).toBeNull();
+    expect(followStage({ stage: "unfinished", hub: null }, "done")).toBeNull();
   });
 });

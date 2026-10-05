@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 import { FetchHttpClient } from "effect/unstable/http";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
@@ -135,9 +136,13 @@ describe("the setup wizard's engine", () => {
     expect((await run(wizard.plan(request))).planId).toBe(first.planId);
 
     fs.writeFileSync(join(home, ".agents/skills/demo/SKILL.md"), "---\nname: demo\n---\nbye\n");
-    expect(
-      await fails(wizard.apply({ kind: "plan", planId: first.planId, choices: {}, values: {} })),
-    ).toContain("changed since the plan was made");
+    const stale = await fails(
+      wizard.apply({ kind: "plan", planId: first.planId, choices: {}, values: {} }),
+    );
+    expect(Schema.is(Wizard.StalePlan)(stale)).toBe(true);
+    expect(String((stale as Wizard.StalePlan).message)).toContain(
+      "changed since the plan was made",
+    );
 
     const plan = await run(wizard.plan(request));
     expect(
@@ -178,6 +183,7 @@ describe("the setup wizard's engine", () => {
     expect(fs.existsSync(join(home, "scratch"))).toBe(false);
     expect(await run(wizard.state)).toMatchObject({ stage: "member", suggestedName: "laptop" });
     expect(await fails(wizard.apply({ kind: "resume" }))).toContain("no unfinished setup");
+    expect(await fails(wizard.abandon)).toContain("no unfinished setup to abandon");
   });
 
   it("admits the hub on the authority: its node file, [relay], a relay token, MCP hosting only when asked; once", async () => {

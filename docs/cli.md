@@ -121,7 +121,7 @@ walks through it. `--ui` asks the same questions in the browser.
 
 | flag                                | does                                                                                                   |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `--plan`                            | shows the plan and stops                                                                               |
+| `--plan`                            | shows the plan, and the Settings the flags would set, and stops                                        |
 | `--yes`, `-y`                       | takes every default                                                                                    |
 | `--resume`, `--abandon`             | continues, or drops, a setup that stopped part-way                                                     |
 | `--dir <path>`                      | where the config repo lives here (`~/fleet`)                                                           |
@@ -214,7 +214,11 @@ Who may open it is a Tailscale login, not just being on the tailnet:
 allow = ["you@example.com"]
 ```
 
-Setup writes the login of the authority that made the hub. A request is let
+The wizard writes the login of the authority it brought the hub up from.
+`t3-fleet setup --relay` on the server does not: add your Tailscale login
+(`tailscale status --json | jq -r .User[].LoginName` lists it) to `[ui] allow`
+in `t3-fleet.toml` on an authority, commit and push it, and the hub lets it in
+on its next sync. A request is let
 in only through `tailscale serve` on the hub itself (a loopback connection,
 with the login Tailscale sets and strips from what the browser sent), with
 the hub's address as Host and Origin, not through Funnel, and with a login in

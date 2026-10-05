@@ -37,6 +37,7 @@ const fixtures = (): Plugin => ({
           res.writeHead(answer.status, {
             "content-type":
               answer.body === "" || answer.status >= 400 ? "text/plain" : "application/json",
+            ...answer.headers,
           });
           res.end(answer.body);
         }, answer.delay ?? 0);

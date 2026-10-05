@@ -24,12 +24,13 @@ import type { UiJobT } from "../../lib/api";
 import { finished as jobFinished } from "../../lib/jobs";
 import { ago, cn, plural } from "../../lib/utils";
 import { CopyCommand, Prose, StepFrame } from "./parts";
-import { runJobs, type SetupRun } from "./run";
+import { runJobs, type JobListing, type SetupRun } from "./run";
 import { stepIndex, stepStates, type StepState } from "./wizard";
 
 export function ApplyStep({
   state,
   run,
+  listing,
   jobs,
   now,
   onReached,
@@ -39,6 +40,8 @@ export function ApplyStep({
 }: {
   state: UiSetupState;
   run: SetupRun | null;
+  /** The server's job list as last read: a job of the run it no longer has is gone. */
+  listing: JobListing | null;
   jobs: ReadonlyArray<UiJobT>;
   now: number;
   onReached: (job: string, index: number) => void;
@@ -46,7 +49,7 @@ export function ApplyStep({
   onAbandon: () => Promise<void>;
   onNext: () => void;
 }) {
-  const { setup, hub, pending } = runJobs(run, jobs);
+  const { setup, hub, pending } = runJobs(run, jobs, listing);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<unknown>(null);
   const [abandoning, setAbandoning] = useState(false);
@@ -130,7 +133,11 @@ export function ApplyStep({
       it did already.
     </>
   ) : finished ? (
-    "Everything in the plan ran. Next, bring in your other machines."
+    run?.commits === false ? (
+      "Everything in the plan ran. What this computer brought now waits for the authority's approval."
+    ) : (
+      "Everything in the plan ran. Next, bring in your other machines."
+    )
   ) : failed === "hub" ? (
     <>
       This computer is set up and in the fleet; bringing up {hubPart?.node ?? "the hub"} stopped.
@@ -172,7 +179,7 @@ export function ApplyStep({
         ) : (
           <Button disabled={!finished} onClick={onNext}>
             {finished ? null : <Spinner className="size-3.5" />}
-            {finished ? "Add your machines" : "Working"}
+            {finished ? (run?.commits === false ? "Continue" : "Add your machines") : "Working"}
             {finished ? <ArrowRightIcon /> : null}
           </Button>
         )
@@ -213,7 +220,13 @@ export function ApplyStep({
             waiting={!setupDone ? "After this computer" : null}
           />
         )}
-        {failed !== null || stopped ? (
+        {failed === "hub" ? (
+          <div className="flex flex-col gap-1.5 text-muted-foreground text-xs leading-5">
+            Only this page brings up the hub. Closed it? Open it again on this computer, and try the
+            hub from here:
+            <CopyCommand command="t3-fleet ui --local" className="max-w-sm" />
+          </div>
+        ) : failed !== null || stopped ? (
           <div className="flex flex-col gap-1.5 text-muted-foreground text-xs leading-5">
             The same from a terminal on this computer:
             <CopyCommand command="t3-fleet setup --resume" className="max-w-sm" />

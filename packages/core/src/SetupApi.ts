@@ -15,8 +15,23 @@
  * Progress comes as the existing "job" events on /api/events. A run that
  * stops part-way is "unfinished" in the state and continues with apply's
  * `resume`, doing what was decided, as `t3-fleet setup --resume` does.
+ *
+ * A refusal answers with why, as plain text:
+ *
+ *   400  the request is not one these schemas read
+ *   409  with `x-t3-fleet-error: stale-plan` (SETUP_ERROR_HEADER, STALE_PLAN):
+ *        the plan is out of date, because something it read changed or its id
+ *        is too old; plan again
+ *   409  without it: a setup is running already; watch its job
+ *   422  setup will not do this, and the text says why ("names are lowercase…")
+ *   500  where this machine stands could not be read
  */
 import * as Schema from "effect/Schema";
+
+/** The header a refusal names its kind in, when a front end acts on it. */
+export const SETUP_ERROR_HEADER = "x-t3-fleet-error";
+/** Apply refused the plan: it is out of date. The app plans again. */
+export const STALE_PLAN = "stale-plan";
 
 // ── where this machine stands ───────────────────────────────────────────
 
@@ -241,7 +256,14 @@ export const UiSetupApplyRequest = Schema.Union([
 export type UiSetupApplyRequest = typeof UiSetupApplyRequest.Type;
 
 /** The job apply started: watch it with the "job" events. Null for abandon. */
-export const UiSetupStarted = Schema.Struct({ jobId: Schema.NullOr(Schema.String) });
+export const UiSetupStarted = Schema.Struct({
+  jobId: Schema.NullOr(Schema.String),
+  /**
+   * For abandon: what the dropped run had done, what stays, and how to finish
+   * or undo it, a line each (as `t3-fleet setup --abandon` prints it).
+   */
+  report: Schema.optionalKey(Schema.Array(Schema.String)),
+});
 
 /** What `t3-fleet notify test` says, a line per path ("desktop: delivered"); `failed` when one did not go. */
 export const UiNotifyTest = Schema.Struct({

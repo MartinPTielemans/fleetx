@@ -4,6 +4,12 @@
 #   curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- setup <config-repo-url> <name>   # install, then run a command
 #
+# The first install, given no command, opens setup in the browser (`t3-fleet ui`)
+# when there is a desktop to open it on: a Mac, or Linux with DISPLAY or
+# WAYLAND_DISPLAY. Otherwise, and on an update, it prints what to run next.
+# A command runs with the terminal as its input, not this script's pipe, so
+# setup can ask its questions.
+#
 # T3_FLEET_VERSION=v0.8.0 pins a release. The download is checked against the
 # release's SHA256SUMS and, with gh installed and logged in, its build
 # attestation; a mismatch or failed verification stops the install.
@@ -56,10 +62,26 @@ elif gh attestation verify "$tmp" --repo "$repo" >/dev/null 2>&1; then
 else
   fail "$name failed build attestation verification"
 fi
+first=yes
+[ -e "$dir/t3-fleet.mjs" ] && first=no
 chmod 755 "$tmp" && mv "$tmp" "$dir/t3-fleet.mjs"
 ln -sfn "$dir/t3-fleet.mjs" "$bin/t3-fleet"
 echo "installed T3 Fleet $(node "$dir/t3-fleet.mjs" --version 2>/dev/null) at $bin/t3-fleet"
 case ":$PATH:" in *":$bin:"*) ;; *) echo "add $bin to your PATH" ;; esac
 
-[ $# -gt 0 ] && exec node "$dir/t3-fleet.mjs" "$@"
+# Run as `curl … | sh`, this script's input is the pipe: a command gets the terminal instead.
+run() {
+  if (: </dev/tty) 2>/dev/null; then exec node "$dir/t3-fleet.mjs" "$@" </dev/tty
+  else exec node "$dir/t3-fleet.mjs" "$@"; fi
+}
+[ $# -gt 0 ] && run "$@"
+desktop=no
+if [ "$(uname -s)" = Darwin ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then desktop=yes; fi
+if [ "$first" = yes ] && [ "$desktop" = yes ]; then
+  echo "opening setup in your browser (Ctrl-C stops it; \`t3-fleet ui\` opens it again)"
+  run ui
+fi
+if [ "$first" = yes ]; then
+  echo "next: run \`t3-fleet setup\` here, or \`t3-fleet ui\` on a computer with a browser (it can set this machine up as your hub over ssh)"
+fi
 exit 0
