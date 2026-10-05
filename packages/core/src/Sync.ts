@@ -948,7 +948,9 @@ export const ownCheck = (config: Config, self: Node, others: ReadonlyArray<NodeS
  * each round and applying what that check newly offers, so one sync takes
  * the machine as far as it goes: a fix can make another possible (the
  * secrets installed, so the relay token is there and the relay can start).
- * Each finding's fix is tried once per run; three rounds at most.
+ * Each finding's fix is tried once per run, and no command runs twice (an
+ * agent CLI just installed, then found behind "latest", is not installed over
+ * again); three rounds at most.
  */
 export const convergeFixes = <
   C extends { readonly findings: ReadonlyArray<Finding> },
@@ -977,6 +979,7 @@ export const convergeFixes = <
     const applied: Array<{ title: string; ok: boolean; output: string }> = [];
     const lines: Array<string> = [];
     const tried = new Set<string>();
+    const ran = new Set<string>();
     for (let round = 0; round < (options.rounds ?? 3); round++) {
       const applicable = checked.findings.filter(
         (f): f is Finding & { readonly fix: Fix } =>
@@ -984,10 +987,14 @@ export const convergeFixes = <
           f.fix.safe &&
           (f.fix.on ?? f.node) === options.self &&
           options.areas.includes(f.area) &&
-          !tried.has(`${f.node}\0${f.key}`),
+          !tried.has(`${f.node}\0${f.key}`) &&
+          !ran.has(f.fix.command),
       );
       if (applicable.length === 0) break;
-      for (const f of applicable) tried.add(`${f.node}\0${f.key}`);
+      for (const f of applicable) {
+        tried.add(`${f.node}\0${f.key}`);
+        ran.add(f.fix.command);
+      }
       const outcomes = yield* options.run(applicable);
       for (const o of outcomes)
         applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });

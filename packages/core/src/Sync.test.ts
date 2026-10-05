@@ -1392,21 +1392,26 @@ describe("a command a person started, while a sync runs (B3)", () => {
 describe("one sync's fixes", () => {
   it("go as far as they take the machine: the secrets installed, then the relay they let start", async () => {
     // What the machine is: each fix changes it, and the next check sees what that made possible.
-    const machine = { secrets: false, relay: false, broken: 0 };
-    const finding = (key: string, area: string, safe = true): Finding => ({
+    const machine = { secrets: false, relay: false, codex: false };
+    const finding = (key: string, area: string, command = key): Finding => ({
       node: "hub",
       key,
       severity: "warn",
       area,
       title: key,
-      fix: { command: key, safe },
+      fix: { command, safe: true },
     });
+    const npm = "npm install -g --prefix ~/.local @openai/codex@latest";
     const check = Effect.sync(() => ({
       findings: [
         ...(machine.secrets ? [] : [finding("secrets-install", "secrets")]),
         ...(machine.secrets && !machine.relay ? [finding("relay-serve", "relay")] : []),
         finding("always-broken", "relay"),
         finding("t3-update", "t3"),
+        // Installed, then found behind "latest": the same install is not run over it again.
+        machine.codex
+          ? finding("codex-behind", "agents", npm)
+          : finding("codex-missing", "agents", npm),
       ],
     }));
     const ran: Array<string> = [];
@@ -1414,13 +1419,14 @@ describe("one sync's fixes", () => {
       Effect.gen(function* () {
         return yield* convergeFixes(yield* check, {
           self: "hub",
-          areas: ["secrets", "relay"],
+          areas: ["secrets", "relay", "agents"],
           run: (fixes) =>
             Effect.sync(() =>
               fixes.map((f) => {
                 ran.push(f.key);
                 if (f.key === "secrets-install") machine.secrets = true;
                 if (f.key === "relay-serve") machine.relay = true;
+                if (f.key === "codex-missing") machine.codex = true;
                 return { finding: f, ok: f.key !== "always-broken", summary: "" };
               }),
             ),
@@ -1428,10 +1434,15 @@ describe("one sync's fixes", () => {
         });
       }),
     );
-    expect(ran).toEqual(["secrets-install", "always-broken", "relay-serve"]);
-    expect(result.checked.findings.map((f) => f.key)).toEqual(["always-broken", "t3-update"]);
+    // Round two: the relay, which the secrets made possible; not the same npm install again.
+    expect(ran).toEqual(["secrets-install", "always-broken", "codex-missing", "relay-serve"]);
+    expect(result.checked.findings.map((f) => f.key)).toEqual([
+      "always-broken",
+      "t3-update",
+      "codex-behind",
+    ]);
     expect(result.lines).toContain("could not fix: always-broken");
-    expect(result.applied).toHaveLength(3);
+    expect(result.applied).toHaveLength(4);
   });
 });
 
