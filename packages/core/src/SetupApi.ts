@@ -45,6 +45,14 @@ export const UiSetupState = Schema.Struct({
   unfinished: Schema.NullOr(
     Schema.Struct({ startedAt: Schema.Number, done: Schema.Number, total: Schema.Number }),
   ),
+  /**
+   * A hub asked for whose bring-up has not finished: apply's `resume` tries
+   * it again, `abandon` forgets it. `error` is why the last try stopped; null
+   * before the first, or while one runs.
+   */
+  hub: Schema.NullOr(
+    Schema.Struct({ node: Schema.String, ssh: Schema.String, error: Schema.NullOr(Schema.String) }),
+  ),
 });
 export type UiSetupState = typeof UiSetupState.Type;
 

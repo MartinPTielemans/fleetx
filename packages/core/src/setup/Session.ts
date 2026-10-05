@@ -40,7 +40,14 @@ import {
   type Step,
 } from "./Apply.ts";
 import type { Secret } from "./Credentials.ts";
-import { cleanUrl, discover, discoverServers, nodeName, tilde, type Discovery } from "./Discover.ts";
+import {
+  cleanUrl,
+  discover,
+  discoverServers,
+  nodeName,
+  tilde,
+  type Discovery,
+} from "./Discover.ts";
 import { extraOffers, type ExtraName } from "./Extras.ts";
 import {
   buildPlan,
@@ -216,10 +223,7 @@ export const prepare = (request: PrepareRequest, pre: Preflight, say: Say) =>
       ({ view: fleet, mcp } = yield* readFleet(request.scratch, node));
       const probe = yield* loadConfigFrom(request.scratch, node).pipe(Effect.option);
       checkout = path.resolve(
-        expandHome(
-          request.dir ?? (Option.isSome(probe) ? probe.value.checkout : "~/fleet"),
-          home,
-        ),
+        expandHome(request.dir ?? (Option.isSome(probe) ? probe.value.checkout : "~/fleet"), home),
       );
       authority =
         Option.isSome(probe) &&
@@ -530,10 +534,7 @@ export const resumeInput = (
         saved.mode === "first" ||
         (Option.isSome(nodeText) ? /^roles\s*=.*"authority"/m.test(nodeText.value) : saved.commits),
       timer: pre.timer,
-      join:
-        saved.join === null
-          ? null
-          : { ...saved.join, url: overrides.url ?? saved.join.url },
+      join: saved.join === null ? null : { ...saved.join, url: overrides.url ?? saved.join.url },
       remote: overrides.remote ?? saved.remote,
     };
     // The clients' entries are only read when the snapshot is still to be taken.

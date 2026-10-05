@@ -17,6 +17,9 @@
  * values encrypted to this machine's key, before the first step. A run that
  * stops part-way continues with `--resume`, doing exactly what was decided,
  * or is dropped with `--abandon`.
+ *
+ * `--ui` asks the same questions in the browser: the setup wizard, served by
+ * `t3-fleet ui` from the same engine (setup/Session.ts).
  */
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
@@ -59,6 +62,7 @@ import { unfinishedLines } from "@t3-fleet/core/setup/Unfinished";
 
 import { reportUserErrors } from "./shared.ts";
 import { connectT3 } from "./t3.ts";
+import { serveUi } from "./ui.ts";
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -247,6 +251,7 @@ interface Flags {
   readonly remote: Option.Option<string>;
   readonly relay: boolean;
   readonly models: boolean;
+  readonly ui: boolean;
 }
 
 export const setupCommand = Command.make("setup", {
@@ -305,11 +310,17 @@ export const setupCommand = Command.make("setup", {
     Flag.withDescription("Set up the model proxy without asking."),
     Flag.withDefault(false),
   ),
+  ui: Flag.Boolean("ui").pipe(
+    Flag.withDescription("Set up in the browser instead: opens the setup wizard (t3-fleet ui)."),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription(
     "Set this machine up: start a fleet, join one (with its URL), or show what still differs. Plan first, resumable.",
   ),
-  Command.withHandler((flags) => setup(flags).pipe(reportUserErrors)),
+  Command.withHandler((flags) =>
+    (flags.ui ? serveUi({ port: null, open: true }) : setup(flags)).pipe(reportUserErrors),
+  ),
 );
 
 const setup = (flags: Flags) =>
