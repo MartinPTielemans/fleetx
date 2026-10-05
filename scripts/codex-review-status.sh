@@ -4,38 +4,35 @@
 #
 # Codex posts no check of its own. It keeps one summary comment per pull
 # request ("Codex Review Summary") and edits it as reviews start and finish,
-# with a row per review naming its state and the commit it covers. The status
-# passes only when the code review has completed for the head commit and no
-# review of that commit is still running. Anything else, including a comment
-# this script cannot read, leaves it pending: the gate fails closed.
+# with a row per review naming its state, when it got there and the commit it
+# covers; a review with findings also leaves review threads.
 #
-# The summary names a commit by its first seven hex digits only, so a commit
-# crafted to share them could pass as reviewed. A review therefore also counts
-# only if it completed after this gate first saw the head commit in this pull
-# request: the pending status `--seen` posts as soon as a commit becomes the
-# head, told apart from every other status by its link (…/pull/N#seen), so a
-# record made for another pull request, or an ordinary pending status, never
-# counts. A status belongs to a commit, not a pull request, so
-# a head that two open pull requests share stays pending: a review of one must
-# not pass the other. What it cannot rule out is a review of an older
-# commit with the same prefix completing after that; and the status itself is
-# only as trusted as everyone who can run a workflow in this repository.
+# The status passes when the summary says the code review of the head has
+# completed and no review of the head is running, the base has not changed
+# since (a different base is a different diff), and no other open pull request
+# has the same head (a status belongs to a commit, so it would pass both).
+# Anything else, including a summary this script cannot read, leaves it
+# pending: the gate fails closed. Every run derives the answer from GitHub
+# alone, so runs can repeat and arrive in any order.
 #
-# Findings are not judged here: Codex posts them as review threads, and the
-# ruleset requires every thread resolved.
+# Limits: the summary names a commit by seven hex digits, so a commit crafted
+# to share them with one already reviewed on this pull request would pass;
+# nothing Codex posts for a clean automatic review names more. And the status
+# is only as trusted as everyone who can run a workflow here.
+#
+# Findings are not judged here: they are review threads, and the ruleset
+# requires every thread resolved.
 #
 #   scripts/codex-review-status.sh OWNER/REPO PR [--dry-run]
-#   scripts/codex-review-status.sh OWNER/REPO PR --seen SHA   (SHA just became the head)
 set -euo pipefail
 
 repo=$1
 pr=$2
 mode=${3:-}
+codex="chatgpt-codex-connector[bot]"
 
-# A request that fails once (a 502, a 503) must not strand the status: the
-# event that marks a review complete may be the last one this pull request gets.
 # Only the attempt that succeeds is printed: a failed one may have written part
-# of a response.
+# of a response. One failed request must not decide the status.
 api() {
   local attempt out
   for attempt in 1 2 3 4; do
@@ -47,105 +44,59 @@ api() {
   done
   return 1
 }
-
-url="https://github.com/$repo/pull/$pr"
-
-post() {
-  echo "${1:0:7}: $2: $3"
-  [[ $mode == --dry-run ]] && return 0
-  api --silent -X POST "repos/$repo/statuses/$1" \
-    -f state="$2" \
-    -f context=codex-review \
-    -f description="${3:0:140}" \
-    -f target_url="$url"
-}
-
-# When --seen recorded commit $1 for this pull request, in epoch seconds; empty if never.
-seen_at() {
-  api --paginate --slurp "repos/$repo/commits/$1/statuses" | jq -r --arg seen "$url#seen" '
-    add // []
-    | map(select(.context == "codex-review" and .creator.login == "github-actions[bot]"
-                 and .target_url == $seen))
-    | map(.created_at | fromdateiso8601) | min // empty'
-}
-
-# Records that this pull request's head is commit $1; prints when, in epoch seconds.
-record() {
-  echo "${1:0:7}: pending: recorded as the head" >&2
-  api -X POST "repos/$repo/statuses/$1" \
-    -f state=pending \
-    -f context=codex-review \
-    -f description="waiting for Codex to review ${1:0:7}" \
-    -f target_url="$url#seen" \
-    --jq '.created_at | fromdateiso8601'
-}
-
-# Only a commit seen for the first time: a pull request reopened on a head it
-# already had keeps that head's record and status.
-if [[ $mode == --seen ]]; then
-  [[ -n $(seen_at "$4") ]] || record "$4" >/dev/null
-  exit 0
-fi
+# Every page of a list, as one JSON array.
+all() { api --paginate --slurp "$1" | jq -c 'add // []'; }
 
 head=$(api "repos/$repo/pulls/$pr" --jq .head.sha)
 short=${head:0:7}
-sharing=$(api "repos/$repo/commits/$head/pulls" --jq "[.[] | select(.state == \"open\" and .number != $pr) | \"#\(.number)\"] | join(\", \")")
 
-summary=$(
-  api --paginate --slurp "repos/$repo/issues/$pr/comments" | jq -r '
-    add // []
-    | map(select(.user.login == "chatgpt-codex-connector[bot]"
-                 and (.body | contains("<!-- codex-pull-request-review-summary -->"))))
-    | last | .body // ""'
-)
-
-# When this gate first saw the head commit, in epoch seconds; empty if it has not.
-first_seen=$(seen_at "$head")
-# "2026-10-05T22:43:12.129609Z" in a row's <relative-time>, in epoch seconds.
-when() {
-  grep -o 'datetime="[^"]*"' <<<"$1" | head -n 1 | cut -d'"' -f2 |
-    jq -R 'sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601'
+summary=$(all "repos/$repo/issues/$pr/comments" | jq -r --arg codex "$codex" '
+  map(select(.user.login == $codex
+             and (.body | contains("<!-- codex-pull-request-review-summary -->"))))
+  | last | .body // ""')
+# The summary's row for review $1 when it covers the head, as "STATE EPOCH":
+# "| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="…"> | `fa311e4` | … |"
+on_head() {
+  grep -F "**$1**" <<<"$summary" | head -n 1 | awk -F'|' -v head="$head" '{
+    gsub(/[ \t`]/, "", $4)
+    if (length($4) < 7 || index(head, $4) != 1) exit
+    state = $3 ~ /Completed/ ? "completed" : $3 ~ /Running/ ? "running" : "other"
+    match($3, /datetime="[^"]*"/)
+    print state, substr($3, RSTART + 10, RLENGTH - 11)
+  }' | while read -r state at; do
+    echo "$state $(jq -rn --arg t "$at" '$t | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601')"
+  done
 }
+read -r code reviewed <<<"$(on_head "Code Review")" || true
+read -r security _ <<<"$(on_head "Security Review")" || true
 
-# "| 📝 **Code Review** | ✅ **Completed** <relative-time …> | `80de642` | Manual request |"
-cell() { awk -F'|' -v n="$1" '{ gsub(/^[ \t`]+|[ \t`]+$/, "", $n); print $n }'; }
-row() { grep -F "**$1**" <<<"$summary" | head -n 1 || true; }
-covers_head() { [[ ${#1} -ge 7 && $head == "$1"* ]]; }
+# When the base last changed, in epoch seconds; empty if it never has.
+rebased=$(all "repos/$repo/issues/$pr/timeline" | jq -r '
+  map(select(.event == "base_ref_changed") | .created_at | fromdateiso8601) | max // empty')
 
-# A head --seen never recorded (a pull request open before this gate, say) is
-# recorded now; a review completing from here on counts.
-if [[ -z $first_seen && $mode != --dry-run ]]; then
-  first_seen=$(record "$head")
-fi
+# Other open pull requests whose head is this commit (not merely containing it).
+sharing=$(all "repos/$repo/commits/$head/pulls" | jq -r --arg head "$head" --argjson pr "$pr" '
+  map(select(.state == "open" and .number != $pr and .head.sha == $head) | "#\(.number)")
+  | join(", ")')
 
 state=pending
-code=$(row "Code Review")
-if [[ -z $code ]]; then
+if [[ ${code:-} == running || ${security:-} == running ]]; then
+  description="Codex is reviewing $short"
+elif [[ ${code:-} != completed ]]; then
   description="waiting for Codex to review $short; comment @codex review if it does not start"
+elif [[ -n $rebased && $rebased -ge ${reviewed:-0} ]]; then
+  description="the base changed after Codex reviewed $short; comment @codex review"
+elif [[ -n $sharing ]]; then
+  description="$short is also the head of $sharing; give each pull request its own commit"
 else
-  status=$(cell 3 <<<"$code")
-  commit=$(cell 4 <<<"$code")
-  security=$(row "Security Review")
-  if ! covers_head "$commit"; then
-    description="Codex last reviewed ${commit:-an older commit}, not $short; comment @codex review"
-  elif [[ $status == *Running* ]]; then
-    description="Codex is reviewing $short"
-  elif [[ $status != *Completed* ]]; then
-    description="Codex's review of $short did not complete; comment @codex review"
-  elif [[ -n $sharing ]]; then
-    description="$short is also the head of $sharing; give each pull request its own commit"
-  elif [[ -z $first_seen ]]; then
-    description="this gate has not seen $short become the head yet; comment @codex review"
-  # Statuses carry whole seconds; a review completing within the record's second counts.
-  elif [[ $(when "$code") -lt $first_seen ]]; then
-    description="Codex's review of ${commit} finished before $short was pushed; comment @codex review"
-  elif [[ -n $security ]] && covers_head "$(cell 4 <<<"$security")" &&
-    [[ $(cell 3 <<<"$security") == *Running* ]]; then
-    description="Codex's security review of $short is still running"
-  else
-    state=success
-    description="Codex reviewed $short"
-  fi
+  state=success
+  description="Codex reviewed $short"
 fi
 
-post "$head" "$state" "$description"
+echo "$short: $state: $description"
+[[ $mode == --dry-run ]] && exit 0
+api --silent -X POST "repos/$repo/statuses/$head" \
+  -f state="$state" \
+  -f context=codex-review \
+  -f description="${description:0:140}" \
+  -f target_url="https://github.com/$repo/pull/$pr"

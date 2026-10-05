@@ -1,9 +1,9 @@
 name: Codex review
 # Keeps the `codex-review` status on each pull request's head current, so
 # main's ruleset can hold a merge until Codex has reviewed that commit
-# (scripts/codex-review-status.sh says how). It runs when the head moves and
-# whenever Codex writes or edits a comment, which is how Codex reports a review
-# starting and finishing.
+# (scripts/codex-review-status.sh says how). It runs when the head or the base
+# moves, and whenever Codex writes or edits a comment, which is how Codex
+# reports a review starting and finishing.
 #
 # Both triggers run this file and the script as they are on main, never as a
 # pull request has them: a pull request that could change the gate could pass
@@ -11,7 +11,7 @@ name: Codex review
 # the pull request's tree.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
   issue_comment:
     types: [created, edited]
 permissions:
@@ -20,31 +20,16 @@ permissions:
   issues: read
   statuses: write
 jobs:
-  # A new head: record that the gate has seen it. Nothing can cancel this job,
-  # since a review counts only if it completed after this record.
-  seen:
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          sparse-checkout: scripts
-          persist-credentials: false
-      - run: scripts/codex-review-status.sh "$REPO" "$PR" --seen "$HEAD"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-  # Codex wrote or edited a comment: read its summary again.
   status:
-    if: github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]'
-    # On the job, so a skipped run (anyone else's comment) cannot cancel a real one.
-    # Every run reads the current state, so only the newest matters.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    # One run at a time per pull request, none cancelled: a cancelled run's
+    # status request may still land after a newer run's. A run waiting behind
+    # another reads the state it starts with, so the last write is the newest.
     concurrency:
-      group: codex-review-${{ github.event.issue.number }}
-      cancel-in-progress: true
+      group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,4 +41,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
