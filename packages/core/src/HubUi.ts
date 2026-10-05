@@ -27,12 +27,19 @@
  *   with a login in [ui] allow the logins the fleet lets in
  *
  *   and tailscaled made the   loopback alone would let any program on the hub
- *   connection                connect and set the headers itself. On Linux the
- *                             kernel says whose socket the other end of the
- *                             connection is (/proc/net/tcp): it must be root's
- *                             or the user tailscaled runs as. A program run by
- *                             anyone else, the relay's own user included, is
- *                             refused (servedByTailscale)
+ *   connection                connect and set the headers itself. The kernel
+ *                             says whose socket the other end of the connection
+ *                             is. On Linux (/proc/net/tcp) it must be root's or
+ *                             the user tailscaled runs as. On macOS (the TCP
+ *                             table sysctl gives, net.inet.tcp.pcblist_n) it
+ *                             must be root's (the standalone app's system
+ *                             extension, or tailscaled as a daemon), or the
+ *                             process must be the App Store app's network
+ *                             extension, which runs as the logged-in user: its
+ *                             code signature, checked on the running process,
+ *                             says so. A program run by anyone else, the
+ *                             relay's own user included, is refused
+ *                             (servedByTailscale)
  *
  * Why not a Unix socket for tailscale serve to proxy to, which only the
  * relay's user could open: since Tailscale 1.98.9 (TS-2026-005) only root may
@@ -42,15 +49,23 @@
  * request can name any device's address in a header.
  *
  * What remains: root on the hub (or the user tailscaled runs as, when that is
- * not root) can pose as any login; it can read every secret there anyway. A
- * hub that is not Linux cannot tell its connections apart, so its app refuses
- * everyone; `t3-fleet ui --local` on an authority serves the app there.
+ * not root, on Linux) can pose as any login; it can read every secret there
+ * anyway. A hub that is neither Linux nor macOS, or a Mac whose tailscaled runs
+ * as a user (the open-source daemon with userspace networking, which no
+ * signature names), cannot tell its connections apart, so its app refuses
+ * everyone; setup notes it (`[ui] hosted = false`) and `t3-fleet ui` serves the
+ * app on each machine instead.
  *
  * Passing the gate is not a session: the app still trades it for a token,
  * bound to that login, which every /api request sends as a header (UiServer.ts).
  */
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { exec } from "./Exec.ts";
 
 export interface HubGate {
   /** `[relay] url`: the only Host and Origin the app answers to. */
@@ -239,19 +254,209 @@ export const tailscaledUid = (status: string): number | null => {
   return uid === undefined ? null : Number(uid);
 };
 
+// ── on macOS ────────────────────────────────────────────────────────────
+
+/** The asking socket, as macOS's TCP table lists it. */
+export interface DarwinSocket {
+  /** Who created it (the kernel's so_uid, as Linux's /proc/net/tcp uid). */
+  readonly uid: number;
+  /** The process that last used it, and the one it is delegated to (the same unless delegated). */
+  readonly pid: number;
+  readonly ePid: number;
+}
+
+// XNU's records in net.inet.tcp.pcblist_n (bsd/sys/socketvar.h, bsd/netinet/in_pcb.h,
+// bsd/netinet/tcp_var.h; packed to 4 bytes): each socket is a run of records, each
+// starting with its length and kind, framed by an xinpgen (24 bytes) at both ends.
+const XINPGEN = 24;
+const XSO_SOCKET = 0x1;
+const XSO_INPCB = 0x10;
+const XSO_TCPCB = 0x20;
+const INP_IPV4 = 0x1;
+const INP_IPV6 = 0x2;
+const TCPS_ESTABLISHED = 4;
+
+/** Whether the 16 bytes of an in_addr_4in6 / in6_addr are a loopback address. */
+const loopback = (bytes: Uint8Array, vflag: number) => {
+  if ((vflag & INP_IPV4) !== 0) return bytes[12] === 127;
+  if ((vflag & INP_IPV6) === 0) return false;
+  const zeros = (from: number, to: number) => bytes.subarray(from, to).every((b) => b === 0);
+  if (zeros(0, 15) && bytes[15] === 1) return true; // ::1
+  return zeros(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff && bytes[12] === 127; // ::ffff:127.x
+};
+
 /**
- * Whether tailscaled made `connection`, on Linux: the asking socket is root's,
- * or the user tailscaled runs as. Null when it did; why not, otherwise.
+ * The asking end of `connection` in macOS's TCP table (`sysctl -b
+ * net.inet.tcp.pcblist_n`, raw): an established socket on loopback whose
+ * local port is the connection's remote port, talking to the relay's port on
+ * loopback. Null when there is none, or more than one, or the table does not
+ * read as XNU writes it.
+ */
+export const darwinSocket = (table: Uint8Array, connection: Connection): DarwinSocket | null => {
+  const view = new DataView(table.buffer, table.byteOffset, table.byteLength);
+  const u32 = (at: number) => view.getUint32(at, true);
+  const step = (length: number) => (length + 7) & ~7;
+  if (table.byteLength < XINPGEN || u32(0) !== XINPGEN) return null;
+  interface Pcb {
+    lport: number;
+    fport: number;
+    loopback: boolean;
+    socket?: DarwinSocket;
+    state?: number;
+  }
+  const pcbs: Array<Pcb> = [];
+  let pcb: Pcb | null = null;
+  let at = step(XINPGEN);
+  let closed = false;
+  while (at + 8 <= table.byteLength) {
+    const length = u32(at);
+    // The closing xinpgen, after the last socket.
+    if (length <= XINPGEN) {
+      closed = true;
+      break;
+    }
+    if (at + length > table.byteLength) return null;
+    const kind = u32(at + 4);
+    if (kind === XSO_INPCB && length >= 80) {
+      const vflag = table[at + 44] ?? 0;
+      pcb = {
+        fport: view.getUint16(at + 16, false),
+        lport: view.getUint16(at + 18, false),
+        loopback:
+          loopback(table.subarray(at + 48, at + 64), vflag) &&
+          loopback(table.subarray(at + 64, at + 80), vflag),
+      };
+      pcbs.push(pcb);
+    } else if (kind === XSO_SOCKET && length >= 76 && pcb !== null)
+      pcb.socket = {
+        uid: u32(at + 64),
+        pid: view.getInt32(at + 68, true),
+        ePid: view.getInt32(at + 72, true),
+      };
+    else if (kind === XSO_TCPCB && length >= 40 && pcb !== null)
+      pcb.state = view.getInt32(at + 36, true);
+    at += step(length);
+  }
+  if (!closed) return null;
+  const asking = pcbs.filter(
+    (p) =>
+      p.loopback &&
+      p.lport === connection.remotePort &&
+      p.fport === connection.localPort &&
+      p.state === TCPS_ESTABLISHED,
+  );
+  const [only] = asking;
+  return asking.length === 1 && only?.socket !== undefined ? only.socket : null;
+};
+
+/**
+ * Tailscale's App Store network extension, as Apple signed it for the Mac App
+ * Store (or, the form Tailscale's own app's requirement allows, a Developer ID
+ * build of Tailscale's team). Its bundle id is the one Tailscale's source
+ * names (version/prop.go).
+ */
+export const APP_STORE_EXTENSION =
+  'anchor apple generic and identifier "io.tailscale.ipn.macos.network-extension" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "W5364U7YZB")';
+
+/** What the macOS check reads: commands in practice, fakes in tests. */
+export interface DarwinLookup {
+  /** The kernel's TCP table, raw; null when it could not be read. */
+  readonly table: Effect.Effect<Uint8Array | null, never, ChildProcessSpawner.ChildProcessSpawner>;
+  /** Whether running process `pid` is Tailscale's App Store network extension, by its code signature. */
+  readonly appStoreExtension: (
+    pid: number,
+  ) => Effect.Effect<boolean, never, ChildProcessSpawner.ChildProcessSpawner>;
+}
+
+/** `sysctl -b net.inet.tcp.pcblist_n`, as bytes: a few ms, and no root needed. */
+const tcpTable = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const child = yield* spawner.spawn(
+        ChildProcess.make("/usr/sbin/sysctl", ["-b", "net.inet.tcp.pcblist_n"], {
+          stdin: "ignore",
+        }),
+      );
+      const [chunks, code] = yield* Effect.all(
+        [
+          Stream.runFold(
+            child.stdout,
+            (): Array<Uint8Array> => [],
+            (all, c) => {
+              all.push(c);
+              return all;
+            },
+          ),
+          child.exitCode,
+        ],
+        { concurrency: "unbounded" },
+      );
+      if (Number(code) !== 0) return null;
+      const bytes = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
+      let at = 0;
+      for (const c of chunks) {
+        bytes.set(c, at);
+        at += c.byteLength;
+      }
+      return bytes;
+    }),
+  );
+}).pipe(
+  Effect.timeoutOption(Duration.seconds(10)),
+  Effect.map((table) => (table._tag === "Some" ? table.value : null)),
+  Effect.orElseSucceed(() => null),
+);
+
+export const liveDarwinLookup: DarwinLookup = {
+  table: tcpTable,
+  // codesign checks the running process's signature (not a file someone could swap
+  // after launch); exit 0 only when it satisfies the requirement.
+  appStoreExtension: (pid) =>
+    exec({
+      command: "/usr/bin/codesign",
+      args: ["--verify", `-R=${APP_STORE_EXTENSION}`, String(pid)],
+      timeout: Duration.seconds(10),
+    }).pipe(Effect.map((r) => r.code === 0)),
+};
+
+/**
+ * Whether tailscaled made `connection`, on macOS: the asking socket is root's,
+ * or its process is Tailscale's App Store network extension. Unknown is no.
+ */
+const servedOnDarwin = (connection: Connection, lookup: DarwinLookup) =>
+  Effect.gen(function* () {
+    const table = yield* lookup.table;
+    const socket = table === null ? null : darwinSocket(table, connection);
+    if (socket === null) return "Who connected could not be told.";
+    if (socket.uid === 0) return null;
+    for (const pid of new Set([socket.pid, socket.ePid]))
+      if (pid > 0 && (yield* lookup.appStoreExtension(pid))) return null;
+    return "This request did not come through tailscale serve: another program on the hub made it.";
+  });
+
+/** Why a hub on `platform` cannot serve the app at all; null when it can. */
+export const unservedPlatform = (platform: string): string | null =>
+  platform === "linux" || platform === "darwin"
+    ? null
+    : "This hub cannot tell tailscale serve from another program on it (only a Linux or macOS hub can), so its app opens for no one. Open the app on your computer with t3-fleet ui --local.";
+
+/**
+ * Whether tailscaled made `connection`: on Linux, the asking socket is root's,
+ * or the user tailscaled runs as; on macOS, see servedOnDarwin. Null when it
+ * did; why not, otherwise.
  */
 export const servedByTailscale = (
   connection: Connection | null,
   platform: string = process.platform,
   proc = "/proc",
+  darwin: DarwinLookup = liveDarwinLookup,
 ) =>
   Effect.gen(function* () {
-    if (platform !== "linux")
-      return "This hub cannot tell tailscale serve from another program on it (only a Linux hub can), so its app opens for no one. Open the app on your computer with t3-fleet ui --local.";
+    const unserved = unservedPlatform(platform);
+    if (unserved !== null) return unserved;
     if (connection === null) return "Who connected could not be told.";
+    if (platform === "darwin") return yield* servedOnDarwin(connection, darwin);
     const fs = yield* FileSystem.FileSystem;
     const read = (file: string) => fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
     let owner: number | null = null;

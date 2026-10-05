@@ -1,6 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
+import * as net from "node:net";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
@@ -19,12 +20,15 @@ import type { Node } from "./Config.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
 import {
   connectionOf,
+  darwinSocket,
   decodeHeaderValue,
   identify,
+  liveDarwinLookup,
   refusedPage,
   servedByTailscale,
   socketOwner,
   tailscaledUid,
+  type DarwinLookup,
   type HubGate,
 } from "./HubUi.ts";
 import { mergeLayers } from "./Settings.ts";
@@ -426,10 +430,183 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     expect(await check(41000)).toBe(null);
     expect(await check(42000)).toContain("another program on the hub");
     expect(await check(43000)).toContain("could not be told");
-    expect(await check(41000, "darwin")).toContain("only a Linux hub can");
+    expect(await check(41000, "freebsd")).toContain("only a Linux or macOS hub can");
     // tailscaled run as uid 1000 (userspace networking): that user's connections are its.
     fs.mkdirSync(join(proc, "77"));
     fs.writeFileSync(join(proc, "77/status"), "Name:\ttailscaled\nUid:\t1000\t1000\t1000\t1000\n");
     expect(await check(42000)).toBe(null);
   });
+
+  // ── macOS ──
+
+  // The records of net.inet.tcp.pcblist_n as XNU writes them (packed to 4 bytes,
+  // each padded to 8): an xinpgen, then per socket its inpcb, socket, buffers,
+  // stats and tcpcb, then a closing xinpgen.
+  const record = (kind: number, length: number, fill: (v: DataView) => void = () => {}) => {
+    const bytes = new Uint8Array((length + 7) & ~7);
+    const v = new DataView(bytes.buffer);
+    v.setUint32(0, length, true);
+    v.setUint32(4, kind, true);
+    fill(v);
+    return bytes;
+  };
+  interface Fake {
+    lport: number;
+    fport: number;
+    uid: number;
+    pid: number;
+    ePid?: number;
+    state?: number;
+    /** IPv4 addresses, local then foreign. */
+    at?: [number, number, number, number];
+    to?: [number, number, number, number];
+  }
+  const tcpTable = (sockets: ReadonlyArray<Fake>, closed = true) => {
+    const gen = (count: number) => record(0, 24, (v) => v.setUint32(4, count, true));
+    const parts = [gen(sockets.length)];
+    for (const f of sockets) {
+      parts.push(
+        record(0x10, 104, (v) => {
+          v.setUint16(16, f.fport, false);
+          v.setUint16(18, f.lport, false);
+          v.setUint8(44, 0x1); // INP_IPV4
+          (f.to ?? [127, 0, 0, 1]).forEach((b, i) => v.setUint8(60 + i, b));
+          (f.at ?? [127, 0, 0, 1]).forEach((b, i) => v.setUint8(76 + i, b));
+        }),
+        record(0x1, 104, (v) => {
+          v.setUint32(64, f.uid, true);
+          v.setInt32(68, f.pid, true);
+          v.setInt32(72, f.ePid ?? 0, true);
+        }),
+        record(0x2, 32),
+        record(0x4, 32),
+        record(0x8, 112),
+        record(0x20, 208, (v) => v.setInt32(36, f.state ?? 4, true)),
+      );
+    }
+    if (closed) parts.push(gen(sockets.length));
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+    let at = 0;
+    for (const p of parts) {
+      all.set(p, at);
+      at += p.byteLength;
+    }
+    return all;
+  };
+  // A Mac hub: the relay on 8399, the standalone app's system extension (root) proxying
+  // from 41000, a program of uid 501 connected from 42000, the App Store extension
+  // (uid 501, pid 700) from 44000, and a connection of root's elsewhere from port 42000.
+  const MAC = [
+    { lport: 8399, fport: 41000, uid: 501, pid: 300 },
+    { lport: 41000, fport: 8399, uid: 0, pid: 893 },
+    { lport: 42000, fport: 8399, uid: 501, pid: 600 },
+    {
+      lport: 42000,
+      fport: 8399,
+      uid: 0,
+      pid: 1,
+      to: [10, 0, 0, 7] as [number, number, number, number],
+    },
+    { lport: 44000, fport: 8399, uid: 501, pid: 700 },
+    { lport: 45000, fport: 8399, uid: 0, pid: 893, state: 5 }, // CLOSE_WAIT
+  ];
+
+  it("reads whose socket asked from macOS's TCP table", () => {
+    const table = tcpTable(MAC);
+    const at = (remotePort: number) => darwinSocket(table, { remotePort, localPort: 8399 });
+    expect(at(41000)).toEqual({ uid: 0, pid: 893, ePid: 0 });
+    // Root's socket to another machine from the same port is not the one asking.
+    expect(at(42000)).toEqual({ uid: 501, pid: 600, ePid: 0 });
+    expect(at(43000)).toBe(null);
+    // Only an established connection.
+    expect(at(45000)).toBe(null);
+    // A table cut short, or not one at all, names no one.
+    expect(darwinSocket(tcpTable(MAC, false), { remotePort: 41000, localPort: 8399 })).toBe(null);
+    expect(darwinSocket(table.subarray(0, 200), { remotePort: 41000, localPort: 8399 })).toBe(null);
+    expect(darwinSocket(new Uint8Array(0), { remotePort: 41000, localPort: 8399 })).toBe(null);
+    // Two sockets claiming the same connection: neither is believed.
+    expect(
+      darwinSocket(tcpTable([...MAC, { lport: 41000, fport: 8399, uid: 501, pid: 9 }]), {
+        remotePort: 41000,
+        localPort: 8399,
+      }),
+    ).toBe(null);
+  });
+
+  it("lets in, on macOS, root's connections and the App Store extension's only", async () => {
+    const asked: Array<number> = [];
+    const lookup = (table: Uint8Array | null): DarwinLookup => ({
+      table: Effect.succeed(table),
+      appStoreExtension: (pid) => Effect.sync(() => (asked.push(pid), pid === 700)),
+    });
+    const check = (remotePort: number, table: Uint8Array | null = tcpTable(MAC)) =>
+      Effect.runPromise(
+        servedByTailscale(
+          { remotePort, localPort: 8399 },
+          "darwin",
+          "/nonexistent",
+          lookup(table),
+        ).pipe(Effect.provide(NodeServices.layer)),
+      );
+    // Owner match: root (the system extension, or tailscaled as a daemon).
+    expect(await check(41000)).toBe(null);
+    expect(asked).toEqual([]);
+    // The App Store extension: a user's socket, from the process its signature names.
+    expect(await check(44000)).toBe(null);
+    // Owner mismatch: anyone else, the relay's own user included.
+    expect(await check(42000)).toContain("another program on the hub");
+    expect(asked).toEqual([700, 600]);
+    // Lookup failure: no table, or no socket in it.
+    expect(await check(41000, null)).toContain("could not be told");
+    expect(await check(43000)).toContain("could not be told");
+    expect(
+      await Effect.runPromise(
+        servedByTailscale(null, "darwin", "/nonexistent", lookup(tcpTable(MAC))).pipe(
+          Effect.provide(NodeServices.layer),
+        ),
+      ),
+    ).toContain("could not be told");
+  });
+
+  // On a Mac (this runs only there): a program of this user's connects to a server on
+  // loopback; the kernel's table names this process and user, and the gate refuses it,
+  // since it is not tailscaled. No Tailscale is needed.
+  it.skipIf(process.platform !== "darwin")(
+    "names and refuses a program of this user's on a real Mac",
+    async () => {
+      const server = net.createServer();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = (server.address() as net.AddressInfo).port;
+      const accepted = new Promise<net.Socket>((resolve) => server.once("connection", resolve));
+      const client = net.connect(port, "127.0.0.1");
+      try {
+        const socket = await accepted;
+        const connection = connectionOf({ socket });
+        expect(connection).not.toBe(null);
+        const table = await Effect.runPromise(
+          liveDarwinLookup.table.pipe(Effect.provide(NodeServices.layer)),
+        );
+        expect(table).not.toBe(null);
+        expect(darwinSocket(table ?? new Uint8Array(0), connection!)).toMatchObject({
+          uid: process.getuid?.(),
+          pid: process.pid,
+        });
+        expect(
+          await Effect.runPromise(
+            servedByTailscale(connection, "darwin").pipe(Effect.provide(NodeServices.layer)),
+          ),
+        ).toContain("another program on the hub");
+        expect(
+          await Effect.runPromise(
+            liveDarwinLookup
+              .appStoreExtension(process.pid)
+              .pipe(Effect.provide(NodeServices.layer)),
+          ),
+        ).toBe(false);
+      } finally {
+        client.destroy();
+        server.close();
+      }
+    },
+  );
 });

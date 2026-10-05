@@ -79,7 +79,8 @@ export const UiSetupState = Schema.Struct({
   /**
    * Where the fleet's app is served once a hub serves it on the tailnet
    * (`[relay] url`); null or absent without one (the app here is the way in).
-   * Filled by setup/Wizard.ts once this machine is in a fleet with a relay.
+   * Filled by setup/Wizard.ts once this machine is in a fleet with a relay,
+   * unless [ui] hosted = false says the hub cannot serve it (UiProbe.app).
    */
   fleetUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
@@ -130,6 +131,16 @@ export const UiProbe = Schema.Struct({
    * there, it is "missing", with what to do.
    */
   fleet: UiProbeItem,
+  /**
+   * Whether the hub can serve the fleet app on the tailnet (setup/Remote.ts
+   * appItem). "warn" when it cannot (its OS, or tailscaled running as a user
+   * on a Mac): its label is the line to show, the app opens locally on each
+   * machine instead, and setup writes [ui] hosted = false, so the state's
+   * fleetUrl stays null. "unknown" when it could not be told (Tailscale not
+   * running); the hub's relay still refuses whoever it cannot place. Absent
+   * from a T3 Fleet before it was asked.
+   */
+  app: Schema.optionalKey(UiProbeItem),
   /** The relay URL setup would use, when tailscale gives one. */
   relayUrl: Schema.NullOr(Schema.String),
   /** Whether everything required is there; tailscale and docker are recommended, not required. */

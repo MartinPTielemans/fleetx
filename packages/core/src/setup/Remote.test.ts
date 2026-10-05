@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { runningBuild } from "../Build.ts";
 import { exec, type ExecInput, type ExecResult } from "../Exec.ts";
 import {
+  appItem,
   probeHub,
   bringUpHub,
   fleetItem,
@@ -165,6 +166,44 @@ describe("a hub in another fleet", () => {
       "t3-fleet setup --abandon",
     );
     expect(membershipProblem({ fleet: null, unfinished: null }, null)).toBeNull();
+  });
+});
+
+describe("whether the hub can serve the fleet app", () => {
+  const PS = (lines: ReadonlyArray<string>) => lines.join("\n");
+  it("can on Linux, and on a Mac whose Tailscale runs as root or from the App Store", () => {
+    expect(appItem("Linux", null).state).toBe("ok");
+    // The standalone app's system extension, root.
+    const standalone = PS([
+      "    0 /sbin/launchd",
+      "    0 /Library/SystemExtensions/50A23A7E/io.tailscale.ipn.macsys.network-extension.systemextension/Contents/MacOS/io.tailscale.ipn.macsys.network-extension",
+      "  501 /Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ]);
+    expect(appItem("Darwin", standalone).state).toBe("ok");
+    // The open-source daemon, as root.
+    expect(appItem("Darwin", PS(["    0 /opt/homebrew/bin/tailscaled"])).state).toBe("ok");
+    // The App Store app's extension runs as the user; the relay checks its signature.
+    expect(
+      appItem(
+        "Darwin",
+        PS([
+          "  501 /Applications/Tailscale.app/Contents/PlugIns/IPNExtension.appex/Contents/MacOS/IPNExtension",
+        ]),
+      ).state,
+    ).toBe("ok");
+  });
+
+  it("cannot on a Mac whose tailscaled runs as a user, or another OS: the app opens here", () => {
+    const user = appItem("Darwin", PS(["  501 /opt/tailscale/bin/tailscaled"]));
+    expect(user.state).toBe("warn");
+    expect(user.label).toContain("The fleet app will open locally on this computer instead");
+    expect(user.remedy).toContain("sudo tailscaled install-system-daemon");
+    const other = appItem("FreeBSD", null);
+    expect(other.state).toBe("warn");
+    expect(other.label).toContain("The fleet app will open locally on this computer instead");
+    // Tailscale not running, or ps not read: could not be told, so nothing is decided.
+    expect(appItem("Darwin", PS(["    0 /sbin/launchd"])).state).toBe("unknown");
+    expect(appItem("Darwin", null).state).toBe("unknown");
   });
 });
 

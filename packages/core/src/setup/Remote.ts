@@ -121,6 +121,57 @@ try {
 process.stdout.write(JSON.stringify(result) + "\\n");
 `;
 
+/** The line the wizard shows when the hub cannot serve the fleet app. */
+export const LOCAL_APP = "The fleet app will open locally on this computer instead";
+
+/**
+ * Whether a hub on `os` can serve the fleet's app on the tailnet: whether the
+ * relay there can tell tailscale serve's connections from another program's
+ * (HubUi.servedByTailscale). On macOS that depends on how Tailscale runs, read
+ * from `ps -axo uid=,comm=` there: as root (the standalone app's system
+ * extension, or tailscaled as a daemon), or the App Store app's extension.
+ * `ps` is null when it could not be read. "warn" means it cannot: setup then
+ * writes [ui] hosted = false. The names here only guide setup; the relay
+ * checks each connection itself.
+ */
+export const appItem = (os: string, ps: string | null): UiProbeItem => {
+  if (os === "Linux") return item("ok", "Serves the fleet app on the tailnet");
+  if (os !== "Darwin")
+    return item(
+      "warn",
+      `${LOCAL_APP}: a ${os || "hub of this kind"} cannot tell tailscale serve from other programs on it`,
+      "To open the app from the hub, use a Linux or macOS machine as the hub.",
+    );
+  if (ps === null)
+    return unknown(
+      "Whether the hub can serve the fleet app",
+      "Check that ps -axo uid=,comm= works on the hub, then check again.",
+    );
+  const running = ps
+    .split("\n")
+    .map((line) => /^\s*(\d+)\s+(.*?)\s*$/.exec(line))
+    .flatMap((m) =>
+      m === null ? [] : [{ uid: Number(m[1]), name: (m[2] ?? "").split("/").at(-1) ?? "" }],
+    );
+  const asRoot = running.some(
+    (p) =>
+      p.uid === 0 &&
+      (p.name === "tailscaled" || p.name === "io.tailscale.ipn.macsys.network-extension"),
+  );
+  if (asRoot || running.some((p) => p.name === "IPNExtension"))
+    return item("ok", "Serves the fleet app on the tailnet");
+  if (running.some((p) => p.name === "tailscaled"))
+    return item(
+      "warn",
+      `${LOCAL_APP}: tailscaled runs as a user on the hub, so it cannot tell tailscale serve from other programs`,
+      "To open the app from the hub, run tailscaled as root (sudo tailscaled install-system-daemon) or use the Tailscale app, then check again.",
+    );
+  return unknown(
+    "Whether the hub can serve the fleet app",
+    "Start Tailscale on the hub, then check again.",
+  );
+};
+
 const serviceProbe = (os: string) =>
   os === "Darwin"
     ? 'command -v launchctl >/dev/null 2>&1 || exit 127\nlaunchctl print "gui/$(id -u)" >/dev/null || exit 1\necho launchd'
@@ -150,21 +201,24 @@ export const probeHub = (ssh: string, repo: string | null = null) =>
     const lines = identity.stdout.trim().split("\n");
     const os = lines.at(-1) ?? "";
     const hostname = lines.at(-2) ?? null;
-    const [nodeRun, gitRun, t3Version, t3Service, tsRun, dockerRun, serviceRun] = yield* Effect.all(
-      [
-        run(ssh, command("node", "--version")),
-        run(ssh, command("git", "--version")),
-        run(ssh, command("t3", "--version")),
-        run(ssh, command("t3", "service status")),
-        run(
-          ssh,
-          'ts=tailscale\ncommand -v "$ts" >/dev/null 2>&1 || ts="${T3_FLEET_TAILSCALE_APP:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"\n[ -x "$ts" ] || command -v "$ts" >/dev/null 2>&1 || exit 127\n"$ts" status --json',
-        ),
-        run(ssh, command("docker", "version --format '{{.Server.Version}}'")),
-        run(ssh, serviceProbe(os)),
-      ],
-      { concurrency: 4 },
-    );
+    const [nodeRun, gitRun, t3Version, t3Service, tsRun, dockerRun, serviceRun, psRun] =
+      yield* Effect.all(
+        [
+          run(ssh, command("node", "--version")),
+          run(ssh, command("git", "--version")),
+          run(ssh, command("t3", "--version")),
+          run(ssh, command("t3", "service status")),
+          run(
+            ssh,
+            'ts=tailscale\ncommand -v "$ts" >/dev/null 2>&1 || ts="${T3_FLEET_TAILSCALE_APP:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"\n[ -x "$ts" ] || command -v "$ts" >/dev/null 2>&1 || exit 127\n"$ts" status --json',
+          ),
+          run(ssh, command("docker", "version --format '{{.Server.Version}}'")),
+          run(ssh, serviceProbe(os)),
+          run(ssh, os === "Darwin" ? "ps -axo uid=,comm=" : "true"),
+        ],
+        { concurrency: 4 },
+      );
+    const app = appItem(os, answered(psRun) && psRun.code === 0 ? psRun.stdout : null);
     const version = nodeRun.code === 0 ? parseVersion(nodeRun.stdout) : undefined;
     const node = !answered(nodeRun)
       ? unknown("Node", "Check node --version on the hub, then try again.")
@@ -327,6 +381,7 @@ export const probeHub = (ssh: string, repo: string | null = null) =>
       docker,
       service,
       fleet,
+      app,
       relayUrl,
       ready: [node, git, service, fleet].every((i) => i.state === "ok"),
     } satisfies UiProbe;

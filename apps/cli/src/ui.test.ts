@@ -139,6 +139,12 @@ describe("where `t3-fleet ui` opens the app (review B-8)", () => {
       expect((await run(hostedApp))._tag).toBe("None");
       await run(dropHub(root));
       expect((await run(hostedApp))._tag).toBe("Some");
+      // A hub that cannot serve the app (HubUi.ts): it opens here.
+      writeFileSync(
+        join(repo, "t3-fleet.toml"),
+        '[relay]\nurl = "https://hub.tailnet.ts.net:8399"\nport = 8399\n\n[ui]\nallow = ["me@example.com"]\nhosted = false\n',
+      );
+      expect((await run(hostedApp))._tag).toBe("None");
     } finally {
       process.env["HOME"] = saved;
     }

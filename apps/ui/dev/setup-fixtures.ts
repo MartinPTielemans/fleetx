@@ -19,10 +19,12 @@
  *   &replan=fail        the first plan is made; every one after it fails (422)
  *   &expire=1           a finished job is dropped a second later, as keepJobsFor
  *                       does: reload after the run to see the page read the state
- *   &probe=ready|missing|old|taken|unreachable   the hub probe's answer; without it,
- *                       the ssh destination decides: "…down…" or "…nope…" is
+ *   &probe=ready|missing|old|taken|unreachable|local   the hub probe's answer; without
+ *                       it, the ssh destination decides: "…down…" or "…nope…" is
  *                       unreachable, "…bare…" lacks tailscale and docker,
- *                       "…old…" has Node 20, anything else is ready
+ *                       "…old…" has Node 20, "…local…" is a Mac whose tailscaled
+ *                       runs as a user (the app then opens locally), anything
+ *                       else is ready
  *   &fast=1             apply steps every 150ms instead of 900ms
  */
 import type { UiJob, UiSession } from "@t3-fleet/core/Api";
@@ -170,9 +172,12 @@ const stateOf = (sim: Sim, page: URLSearchParams): UiSetupState => ({
   github: sim.github,
   unfinished: sim.stage === "unfinished" ? sim.unfinished : null,
   hub: sim.hub,
-  // Once the hub is up it serves the fleet's app on the tailnet.
+  // Once the hub is up it serves the fleet's app on the tailnet, unless it cannot.
   fleetUrl:
-    sim.stage === "member" && sim.hub === null && sim.lastPlan?.plan.hub != null
+    sim.stage === "member" &&
+    sim.hub === null &&
+    sim.lastPlan?.plan.hub != null &&
+    probeKind(sim.lastPlan.request.hub?.ssh ?? "", page) !== "local"
       ? `https://${HUB_HOST}`
       : null,
 });
@@ -183,16 +188,20 @@ const HUB_HOST = "box.tailnet.ts.net";
 
 const ok = (label: string): UiProbeItem => ({ state: "ok", label, remedy: null });
 
-const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
-  const kind =
-    page.get("probe") ??
-    (/down|nope|unreachable/.test(ssh)
-      ? "unreachable"
-      : /bare|missing/.test(ssh)
-        ? "missing"
-        : /old/.test(ssh)
-          ? "old"
+const probeKind = (ssh: string, page: URLSearchParams) =>
+  page.get("probe") ??
+  (/down|nope|unreachable/.test(ssh)
+    ? "unreachable"
+    : /bare|missing/.test(ssh)
+      ? "missing"
+      : /old/.test(ssh)
+        ? "old"
+        : /local/.test(ssh)
+          ? "local"
           : "ready");
+
+const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
+  const kind = probeKind(ssh, page);
   const host = HUB_HOST;
   if (kind === "unreachable") {
     const unknown: UiProbeItem = { state: "unknown", label: "", remedy: null };
@@ -219,7 +228,7 @@ const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
     reachable: true,
     error: null,
     hostname: host,
-    os: "Ubuntu 24.04 · x86_64",
+    os: kind === "local" ? "Darwin" : "Ubuntu 24.04 · x86_64",
     node:
       kind === "old"
         ? {
@@ -254,6 +263,16 @@ const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
               "It is already in another fleet (github.com/someone/their-fleet), as box. Take it out of that fleet first (t3-fleet leave on it), or choose another machine for the hub.",
           }
         : ok("In no fleet yet"),
+    app:
+      kind === "local"
+        ? {
+            state: "warn",
+            label:
+              "The fleet app will open locally on this computer instead: tailscaled runs as a user on the hub, so it cannot tell tailscale serve from other programs",
+            remedy:
+              "To open the app from the hub, run tailscaled as root (sudo tailscaled install-system-daemon) or use the Tailscale app, then check again.",
+          }
+        : ok("Serves the fleet app on the tailnet"),
     relayUrl: bare ? null : `https://${host}`,
     ready: kind !== "old" && kind !== "taken",
   };

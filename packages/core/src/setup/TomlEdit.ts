@@ -210,6 +210,30 @@ export const dropTable = (text: string, path: ReadonlyArray<string>): Edit => {
     : { error: `${what}: could not remove it safely; remove it by hand` };
 };
 
+/** Remove the one-line key `key` from the table `path`; nothing when it is not there. */
+export const dropKey = (text: string, path: ReadonlyArray<string>, key: string): Edit => {
+  const what = [...path, key].join(".");
+  const parsed = parse(text);
+  if (typeof parsed === "string") return { error: `${what}: the file does not parse (${parsed})` };
+  if (at(parsed, [...path, key]) === undefined) return { text };
+  const lines = text.split("\n");
+  const found = section(lines, path);
+  const keyPattern = new RegExp(`^\\s*${escape(tomlKey(key))}\\s*=`);
+  const existing =
+    found === null
+      ? -1
+      : lines.findIndex((l, i) => i > found.start && i < found.end && keyPattern.test(l));
+  if (found === null || existing < 0 || valueExtent(lines, existing, found.end).last !== existing)
+    return { error: `${what}: could not remove it safely; remove it by hand` };
+  lines.splice(existing, 1);
+  const after = lines.join("\n");
+  const again = parse(after);
+  if (typeof again === "string") return { error: `${what}: the result would not parse (${again})` };
+  return at(again, [...path, key]) === undefined
+    ? { text: after }
+    : { error: `${what}: could not remove it safely; remove it by hand` };
+};
+
 /** Append one `[[path]]` entry. */
 export const appendEntry = (
   text: string,

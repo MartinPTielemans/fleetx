@@ -346,8 +346,9 @@ const RANDOM_PORTS = { from: 49152, count: 16384 };
 /**
  * Where the fleet's app is hosted, when it has a hub: the relay's tailnet
  * address, with who may open it. None when the fleet has no relay URL, this
- * machine is not in a fleet (or its setup stopped part-way), or the hub's
- * bring-up from here has not finished: the app here offers to try it again.
+ * machine is not in a fleet (or its setup stopped part-way), the hub's
+ * bring-up from here has not finished (the app here offers to try it again),
+ * or the hub cannot serve the app (`[ui] hosted = false`, HubUi.ts).
  */
 export const hostedApp = Effect.gen(function* () {
   const config = yield* loadConfig.pipe(Effect.option);
@@ -355,6 +356,7 @@ export const hostedApp = Effect.gen(function* () {
   const home = process.env["HOME"] ?? "";
   if (Option.isSome(yield* unfinishedRun(home))) return Option.none();
   if (Option.isSome(yield* readHub(home))) return Option.none();
+  if (config.value.settings.ui?.hosted === false) return Option.none();
   const url = config.value.settings.relay?.url?.replace(/\/+$/, "");
   if (url === undefined || url === "") return Option.none();
   return Option.some({ url: `${url}/`, allow: config.value.settings.ui?.allow ?? [] });

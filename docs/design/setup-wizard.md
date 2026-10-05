@@ -193,6 +193,18 @@ refusal shows the server's own words (SetupApi.ts lists the statuses).
 - **The hub gets the build the wizard started with.** Its SHA-256 is kept
   from the start, the file is refused if it changed since, and the hub
   checks what arrived against it before installing.
+- **The app on the hub opens only through tailscale serve.** The relay asks
+  the hub's kernel whose socket made each connection: on Linux root's or
+  tailscaled's user's (`/proc/net/tcp`); on macOS root's (the standalone
+  app's system extension, or `tailscaled` as a daemon; the TCP table from
+  `sysctl net.inet.tcp.pcblist_n`, which needs no root), or the App Store
+  app's network extension, which runs as the logged-in user and is let in
+  only as that process, by its code signature (`HubUi.ts`). Anything not
+  placed is refused. A hub that cannot tell (`tailscaled` run as a user on a
+  Mac, or another OS) serves the app to no one: the probe says so on the hub
+  step ("The fleet app will open locally on this computer instead",
+  `UiProbe.app`), admission writes `[ui] hosted = false`, the done screen
+  gets no `fleetUrl`, and `t3-fleet ui` serves the app on each machine.
 - **Ssh is yours.** The wizard uses the ssh the user already has (their
   config, keys and agent). It does not store a key or a password.
 

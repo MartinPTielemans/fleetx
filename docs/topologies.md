@@ -90,12 +90,22 @@ confirmed, once per request. It cannot approve a proposal, its own or
 another's, and setting it up approves nothing of its own but its proposed
 secrets: a change to its node file (a role, a profile, a setting) waits for
 you like any proposal. It holds the relay token, like every machine, so it
-could publish false reports. Only tailscale serve can say who is asking: a
-program on the hub that connects to the relay's loopback port is refused
-unless it runs as root or as tailscaled's user (Linux tells; a hub that is not
-Linux serves the app to no one). Root on the hub is out of reach of any of
-this. If the hub is also an authority (one machine doing both), it can commit
-to the repo anyway, as any authority can.
+could publish false reports. Only tailscale serve can say who is asking, so
+the relay asks the hub's kernel whose socket opened each connection to its
+loopback port, and refuses any other program on the hub, the relay's own user
+included:
+
+| Hub                                                                                   | Serves the app to                                                                           |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Linux                                                                                 | connections of root's, or of the user tailscaled runs as (`/proc/net/tcp`)                  |
+| macOS, the standalone Tailscale app (system extension, root)                          | connections of root's (the kernel's TCP table, `net.inet.tcp.pcblist_n`)                    |
+| macOS, open-source `tailscaled` as a daemon (`sudo tailscaled install-system-daemon`) | connections of root's                                                                       |
+| macOS, the App Store Tailscale app (its extension runs as you)                        | the extension's own connections only, by its code signature, checked on the running process |
+| macOS with `tailscaled` run as a user; any other OS                                   | no one: setup writes `[ui] hosted = false` and `t3-fleet ui` serves the app on each machine |
+
+Root on the hub is out of reach of any of this. If the hub is also an
+authority (one machine doing both), it can commit to the repo anyway, as any
+authority can.
 
 ### The MCP hub
 

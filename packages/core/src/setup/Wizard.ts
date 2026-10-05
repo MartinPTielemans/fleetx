@@ -584,8 +584,12 @@ export const make = (hooks: {
             onSome: (h) => ({ node: h.node, ssh: h.ssh, error: h.error }),
           }),
           // Not while the hub's bring-up is still to finish: the app here offers to try it again.
+          // Nor when the hub cannot serve the app (UiProbe.app): it opens here instead.
           fleetUrl:
-            config === null || Option.isSome(unfinished) || Option.isSome(hub)
+            config === null ||
+            Option.isSome(unfinished) ||
+            Option.isSome(hub) ||
+            config.settings.ui?.hosted === false
               ? null
               : (config.settings.relay?.url?.replace(/\/+$/, "").concat("/") ?? null),
         } satisfies UiSetupState;
@@ -630,6 +634,7 @@ export const make = (hooks: {
               ssh: request.hub.ssh,
               relayUrl: probed.relayUrl,
               mcp: request.hub.mcp,
+              ...(probed.app?.state === "warn" ? { hostsApp: false } : {}),
               error: null,
             };
           }
