@@ -27,9 +27,10 @@ your **hub**. It works for the fleet; it doesn't control it:
 
 - **Changes arrive right away.** Every machine hears the moment you change
   something, and a laptop that slept catches up when it wakes.
-- **OAuth logins happen once.** The hub hosts your MCP servers, so you sign
-  in to each of them on the hub and every machine uses that login.
-- **Docker only on the hub.** MCP servers that run in containers run there.
+- **Your MCP servers in one place, if you want.** A switch in setup, off by
+  default: the hub hosts your MCP servers, so you sign in to each once, on
+  the hub, every machine uses that login, and containers run only there.
+  Until you sign in there, those servers stop working on your machines.
 
 Your own computer stays the **authority**: it approves changes and holds the
 keys. The hub runs things; you decide things. A laptop shouldn't be the hub,
@@ -57,6 +58,13 @@ this computer. If you have an always-on machine, it checks it over ssh from
 here and sets it up as your hub. Before anything is written you see the whole
 plan: what goes into your repository, each conflict with a choice, and every
 credential it found. Credentials go into an encrypted file, never a plain one.
+
+Setup also asks how the fleet looks after your machines. **Keep things up to
+date automatically** is on: T3 Code (when no thread is running), Claude Code
+and Codex, and skills are updated by each sync, with no agent involved. Turn it
+off and they wait for you to apply them. Alerts show as a notification on your
+computer, and can go to your phone through [ntfy](https://ntfy.sh) on a
+private topic setup makes for you.
 
 Close the tab and want it back? `t3-fleet ui`. When it's done, the wizard gives
 you the line to run on each next machine.

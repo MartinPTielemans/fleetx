@@ -149,7 +149,7 @@ function LookingAfter({
   return (
     <Question
       title="Looking after them"
-      help="T3 Fleet checks every machine each time it syncs. Choose what it does by itself, and how it tells you when something needs you. Change either later in the fleet's settings."
+      help="T3 Fleet checks every machine each time it syncs. Choose what it does by itself, and how it tells you when something needs you. Both stay editable in your fleet's t3-fleet.toml."
     >
       <Group>
         <Toggle
