@@ -29,7 +29,7 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import { exec } from "./Exec.ts";
 import { lookupLatest } from "./Latest.ts";
 import { stateDir } from "./Names.ts";
-import { readAccess, t3CliFromCommandLine } from "./T3Access.ts";
+import { readAccess, t3CliFromCommandLine, t3FromNix } from "./T3Access.ts";
 import { t3SettingsPath } from "./T3Settings.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
 
@@ -252,6 +252,8 @@ export const updateT3 = (options: { readonly ifIdle: boolean }) =>
     const commandLine = ps.stdout.trim();
     if (ps.code !== 0 || commandLine === "")
       return yield* Effect.fail(`the T3 server (pid ${runtime.pid}) is not running`);
+    if (t3FromNix(commandLine))
+      return yield* Effect.fail("T3 comes from Nix here; update it in your Nix configuration");
 
     const client = yield* HttpClient.HttpClient;
     const descriptor = yield* client

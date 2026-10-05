@@ -412,6 +412,143 @@ describe("diagnose", () => {
     ).toEqual([]);
   });
 
+  describe("agents Nix installed", () => {
+    const fromNix = (
+      claude: Partial<MachineObservation["agents"][number]>,
+      providers?: MachineObservation["t3"]["providers"],
+    ) =>
+      machine(
+        {
+          agents: [
+            {
+              name: "claude",
+              managedPath: "/home/u/.local/bin/claude",
+              managedVersion: null,
+              onPath: ["/home/u/.nix-profile/bin/claude"],
+              nix: { path: "/home/u/.nix-profile/bin/claude", version: "2.1.288" },
+              ...claude,
+            },
+            machine().agents[1]!,
+          ],
+        },
+        providers === undefined ? {} : { providers },
+      );
+
+    it("installs nothing over a current Nix copy, and accepts T3 running it from another profile", () => {
+      const nix = fromNix({}, [
+        provider({
+          instanceId: "claudeAgent",
+          binaryPath: "claude",
+          resolved: "/etc/profiles/per-user/u/bin/claude",
+          resolvedFromNix: true,
+        }),
+        provider({ instanceId: "codex" }),
+      ]);
+      expect(diagnose([ok("nixos", nix)], latest, settings)).toEqual([]);
+    });
+
+    it("leaves a Nix copy behind to the Nix configuration: a note with no fix", () => {
+      const findings = diagnose(
+        [
+          ok(
+            "nixos",
+            fromNix({ nix: { path: "/home/u/.nix-profile/bin/claude", version: "2.1.281" } }),
+          ),
+        ],
+        latest,
+        settings,
+      );
+      expect(findings.map((f) => f.key)).toEqual(["claude-behind"]);
+      expect(findings[0]).toMatchObject({
+        severity: "info",
+        title: "claude 2.1.281 is behind 2.1.288",
+      });
+      expect(findings[0]?.fix).toBeUndefined();
+      expect(findings[0]?.detail).toBe(
+        "it comes from Nix (~/.nix-profile/bin/claude); update it in your Nix configuration",
+      );
+    });
+
+    it("never upgrades the managed path when home-manager links it into the Nix store", () => {
+      const linked = fromNix({
+        managedVersion: "2.1.281",
+        onPath: ["/home/u/.local/bin/claude"],
+        nix: { path: "/home/u/.local/bin/claude", version: "2.1.281" },
+      });
+      const behind = diagnose([ok("nixos", linked)], latest, settings).find(
+        (f) => f.key === "claude-behind",
+      );
+      expect(behind?.fix).toBeUndefined();
+    });
+
+    it("still notices a non-Nix copy shadowing it, in PATH or in T3", () => {
+      const shadowed = fromNix(
+        { onPath: ["/home/u/.npm-global/bin/claude", "/home/u/.nix-profile/bin/claude"] },
+        [
+          provider({
+            instanceId: "claudeAgent",
+            binaryPath: "claude",
+            resolved: "/home/u/.npm-global/bin/claude",
+          }),
+          provider({ instanceId: "codex" }),
+        ],
+      );
+      expect(titles(diagnose([ok("nixos", shadowed)], latest, settings), "warn")).toEqual([
+        "nixos: your shell runs ~/.npm-global/bin/claude, not the claude from Nix",
+        "nixos: T3 runs claude from ~/.npm-global/bin/claude, not the claude from Nix",
+      ]);
+    });
+
+    it("says a pin is set in the Nix configuration instead of reinstalling", () => {
+      const r = ok("nixos", fromNix({}));
+      const pinned = {
+        ...r,
+        node: {
+          ...r.node,
+          settings: {
+            table: { agents: { claude: { policy: "pin:2.1.280" } } },
+            provenance: new Map(),
+          },
+        },
+      };
+      const off = diagnose([pinned], latest, settings, [pinned.node]).find(
+        (f) => f.key === "claude-off-pin",
+      );
+      expect(off?.fix).toBeUndefined();
+      expect(off?.detail).toContain("pin it in your Nix configuration");
+    });
+  });
+
+  it("leaves a T3 that Nix installed to Nix, even under [t3] update = when-idle", () => {
+    const r = ok(
+      "nixos",
+      machine(
+        {},
+        {
+          descriptor: {
+            environmentId: "e",
+            label: "l",
+            serverVersion: "0.0.46-nightly.20261001.2500",
+          },
+          runtimeBinary: null,
+          fromNix: true,
+        },
+      ),
+    );
+    const idle = {
+      ...r,
+      node: {
+        ...r.node,
+        settings: { table: { t3: { update: "when-idle" } }, provenance: new Map() },
+      },
+    };
+    const behind = diagnose([idle], latest, settings, [idle.node]).find(
+      (f) => f.key === "t3-behind",
+    );
+    expect(behind?.fix).toBeUndefined();
+    expect(behind?.detail).toBe("T3 comes from Nix here; update it in your Nix configuration");
+  });
+
   it("reports a machine it could not reach without dropping the others", () => {
     const findings = diagnose(
       [

@@ -42,6 +42,7 @@ import {
   RENEW_WITHIN_MS,
   t3AccessAttemptPath,
   t3CliFromCommandLine,
+  t3FromNix,
 } from "./T3Access.ts";
 import { providerPlans, T3SettingsFile, type ProviderPlan } from "./T3Settings.ts";
 import { ExecutionEnvironmentDescriptor } from "./vendor/t3/environment.ts";
@@ -91,6 +92,14 @@ export const resolveAll = (name: string, pathVar: string | undefined) =>
     return hits;
   });
 
+/** Whether `file` is, or links to, something in the Nix store: Nix keeps its version, not T3 Fleet. */
+const inNixStore = (file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const real = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => file));
+    return real.startsWith("/nix/store/");
+  });
+
 // ---- agents -------------------------------------------------------------
 
 const observeAgent = (name: "claude" | "codex", home: string, loginPath: string | undefined) =>
@@ -106,11 +115,33 @@ const observeAgent = (name: "claude" | "codex", home: string, loginPath: string 
           })).stdout,
         ) ?? null)
       : null;
+    const onPath = yield* resolveAll(name, loginPath);
+    const nixPath =
+      managed && (yield* inNixStore(managedPath))
+        ? managedPath
+        : yield* Effect.findFirst(onPath, inNixStore).pipe(Effect.map(Option.getOrNull));
+    const nix =
+      nixPath === null
+        ? undefined
+        : nixPath === managedPath
+          ? { path: nixPath, version }
+          : {
+              path: nixPath,
+              version:
+                parseVersion(
+                  (yield* exec({
+                    command: nixPath,
+                    args: ["--version"],
+                    timeout: Duration.seconds(20),
+                  })).stdout,
+                ) ?? null,
+            };
     return {
       name,
       managedPath,
       managedVersion: version,
-      onPath: yield* resolveAll(name, loginPath),
+      onPath,
+      ...(nix === undefined ? {} : { nix }),
     } satisfies AgentObservation;
   });
 
@@ -180,6 +211,7 @@ export const runtimeFromCommandLine = (pid: number) =>
       binary: match?.[1] ?? null,
       version: match?.[2] ?? null,
       cli: t3CliFromCommandLine(ps.stdout) !== null,
+      nix: t3FromNix(ps.stdout),
     };
   });
 
@@ -245,7 +277,12 @@ const observeProvider = (plan: ProviderPlan, env: Env) =>
         : ok
           ? "starts"
           : (output.split("\n").find((l) => l.trim() !== "") ?? `exit ${run.code}`).slice(0, 240);
-    return { ...base, resolved, launch: { ok, version, detail } };
+    return {
+      ...base,
+      resolved,
+      ...((yield* inNixStore(resolved)) ? { resolvedFromNix: true } : {}),
+      launch: { ok, version, detail },
+    };
   });
 
 const observeT3 = (home: string, loginEnv: Env) =>
@@ -261,6 +298,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
     let descriptor: T3Observation["descriptor"] = null;
     let installedVersion: string | null = null;
     let runtimeBinary: string | null = null;
+    let fromNix = false;
     let serverEnv: Env | null = null;
     let cli = false;
 
@@ -291,6 +329,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
         }
         const fromCommandLine = yield* runtimeFromCommandLine(r.pid);
         runtimeBinary = fromCommandLine.binary;
+        fromNix = fromCommandLine.nix;
         cli = fromCommandLine.cli;
         installedVersion = descriptor?.serverVersion ?? fromCommandLine.version;
         serverEnv = Option.getOrNull(yield* serverEnvironment(r.pid));
@@ -409,6 +448,7 @@ const observeT3 = (home: string, loginEnv: Env) =>
       descriptor,
       installedVersion,
       runtimeBinary,
+      ...(fromNix ? { fromNix } : {}),
       serverPath: serverEnv?.["PATH"] ?? null,
       providers,
       access,
