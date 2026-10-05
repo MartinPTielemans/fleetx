@@ -25,7 +25,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { BuildId } from "./Build.ts";
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
-import { configDir, FLEET_FILE } from "./Names.ts";
+import { configDir, DEFAULT_RELAY_PORT, FLEET_FILE } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -304,7 +304,10 @@ export const probeSettings = (
   ...(config.settings.relay === undefined
     ? {}
     : {
-        relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
+        relay: {
+          url: config.settings.relay.url ?? null,
+          port: config.settings.relay.port ?? DEFAULT_RELAY_PORT,
+        },
       }),
   // This machine uses the repo it loaded, wherever it is (setup --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,

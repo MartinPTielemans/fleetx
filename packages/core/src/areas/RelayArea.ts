@@ -23,7 +23,7 @@ import * as Schema from "effect/Schema";
 import { defineArea, sh } from "../Area.ts";
 import type { Finding } from "../Diagnose.ts";
 import { exec } from "../Exec.ts";
-import { launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
+import { DEFAULT_RELAY_PORT, launchdLabel, STATE_DIR, systemdUnit } from "../Names.ts";
 import { RELAY_TOKEN } from "../RelayClient.ts";
 import { installedBundle, launchdReload, stableNode } from "../Runtime.ts";
 import { localSecretsPath } from "../Secrets.ts";
@@ -210,7 +210,7 @@ export const RelayArea = defineArea({
       const fs = yield* FileSystem.FileSystem;
       const platform = process.platform;
       const root = process.getuid?.() === 0;
-      const port = ctx.relay?.port ?? 8399;
+      const port = ctx.relay?.port ?? DEFAULT_RELAY_PORT;
       const role =
         ctx.relay === null
           ? null

@@ -44,7 +44,7 @@ import {
   why,
 } from "../Git.ts";
 import { writeLocalConfig } from "../Init.ts";
-import { FLEET_FILE } from "../Names.ts";
+import { DEFAULT_RELAY_PORT, FLEET_FILE } from "../Names.ts";
 import {
   encryptFor,
   ensureIdentity,
@@ -280,7 +280,7 @@ const listedDests = (text: string): ReadonlySet<unknown> => {
 };
 
 const relayEdits = (text: string, url: string | null): Edit => {
-  const port = setKey(text, ["relay"], "port", 8399);
+  const port = setKey(text, ["relay"], "port", DEFAULT_RELAY_PORT);
   if ("error" in port || url === null) return port;
   return setKey(port.text, ["relay"], "url", url);
 };

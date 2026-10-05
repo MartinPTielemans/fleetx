@@ -11,6 +11,7 @@ import { shPath } from "./Area.ts";
 import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
 import type { Node } from "./Config.ts";
+import { remoteExec } from "./Remote.ts";
 import { BUNDLE_FILE, CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
 
 export interface FixOutcome {
@@ -28,6 +29,29 @@ const lastLine = (text: string) =>
     .filter((l) => l !== "")
     .pop() ?? "";
 
+/** Install this exact build, atomically, in the same locations as the release installer. */
+export const installEngineScript = (bundle: string) => {
+  const share = `~/${SHARE_DIR}`;
+  return [
+    `mkdir -p ${share} ~/.local/bin`,
+    `base64 -d > ${share}/${BUNDLE_FILE}.tmp <<'T3_FLEET_BUNDLE'`,
+    Buffer.from(bundle)
+      .toString("base64")
+      .replace(/(.{76})/g, "$1\n"),
+    "T3_FLEET_BUNDLE",
+    `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
+    // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
+    `if [ -e ~/.local/bin/${CLI} ] && [ ! -L ~/.local/bin/${CLI} ]; then mv ~/.local/bin/${CLI} ~/.local/bin/${CLI}.t3-fleet-backup; fi`,
+    `ln -sfn ${share}/${BUNDLE_FILE} ~/.local/bin/${CLI}`,
+    // Long-running services hold the old build until restarted. The model proxy is not
+    // restarted: it notices the new build and exits once its responses are done.
+    `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
+    `elif [ "$(id -u)" = 0 ]; then systemctl try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true`,
+    `else systemctl --user try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true; fi`,
+    `echo installed ${PRODUCT}`,
+  ].join("\n");
+};
+
 /**
  * Every fix runs with T3_FLEET_CHECKOUT set to that node's clone of the
  * config repo, and ~/.local/bin on PATH, where t3-fleet and the agent CLIs
@@ -35,28 +59,7 @@ const lastLine = (text: string) =>
  * and linked as t3-fleet.
  */
 const script = (command: string, checkout: string, bundle: string) => {
-  const share = `~/${SHARE_DIR}`;
-  const body =
-    command === ENGINE_INSTALL
-      ? [
-          `mkdir -p ${share} ~/.local/bin`,
-          `base64 -d > ${share}/${BUNDLE_FILE}.tmp <<'T3_FLEET_BUNDLE'`,
-          Buffer.from(bundle)
-            .toString("base64")
-            .replace(/(.{76})/g, "$1\n"),
-          "T3_FLEET_BUNDLE",
-          `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
-          // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
-          `[ -e ~/.local/bin/${CLI} ] && [ ! -L ~/.local/bin/${CLI} ] && mv ~/.local/bin/${CLI} ~/.local/bin/${CLI}.t3-fleet-backup`,
-          `ln -sfn ${share}/${BUNDLE_FILE} ~/.local/bin/${CLI}`,
-          // Long-running services hold the old build until restarted. The model proxy is not
-          // restarted: it notices the new build and exits once its responses are done.
-          `if [ "$(uname)" = Darwin ]; then for l in ${launchdLabel("serve")} ${launchdLabel("listen")}; do launchctl kickstart -k "gui/$(id -u)/$l" 2>/dev/null || true; done`,
-          `elif [ "$(id -u)" = 0 ]; then systemctl try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true`,
-          `else systemctl --user try-restart ${systemdUnit("serve")}.service ${systemdUnit("listen")}.service 2>/dev/null || true; fi`,
-          `echo installed ${PRODUCT}`,
-        ].join("\n")
-      : command;
+  const body = command === ENGINE_INSTALL ? installEngineScript(bundle) : command;
   return `export T3_FLEET_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
 };
 
@@ -75,22 +78,10 @@ export const runFix = (
         summary: `no ${PRODUCT} build to install was given; nothing was changed`,
       } satisfies FixOutcome;
     }
-    const run = yield* exec(
-      node.ssh === null
-        ? {
-            command: "bash",
-            args: ["-l", "-s"],
-            stdin: script(finding.fix.command, checkout, bundle),
-            timeout: Duration.minutes(10),
-          }
-        : {
-            command: "ssh",
-            args: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", node.ssh, "bash -l -s"],
-            env: process.env,
-            stdin: script(finding.fix.command, checkout, bundle),
-            timeout: Duration.minutes(10),
-          },
-    );
+    const stdin = script(finding.fix.command, checkout, bundle);
+    const run = yield* node.ssh === null
+      ? exec({ command: "bash", args: ["-l", "-s"], stdin, timeout: Duration.minutes(10) })
+      : remoteExec(node.ssh, { command: "bash -l -s", stdin, timeout: Duration.minutes(10) });
     const ok = run.code === 0;
     const summary = run.timedOut
       ? "timed out after 10 minutes"
