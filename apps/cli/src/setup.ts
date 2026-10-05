@@ -56,6 +56,7 @@ import {
   type Plan,
 } from "@t3-fleet/core/setup/Plan";
 import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Preflight";
+import { settingsWords } from "@t3-fleet/core/setup/PlanWords";
 import { SELF_SERVER } from "@t3-fleet/core/setup/Repo";
 import {
   abandonRun,
@@ -519,6 +520,20 @@ const planAndApply = (flags: Flags, scratch: string) =>
       return yield* Console.log(`\n${node} is set up.`);
     }
     if (flags.planOnly) {
+      const settings = plannedSettings(flags, {
+        node,
+        mode: p.mode,
+        fleetNtfy: p.fleetNtfy,
+        canNotify: canNotifyHere(),
+      });
+      if (settings.length > 0)
+        yield* Console.log(
+          [
+            "",
+            "Settings (from these flags; each one not given takes its default, or is asked when setup runs)",
+            ...settings.map((l) => `  ${l}`),
+          ].join("\n"),
+        );
       yield* Console.log("\n--plan: nothing was written.");
       return;
     }
@@ -715,6 +730,28 @@ export const upkeepFlags = (
       ? false
       : Option.getOrElse(flags.ntfy, () => (again ? false : ("ask" as const))),
   };
+};
+
+/** What `--plan` shows under Settings: each flag given, and the default for each setup would ask. */
+export const plannedSettings = (
+  flags: Pick<Flags, "autoUpdate" | "notify" | "ntfy" | "mcpHub" | "relay">,
+  context: Parameters<typeof upkeepFlags>[1] & { readonly node: string },
+): ReadonlyArray<string> => {
+  const wanted = upkeepFlags(flags, context);
+  const pick = (value: boolean | "ask", initial: boolean) => (value === "ask" ? initial : value);
+  const upkeep = upkeepFor(context.mode, {
+    autoUpdate:
+      wanted.autoUpdate === null ? null : pick(wanted.autoUpdate, UPKEEP_DEFAULTS.autoUpdate),
+    desktop: wanted.desktop === null ? null : pick(wanted.desktop, UPKEEP_DEFAULTS.desktop),
+    ntfy: pick(wanted.ntfy, UPKEEP_DEFAULTS.ntfy) ? "" : null,
+  });
+  return settingsWords({
+    node: context.node,
+    mcpHub: flags.relay && Option.getOrElse(flags.mcpHub, () => UPKEEP_DEFAULTS.mcpHub),
+    autoUpdate: upkeep.autoUpdate,
+    desktop: upkeep.desktop,
+    ntfy: upkeep.ntfy !== null,
+  });
 };
 
 const chooseUpkeep = (input: {

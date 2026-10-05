@@ -51,7 +51,10 @@ More on roles and layouts: [topologies](docs/topologies.md).
 curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
 ```
 
-When it finishes, a setup wizard opens in your browser, on your own computer.
+When it finishes, on a first install on your own computer (a Mac, or Linux
+with a desktop), a setup wizard opens in your browser. Elsewhere, such as a
+server over ssh, the installer prints the command to run next, and `t3-fleet ui`
+opens the wizard on any computer with a browser.
 It asks what machines you have, recommends a layout, and asks where your setup
 should live: a new private GitHub repository, one you already have, or just
 this computer. If you have an always-on machine, it checks it over ssh from
@@ -101,7 +104,10 @@ This opens a local web app that looks like T3 Code, in light and dark:
 - **Models**: traffic through your model proxy, if you use one.
 
 With a hub, the hub hosts the app on your tailnet, so you open it from any
-device signed in to Tailscale as a login the fleet allows (setup allows yours).
+device signed in to Tailscale as a login the fleet allows. The wizard allows
+yours when it brings up the hub; with a hub set up in the terminal
+(`t3-fleet setup … --relay`), add your login to `[ui] allow` in
+`t3-fleet.toml` yourself, on an authority ([cli](docs/cli.md#on-the-hub)).
 It shows each machine as it last reported, sends a fix to the machine it
 changes (which checks itself again and runs only what it proposes), and leaves
 approving proposals to an authority. Without a hub, or with

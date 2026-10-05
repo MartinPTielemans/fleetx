@@ -512,7 +512,9 @@ export const setupSteps = (
             .readDirectory(repo)
             .pipe(Effect.orElseSucceed(() => [] as Array<string>));
           if (files.length > 0)
-            return yield* Effect.fail(`${repo} already exists and is not empty; pass --dir`);
+            return yield* Effect.fail(
+              `${repo} already exists and is not empty; move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
+            );
         }
         yield* fs.makeDirectory(`${repo}/nodes`, { recursive: true });
         if (!(yield* exists(fleetFile)))
@@ -594,11 +596,13 @@ export const setupSteps = (
           if (cleanUrl(origin) === cleanUrl(join.url))
             return [`${repo} is already a clone of ${cleanUrl(join.url)}`];
           return yield* Effect.fail(
-            `${repo} already holds another repository (${cleanUrl(origin) || "no remote"}); pass --dir`,
+            `${repo} already holds another repository (${cleanUrl(origin) || "no remote"}); move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
           );
         }
         if (yield* exists(repo))
-          return yield* Effect.fail(`${repo} already exists; move it or pass --dir`);
+          return yield* Effect.fail(
+            `${repo} already exists; move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
+          );
         yield* fs.makeDirectory(repo.slice(0, repo.lastIndexOf("/")), { recursive: true });
         if (yield* exists(`${join.clone}/.git`)) {
           // The plan's clone, from a temporary directory: mv crosses filesystems where rename cannot.

@@ -586,3 +586,39 @@ export function Prose({ text }: { text: string }) {
     </>
   );
 }
+
+/** What an abandoned run had done, as abandon said it: what stays, and how to finish or undo it. */
+export function AbandonedNote({
+  lines,
+  onDismiss,
+}: {
+  lines: ReadonlyArray<string>;
+  onDismiss: () => void;
+}) {
+  const [first, ...rest] = lines;
+  return (
+    <section
+      role="status"
+      aria-label="Setup abandoned"
+      className="mx-4 mt-4 flex flex-col gap-2 rounded-xl border bg-card/60 px-4 py-3 shadow-xs/5 md:mx-8"
+    >
+      <div className="flex items-start gap-3">
+        <p className="min-w-0 flex-1 text-pretty font-medium text-sm leading-5">
+          {first === undefined ? "Setup abandoned." : <Prose text={first} />}
+        </p>
+        <Button size="xs" variant="ghost-muted" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      </div>
+      {rest.length === 0 ? null : (
+        <ul className="flex flex-col gap-0.5 text-muted-foreground text-xs leading-5">
+          {rest.map((line, i) => (
+            <li key={i} className={cn(/^\s/.test(line) && "pl-4")}>
+              <Prose text={line.trim()} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}

@@ -26,6 +26,8 @@ export interface SetupRun {
   readonly settings?: ReadonlyArray<string>;
   /** The repository's remote; without one there is nothing for another machine to join yet. */
   readonly remote?: string | null;
+  /** Whether this machine commits (a new fleet, or an authority) rather than proposes (joining). */
+  readonly commits?: boolean;
   /** How many other machines the user said they have, for the invites. */
   readonly others: number;
   /** The furthest step each job reported, by job id: a failed job reports none. */
@@ -50,14 +52,32 @@ export const saveRun = (run: SetupRun | null) => {
   else window.localStorage.setItem(KEY, JSON.stringify(run));
 };
 
+/** The server's job list as read at `at` (GET /api/jobs): which jobs it still had. */
+export interface JobListing {
+  readonly at: number;
+  readonly ids: ReadonlySet<string>;
+}
+
 /**
  * The run's two jobs, as the store knows them. `run.job` is the job apply
  * last answered with: the "setup" job, or the "setup-hub" one when a resume
  * only had the hub's part left. Until that job's first event arrives the
- * run is `pending`.
+ * run is `pending`, unless the server's list, read after apply answered,
+ * does not have it: the server dropped it (finished long ago, or t3-fleet ui
+ * restarted), so it is `gone` and the run is read from the state instead.
  */
-export const runJobs = (run: SetupRun | null, jobs: ReadonlyArray<UiJob>) => {
+export const runJobs = (
+  run: SetupRun | null,
+  jobs: ReadonlyArray<UiJob>,
+  listing: JobListing | null = null,
+) => {
   const pinned = run?.job == null ? undefined : jobs.find((j) => j.id === run.job);
+  const gone =
+    run?.job != null &&
+    pinned === undefined &&
+    listing !== null &&
+    listing.at >= run.startedAt &&
+    !listing.ids.has(run.job);
   const setups = jobs.filter((j) => j.kind === "setup");
   const setup =
     pinned === undefined
@@ -67,7 +87,9 @@ export const runJobs = (run: SetupRun | null, jobs: ReadonlyArray<UiJob>) => {
       : pinned.kind === "setup"
         ? pinned
         : (setups.filter((j) => j.startedAt <= pinned.startedAt).at(-1) ?? null);
-  const since = setup?.startedAt ?? pinned?.startedAt ?? Number.POSITIVE_INFINITY;
+  const since = gone
+    ? (run?.startedAt ?? Number.POSITIVE_INFINITY)
+    : (setup?.startedAt ?? pinned?.startedAt ?? Number.POSITIVE_INFINITY);
   const hub = jobs.filter((j) => j.kind === "setup-hub" && j.startedAt >= since).at(-1) ?? null;
-  return { setup, hub, pending: run?.job != null && pinned === undefined };
+  return { setup, hub, pending: run?.job != null && pinned === undefined && !gone, gone };
 };

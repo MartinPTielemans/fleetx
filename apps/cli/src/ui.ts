@@ -589,10 +589,13 @@ export const serveUi = ({
 
     // The ticket travels in the fragment, which browsers never send to a server, and works once.
     const url = link(port, ticket);
+    const stoppedRun = Option.isNone(started) && Option.isSome(yield* unfinishedRun(home));
     yield* Console.log(
       Option.isSome(started)
         ? `t3-fleet ui on ${url}\nthe link works once; checks every minute while a tab is open; Ctrl-C stops it`
-        : `t3-fleet ui on ${url}\nthis machine is not in a fleet yet: the link opens setup. It works once; Ctrl-C stops it`,
+        : stoppedRun
+          ? `t3-fleet ui on ${url}\na setup stopped part-way on this machine: the link opens it, to continue or abandon. It works once; Ctrl-C stops it`
+          : `t3-fleet ui on ${url}\nthis machine is not in a fleet yet: the link opens setup. It works once; Ctrl-C stops it`,
     );
     if (!noOpen) {
       const opened = yield* openBrowser(url);

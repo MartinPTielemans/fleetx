@@ -42,7 +42,7 @@ export interface Answers {
   readonly notifyDesktop: boolean;
   /** Push alerts to a phone with ntfy, at `ntfyUrl`. */
   readonly ntfy: boolean;
-  /** The topic made the first time ntfy was turned on, kept if it is turned off and on again. */
+  /** The topic made when ntfy was turned on; gone when it is turned off, and never kept across a reload. */
   readonly ntfyUrl: string;
 }
 
@@ -64,9 +64,23 @@ export const initialAnswers = (state: UiSetupState): Answers => ({
   ntfyUrl: "",
 });
 
-/** Turning ntfy on or off: a topic is made the first time, and kept after. */
+/** Turning ntfy on makes a topic; turning it off forgets it, so it is in no request or storage after. */
 export const ntfyPatch = (answers: Answers, on: boolean): Partial<Answers> =>
-  on && answers.ntfyUrl === "" ? { ntfy: true, ntfyUrl: newNtfyUrl() } : { ntfy: on };
+  !on
+    ? { ntfy: false, ntfyUrl: "" }
+    : answers.ntfyUrl === ""
+      ? { ntfy: true, ntfyUrl: newNtfyUrl() }
+      : { ntfy: true };
+
+/**
+ * The answers as kept across a reload: everything but the ntfy topic, which
+ * is a secret (anyone with it reads the alerts), so ntfy comes back off.
+ */
+export const persistable = (answers: Answers): Answers => ({
+  ...answers,
+  ntfy: false,
+  ntfyUrl: "",
+});
 
 export const STEP_LABEL: Readonly<Record<StepId, string>> = {
   machines: "Your machines",
@@ -224,18 +238,118 @@ export const conflictNow = (
 export const openConflicts = (plan: UiSetupPlan, choices: Choices) =>
   plan.conflicts.filter((c) => conflictNow(c, choices, plan.conflicts).applies);
 
+/**
+ * The choices still meaningful for a new plan: each names a conflict the plan
+ * still has and one of its choices. The rest are dropped, back to defaults.
+ */
+export const keepChoices = (choices: Choices, plan: UiSetupPlan): Choices =>
+  Object.fromEntries(
+    Object.entries(choices).filter(([id, value]) =>
+      plan.conflicts.some((c) => c.id === id && c.choices.some((x) => x.value === value)),
+    ),
+  );
+
 /** Every applying conflict's choice, explicit, for apply. */
 export const chosen = (plan: UiSetupPlan, choices: Choices): Record<string, string> =>
   Object.fromEntries(openConflicts(plan, choices).map((c) => [c.id, choiceOf(c, choices)]));
 
-/** Missing credentials typed in; one left blank or marked "set later" is left out. */
+const missingNames = (plan: Pick<UiSetupPlan, "missing">) =>
+  new Set(plan.missing.map((m) => m.name));
+
+/**
+ * Missing credentials typed in, for apply: only those this plan asks for; one
+ * left blank or marked "set later" is left out.
+ */
 export const typedValues = (
   values: Readonly<Record<string, string>>,
   later: ReadonlySet<string>,
-): Record<string, string> =>
-  Object.fromEntries(
-    Object.entries(values).filter(([name, value]) => !later.has(name) && value !== ""),
+  plan: Pick<UiSetupPlan, "missing">,
+): Record<string, string> => {
+  const asked = missingNames(plan);
+  return Object.fromEntries(
+    Object.entries(values).filter(
+      ([name, value]) => asked.has(name) && !later.has(name) && value !== "",
+    ),
   );
+};
+
+/** What was typed in (or marked "set later") for credentials a new plan still asks for; the rest forgotten. */
+export const keepCredentials = (
+  values: Readonly<Record<string, string>>,
+  later: ReadonlySet<string>,
+  plan: Pick<UiSetupPlan, "missing">,
+): { values: Readonly<Record<string, string>>; later: ReadonlySet<string> } => {
+  const asked = missingNames(plan);
+  return {
+    values: Object.fromEntries(Object.entries(values).filter(([name]) => asked.has(name))),
+    later: new Set([...later].filter((name) => asked.has(name))),
+  };
+};
+
+// ── making the plan ─────────────────────────────────────────────────────
+
+/**
+ * The plan as the review shows it. `key` is the request it was asked for,
+ * `gen` the newest ask: an answer to an older one is dropped, so a slow
+ * reply cannot replace a newer plan, or an error leave an old one standing.
+ */
+export interface PlanLoad {
+  readonly data: UiSetupPlan | null;
+  readonly key: string;
+  readonly gen: number;
+  readonly loading: boolean;
+  readonly error: unknown;
+}
+
+export const NO_PLAN: PlanLoad = { data: null, key: "", gen: 0, loading: false, error: null };
+
+/** Asked again (generation `gen`) for the request `key`: the last plan stays on screen, dimmed. */
+export const planAsked = (load: PlanLoad, key: string, gen: number): PlanLoad => ({
+  ...load,
+  key,
+  gen,
+  loading: true,
+  error: null,
+});
+
+/** The answer to ask `gen`; one that failed leaves no plan to apply. */
+export const planAnswered = (
+  load: PlanLoad,
+  gen: number,
+  answer: { readonly data: UiSetupPlan } | { readonly error: unknown },
+): PlanLoad =>
+  gen !== load.gen
+    ? load
+    : "data" in answer
+      ? { ...load, data: answer.data, loading: false, error: null }
+      : { ...load, data: null, loading: false, error: answer.error };
+
+/** Whether "Set up" may apply this plan: the answer to the answers as they are now, and nothing failed. */
+export const planReady = (
+  load: PlanLoad,
+  requestKey: string,
+): load is PlanLoad & {
+  readonly data: UiSetupPlan;
+} => load.data !== null && !load.loading && load.error === null && load.key === requestKey;
+
+// ── where the server says this machine stands ───────────────────────────
+
+/**
+ * Where a state read (on focus, a job's end, the "session" event) moves a
+ * wizard that is not following a run: into the fleet when this machine is a
+ * member with nothing left to do, to the run when one is going, stopped, or
+ * has a hub left; otherwise nowhere. A tab left open on an earlier step so
+ * cannot start a second setup, and a stopped run reaches resume or abandon.
+ */
+export const followStage = (
+  state: Pick<UiSetupState, "stage" | "hub">,
+  step: StepId,
+): "member" | "apply" | null => {
+  if (step === "apply" || step === "done") return null;
+  if (state.stage === "member" && state.hub === null) return "member";
+  if (state.stage !== "fresh" || state.hub !== null) return "apply";
+  return null;
+};
 
 // ── a run's progress ────────────────────────────────────────────────────
 

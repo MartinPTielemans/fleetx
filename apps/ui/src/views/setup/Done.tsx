@@ -1,4 +1,8 @@
-/** Done: what the fleet is now, the line each other machine runs to join, and the way into the fleet. */
+/**
+ * Done: what the fleet is now, the line each other machine runs to join, and
+ * the way into the fleet. A machine that joined proposes rather than commits:
+ * what it brought waits on the authority, which also makes the invites.
+ */
 import {
   ArrowRightIcon,
   ArrowUpRightIcon,
@@ -45,20 +49,23 @@ export function DoneStep({
 }) {
   const [rows, setRows] = useState(() => Math.max(1, run?.others ?? 0));
   const taken = [run?.node, run?.hub?.node].filter((n): n is string => n !== undefined);
+  const joined = run?.commits === false;
   return (
     <StepFrame
       title={
         <span className="flex items-center gap-3">
           <Check />
-          Your fleet is ready
+          {joined ? `${run?.node ?? "This computer"} is in the fleet` : "Your fleet is ready"}
         </span>
       }
       lead={
-        run?.remote === null
-          ? `${run.node} holds the keys and approves what changes. Your setup is in a repository on this computer, ready for more machines once it has a remote.`
-          : run?.hub == null
-            ? `${run?.node ?? "This computer"} holds the keys and approves what changes. Each machine you add below joins with one command.`
-            : `${run.node} holds the keys and approves what changes; ${run.hub.node} is the hub, always on for the rest. Each machine you add below joins with one command.`
+        joined
+          ? `${run?.node ?? "This computer"} is set up and syncs with the fleet. What it brought is proposed: it reaches your other machines once the fleet's authority approves it.`
+          : run?.remote === null
+            ? `${run.node} holds the keys and approves what changes. Your setup is in a repository on this computer, ready for more machines once it has a remote.`
+            : run?.hub == null
+              ? `${run?.node ?? "This computer"} holds the keys and approves what changes. Each machine you add below joins with one command.`
+              : `${run.node} holds the keys and approves what changes; ${run.hub.node} is the hub, always on for the rest. Each machine you add below joins with one command.`
       }
       actions={
         fleetUrl === null ? (
@@ -91,13 +98,13 @@ export function DoneStep({
           <Chip
             icon={<LaptopIcon />}
             name={run?.node ?? "This computer"}
-            role="Authority"
+            role={joined ? "Member" : "Authority"}
             tone="primary"
           />
           {run?.hub == null ? null : (
             <Chip icon={<ServerIcon />} name={run.hub.node} role="Hub" tone="hub" />
           )}
-          {(run?.others ?? 0) === 0 ? null : (
+          {(run?.others ?? 0) === 0 || joined ? null : (
             <Chip
               icon={<MonitorSmartphoneIcon />}
               name={run?.others === 1 ? "One to join" : `${run?.others} to join`}
@@ -130,7 +137,9 @@ export function DoneStep({
           </div>
         )}
 
-        {run?.remote === null ? (
+        {joined ? (
+          <Joined node={run?.node ?? "this computer"} />
+        ) : run?.remote === null ? (
           <NoRemote />
         ) : (
           <section aria-labelledby="add-machines" className="flex flex-col gap-3">
@@ -221,6 +230,27 @@ function SignIn({ hub }: { hub: string }) {
         </div>
       </div>
       <CopyCommand command="t3-fleet mcp servers" className="bg-background/70 sm:ml-7" />
+    </section>
+  );
+}
+
+/** Joined: its proposal waits on the authority, where invites are made too; none can be made here. */
+function Joined({ node }: { node: string }) {
+  return (
+    <section
+      aria-labelledby="waiting-approval"
+      className="flex flex-col gap-3 rounded-xl border bg-card/50 p-4 shadow-xs/5"
+    >
+      <div className="flex flex-col gap-0.5">
+        <h2 id="waiting-approval" className="font-semibold text-sm">
+          Waiting for approval on the authority
+        </h2>
+        <p className="text-pretty text-muted-foreground text-xs leading-5">
+          On the fleet's authority, approve what {node} proposed in T3 Fleet's Proposals view, or
+          from a terminal there. Your other machines are invited from the authority too.
+        </p>
+      </div>
+      <CopyCommand command={`t3-fleet approve ${node}`} className="max-w-sm" />
     </section>
   );
 }

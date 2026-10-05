@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import { Command } from "effect/unstable/cli";
 import { describe, expect, it } from "vite-plus/test";
 
-import { existingRelayHub, setupFlags, upkeepFlags } from "./setup.ts";
+import { existingRelayHub, plannedSettings, setupFlags, upkeepFlags } from "./setup.ts";
 
 /** What `t3-fleet setup <args>` parses to, without running setup. */
 const parsed = async (args: ReadonlyArray<string>) => {
@@ -92,6 +92,27 @@ describe("t3-fleet setup's switches", () => {
     expect(upkeepFlags(await parsed(["--ntfy"]), { ...first, mode: "again" }).ntfy).toBe(true);
     // A fleet that pushes to ntfy already keeps its topic.
     expect(upkeepFlags(await parsed(["--ntfy"]), { ...first, fleetNtfy: true }).ntfy).toBe(false);
+  });
+
+  it("show under --plan's Settings what setup would set: the flags given, defaults for the rest", async () => {
+    const here = { ...first, node: "laptop" };
+    expect(plannedSettings(await parsed([]), here)).toEqual([
+      expect.stringContaining("Keep things up to date automatically"),
+      "Notify you on laptop for every fleet alert ([notify] desktop)",
+    ]);
+    const chosen = plannedSettings(
+      await parsed(["--relay", "--mcp-hub", "--no-auto-update", "--no-notify", "--ntfy"]),
+      here,
+    );
+    expect(chosen[0]).toContain("laptop");
+    expect(chosen.slice(1)).toEqual([
+      expect.stringContaining("Leave updates for you to apply"),
+      expect.stringContaining("Push every fleet alert to your phone with ntfy"),
+    ]);
+    // Joining keeps the fleet's [fleet] apply: nothing to say about it.
+    expect(plannedSettings(await parsed([]), { ...here, mode: "join" })).toEqual([
+      "Notify you on laptop for every fleet alert ([notify] desktop)",
+    ]);
   });
 });
 
