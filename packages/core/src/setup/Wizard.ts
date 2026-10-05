@@ -547,8 +547,9 @@ export const make = (hooks: {
             onNone: () => null,
             onSome: (h) => ({ node: h.node, ssh: h.ssh, error: h.error }),
           }),
+          // Not while the hub's bring-up is still to finish: the app here offers to try it again.
           fleetUrl:
-            config === null || Option.isSome(unfinished)
+            config === null || Option.isSome(unfinished) || Option.isSome(hub)
               ? null
               : (config.settings.relay?.url?.replace(/\/+$/, "").concat("/") ?? null),
         } satisfies UiSetupState;

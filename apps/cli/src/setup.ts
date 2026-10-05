@@ -65,11 +65,15 @@ import {
   leavingRefusal,
   prepare,
   resumeInput,
+  RUN_ELSEWHERE,
+  runningElsewhere,
   runSteps as runSessionSteps,
   savedSteps,
   startRun,
   unfinishedRun,
+  withRunLock,
 } from "@t3-fleet/core/setup/Session";
+import { bringUp, dropHub, readHub, undoAdmission, updateHub } from "@t3-fleet/core/setup/Hub";
 import { clearAbandoned, type Progress } from "@t3-fleet/core/setup/State";
 import { unfinishedLines } from "@t3-fleet/core/setup/Unfinished";
 
@@ -370,9 +374,20 @@ export const setupCommand = Command.make("setup", setupFlags).pipe(
 const setup = (flags: Flags) =>
   Effect.gen(function* () {
     const home = process.env["HOME"] ?? "";
+    // A hub the wizard asked for whose bring-up has not finished: the terminal resumes or abandons it too.
+    const hub = yield* readHub(home);
     if (flags.abandon) {
+      if (yield* runningElsewhere(home)) return yield* Effect.fail(RUN_ELSEWHERE);
+      if (Option.isSome(hub)) {
+        yield* Console.log(`The bring-up of ${hub.value.node}, the hub, is abandoned:`);
+        for (const line of yield* undoAdmission(hub.value, home)) yield* Console.log(`  ${line}`);
+        yield* dropHub(home);
+      }
       const dropped = yield* abandonRun(home);
-      if (Option.isNone(dropped)) return yield* Console.log("No unfinished setup to abandon.");
+      if (Option.isNone(dropped)) {
+        if (Option.isNone(hub)) yield* Console.log("No unfinished setup to abandon.");
+        return;
+      }
       const { stopped, report } = dropped.value;
       if (stopped) yield* Console.log(`It stopped at ${stopped.step}: ${stopped.why}`);
       yield* Console.log(report.join("\n"));
@@ -383,10 +398,19 @@ const setup = (flags: Flags) =>
     const leaving = yield* leavingRefusal(home);
     if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
     if (flags.resume) {
-      if (Option.isNone(unfinished))
+      if (Option.isNone(unfinished) && Option.isNone(hub))
         return yield* Effect.fail("there is no unfinished setup to resume");
-      if (flags.planOnly) return yield* showRemaining(unfinished.value);
-      return yield* resumeRun(unfinished.value, flags);
+      if (flags.planOnly) {
+        if (Option.isSome(unfinished)) yield* showRemaining(unfinished.value);
+        if (Option.isSome(hub))
+          yield* Console.log(
+            `The bring-up of ${hub.value.node}, the hub, is still to finish${hub.value.error === null ? "" : `: it stopped with ${hub.value.error}`}.`,
+          );
+        return;
+      }
+      if (Option.isSome(unfinished)) yield* resumeRun(unfinished.value, flags);
+      if (Option.isSome(hub)) yield* resumeHub(home);
+      return;
     }
     if (Option.isSome(unfinished) && !flags.planOnly) {
       const p = unfinished.value;
@@ -540,17 +564,54 @@ const planAndApply = (flags: Flags, scratch: string) =>
       }
 
     // 6. Optional extras, then how the fleet looks after this machine.
-    const extras = yield* chooseExtras({ flags, offers: p.offers, found: p.found, mode: p.mode });
-    const upkeep = yield* chooseUpkeep({ flags, mode: p.mode, fleetNtfy: p.fleetNtfy });
+    const extras = yield* chooseExtras({
+      flags,
+      offers: p.offers,
+      found: p.found,
+      mode: p.mode,
+      fleetRelay: p.fleetRelay,
+    });
+    const upkeep = yield* chooseUpkeep({
+      flags,
+      mode: p.mode,
+      fleetNtfy: p.fleetNtfy,
+      mcpHub: existingRelayHub(flags.mcpHub, extras, p.fleetRelay),
+    });
     const input = decideRun(p, { choices, entered, extras, upkeep });
     const settings = settingsLines(input);
     if (settings.length > 0)
       yield* Console.log(["", "Settings", ...settings.map((l) => `  ${l}`)].join("\n"));
 
-    // 5. Apply: the run is saved first, so a resume does exactly this.
-    const progress = yield* startRun(p, input, say);
-    return yield* runSteps(input, p.found.raw, progress);
+    // 5. Apply: the run is saved first, so a resume does exactly this; one process at a time.
+    return yield* withRunLock(
+      home,
+      startRun(p, input, say).pipe(
+        Effect.flatMap((progress) => runSteps(input, p.found.raw, progress)),
+      ),
+    );
   });
+
+/** `--resume` with a hub still to bring up: as the wizard's resume does, from this terminal. */
+const resumeHub = (home: string) =>
+  withRunLock(
+    home,
+    Effect.gen(function* () {
+      const saved = yield* readHub(home);
+      if (Option.isNone(saved)) return;
+      const hub = saved.value;
+      yield* Console.log(`\nBringing up ${hub.node}, the hub`);
+      yield* updateHub(home, (h) => ({ ...h, error: null }));
+      yield* bringUp(hub, (line) => Console.log(line), home).pipe(
+        Effect.tapError((why) => updateHub(home, (h) => ({ ...h, error: why })).pipe(Effect.ignore)),
+        Effect.mapError(
+          (why) =>
+            `${hub.node}'s bring-up stopped: ${why}. Fix that, then \`t3-fleet setup --resume\` (or \`t3-fleet setup --abandon\` to take it out of the fleet)`,
+        ),
+      );
+      yield* dropHub(home);
+      yield* Console.log(`${hub.node} is up.`);
+    }),
+  );
 
 /** `--resume`: the saved run, its secret values decrypted; nothing is planned again. */
 const resumeRun = (progress: Progress, flags: Flags) =>
@@ -567,7 +628,10 @@ const resumeRun = (progress: Progress, flags: Flags) =>
     yield* Console.log(
       `Resuming setup of ${progress.node} (${MODE_LINE[progress.mode]}); done: ${progress.done.join(", ") || "nothing yet"}`,
     );
-    return yield* runSteps(input, raw, progress);
+    return yield* withRunLock(
+      process.env["HOME"] ?? "",
+      runSteps(input, raw, progress),
+    );
   });
 
 const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>
@@ -601,6 +665,21 @@ const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>
       yield* Console.log("Try the notifications: t3-fleet notify test");
   });
 
+/**
+ * --mcp-hub or --no-mcp-hub on a fleet whose relay is set up already: on,
+ * served at that relay; off. A relay this run sets up carries its own
+ * (Extras.relay.mcp); without either flag, nothing changes.
+ */
+export const existingRelayHub = (
+  flag: Option.Option<boolean>,
+  extras: Pick<Extras, "relay">,
+  fleetRelay: string | null,
+): { readonly gateway: string } | false | null => {
+  if (Option.isNone(flag) || extras.relay !== null) return null;
+  if (!flag.value) return false;
+  return fleetRelay === null ? null : { gateway: fleetRelay };
+};
+
 /** Whether this machine can show an OS notification: a Mac, or a desktop session. */
 const canNotifyHere = () =>
   process.platform === "darwin" ||
@@ -621,7 +700,7 @@ export const upkeepFlags = (
   },
 ): {
   readonly autoUpdate: boolean | null | "ask";
-  readonly desktop: boolean | "ask";
+  readonly desktop: boolean | null | "ask";
   readonly ntfy: boolean | "ask";
 } => {
   const again = context.mode === "again";
@@ -629,8 +708,9 @@ export const upkeepFlags = (
     autoUpdate: Option.getOrElse(flags.autoUpdate, () =>
       context.mode === "first" ? ("ask" as const) : null,
     ),
+    // Named, it is set either way (--no-notify takes this machine out); unnamed on a machine set up, left.
     desktop: Option.getOrElse(flags.notify, () =>
-      again ? false : context.canNotify ? ("ask" as const) : false,
+      again ? null : context.canNotify ? ("ask" as const) : false,
     ),
     ntfy: context.fleetNtfy
       ? false
@@ -642,6 +722,8 @@ const chooseUpkeep = (input: {
   readonly flags: Flags;
   readonly mode: Mode;
   readonly fleetNtfy: boolean;
+  /** The MCP hub as --mcp-hub / --no-mcp-hub set it on the fleet's relay; null leaves it. */
+  readonly mcpHub: { readonly gateway: string } | false | null;
 }) =>
   Effect.gen(function* () {
     const quiet = input.flags.yes || !interactive();
@@ -664,11 +746,14 @@ const chooseUpkeep = (input: {
             `Keep things up to date automatically (${UPDATE_WORDS.join(" · ")})`,
             UPKEEP_DEFAULTS.autoUpdate,
           );
-    const desktop = yield* decide(
-      wanted.desktop,
-      "Notify you on this machine for every fleet alert",
-      UPKEEP_DEFAULTS.desktop,
-    );
+    const desktop =
+      wanted.desktop === null
+        ? null
+        : yield* decide(
+            wanted.desktop,
+            "Notify you on this machine for every fleet alert",
+            UPKEEP_DEFAULTS.desktop,
+          );
     const ntfy = (yield* decide(
       wanted.ntfy,
       "Push fleet alerts to your phone with ntfy (setup makes a private topic)",
@@ -680,7 +765,12 @@ const chooseUpkeep = (input: {
       yield* Console.log(
         `  Your ntfy topic: ${ntfy}\n  Subscribe to it in the ntfy app (or open it in a browser). Anyone with the link reads your alerts: keep it to yourself.`,
       );
-    return upkeepFor(input.mode, { autoUpdate, desktop, ntfy }) satisfies Upkeep;
+    return upkeepFor(input.mode, {
+      autoUpdate,
+      desktop,
+      ntfy,
+      mcpHub: input.mcpHub,
+    }) satisfies Upkeep;
   });
 
 const chooseExtras = (input: {
@@ -693,6 +783,8 @@ const chooseExtras = (input: {
   readonly offers: ReadonlyArray<readonly [string, string]>;
   readonly found: Discovery;
   readonly mode: Mode;
+  /** The fleet's relay URL, when it has a relay already: --mcp-hub turns its MCP hub on. */
+  readonly fleetRelay: string | null;
 }) =>
   Effect.gen(function* () {
     const offered = (name: string) => input.offers.some(([n]) => n === name);
@@ -731,7 +823,7 @@ const chooseExtras = (input: {
         mcp = false;
       }
       relay = { url: checks.url, token: hex(randomBytes(32)), mcp };
-    } else if (Option.getOrElse(input.flags.mcpHub, () => false))
+    } else if (Option.getOrElse(input.flags.mcpHub, () => false) && input.fleetRelay === null)
       return yield* Effect.fail(
         "--mcp-hub hosts the MCP servers on the relay: pass --relay too, on the always-on machine",
       );

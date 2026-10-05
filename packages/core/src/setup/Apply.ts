@@ -68,7 +68,7 @@ import { settingsWords } from "./PlanWords.ts";
 import type { Preflight } from "./Preflight.ts";
 import { cloneFleet, GITIGNORE, newFleetFile, newNodeFile } from "./Repo.ts";
 import { addSetupProposed, backupDir, recordMoved, takeSnapshot } from "./State.ts";
-import { addToList, appendEntry, edits, setKey, type Edit } from "./TomlEdit.ts";
+import { addToList, appendEntry, edits, removeFromList, setKey, type Edit } from "./TomlEdit.ts";
 
 export interface Extras {
   /**
@@ -93,10 +93,20 @@ export interface Upkeep {
    * null leaves the fleet's as they are (a fleet this machine joins).
    */
   readonly autoUpdate: boolean | null;
-  /** This machine in [notify] desktop: an OS notification here for every fleet alert. */
-  readonly desktop: boolean;
+  /**
+   * This machine in [notify] desktop (an OS notification here for every
+   * fleet alert), or out of it; null leaves it as it is (a machine set up
+   * already, with no flag naming it).
+   */
+  readonly desktop: boolean | null;
   /** [notify] ntfy, the topic URL stored as T3_FLEET_NTFY_URL; null for no push. A saved run keeps no URL. */
   readonly ntfy: { readonly url: string | null } | null;
+  /**
+   * [defaults.mcp] hub on, served at `gateway` (the fleet's relay, set up
+   * already), or off; null or absent leaves it. A new relay's MCP hub is
+   * Extras.relay.mcp instead.
+   */
+  readonly mcpHub?: { readonly gateway: string } | false | null;
 }
 
 /**
@@ -107,13 +117,16 @@ export const upkeepFor = (
   mode: Mode,
   chosen: {
     readonly autoUpdate: boolean | null;
-    readonly desktop: boolean;
+    readonly desktop: boolean | null;
     readonly ntfy: string | null;
+    readonly mcpHub?: { readonly gateway: string } | false | null;
   },
 ): Upkeep => ({
   autoUpdate: mode === "join" ? null : chosen.autoUpdate,
-  desktop: chosen.desktop,
+  // Off on a machine not in the fleet yet: nothing to take it out of.
+  desktop: chosen.desktop === false && mode !== "again" ? null : chosen.desktop,
   ntfy: chosen.ntfy === null ? null : { url: chosen.ntfy },
+  ...(chosen.mcpHub == null ? {} : { mcpHub: chosen.mcpHub }),
 });
 
 export interface SetupInput {
@@ -357,6 +370,12 @@ const valueAt = (text: string, path: ReadonlyArray<string>): unknown => {
   }
 };
 
+/** The fleet's relay URL ([relay] url), when it has one. */
+export const relayUrlIn = (fleetText: string): string | null => {
+  const url = valueAt(fleetText, ["relay", "url"]);
+  return typeof url === "string" && url !== "" ? url : null;
+};
+
 /** Whether a t3-fleet.toml pushes alerts to ntfy already ([notify] ntfy). */
 export const pushesToNtfy = (fleetText: string) =>
   valueAt(fleetText, ["notify", "ntfy"]) !== undefined;
@@ -397,8 +416,18 @@ export const upkeepEdits = (
           : setKey(t, ["defaults", "t3"], "update", "manual"),
     );
   }
-  if (upkeep.desktop) out.push((t) => addToList(t, ["notify"], "desktop", [node]));
+  if (upkeep.desktop === true) out.push((t) => addToList(t, ["notify"], "desktop", [node]));
+  if (upkeep.desktop === false)
+    out.push((t) => removeFromList(t, ["notify"], "desktop", [node]));
   if (upkeep.ntfy !== null) out.push((t) => setKey(t, ["notify"], "ntfy", NTFY_SECRET));
+  const hub = upkeep.mcpHub;
+  if (hub != null && hub !== false) out.push((t) => mcpHubEdits(t, hub.gateway));
+  if (hub === false)
+    out.push((t) =>
+      valueAt(t, ["defaults", "mcp", "hub"]) === true
+        ? setKey(t, ["defaults", "mcp"], "hub", false)
+        : { text: t },
+    );
   return out;
 };
 
@@ -406,9 +435,12 @@ export const upkeepEdits = (
 export const settingsLines = (input: SetupInput): ReadonlyArray<string> =>
   settingsWords({
     node: input.node,
-    mcpHub: input.extras.relay?.mcp === true && input.extras.relay.url !== null,
+    mcpHub:
+      (input.extras.relay?.mcp === true && input.extras.relay.url !== null) ||
+      (input.upkeep?.mcpHub != null && input.upkeep.mcpHub !== false),
+    mcpHubOff: input.upkeep?.mcpHub === false,
     autoUpdate: input.upkeep?.autoUpdate ?? null,
-    desktop: input.upkeep?.desktop === true,
+    desktop: input.upkeep?.desktop ?? null,
     ntfy: input.upkeep?.ntfy != null,
   });
 

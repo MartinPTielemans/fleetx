@@ -33,6 +33,7 @@ import { t3AccessPath } from "../T3Access.ts";
 import {
   persistable,
   pushesToNtfy,
+  relayUrlIn,
   restored,
   secretsToStore,
   setupSteps,
@@ -178,6 +179,8 @@ export interface Prepared {
   readonly nothing: boolean;
   /** The fleet pushes alerts to ntfy already ([notify] ntfy): its topic stays. */
   readonly fleetNtfy: boolean;
+  /** The fleet's relay URL ([relay] url), set up already; null without one. */
+  readonly fleetRelay: string | null;
   /** A run dropped with --abandon on this checkout, and what it left to do. */
   readonly record: Abandoned | null;
   readonly left: Unfinished | null;
@@ -373,6 +376,7 @@ export const prepare = (request: PrepareRequest, pre: Preflight, say: Say) =>
       preview,
       nothing,
       fleetNtfy: pushesToNtfy(fleetText),
+      fleetRelay: mode === "first" ? null : relayUrlIn(fleetText),
       record,
       left,
       pending,
@@ -414,6 +418,7 @@ export const decideRun = (
             autoUpdate: p.mode === "join" ? null : answers.upkeep.autoUpdate,
             desktop: answers.upkeep.desktop,
             ntfy: p.fleetNtfy ? null : answers.upkeep.ntfy,
+            ...(answers.upkeep.mcpHub == null ? {} : { mcpHub: answers.upkeep.mcpHub }),
           },
         }),
   };

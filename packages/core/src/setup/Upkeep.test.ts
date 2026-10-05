@@ -131,6 +131,33 @@ describe("notifications", () => {
   });
 });
 
+describe("flags on a machine set up already converge both ways (review B-13)", () => {
+  it("--no-notify takes this machine out of [notify] desktop; none leaves it", () => {
+    const on = written({ ...off, desktop: true });
+    const out = written({ ...off, desktop: false }, on.text);
+    expect(out.toml.notify).toEqual({ desktop: [] });
+    expect(written({ ...off, desktop: null }, on.text).text).toBe(on.text);
+    // Another machine's entry stays.
+    const both = edits(on.text, ...upkeepEdits({ ...off, desktop: true }, "desk"));
+    if ("error" in both) throw new Error(both.error);
+    expect(written({ ...off, desktop: false }, both.text).toml.notify).toEqual({
+      desktop: ["desk"],
+    });
+  });
+
+  it("--mcp-hub on a fleet with a relay turns its MCP hub on; --no-mcp-hub off", () => {
+    const hosted = written({ ...off, mcpHub: { gateway: "https://box.tailnet.ts.net:8399" } });
+    expect(hosted.toml.defaults["mcp"]).toMatchObject({
+      hub: true,
+      gateway: "https://box.tailnet.ts.net:8399",
+    });
+    expect(written({ ...off, mcpHub: false }, hosted.text).toml.defaults["mcp"]).toMatchObject({
+      hub: false,
+    });
+    expect(written({ ...off, mcpHub: false }).text).toBe(fresh);
+  });
+});
+
 describe("the MCP hub", () => {
   it("on: [defaults.mcp] hub, its gateway the relay's URL, the fleet's servers kept", () => {
     const edit = mcpHubEdits(fresh, "https://box.tailnet.ts.net:8399");
@@ -145,8 +172,12 @@ describe("the MCP hub", () => {
   it("the plan's hub steps are the ones bring-up says, with MCP hosting only when on", () => {
     const on = hubStepTitles({ node: "box", mcp: true });
     const no = hubStepTitles({ node: "box" });
-    expect(on).toHaveLength(5);
+    // On, a sixth: the machines' MCP servers move only once the hub is up (review B-3).
+    expect(on).toHaveLength(6);
     expect(no).toHaveLength(5);
+    expect(on[5]).toBe(
+      "Once box is up, move your machines' MCP servers to it ([defaults.mcp] hub)",
+    );
     expect(on[0]).toBe(
       "Add box to the fleet as its relay and MCP hub, with a new relay token among the secrets, and let your Tailscale login open the app it hosts",
     );

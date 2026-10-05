@@ -380,7 +380,7 @@ describe("the setup wizard's engine", () => {
     // Another live process holds it: the test runner's parent.
     fs.writeFileSync(
       join(lock, "owner.json"),
-      JSON.stringify({ pid: process.ppid, start: Date.now(), token: "elsewhere" }),
+      JSON.stringify({ pid: process.ppid, start: 0, token: "elsewhere" }),
     );
     try {
       expect(await run(runningElsewhere(home))).toBe(true);

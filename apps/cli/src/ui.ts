@@ -35,6 +35,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import type { UiAlert, UiProposal, UiSession } from "@t3-fleet/core/Api";
 import type { NodeState } from "@t3-fleet/core/State";
 import { checkNodes } from "@t3-fleet/core/Check";
+import { readHub } from "@t3-fleet/core/setup/Hub";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
 import { git, snapshot } from "@t3-fleet/core/Git";
@@ -344,13 +345,16 @@ const RANDOM_PORTS = { from: 49152, count: 16384 };
 
 /**
  * Where the fleet's app is hosted, when it has a hub: the relay's tailnet
- * address, with who may open it. None when the fleet has no relay URL, or
- * this machine is not in a fleet (or its setup stopped part-way).
+ * address, with who may open it. None when the fleet has no relay URL, this
+ * machine is not in a fleet (or its setup stopped part-way), or the hub's
+ * bring-up from here has not finished: the app here offers to try it again.
  */
-const hostedApp = Effect.gen(function* () {
+export const hostedApp = Effect.gen(function* () {
   const config = yield* loadConfig.pipe(Effect.option);
   if (Option.isNone(config)) return Option.none();
-  if (Option.isSome(yield* unfinishedRun(process.env["HOME"] ?? ""))) return Option.none();
+  const home = process.env["HOME"] ?? "";
+  if (Option.isSome(yield* unfinishedRun(home))) return Option.none();
+  if (Option.isSome(yield* readHub(home))) return Option.none();
   const url = config.value.settings.relay?.url?.replace(/\/+$/, "");
   if (url === undefined || url === "") return Option.none();
   return Option.some({ url: `${url}/`, allow: config.value.settings.ui?.allow ?? [] });
