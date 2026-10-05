@@ -1,0 +1,37 @@
+name: Codex review
+# Keeps the `codex-review` status on each pull request's head current, so
+# main's ruleset can hold a merge until Codex has reviewed that commit
+# (scripts/codex-review-status.sh says how). It runs when the head moves and
+# whenever Codex writes or edits a comment, which is how Codex reports a review
+# starting and finishing.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created, edited]
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+jobs:
+  status:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    # On the job, so a skipped run (anyone else's comment) cannot cancel a real one.
+    # Every run reads the current state, so only the newest matters.
+    concurrency:
+      group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      # The pull request's script for its own pushes; main's for comment events.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - run: scripts/codex-review-status.sh "$REPO" "$PR"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}

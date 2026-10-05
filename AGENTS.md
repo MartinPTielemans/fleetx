@@ -13,5 +13,10 @@ conventions, and the Effect language service's rules are errors here too.
 - Use T3's own interfaces (its CLI, its HTTP descriptor) instead of reading or
   writing its files, wherever T3 offers one.
 
+A pull request merges only once Codex has reviewed its head commit and every
+review thread is resolved (the `codex-review` status, from
+`scripts/codex-review-status.sh`). Codex reviews new commits on its own; if
+the status says it has not started, comment `@codex review`.
+
 Checks: `pnpm typecheck`, `pnpm test`. Try it against real machines with
 `pnpm --filter t3-fleet build && node apps/cli/dist/bin.mjs status`.
