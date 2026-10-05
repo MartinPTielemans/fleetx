@@ -204,6 +204,36 @@ const installDesktop = (home: string, app: string, version: string, appPid: numb
     return `installed ${name} ${version} and opened it again`;
   });
 
+/** /run/user/<uid> when this process's user has a systemd user session; null elsewhere. */
+const runtimeDirOf = () =>
+  Effect.gen(function* () {
+    if (process.platform !== "linux" || process.getuid === undefined) return null;
+    const dir = `/run/user/${process.getuid()}`;
+    return (yield* (yield* FileSystem.FileSystem)
+      .exists(dir)
+      .pipe(Effect.orElseSucceed(() => false)))
+      ? dir
+      : null;
+  });
+
+/**
+ * What `t3 update` needs to reach T3's service when T3 Fleet runs as a system
+ * unit (root on a server) while T3 is a systemd user service: a system unit
+ * gets neither the user's runtime directory nor its session bus. Pure, for tests.
+ */
+export const userSession = (
+  env: Readonly<Record<string, string | undefined>>,
+  runtimeDir: string | null,
+): Record<string, string> =>
+  runtimeDir === null || env["XDG_RUNTIME_DIR"] !== undefined
+    ? {}
+    : {
+        XDG_RUNTIME_DIR: runtimeDir,
+        ...(env["DBUS_SESSION_BUS_ADDRESS"] === undefined
+          ? { DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus` }
+          : {}),
+      };
+
 /**
  * Update this machine's T3 to its channel's newest release. With `ifIdle`,
  * only when no thread is busy; otherwise the reason it waits is the result.
@@ -270,7 +300,7 @@ export const updateT3 = (options: { readonly ifIdle: boolean }) =>
     const updated = yield* exec({
       command: cli.command,
       args: [...cli.args, "update", "--channel", channel, "--yes"],
-      env: { ...process.env, ...cli.env },
+      env: { ...process.env, ...userSession(process.env, yield* runtimeDirOf()), ...cli.env },
       timeout: Duration.minutes(10),
     });
     if (updated.code !== 0)
