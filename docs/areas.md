@@ -30,7 +30,7 @@ and swapped in while it is quit. Add `t3` to `[fleet] apply` if you set
 `"pin:2.1.288"`, or `"manual"`.
 
 **Proxy.** If `[proxy]` is declared in t3-fleet.toml: whether each node's key is
-accepted, and which providers skip the launcher. See the README.
+accepted, and which providers skip the launcher. See [the CLI](cli.md#routing-providers-through-a-proxy).
 
 ## runtime
 

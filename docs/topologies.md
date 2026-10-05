@@ -10,6 +10,12 @@ Topology is configuration. Every node has one or more roles:
 
 Git is always the hub. A relay only makes things faster.
 
+You don't have to choose a layout by hand. The [setup wizard](design/setup-wizard.md)
+asks what machines you have and recommends one: your own computer as the
+authority, an always-on machine as the hub. It checks that machine over ssh
+from your computer and sets it up, so you don't run setup on it yourself.
+`t3-fleet setup` does the same in the terminal.
+
 ## One laptop
 
 ```toml
