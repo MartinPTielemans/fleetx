@@ -141,4 +141,3 @@ prints the link instead of opening a browser. The app is built into the single
 when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
 does too), it stops installing its build on other machines until you restart
 it, since that would put the old build back.
-
