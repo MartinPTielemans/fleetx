@@ -26,6 +26,14 @@ export const writeLocalConfig = (repo: string, node: string) =>
     );
   });
 
+/** Where `curl … | sh` gets T3 Fleet from. */
+export const INSTALL_URL =
+  "https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh";
+
+/** The one line that sets up `name` on its own machine, joining the fleet at `url`. */
+export const inviteLine = (url: string, name: string) =>
+  `curl -fsSL ${INSTALL_URL} | sh -s -- setup ${url} ${name}`;
+
 /** Add a node to the repo (an authority inviting a machine). */
 export const addNode = (
   repo: string,
