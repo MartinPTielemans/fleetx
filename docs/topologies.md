@@ -20,9 +20,10 @@ You don't have to choose a layout by hand. The [setup wizard](design/setup-wizar
 asks what machines you have and recommends one: your own computer as the
 authority, an always-on machine as the hub. It checks that machine over ssh
 from your computer and sets it up, so you don't run setup on it yourself.
-Only the wizard brings the hub up over ssh. In the terminal, `t3-fleet setup`
-sets up the machine it runs on: run it on the server with `--relay`, as below,
-and add your login to `[ui] allow` by hand if the hub should host the app.
+Only the wizard brings the hub up over ssh, and it is done only once the relay
+answers there. In the terminal, `t3-fleet setup` sets up the machine it runs
+on: run it on the server with `--relay`, as below; the authority that approves
+it lets its own Tailscale login into the app the hub hosts (`[ui] allow`).
 
 ## One laptop
 
@@ -63,11 +64,15 @@ port = 8399
 ```
 
 with a new `T3_FLEET_RELAY_TOKEN` among the secrets it proposes. Once an
-authority approves, the relay area installs `t3-fleet relay serve` on the
-server and publishes it on the tailnet; every other node runs `t3-fleet listen`
-and syncs seconds after the branch moves. A laptop that slept catches up on
-the events it missed. Without tailscale, set `[relay] url` once the server
-can be reached.
+authority approves, each machine's own sync does the rest, as it keeps
+anything else the fleet's: the relay area is among the areas sync always
+applies (with `[fleet] apply` set, setup adds `relay` to it), so the server's
+next sync installs `t3-fleet relay serve` and publishes it on the tailnet, and
+every other machine's runs `t3-fleet listen` and syncs seconds after the
+branch moves. A machine starts its service as soon as it can read the relay
+token; one sync goes as far as that (it reads the secrets, then starts the
+service). A laptop that slept catches up on the events it missed. Without
+tailscale, set `[relay] url` once the server can be reached.
 
 ### The app on the hub
 
@@ -115,7 +120,11 @@ servers = ["fetch", "posthog"]
 
 The hub runs every definition in `mcp/` with a hosted kind (`remote`,
 `container`, `registry`, `hosted-stdio`) on the relay node, with Docker for
-images. Sign in to OAuth servers once with `t3-fleet mcp login <name>`; the
+images. Turning it on moves the servers it can take over: each plain https
+server (`direct`, as setup imports them) becomes `remote`, its bearer secret
+kept. A server that runs a command (`stdio`), sends headers of its own, speaks
+SSE, or carries a secret in its URL stays on each machine, as before. The plan
+lists which servers move and which stay, and why, before anything is written. Sign in to OAuth servers once with `t3-fleet mcp login <name>`; the
 callback goes to the relay, so it works from any browser on the tailnet. See
 [areas](areas.md#the-hub).
 

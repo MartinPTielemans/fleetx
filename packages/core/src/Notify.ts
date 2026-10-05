@@ -31,6 +31,14 @@ export class NotifyError extends Schema.TaggedError<NotifyError>()("NotifyError"
 const Delivery = Schema.Struct({
   ids: Schema.Array(Schema.String),
   status: Schema.String,
+  /**
+   * When a relay or listener on this machine first caught up on this path.
+   * Until then, the alerts already published were for someone else to
+   * deliver (each machine its own, before there was a relay): that first
+   * catch-up takes them as seen rather than pushing them all again as a
+   * summary. A report that arrives live is delivered either way.
+   */
+  since: Schema.optionalKey(Schema.Number),
 });
 const Ledger = Schema.Record(Schema.String, Delivery);
 type Ledger = Record<string, typeof Delivery.Type>;
@@ -255,6 +263,23 @@ export const deliverAlerts = <E = never, R = never>(
         const previous = ledger[channel] ?? { ids: [], status: "ready" };
         const delivered = new Set(previous.ids);
         const unseen = identified.filter(({ id }) => !delivered.has(id));
+        if (source !== "sync" && options.catchUp === true && previous.since === undefined) {
+          // A relay's or listener's first catch-up from what machines published: its baseline.
+          ledger[channel] = {
+            ids: [...previous.ids, ...unseen.map(({ id }) => id)],
+            status:
+              unseen.length === 0
+                ? previous.status
+                : `${unseen.length} earlier alert${unseen.length === 1 ? "" : "s"} taken as seen when the ${source === "relay" ? "relay" : "listener"} started`,
+            since: now,
+          };
+          yield* save();
+          if (unseen.length > 0)
+            lines.push(
+              `${channel}: ${unseen.length} earlier alert${unseen.length === 1 ? "" : "s"} taken as seen (t3-fleet alerts lists them)`,
+            );
+          continue;
+        }
         if (unseen.length === 0) continue;
         const summary =
           options.catchUp === true ||
@@ -266,6 +291,7 @@ export const deliverAlerts = <E = never, R = never>(
           const ids = [...before.ids, ...batch.map(({ id }) => id)];
           // Write ahead: a process dying after OS/HTTP acceptance cannot replay this batch.
           ledger[channel] = {
+            ...before,
             ids,
             status: "delivery interrupted or in progress; receipt unconfirmed",
           };
@@ -284,7 +310,11 @@ export const deliverAlerts = <E = never, R = never>(
                 ? result.failure.message
                 : "notification transport failed";
           // A definite returned failure remains eligible on the next pass. A crashed sender's claim stays.
-          ledger[channel] = { ids: result._tag === "Success" ? ids : before.ids, status };
+          ledger[channel] = {
+            ...before,
+            ids: result._tag === "Success" ? ids : before.ids,
+            status,
+          };
           yield* save();
           lines.push(`${channel}: ${status}`);
           if (result._tag === "Failure") break;
@@ -367,7 +397,7 @@ export const testNotification = <E = never, R = never>(
               ? sent.failure.message
               : "notification transport failed";
         failed ||= sent._tag === "Failure";
-        ledger[channel] = { ids: ledger[channel]?.ids ?? [], status };
+        ledger[channel] = { ...ledger[channel], ids: ledger[channel]?.ids ?? [], status };
         yield* fs.writeFileString(`${file}.tmp`, yield* encodeLedger(ledger), { mode: 0o600 });
         yield* fs.rename(`${file}.tmp`, file);
         lines.push(`${channel}: ${status}`);

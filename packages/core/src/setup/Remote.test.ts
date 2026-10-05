@@ -6,7 +6,16 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { runningBuild } from "../Build.ts";
 import { exec, type ExecInput, type ExecResult } from "../Exec.ts";
-import { probeHub, bringUpHub, forgetBundles, hubPlanSteps } from "./Remote.ts";
+import {
+  probeHub,
+  bringUpHub,
+  fleetItem,
+  forgetBundles,
+  hubPlanSteps,
+  membershipProblem,
+  repoKey,
+  type Membership,
+} from "./Remote.ts";
 
 vi.mock("../Exec.ts", async (original) => ({
   ...(await original<typeof import("../Exec.ts")>()),
@@ -56,7 +65,8 @@ const defaults = (script: string): ExecResult => {
   return ok();
 };
 // The mocked exec still has its real spawner requirement. Keep real platform services on the runtime.
-const probe = () => Effect.runPromise(probeHub("hub").pipe(Effect.provide(NodeServices.layer)));
+const probe = (repo: string | null = null) =>
+  Effect.runPromise(probeHub("hub", repo).pipe(Effect.provide(NodeServices.layer)));
 const steps: Array<string> = [];
 const input = {
   ssh: "hub",
@@ -104,6 +114,60 @@ beforeEach(() => {
   });
 });
 
+describe("a hub in another fleet", () => {
+  const other: Membership = {
+    fleet: { repo: "git@github.com:someone/their-fleet.git", node: "box" },
+    unfinished: null,
+  };
+  it("is refused at the probe, with what to do, before any plan or commit", async () => {
+    overrides.set("config.toml", ok('node = "box"\nrepo = "~/fleet"\n'));
+    overrides.set("remote get-url", ok("git@github.com:someone/their-fleet.git\n"));
+    const p = await probe("https://example.test/fleet.git");
+    expect(p.ready).toBe(false);
+    expect(p.fleet).toMatchObject({
+      state: "missing",
+      label: expect.stringContaining("Already in another fleet"),
+      remedy: expect.stringContaining("t3-fleet leave"),
+    });
+    // A new fleet (no repository yet) is never the one it is in.
+    expect((await probe(null)).fleet.state).toBe("missing");
+    // Only reads: nothing on the hub is changed by looking.
+    expect(scripts().join("\n")).not.toMatch(/mkdir|rm |mv |setup --|sudo|base64 -d/);
+  });
+  it("is welcome when it is in this fleet already, under the name asked for", () => {
+    const here = "https://github.com/someone/their-fleet";
+    expect(membershipProblem(other, here, "box")).toBeNull();
+    expect(fleetItem(other, here)).toMatchObject({
+      state: "ok",
+      label: "In this fleet already, as box",
+    });
+    expect(membershipProblem(other, here, "hub")).toContain("name the hub box");
+    expect(membershipProblem(other, "https://example.test/fleet.git")).toContain(
+      "already in another fleet (git@github.com:someone/their-fleet.git)",
+    );
+  });
+  it("knows one repository however its URL is written", () => {
+    for (const url of [
+      "git@github.com:someone/their-fleet.git",
+      "ssh://git@github.com/someone/their-fleet",
+      "https://x-token@GitHub.com/someone/their-fleet.git/",
+    ])
+      expect(repoKey(url)).toBe("github.com/someone/their-fleet");
+    expect(repoKey("/srv/remote/fleet.git")).toBe("/srv/remote/fleet");
+  });
+  it("names a setup left unfinished there, which only its own fleet may go on with", () => {
+    const part: Membership = {
+      fleet: null,
+      unfinished: { repo: "https://example.test/fleet.git", node: "server" },
+    };
+    expect(membershipProblem(part, "https://example.test/fleet.git", "server")).toBeNull();
+    expect(membershipProblem(part, "https://example.test/other.git", "server")).toContain(
+      "t3-fleet setup --abandon",
+    );
+    expect(membershipProblem({ fleet: null, unfinished: null }, null)).toBeNull();
+  });
+});
+
 describe("probeHub", () => {
   it("checks the login user, T3's live descriptor, and this host's MagicDNS name", async () => {
     const p = await probe();
@@ -115,8 +179,9 @@ describe("probeHub", () => {
       ready: true,
       relayUrl: input.relayUrl,
     });
-    for (const key of ["node", "git", "t3", "tailscale", "docker", "service"] as const)
+    for (const key of ["node", "git", "t3", "tailscale", "docker", "service", "fleet"] as const)
       expect(p[key]).toMatchObject({ state: "ok", remedy: null });
+    expect(p.fleet.label).toBe("In no fleet yet");
     expect(p.t3.label).toContain("0.1.1 is running");
     expect(scripts()).toContainEqual(expect.stringContaining("systemctl --user"));
     for (const [call] of fake.mock.calls) {
@@ -353,15 +418,19 @@ describe("bringUpHub", () => {
       progress = saved(over);
       expect(await bringUp()).toMatchObject({
         _tag: "Failure",
-        failure: expect.stringContaining("another node or repository"),
+        failure: expect.stringContaining("has an unfinished setup of"),
       });
       expect(fake).toHaveBeenCalledTimes(1);
       expect(steps).toHaveLength(1);
     },
   );
   it.each([
-    ['node = "other"\nrepo = "~/fleet"\n', null, "another node"],
-    ['node = "server"\nrepo = "~/fleet"\n', "https://example.test/other.git", "another repository"],
+    ['node = "other"\nrepo = "~/fleet"\n', null, "in a fleet as other, not server"],
+    [
+      'node = "server"\nrepo = "~/fleet"\n',
+      "https://example.test/other.git",
+      "already in another fleet (https://example.test/other.git)",
+    ],
     ["not = valid = toml", null, "unreadable"],
   ])(
     "refuses mismatched or broken local membership before installation",

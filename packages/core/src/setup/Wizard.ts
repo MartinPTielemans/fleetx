@@ -62,6 +62,7 @@ import {
   writeHub,
   type HubRequest,
 } from "./Hub.ts";
+import { hostingPlan } from "./HubHosting.ts";
 import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
 import { pinOwnBundle, probeHub } from "./Remote.ts";
 import { SELF_SERVER } from "./Repo.ts";
@@ -86,7 +87,7 @@ import {
   type PrepareRequest,
 } from "./Session.ts";
 import { clearAbandoned } from "./State.ts";
-import { underSyncLock } from "../SyncLock.ts";
+import { waitForSyncLock } from "../SyncLock.ts";
 
 /** A job apply starts: the local setup, then the hub. */
 export interface SetupJob {
@@ -113,7 +114,8 @@ export class RunningElsewhere extends Schema.TaggedError<RunningElsewhere>()(
 /** What the server asks of the wizard's engine; Wizard.make gives the real one, tests fakes. */
 export interface SetupActions {
   readonly state: Effect.Effect<UiSetupState, string>;
-  readonly probe: (ssh: string) => Effect.Effect<UiProbe>;
+  /** `repo`: the repository the fleet will be in, when the wizard knows it (UiProbeRequest). */
+  readonly probe: (ssh: string, repo?: string) => Effect.Effect<UiProbe>;
   readonly plan: (request: UiSetupPlanRequest) => Effect.Effect<UiSetupPlan, string>;
   /** The jobs to run, in order; refused with why, a stale plan as StalePlan, a run locked by another process as RunningElsewhere. */
   readonly apply: (
@@ -284,6 +286,16 @@ export const toUiPlan = (
             ssh: extra.hub.ssh,
             relayUrl: extra.hub.relayUrl,
             mcp: extra.hub.mcp === true,
+            ...(extra.hub.mcp === true
+              ? {
+                  servers: hostingPlan(
+                    new Map([
+                      ...p.fleet.servers,
+                      ...input.actions.servers.map((s) => [s.name, s.definition] as const),
+                    ]),
+                  ),
+                }
+              : {}),
             steps: hubStepTitles(extra.hub),
           },
     settings: [
@@ -590,13 +602,19 @@ export const make = (hooks: {
           );
           let hub: HubRequest | null = null;
           if (request.hub !== null) {
-            const probed = yield* probeHub(request.hub.ssh);
+            // The fleet this plan is for: the hub may be in it already, never in another.
+            const fleetRepo =
+              p.mode === "join" || p.mode === "first"
+                ? (p.url ??
+                  (p.remoteTarget !== null && "url" in p.remoteTarget ? p.remoteTarget.url : null))
+                : out(yield* git(p.checkout, ["remote", "get-url", "origin"])) || null;
+            const probed = yield* probeHub(request.hub.ssh, fleetRepo);
             if (!probed.reachable)
               return yield* Effect.fail(
                 `cannot reach ${request.hub.ssh}: ${probed.error ?? "no answer"}`,
               );
             if (!probed.ready) {
-              const lacking = [probed.node, probed.git, probed.t3, probed.service]
+              const lacking = [probed.fleet, probed.node, probed.git, probed.t3, probed.service]
                 .filter((i) => i.state === "missing")
                 .map((i) => `${i.label}${i.remedy === null ? "" : ` (${i.remedy})`}`);
               return yield* Effect.fail(
@@ -844,7 +862,7 @@ export const make = (hooks: {
           // Invited already: the same line again, nothing committed twice.
           if (node === config.self) return yield* Effect.fail(`${node} is this machine`);
           if (!config.nodes.some((n) => n.name === node))
-            yield* underSyncLock(addNode(config.repo, node, null, []));
+            yield* waitForSyncLock(addNode(config.repo, node, null, []));
           return { command: inviteLine(url, node) };
         }),
       );
@@ -861,7 +879,16 @@ export const make = (hooks: {
     return {
       state,
       notifyTest,
-      probe: (ssh) => probeHub(ssh).pipe(Effect.provide(services)),
+      probe: (ssh, repo) =>
+        Effect.gen(function* () {
+          // A machine in a fleet checks the hub against its own; otherwise against the repo asked about.
+          const config = yield* member;
+          const own =
+            config === null
+              ? ""
+              : out(yield* git(config.repo, ["remote", "get-url", "origin"]).pipe(Effect.orDie));
+          return yield* probeHub(ssh, own !== "" ? own : (repo ?? null));
+        }).pipe(Effect.provide(services)),
       plan,
       apply,
       abandon,

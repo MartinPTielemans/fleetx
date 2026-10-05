@@ -26,7 +26,7 @@ import { CopyCommand, inputClass, Prose, StepFrame } from "./parts";
 import type { SetupRun } from "./run";
 import { nodeNameProblem, settingParts } from "./wizard";
 
-const SUGGESTED = ["desktop", "workstation", "studio", "travel", "office", "spare"];
+export const SUGGESTED = ["desktop", "workstation", "studio", "travel", "office", "spare"];
 
 /** "https://box.tailnet.ts.net/" → "box.tailnet.ts.net". */
 const hostOf = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
@@ -150,7 +150,7 @@ export function DoneStep({
               <p className="text-pretty text-muted-foreground text-xs leading-5">
                 Name a machine to make its invite, then run the line on it. It installs T3 Fleet
                 there, brings what that machine has, and keeps it in step from then on. You can do
-                this later from the fleet too.
+                this later too, under Add machines in the fleet.
               </p>
             </div>
             <ol className="flex flex-col gap-2.5">
@@ -177,7 +177,7 @@ export function DoneStep({
 }
 
 /** One test alert through the paths just set up, as `t3-fleet notify test` sends it. */
-function NotifyTest() {
+export function NotifyTest() {
   const action = useAction(api.setupNotifyTest);
   const [result, setResult] = useState<UiNotifyTest | null>(null);
   return (
@@ -330,7 +330,8 @@ function Chip({
   );
 }
 
-function Invite({
+/** One machine's invite: its name, then the line to run there. */
+export function Invite({
   index,
   placeholder,
   taken,

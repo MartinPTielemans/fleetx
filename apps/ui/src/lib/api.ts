@@ -286,7 +286,9 @@ export const api = {
   skillsRemove: (skills: ReadonlyArray<string>) => postJob("/api/skills/remove", { skills }),
   /** Where this machine stands: in a fleet, not yet, or part-way through setup. */
   setupState: () => getSetupState("/api/setup/state"),
-  setupProbe: (ssh: string) => postProbe("/api/setup/probe", { ssh }),
+  /** `repo`: the repository being joined, when it is one, so a hub already in it is welcome. */
+  setupProbe: (ssh: string, repo?: string) =>
+    postProbe("/api/setup/probe", repo === undefined || repo === "" ? { ssh } : { ssh, repo }),
   setupPlan: (request: UiSetupPlanRequest) => postSetupPlan("/api/setup/plan", request),
   setupApply: (request: UiSetupApplyRequest) => postSetupApply("/api/setup/apply", request),
   setupInvite: (node: string) => postInvite("/api/setup/invite", { node }),

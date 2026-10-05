@@ -172,7 +172,9 @@ describe("answerFixRequest", () => {
   const answer = (request: FixRequestRecord, claimable = true) => {
     const sent: Array<FixProgress> = [];
     const ran: Array<string> = [];
+    const said: Array<string> = [];
     const done = answerFixRequest({
+      claimed: Effect.sync(() => void said.push("the hub asks")),
       self: "laptop",
       request,
       progress: (p) =>
@@ -193,8 +195,17 @@ describe("answerFixRequest", () => {
         }),
       secrets: new Map([["NPM_TOKEN", "s3cr3t-value"]]),
     });
-    return { done, sent, ran };
+    return { done, sent, ran, said };
   };
+
+  it("says it answers the hub only once it holds the request: one expired is left unsaid (N2)", async () => {
+    const expired = answer(record({ fixes: [await asked(upgrade)] }), false);
+    expect(await run(expired.done)).toBe(false);
+    expect(expired.said).toEqual([]);
+    const taken = answer(record({ fixes: [await asked(upgrade)] }));
+    await run(taken.done);
+    expect(taken.said).toEqual(["the hub asks"]);
+  });
 
   it("checks again, runs what it proposes, and reports without its secret values", async () => {
     const a = answer(record({ fixes: [await asked(upgrade)] }));

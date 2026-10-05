@@ -177,6 +177,8 @@ export const answerFixRequest = <R, R2, R3>(options: {
     secrets: ReadonlyMap<string, string>,
   ) => Effect.Effect<ReadonlyArray<FixOutcome>, never, R2>;
   readonly secrets: ReadonlyMap<string, string>;
+  /** Once this run holds the claim: a request expired or taken by another is never announced. */
+  readonly claimed?: Effect.Effect<void>;
 }) =>
   Effect.gen(function* () {
     const { self, request } = options;
@@ -186,6 +188,7 @@ export const answerFixRequest = <R, R2, R3>(options: {
     const running = (step: string) =>
       progress({ state: "running", step, result: null, error: null });
     if (!(yield* running(`${self} is checking itself again`))) return false;
+    if (options.claimed !== undefined) yield* options.claimed;
     const found = yield* options.findings.pipe(Effect.result);
     if (found._tag === "Failure") {
       yield* progress({

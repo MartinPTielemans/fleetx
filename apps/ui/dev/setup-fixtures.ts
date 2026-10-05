@@ -19,7 +19,7 @@
  *   &replan=fail        the first plan is made; every one after it fails (422)
  *   &expire=1           a finished job is dropped a second later, as keepJobsFor
  *                       does: reload after the run to see the page read the state
- *   &probe=ready|missing|old|unreachable   the hub probe's answer; without it,
+ *   &probe=ready|missing|old|taken|unreachable   the hub probe's answer; without it,
  *                       the ssh destination decides: "…down…" or "…nope…" is
  *                       unreachable, "…bare…" lacks tailscale and docker,
  *                       "…old…" has Node 20, anything else is ready
@@ -208,6 +208,7 @@ const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
       tailscale: unknown,
       docker: unknown,
       service: unknown,
+      fleet: unknown,
       relayUrl: null,
       ready: false,
     };
@@ -244,8 +245,17 @@ const probeFor = (ssh: string, page: URLSearchParams): UiProbe => {
         }
       : ok("docker 27.3.1, running"),
     service: ok("systemd, with lingering"),
+    fleet:
+      kind === "taken"
+        ? {
+            state: "missing",
+            label: "Already in another fleet: github.com/someone/their-fleet",
+            remedy:
+              "It is already in another fleet (github.com/someone/their-fleet), as box. Take it out of that fleet first (t3-fleet leave on it), or choose another machine for the hub.",
+          }
+        : ok("In no fleet yet"),
     relayUrl: bare ? null : `https://${host}`,
-    ready: kind !== "old",
+    ready: kind !== "old" && kind !== "taken",
   };
 };
 
@@ -435,6 +445,24 @@ const planFor = (request: UiSetupPlanRequest, github: string | null): UiSetupPla
             ssh: request.hub.ssh,
             relayUrl: `https://${HUB_HOST}`,
             mcp: request.hub.mcp,
+            ...(request.hub.mcp
+              ? {
+                  servers: [
+                    { name: "context7", hub: true, why: null },
+                    { name: "posthog", hub: true, why: null },
+                    {
+                      name: "github",
+                      hub: false,
+                      why: "it runs a command on each machine, and the hub runs only containers and commands declared for it",
+                    },
+                    {
+                      name: "t3-fleet",
+                      hub: false,
+                      why: "it runs a command on each machine, and the hub runs only containers and commands declared for it",
+                    },
+                  ],
+                }
+              : {}),
             steps: hubStepTitles(request.hub),
           },
     // The engine's words (setup/PlanWords.ts); a fleet joined keeps its own [fleet] apply.

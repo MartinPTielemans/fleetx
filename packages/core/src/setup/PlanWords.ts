@@ -16,9 +16,11 @@ export const hubStepTitles = (hub: { readonly node: string; readonly mcp?: boole
   hub.mcp === true
     ? `Sync ${hub.node}, so it starts the relay and hosts your MCP servers`
     : `Sync ${hub.node}, so it starts the relay`,
+  `Check that the relay on ${hub.node} answers`,
   ...(hub.mcp === true
     ? [`Once ${hub.node} is up, move your machines' MCP servers to it ([defaults.mcp] hub)`]
     : []),
+  `Sync this computer, so it listens to ${hub.node}; your other machines follow on their next sync`,
 ];
 
 /** The MCP hub, in the plan's words. */

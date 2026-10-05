@@ -106,8 +106,9 @@ This opens a local web app that looks like T3 Code, in light and dark:
 With a hub, the hub hosts the app on your tailnet, so you open it from any
 device signed in to Tailscale as a login the fleet allows. The wizard allows
 yours when it brings up the hub; with a hub set up in the terminal
-(`t3-fleet setup … --relay`), add your login to `[ui] allow` in
-`t3-fleet.toml` yourself, on an authority ([cli](docs/cli.md#on-the-hub)).
+(`t3-fleet setup … --relay` on it), the authority that approves it allows its
+own Tailscale login, or says what to add to `[ui] allow` when it has none
+([cli](docs/cli.md#on-the-hub)).
 It shows each machine as it last reported, sends a fix to the machine it
 changes (which checks itself again and runs only what it proposes), and leaves
 approving proposals to an authority. Without a hub, or with
@@ -175,6 +176,7 @@ pnpm --filter t3-fleet build                            # builds the UI into the
 node apps/cli/dist/bin.mjs status
 T3_FLEET_UI_FIXTURES=1 pnpm --filter @t3-fleet/ui dev   # the UI against a made-up fleet
 tests/integration/run.sh                                # three throwaway nodes in Docker
+tests/integration/wizard-e2e.sh                         # the wizard end to end: a hub, an invite, alerts
 ```
 
 ## License

@@ -1580,7 +1580,7 @@ export const uiLayer = (options: UiServerOptions) =>
 
       const setupProbe = setupRoute("/api/setup/probe", UiProbeRequest, (setup, r) =>
         SSH_DESTINATION.test(r.ssh)
-          ? setup.probe(r.ssh).pipe(Effect.flatMap(jsonResponse(UiProbe)))
+          ? setup.probe(r.ssh, r.repo).pipe(Effect.flatMap(jsonResponse(UiProbe)))
           : Effect.succeed(plain("not an ssh destination: host, or user@host", 400)),
       );
 

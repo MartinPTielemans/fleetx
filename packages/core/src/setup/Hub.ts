@@ -36,11 +36,14 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { ProbeServices } from "../Area.ts";
 import { loadConfig, type Config } from "../Config.ts";
-import { exec } from "../Exec.ts";
+import { exec, type ExecResult } from "../Exec.ts";
 import { changedFiles, commitAndPush, git, ok, out, pullBranch, restorePaths } from "../Git.ts";
 import { removeNode } from "../leave/Fleet.ts";
 import { randomBytes } from "../hub/Policy.ts";
@@ -57,11 +60,19 @@ import {
   writeSecrets,
 } from "../Secrets.ts";
 import { approve, listProposals } from "../Staging.ts";
-import { underSyncLock } from "../SyncLock.ts";
-import { mcpHubEdits, relayEdits, rolesOf } from "./Apply.ts";
+import { syncRun } from "../Sync.ts";
+import { underSyncLock, waitForSyncLock } from "../SyncLock.ts";
+import {
+  applyRelay,
+  mcpHubEdits,
+  movedLines,
+  moveServersToHub,
+  relayEdits,
+  rolesOf,
+} from "./Apply.ts";
 import { PROPOSED_SECRETS } from "./Plan.ts";
 import { hubStepTitles } from "./PlanWords.ts";
-import { bringUpHub } from "./Remote.ts";
+import { bringUpHub, hubMembership, membershipProblem } from "./Remote.ts";
 import { newNodeFile } from "./Repo.ts";
 import { dropTable, setKey, type Edit } from "./TomlEdit.ts";
 
@@ -186,7 +197,7 @@ export const loginOfStatus = (json: string) =>
 
 /** The Tailscale login this machine is signed in as; null without Tailscale, or signed out. */
 export const tailscaleLogin = Effect.gen(function* () {
-  for (const command of ["tailscale", TAILSCALE_APP]) {
+  for (const command of ["tailscale", process.env["T3_FLEET_TAILSCALE_APP"] ?? TAILSCALE_APP]) {
     const status = yield* exec({
       command,
       args: ["status", "--json", "--peers=false"],
@@ -251,6 +262,13 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
             : `[relay] in ${FLEET_FILE}: ${hub.relayUrl}`,
         );
       }
+      const applied = yield* edited(FLEET_FILE, fleetAfter, [applyRelay]);
+      if (applied !== fleetAfter) {
+        fleetAfter = applied;
+        lines.push(
+          `relay in [fleet] apply: sync runs the relay on ${hub.node} and a listener on every other machine`,
+        );
+      }
       if (hub.mcp === true && hub.relayUrl === null)
         return yield* Effect.fail(
           `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
@@ -291,6 +309,56 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
     }),
   );
 
+/** How to let a login into the app on the hub by hand, for when setup cannot tell whose it is. */
+export const ALLOW_BY_HAND = `add your Tailscale login to ${FLEET_FILE} on an authority, [ui] allow = ["you@example.com"], then commit and push it (or run \`t3-fleet ui\` here and set the hub up from there)`;
+
+/**
+ * [ui] allow with this authority's Tailscale login, when the fleet has a
+ * relay and no [ui] yet: the app the hub hosts opens for whoever approved it,
+ * as the wizard's admission does. For the terminal's way to a hub (`setup
+ * --relay` there, then `t3-fleet approve` here). Lines saying what it did;
+ * none when there was nothing to do. Without a login to name, how to add it.
+ */
+export const allowOwner = Effect.gen(function* () {
+  const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
+  if (config.settings.relay === undefined || config.settings.ui !== undefined) return [];
+  if (!isAuthority(config)) return [];
+  const hub = config.nodes.find((n) => n.roles.includes("relay"))?.name ?? "the hub";
+  const login = yield* tailscaleLogin;
+  if (login === null)
+    return [
+      `The app on ${hub} opens for nobody yet, and this machine has no Tailscale login to name: ${ALLOW_BY_HAND}`,
+    ];
+  return yield* waitForSyncLock(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      yield* refuseDirty(config.repo, [FLEET_FILE]);
+      yield* pullBranch(config.repo, config.branch, "rebase");
+      const fleetFile = `${config.repo}/${FLEET_FILE}`;
+      const before = yield* fs.readFileString(fleetFile);
+      if (/^\[ui\]/m.test(before)) return [];
+      yield* fs.writeFileString(
+        fleetFile,
+        yield* edited(FLEET_FILE, before, [(t) => setKey(t, ["ui"], "allow", [login])]),
+      );
+      const rev = yield* commitAndPush(
+        config.repo,
+        [FLEET_FILE],
+        `Let ${login} open the app on ${hub}`,
+      ).pipe(Effect.tapError(() => restorePaths(config.repo, [FLEET_FILE]).pipe(Effect.ignore)));
+      return [`[ui] allow in ${FLEET_FILE}: the app on ${hub} opens for ${login} (${rev})`];
+    }),
+  ).pipe(
+    Effect.mapError((e) =>
+      typeof e === "string"
+        ? e
+        : typeof e === "object" && e !== null && "message" in e
+          ? String(e.message)
+          : String(e),
+    ),
+  );
+});
+
 /**
  * [defaults.mcp] hub and gateway: every machine's MCP servers go through the
  * hub from their next sync. Only once the hub is up (its sync succeeded),
@@ -306,18 +374,28 @@ export const hostMcp = (config: Config, hub: HubRequest) =>
         );
       const gateway = hub.relayUrl;
       const fs = yield* FileSystem.FileSystem;
-      yield* refuseDirty(config.repo, [FLEET_FILE]);
+      yield* refuseDirty(config.repo, [FLEET_FILE, "mcp"]);
       const fleetFile = `${config.repo}/${FLEET_FILE}`;
       const before = yield* fs.readFileString(fleetFile);
       const after = yield* edited(FLEET_FILE, before, [(t) => mcpHubEdits(t, gateway)]);
-      if (after === before) return [`your MCP servers run on ${hub.node} already`];
-      yield* fs.writeFileString(fleetFile, after);
+      // The servers it can host become its own (`remote`); the rest stay on each machine, said why.
+      const moved = yield* moveServersToHub(config.repo).pipe(
+        Effect.mapError((e) => `reading the fleet's MCP servers: ${e.message}`),
+      );
+      const words = movedLines(hub.node, moved);
+      if (after === before && moved.files.length === 0)
+        return [`your MCP servers run on ${hub.node} already`, ...words];
+      if (after !== before) yield* fs.writeFileString(fleetFile, after);
+      const paths = [FLEET_FILE, ...moved.files];
       const rev = yield* commitAndPush(
         config.repo,
-        [FLEET_FILE],
+        paths,
         `Host the fleet's MCP servers on ${hub.node}`,
-      ).pipe(Effect.tapError(() => restorePaths(config.repo, [FLEET_FILE]).pipe(Effect.ignore)));
-      return [`[defaults.mcp] hub in ${FLEET_FILE}: your MCP servers run on ${hub.node} (${rev})`];
+      ).pipe(Effect.tapError(() => restorePaths(config.repo, paths).pipe(Effect.ignore)));
+      return [
+        `[defaults.mcp] hub in ${FLEET_FILE}: your MCP servers run on ${hub.node} (${rev})`,
+        ...words,
+      ];
     }),
   );
 
@@ -380,10 +458,25 @@ export const bringUp = (
     yield* requireAuthority(config);
     // Read again before each step that changes the fleet: the repo may have changed under it.
     const authorityNow = loadConfig.pipe(Effect.mapError(message), Effect.tap(requireAuthority));
-    const [admit, join, key, review, sync, publish] = hubStepTitles(hub);
+    const titles = hubStepTitles(hub);
+    const [admit, join, key, review, sync, check] = titles;
+    const publish = hub.mcp === true ? titles[6] : undefined;
+    const listen = titles.at(-1);
+    // A sync this computer's timer started meanwhile only delays a step that changes the repo.
+    const locked = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      waitForSyncLock(effect, {
+        waiting: step("Waiting for the sync running on this computer to finish"),
+      });
     yield* step(admit ?? "");
+    const repoUrl = out(yield* git(config.repo, ["remote", "get-url", "origin"]));
+    if (repoUrl === "")
+      return yield* Effect.fail("the fleet's repo has no remote, so the hub cannot clone it");
+    // A machine in another fleet is refused before this fleet's repo names it anything.
+    const membership = yield* hubMembership(hub.ssh);
+    const taken = membershipProblem(membership, repoUrl, hub.node);
+    if (taken !== null) return yield* Effect.fail(`${hub.node} (${hub.ssh}): ${taken}`);
     const owner = yield* tailscaleLogin;
-    const admitted = yield* admitHub(config, hub, owner).pipe(Effect.mapError(message));
+    const admitted = yield* locked(admitHub(config, hub, owner)).pipe(Effect.mapError(message));
     // A resume admits nothing new: what the first admission added is kept.
     yield* updateHub(home, (h) => ({
       ...h,
@@ -397,9 +490,6 @@ export const bringUp = (
     for (const line of admitted.lines) yield* step(`✓ ${line}`);
 
     yield* step(join ?? "");
-    const repoUrl = out(yield* git(config.repo, ["remote", "get-url", "origin"]));
-    if (repoUrl === "")
-      return yield* Effect.fail("the fleet's repo has no remote, so the hub cannot clone it");
     yield* bringUpHub({
       ssh: hub.ssh,
       node: hub.node,
@@ -411,7 +501,7 @@ export const bringUp = (
     yield* step(key ?? "");
     const recipient = yield* hubRecipient(hub.ssh);
     yield* authorityNow;
-    const added = yield* underSyncLock(
+    const added = yield* locked(
       refuseDirty(config.repo, SECRETS_FILES).pipe(
         Effect.andThen(addRecipient(config.repo, hub.node, recipient)),
         Effect.flatMap((changed) =>
@@ -441,20 +531,17 @@ export const bringUp = (
     else {
       yield* authorityNow;
       // Bound to the commit just checked: a proposal changed since is refused, not approved.
-      const approved = yield* approve(
-        config.repo,
-        config.branch,
-        proposal,
-        config.self,
-        proposal.commit,
+      const approved = yield* locked(
+        approve(config.repo, config.branch, proposal, config.self, proposal.commit),
       ).pipe(Effect.mapError(message));
       yield* step(`✓ approved ${hub.node}'s proposed secrets`);
       for (const note of approved.notes) yield* step(`✓ ${note}`);
     }
 
     yield* step(sync ?? "");
-    const synced = yield* ssh(hub.ssh, "t3-fleet sync", 300);
-    const why = synced.stderr.trim().split("\n").pop() ?? `exit ${synced.code}`;
+    // --wait: a sync the hub's own timer is running is waited for, never taken for this one.
+    const synced = yield* ssh(hub.ssh, "t3-fleet sync --wait", 900);
+    const why = lastLine(synced);
     if (synced.code !== 0 && hub.mcp === true)
       // Every machine's MCP servers would move to a hub that is not serving them.
       return yield* Effect.fail(
@@ -466,15 +553,88 @@ export const bringUp = (
         : `${hub.node}'s sync did not finish (${why}); its timer tries again`,
     );
 
+    // Done only once the relay answers: on the hub itself, then (said, not required) where machines reach it.
+    yield* step(check ?? "");
+    const health = yield* ssh(hub.ssh, "t3-fleet relay health --wait 60", 120);
+    if (health.code !== 0)
+      return yield* Effect.fail(
+        `the relay on ${hub.node} does not answer (${lastLine(health)})${synced.code === 0 ? "" : `; its sync said: ${why}`}. t3-fleet status on ${hub.node} says what is wrong; fix that, then resume`,
+      );
+    yield* step(`✓ the relay answers on ${hub.node}`);
+    if (hub.relayUrl !== null) {
+      const published = yield* reaches(hub.relayUrl);
+      yield* step(
+        published === null
+          ? `✓ ${hub.relayUrl} answers from this computer`
+          : `${hub.relayUrl} does not answer from this computer yet (${published}): the relay runs on ${hub.node}, so check that this computer is on the tailnet and that ${hub.node} publishes its port (t3-fleet status there)`,
+      );
+    }
+
     if (hub.mcp === true) {
       yield* step(publish ?? "");
       for (const line of yield* authorityNow.pipe(
-        Effect.flatMap((now) => hostMcp(now, hub)),
+        Effect.flatMap((now) => locked(hostMcp(now, hub))),
         Effect.mapError(message),
       ))
         yield* step(`✓ ${line}`);
     }
+
+    // This computer's listener, now, rather than on its next timer run.
+    yield* step(listen ?? "");
+    for (const line of yield* listenHere.pipe(Effect.mapError(message))) yield* step(line);
   });
+
+const lastLine = (r: ExecResult) =>
+  (r.stderr.trim() || r.stdout.trim()).split("\n").pop() || `exit ${r.code}`;
+
+/** Null when `${url}/health` answers 200 from here within half a minute; otherwise why not. */
+export const reaches = (url: string) =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const ask = client.execute(HttpClientRequest.get(`${url.replace(/\/+$/, "")}/health`)).pipe(
+      Effect.map((r) => (r.status === 200 ? null : `HTTP ${r.status}`)),
+      Effect.timeout(Duration.seconds(5)),
+      Effect.catch((e) =>
+        Effect.succeed(
+          typeof e === "object" && e !== null && "message" in e ? String(e.message) : String(e),
+        ),
+      ),
+    );
+    return yield* ask.pipe(
+      Effect.repeat({
+        until: (why) => why === null,
+        schedule: Schedule.spaced(Duration.seconds(3)),
+        times: 10,
+      }),
+    );
+  });
+
+/**
+ * A sync of this computer's relay (its listener) and MCP areas, waiting for
+ * one already running: what its timer would do next, done now. Lines for
+ * what it did, and for a listener it could not start.
+ */
+const listenHere = Effect.gen(function* () {
+  const config = yield* loadConfig;
+  const result = yield* syncRun(config, { apply: true, areas: ["relay", "mcp"] }).pipe(
+    Effect.repeat({
+      while: (r) => r.state === null,
+      schedule: Schedule.spaced(Duration.seconds(5)),
+      times: 120,
+    }),
+  );
+  if (result.state === null)
+    return ["this computer's sync was busy for ten minutes; its timer starts the listener"];
+  const left = result.state.findings.filter(
+    (f) => f.node === config.self && f.area === "relay" && f.severity !== "info",
+  );
+  return [
+    ...result.lines.map((l) => `✓ ${l}`),
+    ...(left.length === 0
+      ? [`✓ ${config.self} listens to the relay`]
+      : left.map((f) => `${config.self}: ${f.title}`)),
+  ];
+});
 
 /**
  * Take out what an abandoned bring-up added to the fleet, each part as a new
@@ -498,12 +658,14 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
     yield* requireAuthority(config);
     const repo = config.repo;
     if (added?.node === true) {
-      const removed = yield* removeNode(
-        repo,
-        config.branch,
-        hub.node,
-        home,
-        `Take ${hub.node} out of the fleet: its setup as the hub was abandoned`,
+      const removed = yield* waitForSyncLock(
+        removeNode(
+          repo,
+          config.branch,
+          hub.node,
+          home,
+          `Take ${hub.node} out of the fleet: its setup as the hub was abandoned`,
+        ),
       ).pipe(Effect.mapError(message));
       lines.push(
         removed.rev === null
@@ -516,7 +678,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
       );
     if (added !== undefined && (added.relay || added.ui || added.token)) {
       const fs = yield* FileSystem.FileSystem;
-      const rev = yield* underSyncLock(
+      const rev = yield* waitForSyncLock(
         Effect.gen(function* () {
           yield* refuseDirty(repo, [FLEET_FILE, ...SECRETS_FILES]);
           yield* pullBranch(repo, config.branch, "rebase");

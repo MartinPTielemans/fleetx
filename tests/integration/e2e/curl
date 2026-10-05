@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stands in for curl on the machine that runs the invite line: the release's
+# install.sh, its t3-fleet.mjs and SHA256SUMS come from this build, not GitHub.
+out="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out=$2; shift ;; http*) url=$1 ;; esac
+  shift
+done
+case "$url" in
+  */install.sh) body=/opt/wizfe/install.sh ;;
+  */t3-fleet.mjs) body=/opt/wizfe/t3-fleet.mjs ;;
+  */SHA256SUMS) (cd /opt/wizfe && sha256sum t3-fleet.mjs install.sh) > /tmp/wizfe-sums; body=/tmp/wizfe-sums ;;
+  *) echo "wizfe curl stand-in: no $url" >&2; exit 22 ;;
+esac
+if [ -n "$out" ]; then cp "$body" "$out"; else cat "$body"; fi

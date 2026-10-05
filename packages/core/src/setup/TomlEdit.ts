@@ -118,7 +118,14 @@ export const setKey = (
       if (keyAt >= 0 && (first < 0 || keyAt < first)) {
         const { last, comment } = valueExtent(lines, keyAt, first < 0 ? lines.length : first);
         lines.splice(keyAt, last - keyAt + 1, comment === "" ? line : `${line} ${comment}`);
-      } else lines.splice(first < 0 ? lines.length : first, 0, ...body, ...(first < 0 ? [] : [""]));
+      } else if (first >= 0) lines.splice(first, 0, ...body, "");
+      else {
+        // At the end, before the newline that ends the file, so it still ends with one.
+        let end = lines.length;
+        while (end > 0 && lines[end - 1] === "") end--;
+        lines.splice(end, 0, ...body);
+        if (lines[lines.length - 1] !== "") lines.push("");
+      }
     } else {
       while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
       lines.push(...body, "");

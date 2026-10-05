@@ -90,6 +90,12 @@ export type UiSetupState = typeof UiSetupState.Type;
 export const UiProbeRequest = Schema.Struct({
   /** An ssh destination: "server", "me@box.tailnet.ts.net". */
   ssh: Schema.String,
+  /**
+   * The repository the fleet will be in, when the wizard knows it (an
+   * existing one, joined): a hub already in that fleet is welcome, one in
+   * any other is not. A machine in a fleet always checks against its own.
+   */
+  repo: Schema.optionalKey(Schema.String),
 });
 
 /** One thing the hub needs, as found there. */
@@ -118,6 +124,12 @@ export const UiProbe = Schema.Struct({
   docker: UiProbeItem,
   /** A service manager that keeps the relay running (systemd, launchd). */
   service: UiProbeItem,
+  /**
+   * Whether it is free to join this fleet: in no fleet, or in this one
+   * already. In another fleet, or with another fleet's setup unfinished
+   * there, it is "missing", with what to do.
+   */
+  fleet: UiProbeItem,
   /** The relay URL setup would use, when tailscale gives one. */
   relayUrl: Schema.NullOr(Schema.String),
   /** Whether everything required is there; tailscale and docker are recommended, not required. */
@@ -233,6 +245,20 @@ export const UiSetupPlan = Schema.Struct({
       relayUrl: Schema.NullOr(Schema.String),
       /** Whether it hosts the fleet's MCP servers. */
       mcp: Schema.Boolean,
+      /**
+       * With `mcp`: each of the fleet's MCP servers, as it will be once
+       * setup is done, and where it runs: on the hub, or still on each
+       * machine, with why (setup/HubHosting.ts).
+       */
+      servers: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            name: Schema.String,
+            hub: Schema.Boolean,
+            why: Schema.NullOr(Schema.String),
+          }),
+        ),
+      ),
       /** "Install T3 Fleet", "Join the fleet as a member", "Run the relay as a service", … */
       steps: Schema.Array(Schema.String),
     }),

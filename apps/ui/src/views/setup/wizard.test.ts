@@ -51,6 +51,7 @@ const probe = (over: Partial<UiProbe> = {}): UiProbe => ({
   tailscale: item,
   docker: item,
   service: item,
+  fleet: item,
   relayUrl: "https://server.tailnet.ts.net",
   ready: true,
   ...over,

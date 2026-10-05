@@ -21,8 +21,10 @@ import { loadConfig } from "../Config.ts";
 import { readSecrets } from "../Secrets.ts";
 import type { UiSetupPlanRequest } from "../SetupApi.ts";
 import { DEFAULT_APPLY, newNtfyUrl, NTFY_SECRET } from "../Upkeep.ts";
+import { dropTable } from "./TomlEdit.ts";
 import {
   admitHub,
+  allowOwner,
   bringUp,
   dropHub,
   hostMcp,
@@ -264,17 +266,135 @@ describe("the setup wizard's engine", () => {
     // Admitted again; [defaults.mcp] only through hostMcp, which bringUp calls once the hub synced.
     await run(admitHub(await run(loadConfig), { ...hub, mcp: true }, "me@example.com"));
     expect(mcpOf()["hub"]).toBeUndefined();
+    // B5: the servers setup imported as `direct`; the hub takes over what it can host.
+    fs.mkdirSync(join(repo, "mcp"), { recursive: true });
+    const define = (name: string, definition: unknown) =>
+      fs.writeFileSync(join(repo, `mcp/${name}.json`), `${JSON.stringify(definition, null, 2)}\n`);
+    define("posthog", {
+      kind: "direct",
+      url: "https://mcp.posthog.example/mcp",
+      auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+    });
+    define("search", {
+      kind: "direct",
+      url: "https://search.example/mcp",
+      headers: { "X-Api-Key": "$SEARCH_KEY" },
+    });
+    define("notes", { kind: "stdio", command: "npx", args: ["-y", "notes-mcp"] });
+    git("add", "mcp");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "servers");
+    git("push", "-q");
     const hosted = await run(hostMcp(await run(loadConfig), { ...hub, mcp: true }));
     expect(hosted[0]).toMatch(
       /^\[defaults\.mcp\] hub in t3-fleet\.toml: your MCP servers run on hub/,
     );
-    expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://hub.tailnet.ts.net:8399" });
-    expect(await run(hostMcp(await run(loadConfig), { ...hub, mcp: true }))).toEqual([
-      "your MCP servers run on hub already",
+    const command =
+      "stays on each machine: it runs a command on each machine, and the hub runs only containers and commands declared for it";
+    expect(hosted.slice(1)).toEqual([
+      "moved to hub: posthog",
+      `ctx ${command}`,
+      `notes ${command}`,
+      "search stays on each machine: it sends headers of its own, and the hub sends only the server's credential",
+      // T3 Fleet's own server answers about the machine it runs on.
+      `t3-fleet ${command}`,
     ]);
+    expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://hub.tailnet.ts.net:8399" });
+    // In the same commit: the hub proxies posthog with its bearer secret; the others are as they were.
+    expect(JSON.parse(show("mcp/posthog.json"))).toEqual({
+      kind: "remote",
+      url: "https://mcp.posthog.example/mcp",
+      auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+    });
+    expect(JSON.parse(show("mcp/search.json")).kind).toBe("direct");
+    expect(JSON.parse(show("mcp/notes.json")).kind).toBe("stdio");
+    expect((await run(hostMcp(await run(loadConfig), { ...hub, mcp: true })))[0]).toBe(
+      "your MCP servers run on hub already",
+    );
     expect(
       await fails(admitHub(await run(loadConfig), { ...hub, relayUrl: null, mcp: true })),
     ).toContain("no relay URL");
+  });
+
+  it("refuses a hub that is in another fleet before this fleet's repo names it (B4)", async () => {
+    const show = (file: string) =>
+      execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
+    const head = () => execFileSync("git", ["-C", bare, "rev-parse", "main"], { encoding: "utf8" });
+    const before = head();
+    // The hub, over ssh: in a fleet of its own, done with its setup there.
+    const ssh = join(bin, "ssh");
+    const real = fs.readlinkSync(ssh);
+    fs.rmSync(ssh);
+    fs.writeFileSync(
+      ssh,
+      [
+        "#!/bin/sh",
+        // Builtins only: this PATH has no cat.
+        'script=$(while IFS= read -r line; do printf "%s\\n" "$line"; done)',
+        'case "$script" in',
+        "  *setup.json*) echo null ;;",
+        '  *config.toml*) printf \'node = "box"\\nrepo = "~/fleet"\\n\' ;;',
+        '  *"remote get-url"*) echo git@github.com:someone/their-fleet.git ;;',
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    try {
+      const steps: Array<string> = [];
+      const why = await fails(
+        bringUp(
+          { node: "box", ssh: "me@box", relayUrl: "https://box.tailnet.ts.net:8399", error: null },
+          (t) => Effect.sync(() => void steps.push(t)),
+          home,
+        ),
+      );
+      expect(why).toContain("already in another fleet (git@github.com:someone/their-fleet.git)");
+      expect(why).toContain("t3-fleet leave");
+      expect(why).not.toContain("--resume");
+      expect(head()).toBe(before);
+      expect(() => show("nodes/box.toml")).toThrow();
+    } finally {
+      fs.rmSync(ssh);
+      fs.symlinkSync(real, ssh);
+    }
+  });
+
+  it("lets the authority that approves a terminal-made relay open its app ([ui] allow, B6)", async () => {
+    const show = (file: string) =>
+      execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
+    // A relay without [ui], as `t3-fleet setup --relay` on the server proposes it.
+    const fleetFile = join(repo, "t3-fleet.toml");
+    const without = dropTable(fs.readFileSync(fleetFile, "utf8"), ["ui"]);
+    if ("error" in without) throw new Error(without.error);
+    fs.writeFileSync(fleetFile, without.text);
+    git("add", "t3-fleet.toml");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "no [ui]");
+    git("push", "-q");
+    // No Tailscale here (nor the macOS app's): nothing to name, so it says exactly what to add by hand.
+    const app = process.env["T3_FLEET_TAILSCALE_APP"];
+    process.env["T3_FLEET_TAILSCALE_APP"] = join(home, "no-tailscale-app");
+    const byHand = await run(allowOwner);
+    expect(byHand.join("\n")).toContain('[ui] allow = ["you@example.com"]');
+    expect((parseToml(show("t3-fleet.toml")) as Record<string, unknown>)["ui"]).toBeUndefined();
+    // Signed in to Tailscale: its login, committed.
+    const tailscale = join(bin, "tailscale");
+    fs.writeFileSync(
+      tailscale,
+      `#!/bin/sh\necho '{"Self":{"UserID":7},"User":{"7":{"LoginName":"me@example.com"}}}'\n`,
+      { mode: 0o755 },
+    );
+    try {
+      const lines = await run(allowOwner);
+      expect(lines.join("\n")).toMatch(
+        /\[ui\] allow in t3-fleet\.toml: the app on hub opens for me@example\.com/,
+      );
+      expect(show("t3-fleet.toml")).toMatch(/\[ui\]\nallow = \["me@example\.com"\]/);
+      expect(await run(allowOwner)).toEqual([]);
+    } finally {
+      fs.rmSync(tailscale);
+      if (app === undefined) delete process.env["T3_FLEET_TAILSCALE_APP"];
+      else process.env["T3_FLEET_TAILSCALE_APP"] = app;
+    }
   });
 
   it("approves unattended only the hub's own proposed secrets, never a node file (review A-F1)", async () => {

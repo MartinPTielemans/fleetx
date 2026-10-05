@@ -277,10 +277,63 @@ const withoutHashes = (message: string) =>
 /**
  * A node's errors by finding key, with their titles. Keyed by the key alone:
  * a title that counts something ("failed 4 times") changes every run, and is
- * still the same problem.
+ * still the same problem. Its own sync failing is left out: the run's streak
+ * says that (the "failing" and "recovered" alerts), one run sooner, and the
+ * finding, read from the record of the run before, would be announced as a
+ * new problem by the very run that recovers.
  */
 const healthOf = (findings: ReadonlyArray<Finding>) =>
-  new Map(findings.filter((f) => f.severity === "error").map((f) => [f.key, f.title] as const));
+  new Map(
+    findings
+      .filter((f) => f.severity === "error" && f.key !== "sync-failing")
+      .map((f) => [f.key, f.title] as const),
+  );
+
+/**
+ * The alerts for going from `before` to `after` (healthOf): each new error a
+ * problem, each gone a resolution. A node's first report (no `previous`) is a
+ * baseline, announcing nothing: what it starts with is in its findings, and
+ * setting a machine up would otherwise push every first-run error. An error
+ * never announced (in `unalerted`) goes away unannounced too.
+ */
+export const healthAlerts = (input: {
+  readonly node: string;
+  readonly at: number;
+  readonly first: boolean;
+  readonly before: ReadonlyMap<string, string>;
+  readonly after: ReadonlyMap<string, string>;
+  readonly unalerted: ReadonlyArray<string>;
+}) => {
+  const alerts: Array<Alert> = [];
+  if (input.first) return { alerts, unalerted: [...input.after.keys()] };
+  const quiet = new Set(input.unalerted);
+  for (const [key, title] of input.after)
+    if (!input.before.has(key))
+      alerts.push({ at: input.at, node: input.node, kind: "problem", message: title });
+  for (const [key, title] of input.before)
+    if (!input.after.has(key) && !quiet.has(key))
+      alerts.push({ at: input.at, node: input.node, kind: "resolved", message: title });
+  return { alerts, unalerted: [...quiet].filter((k) => input.after.has(k) && input.before.has(k)) };
+};
+
+/** This node's last report as it sent it, published or not (report() keeps it). */
+export const lastReportPath = (home: string) => `${stateDir(home)}/last-report.json`;
+
+/** The state this node last reported, when it kept one, for `node`. */
+const lastReported = (home: string, node: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(lastReportPath(home)).pipe(Effect.option);
+    if (Option.isNone(text)) return Option.none<NodeState>();
+    return Option.filter(
+      Schema.decodeOption(Schema.fromJsonString(NodeState))(text.value),
+      (s) => s.node === node,
+    );
+  });
+
+/** The newer of two states of one node. */
+const newestState = (a: Option.Option<NodeState>, b: Option.Option<NodeState>) =>
+  Option.isNone(a) ? b : Option.isNone(b) ? a : b.value.at > a.value.at ? b : a;
 
 /** The streak in this node's own record of its last run, which a failed publish cannot lose. */
 const localStreak = (home: string) =>
@@ -724,7 +777,7 @@ export const report = ({
   config,
   node,
   now,
-  previous,
+  previous: fromGit,
   failed,
   message,
   lines,
@@ -736,6 +789,9 @@ export const report = ({
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
     const repo = config.repo;
+    // What the relay last heard from this node may be newer than what reached git (a publish
+    // that failed): transitions count from that, so a problem is never raised twice.
+    const previous = newestState(fromGit, yield* lastReported(home, node));
     // A fix whose command holds one of this node's secret values is not published: it runs here only.
     const secrets = [...(yield* localSecrets).values()].filter((v) => v.length >= 6);
     const publishable = (fix: Finding["fix"]) =>
@@ -755,10 +811,15 @@ export const report = ({
         }),
       );
       const after = healthOf(findings);
-      for (const [key, title] of after)
-        if (!before.has(key)) alerts.push({ at: now, node, kind: "problem", message: title });
-      for (const [key, title] of before)
-        if (!after.has(key)) alerts.push({ at: now, node, kind: "resolved", message: title });
+      const health = healthAlerts({
+        node,
+        at: now,
+        first: Option.isNone(previous),
+        before,
+        after,
+        unalerted: Option.match(previous, { onNone: () => [], onSome: (p) => p.unalerted ?? [] }),
+      });
+      alerts.push(...health.alerts);
       const wasFailing = previousStreak >= config.alertAfter;
       if (streak >= config.alertAfter && !wasFailing)
         alerts.push({
@@ -798,20 +859,21 @@ export const report = ({
         })),
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
+        ...(health.unalerted.length === 0 ? {} : { unalerted: health.unalerted }),
       };
     };
     const record = (state: NodeState) =>
-      fs
-        .makeDirectory(stateDir(home), { recursive: true })
-        .pipe(
-          Effect.andThen(
-            fs.writeFileString(
-              lastSyncPath(home),
-              `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
-            ),
+      fs.makeDirectory(stateDir(home), { recursive: true }).pipe(
+        Effect.andThen(
+          fs.writeFileString(
+            lastSyncPath(home),
+            `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
           ),
-          Effect.ignore,
-        );
+        ),
+        Effect.andThen(encodeState(state)),
+        Effect.flatMap((text) => fs.writeFileString(lastReportPath(home), text, { mode: 0o600 })),
+        Effect.ignore,
+      );
     const rev = out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
     const state = stateOf(failed, message);
     // Recorded only after publishing, so a run nobody else could see is never "ok" here.
@@ -881,6 +943,60 @@ export const ownCheck = (config: Config, self: Node, others: ReadonlyArray<NodeS
     return { selfResult, findings };
   });
 
+/**
+ * Apply the safe fixes in `areas` that run on `self`, checking again after
+ * each round and applying what that check newly offers, so one sync takes
+ * the machine as far as it goes: a fix can make another possible (the
+ * secrets installed, so the relay token is there and the relay can start).
+ * Each finding's fix is tried once per run; three rounds at most.
+ */
+export const convergeFixes = <
+  C extends { readonly findings: ReadonlyArray<Finding> },
+  E,
+  R,
+  E2,
+  R2,
+>(
+  first: C,
+  options: {
+    readonly self: string;
+    readonly areas: ReadonlyArray<string>;
+    readonly run: (
+      fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
+    ) => Effect.Effect<
+      ReadonlyArray<{ readonly finding: Finding; readonly ok: boolean; readonly summary: string }>,
+      E,
+      R
+    >;
+    readonly check: Effect.Effect<C, E2, R2>;
+    readonly rounds?: number;
+  },
+) =>
+  Effect.gen(function* () {
+    let checked = first;
+    const applied: Array<{ title: string; ok: boolean; output: string }> = [];
+    const lines: Array<string> = [];
+    const tried = new Set<string>();
+    for (let round = 0; round < (options.rounds ?? 3); round++) {
+      const applicable = checked.findings.filter(
+        (f): f is Finding & { readonly fix: Fix } =>
+          f.fix !== undefined &&
+          f.fix.safe &&
+          (f.fix.on ?? f.node) === options.self &&
+          options.areas.includes(f.area) &&
+          !tried.has(`${f.node}\0${f.key}`),
+      );
+      if (applicable.length === 0) break;
+      for (const f of applicable) tried.add(`${f.node}\0${f.key}`);
+      const outcomes = yield* options.run(applicable);
+      for (const o of outcomes)
+        applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
+      lines.push(...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`));
+      checked = yield* options.check;
+    }
+    return { checked, applied, lines };
+  });
+
 export const syncRun = (
   startConfig: Config,
   /** `areas` narrows [fleet] apply further (setup's first sync). */
@@ -913,22 +1029,21 @@ export const syncRun = (
       const applyAreas = settingList(config, "apply", DEFAULT_APPLY).filter(
         (a) => options.areas === undefined || options.areas.includes(a),
       );
-      const applicable = findings.filter(
-        (f): f is Finding & { readonly fix: Fix } =>
-          f.fix !== undefined &&
-          f.fix.safe &&
-          (f.fix.on ?? f.node) === self.name &&
-          applyAreas.includes(f.area),
-      );
       const applied: Array<{ title: string; ok: boolean; output: string }> = [];
-      if (options.apply && applicable.length > 0) {
-        const outcomes = yield* runFixes([{ ...self, ssh: null }], applicable, repo);
-        for (const o of outcomes)
-          applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
-        lines.push(
-          ...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`),
+      if (options.apply) {
+        const here = self;
+        const converged = yield* convergeFixes(
+          { selfResult, findings },
+          {
+            self: self.name,
+            areas: applyAreas,
+            run: (fixes) => runFixes([{ ...here, ssh: null }], fixes, repo),
+            check: ownCheck(config, self, others),
+          },
         );
-        ({ selfResult, findings } = yield* ownCheck(config, self, others));
+        ({ selfResult, findings } = converged.checked);
+        applied.push(...converged.applied);
+        lines.push(...converged.lines);
       }
       if (applied.some((a) => !a.ok)) {
         failed = true;

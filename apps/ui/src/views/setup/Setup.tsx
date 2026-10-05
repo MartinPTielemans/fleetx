@@ -31,6 +31,7 @@ import {
   planAsked,
   planReady,
   planRequest,
+  repoOf,
   stepsFor,
   suggestHubName,
   typedValues,
@@ -181,7 +182,8 @@ export function SetupWizard({
     const ssh = answers.hubSsh.trim();
     setProbe((p) => ({ ...p, running: true, error: null }));
     try {
-      const data = await api.setupProbe(ssh);
+      const repo = repoOf(answers);
+      const data = await api.setupProbe(ssh, repo.kind === "url" ? repo.url : undefined);
       setProbe({ data, running: false, error: null });
       // Without a tailnet address there is nowhere for the machines to reach hosted servers.
       if (data.relayUrl === null) set({ hubMcp: false });
