@@ -19,11 +19,22 @@ repo=$1
 pr=$2
 dry_run=${3:-}
 
-head=$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)
+# A request that fails once (a 502, a 503) must not strand the status: the
+# event that marks a review complete may be the last one this pull request gets.
+api() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    gh api "$@" && return 0
+    [[ $attempt -lt 4 ]] && sleep $((attempt * 5))
+  done
+  return 1
+}
+
+head=$(api "repos/$repo/pulls/$pr" --jq .head.sha)
 short=${head:0:7}
 
 summary=$(
-  gh api --paginate --slurp "repos/$repo/issues/$pr/comments" | jq -r '
+  api --paginate --slurp "repos/$repo/issues/$pr/comments" | jq -r '
     add // []
     | map(select(.user.login == "chatgpt-codex-connector[bot]"
                  and (.body | contains("<!-- codex-pull-request-review-summary -->"))))
@@ -60,7 +71,7 @@ fi
 
 echo "$short: $state: $description"
 [[ $dry_run == --dry-run ]] && exit 0
-gh api --silent -X POST "repos/$repo/statuses/$head" \
+api --silent -X POST "repos/$repo/statuses/$head" \
   -f state="$state" \
   -f context=codex-review \
   -f description="${description:0:140}" \
