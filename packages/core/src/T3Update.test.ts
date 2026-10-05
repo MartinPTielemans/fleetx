@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { busyThreads, desktopBundle, macZip, withContinuation } from "./T3Update.ts";
+import { busyThreads, desktopBundle, macZip, userSession, withContinuation } from "./T3Update.ts";
 
 describe("T3 updates", () => {
   it("counts a thread as busy while it has an active run or run activity", () => {
@@ -55,5 +55,14 @@ describe("T3 updates", () => {
     });
     expect(macZip(yml, "x64")?.sha512).toBe("X64==");
     expect(macZip("files: []", "arm64")).toBeNull();
+  });
+
+  it("gives t3 update the user's session when it runs from a system unit, and leaves a login session alone", () => {
+    expect(userSession({}, "/run/user/0")).toEqual({
+      XDG_RUNTIME_DIR: "/run/user/0",
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/0/bus",
+    });
+    expect(userSession({ XDG_RUNTIME_DIR: "/run/user/1000" }, "/run/user/1000")).toEqual({});
+    expect(userSession({}, null)).toEqual({});
   });
 });
