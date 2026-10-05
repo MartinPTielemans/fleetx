@@ -36,6 +36,7 @@ import {
   relayUrlIn,
   restored,
   secretsToStore,
+  credentialedUrls,
   setupSteps,
   writtenPaths,
   type Extras,
@@ -444,7 +445,8 @@ export const startRun = (p: Prepared, input: SetupInput, say: Say) =>
       }))
         yield* say(`✓ ${line}`);
     let plain = "";
-    for (const s of secretsToStore(input)) plain = setVar(plain, s.name, s.value);
+    for (const s of [...secretsToStore(input), ...credentialedUrls(input)])
+      plain = setVar(plain, s.name, s.value);
     yield* saveRunSecrets(p.home, p.now, plain);
     const progress: Progress = {
       startedAt: p.now,
@@ -595,8 +597,8 @@ export const resumeInput = (
         saved.mode === "first" ||
         (Option.isSome(nodeText) ? /^roles\s*=.*"authority"/m.test(nodeText.value) : saved.commits),
       timer: pre.timer,
-      join: saved.join === null ? null : { ...saved.join, url: overrides.url ?? saved.join.url },
-      remote: overrides.remote ?? saved.remote,
+      join: back.join === null ? null : { ...back.join, url: overrides.url ?? back.join.url },
+      remote: overrides.remote ?? back.remote,
     };
     // The clients' entries are only read when the snapshot is still to be taken.
     const raw = progress.done.includes("snapshot")

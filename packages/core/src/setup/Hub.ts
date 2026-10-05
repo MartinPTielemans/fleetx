@@ -64,6 +64,7 @@ import { syncRun } from "../Sync.ts";
 import { underSyncLock, waitForSyncLock } from "../SyncLock.ts";
 import {
   applyRelay,
+  appliesRelay,
   mcpHubEdits,
   movedLines,
   moveServersToHub,
@@ -93,6 +94,8 @@ export const Admitted = Schema.Struct({
   relayRole: Schema.optionalKey(Schema.Boolean),
   /** `ssh`, added to a node file that was there before. */
   ssh: Schema.optionalKey(Schema.Boolean),
+  /** `relay`, added to a `[fleet] apply` list that was there before without it. */
+  applyRelay: Schema.optionalKey(Schema.Boolean),
 });
 export type Admitted = typeof Admitted.Type;
 
@@ -123,20 +126,34 @@ export type HubRequest = typeof HubRequest.Type;
 
 export const hubPath = (home: string) => `${stateDir(home)}/setup/hub.json`;
 
+/**
+ * The saved hub; none when there is no hub.json. One that is there but
+ * unreadable fails, naming the file: taking it for none would lose a
+ * half-admitted hub, with nothing left to resume or abandon.
+ */
 export const readHub = (home: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    if (!(yield* fs.exists(hubPath(home)).pipe(Effect.orElseSucceed(() => false))))
+      return Option.none<HubRequest>();
     const text = yield* fs.readFileString(hubPath(home)).pipe(Effect.option);
-    if (Option.isNone(text)) return Option.none<HubRequest>();
-    return Schema.decodeOption(Schema.fromJsonString(HubRequest))(text.value);
+    const hub = Option.flatMap(text, Schema.decodeOption(Schema.fromJsonString(HubRequest)));
+    if (Option.isNone(hub))
+      return yield* Effect.fail(
+        `${hubPath(home)} is unreadable, so the hub's setup cannot be resumed or abandoned from it; look at it, then move it aside to start the hub over`,
+      );
+    return hub;
   });
 
+/** Written to a file of its own and renamed over hub.json: a reader never sees half of it. */
 export const writeHub = (home: string, hub: HubRequest) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     yield* fs.makeDirectory(`${stateDir(home)}/setup`, { recursive: true });
     const text = yield* Schema.encodeEffect(Schema.fromJsonString(HubRequest))(hub);
-    yield* fs.writeFileString(hubPath(home), `${text}\n`, { mode: 0o600 });
+    const temp = `${hubPath(home)}.${process.pid}.tmp`;
+    yield* fs.writeFileString(temp, `${text}\n`, { mode: 0o600 });
+    yield* fs.rename(temp, hubPath(home));
   });
 
 /** Change the saved hub as it is now (what an earlier step recorded stays). */
@@ -340,6 +357,10 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
           `relay in [fleet] apply: sync runs the relay on ${hub.node} and a listener on every other machine`,
         );
       }
+      // relay put into a [fleet] apply that left it out, here or by relayEdits: the fleet's own
+      // policy, so an abandon puts it back as it was.
+      if (appliesRelay(fleetBefore) === false && appliesRelay(fleetAfter) === true)
+        added.applyRelay = true;
       const uiBefore = /^\[ui\]/m.test(fleetAfter);
       if (owner !== null && config.settings.ui?.allow === undefined && !uiBefore) {
         fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [
@@ -400,51 +421,102 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
 /** How to let a login into the app on the hub by hand, for when setup cannot tell whose it is. */
 export const ALLOW_BY_HAND = `add your Tailscale login to ${FLEET_FILE} on an authority, [ui] allow = ["you@example.com"], then commit and push it (or run \`t3-fleet ui\` here and set the hub up from there)`;
 
+/** The text of `file` at `rev` in the repo; null when it has none there. */
+const fileAt = (repo: string, rev: string, file: string) =>
+  git(repo, ["show", `${rev}:${file}`]).pipe(Effect.map((r) => (ok(r) ? r.stdout : null)));
+
 /**
- * [ui] allow with this authority's Tailscale login, when the fleet has a
- * relay and no [ui] yet: the app the hub hosts opens for whoever approved it,
- * as the wizard's admission does. For the terminal's way to a hub (`setup
- * --relay` there, then `t3-fleet approve` here). Lines saying what it did;
+ * What approving `proposal` would also do, decided before it is approved so
+ * it is shown with the proposal: when it makes its machine the fleet's relay
+ * (`setup --relay` there) and the fleet lets no one into the app the hub
+ * hosts yet, approving on this authority also lets this machine's Tailscale
+ * login in ([ui] allow), as the wizard's admission does. Null for any other
+ * proposal: approving one never changes who may open the app. `login` is
+ * null when this machine has none to name.
+ */
+export const ownerAccess = (
+  config: Config,
+  proposal: { readonly node: string; readonly commit: string },
+) =>
+  Effect.gen(function* () {
+    if (!isAuthority(config) || config.settings.ui !== undefined) return null;
+    const nodeFile = `nodes/${proposal.node}.toml`;
+    const proposed = yield* fileAt(config.repo, proposal.commit, nodeFile);
+    if (proposed === null || !rolesOf(proposed).includes("relay")) return null;
+    const branch = `origin/${config.branch}`;
+    const now = yield* fileAt(config.repo, branch, nodeFile);
+    if (now !== null && rolesOf(now).includes("relay")) return null;
+    for (const rev of [branch, proposal.commit]) {
+      const fleet = yield* fileAt(config.repo, rev, FLEET_FILE);
+      if (fleet !== null && /^\[ui\]/m.test(fleet)) return null;
+    }
+    return { hub: proposal.node, login: yield* tailscaleLogin };
+  });
+
+export type OwnerAccess = { readonly hub: string; readonly login: string | null };
+
+/** What `ownerAccess` says approving also does, in the words review and approve show. */
+export const ownerAccessLine = (access: OwnerAccess) =>
+  access.login === null
+    ? `The app on ${access.hub} will open for nobody, and this machine has no Tailscale login to name: ${ALLOW_BY_HAND}`
+    : `Approving also lets ${access.login} open the app on ${access.hub}: [ui] allow = ["${access.login}"] in ${FLEET_FILE}, committed and pushed on its own`;
+
+/**
+ * [ui] allow with `login`, when the fleet has a relay and no [ui] yet: the
+ * app the hub hosts opens for whoever set it up. Lines saying what it did;
  * none when there was nothing to do. Without a login to name, how to add it.
+ */
+export const allowLogin = (access: OwnerAccess) =>
+  Effect.gen(function* () {
+    const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
+    if (config.settings.relay === undefined || config.settings.ui !== undefined) return [];
+    if (!isAuthority(config)) return [];
+    const { hub, login } = access;
+    if (login === null)
+      return [
+        `The app on ${hub} opens for nobody yet, and this machine has no Tailscale login to name: ${ALLOW_BY_HAND}`,
+      ];
+    return yield* waitForSyncLock(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        yield* refuseDirty(config.repo, [FLEET_FILE]);
+        yield* pullBranch(config.repo, config.branch, "rebase");
+        const fleetFile = `${config.repo}/${FLEET_FILE}`;
+        const before = yield* fs.readFileString(fleetFile);
+        if (/^\[ui\]/m.test(before)) return [];
+        yield* fs.writeFileString(
+          fleetFile,
+          yield* edited(FLEET_FILE, before, [(t) => setKey(t, ["ui"], "allow", [login])]),
+        );
+        const rev = yield* commitAndPush(
+          config.repo,
+          [FLEET_FILE],
+          `Let ${login} open the app on ${hub}`,
+        ).pipe(Effect.tapError(() => restorePaths(config.repo, [FLEET_FILE]).pipe(Effect.ignore)));
+        return [`[ui] allow in ${FLEET_FILE}: the app on ${hub} opens for ${login} (${rev})`];
+      }),
+    ).pipe(
+      Effect.mapError((e) =>
+        typeof e === "string"
+          ? e
+          : typeof e === "object" && e !== null && "message" in e
+            ? String(e.message)
+            : String(e),
+      ),
+    );
+  });
+
+/**
+ * [ui] allow with this authority's Tailscale login, at the end of the setup of
+ * an authority that is its own relay: the app it hosts opens for it, as the
+ * wizard's admission does.
  */
 export const allowOwner = Effect.gen(function* () {
   const config = yield* loadConfig.pipe(Effect.mapError((e) => e.message));
   if (config.settings.relay === undefined || config.settings.ui !== undefined) return [];
   if (!isAuthority(config)) return [];
   const hub = config.nodes.find((n) => n.roles.includes("relay"))?.name ?? "the hub";
-  const login = yield* tailscaleLogin;
-  if (login === null)
-    return [
-      `The app on ${hub} opens for nobody yet, and this machine has no Tailscale login to name: ${ALLOW_BY_HAND}`,
-    ];
-  return yield* waitForSyncLock(
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      yield* refuseDirty(config.repo, [FLEET_FILE]);
-      yield* pullBranch(config.repo, config.branch, "rebase");
-      const fleetFile = `${config.repo}/${FLEET_FILE}`;
-      const before = yield* fs.readFileString(fleetFile);
-      if (/^\[ui\]/m.test(before)) return [];
-      yield* fs.writeFileString(
-        fleetFile,
-        yield* edited(FLEET_FILE, before, [(t) => setKey(t, ["ui"], "allow", [login])]),
-      );
-      const rev = yield* commitAndPush(
-        config.repo,
-        [FLEET_FILE],
-        `Let ${login} open the app on ${hub}`,
-      ).pipe(Effect.tapError(() => restorePaths(config.repo, [FLEET_FILE]).pipe(Effect.ignore)));
-      return [`[ui] allow in ${FLEET_FILE}: the app on ${hub} opens for ${login} (${rev})`];
-    }),
-  ).pipe(
-    Effect.mapError((e) =>
-      typeof e === "string"
-        ? e
-        : typeof e === "object" && e !== null && "message" in e
-          ? String(e.message)
-          : String(e),
-    ),
-  );
+  return yield* allowLogin({ hub, login: yield* tailscaleLogin });
 });
 
 /**
@@ -672,6 +744,13 @@ export const bringUp = (
         Effect.mapError(message),
       ))
         yield* step(`✓ ${line}`);
+      // The hub takes it now, not on its next timer run; its relay sees the change and restarts with it.
+      const taken = yield* ssh(hub.ssh, "t3-fleet sync --wait", 900);
+      yield* step(
+        taken.code === 0
+          ? `✓ ${hub.node} has it; its relay restarts within a minute to host them`
+          : `${hub.node} takes it on its next sync (${lastLine(taken)}); its relay restarts then`,
+      );
     }
 
     // This computer's listener, now, rather than on its next timer run.
@@ -776,7 +855,12 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
       added !== undefined && !added.node && (added.relayRole === true || added.ssh === true);
     if (
       added !== undefined &&
-      (added.relay || added.ui || added.token || added.hosted === true || nodeEdits)
+      (added.relay ||
+        added.ui ||
+        added.token ||
+        added.hosted === true ||
+        added.applyRelay === true ||
+        nodeEdits)
     ) {
       const fs = yield* FileSystem.FileSystem;
       const nodePath = `nodes/${hub.node}.toml`;
@@ -805,6 +889,10 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
             (t) => (added.relay ? dropTable(t, ["relay"]) : { text: t }),
             (t) => (added.ui ? dropTable(t, ["ui"]) : { text: t }),
             (t) => (added.hosted === true ? dropKey(t, ["ui"], "hosted") : { text: t }),
+            (t) =>
+              added.applyRelay === true
+                ? removeFromList(t, ["fleet"], "apply", ["relay"])
+                : { text: t },
           ]);
           if (after !== before) yield* fs.writeFileString(fleetFile, after);
           if (added.token) {
@@ -827,6 +915,7 @@ export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"
           ...(added.ui ? ["[ui]"] : []),
           ...(added.hosted === true && !added.ui ? ["[ui] hosted"] : []),
           ...(added.token ? [RELAY_TOKEN] : []),
+          ...(added.applyRelay === true ? ["relay from [fleet] apply"] : []),
           ...(nodeEdits && added.relayRole === true ? [`${hub.node}'s relay role`] : []),
           ...(nodeEdits && added.ssh === true ? [`${hub.node}'s ssh`] : []),
         ].join(", ")}${rev === "nothing to commit" ? " (gone already)" : ` (${rev})`}`,

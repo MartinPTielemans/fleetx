@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
@@ -23,15 +24,19 @@ import { readSecrets } from "../Secrets.ts";
 import type { UiProbe, UiSetupPlanRequest } from "../SetupApi.ts";
 import { machineLockHolder, syncLockPath } from "../SyncLock.ts";
 import { DEFAULT_APPLY, newNtfyUrl, NTFY_SECRET } from "../Upkeep.ts";
-import { dropTable } from "./TomlEdit.ts";
+import { dropTable, removeFromList } from "./TomlEdit.ts";
 import {
   admitHub,
   allowOwner,
   bringUp,
   dropHub,
   hostMcp,
+  hubPath,
   onboardingOnly,
   otherRelay,
+  ownerAccess,
+  ownerAccessLine,
+  readHub,
   undoAdmission,
   writeHub,
 } from "./Hub.ts";
@@ -339,6 +344,35 @@ describe("the setup wizard's engine", () => {
     git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "hub, out again");
     git("push", "-q");
 
+    // A [fleet] apply without relay, by the fleet's own choice: admission adds it, an abandon takes it out.
+    const ownPolicy = fs.readFileSync(fleetFile, "utf8");
+    const withoutRelay = removeFromList(ownPolicy, ["fleet"], "apply", ["relay"]);
+    if ("error" in withoutRelay) throw new Error(withoutRelay.error);
+    fs.writeFileSync(fleetFile, withoutRelay.text);
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qam", "no relay area");
+    git("push", "-q");
+    const applyOf = () =>
+      (parseToml(show("t3-fleet.toml")) as { fleet: { apply: Array<string> } }).fleet.apply;
+    const policy = applyOf();
+    expect(policy).not.toContain("relay");
+    const withApply = await run(admitHub(await run(loadConfig), hub, "me@example.com"));
+    expect(withApply.added.applyRelay).toBe(true);
+    expect(applyOf()).toContain("relay");
+    const policyBack = await run(undoAdmission({ ...hub, admitted: withApply.added }));
+    expect(policyBack.join("\n")).toContain("relay from [fleet] apply");
+    expect(applyOf()).toEqual(policy);
+    fs.writeFileSync(fleetFile, ownPolicy);
+    git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.com",
+      "commit",
+      "-qam",
+      "relay area again",
+    );
+    git("push", "-q");
+
     // Admitted again; [defaults.mcp] only through hostMcp, which bringUp calls once the hub synced.
     await run(admitHub(await run(loadConfig), { ...hub, mcp: true }, "me@example.com"));
     expect(mcpOf()["hub"]).toBeUndefined();
@@ -380,6 +414,11 @@ describe("the setup wizard's engine", () => {
       kind: "remote",
       url: "https://mcp.posthog.example/mcp",
       auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+      moved_from: {
+        kind: "direct",
+        url: "https://mcp.posthog.example/mcp",
+        auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+      },
     });
     expect(JSON.parse(show("mcp/search.json")).kind).toBe("direct");
     expect(JSON.parse(show("mcp/notes.json")).kind).toBe("stdio");
@@ -460,6 +499,28 @@ describe("the setup wizard's engine", () => {
       { mode: 0o755 },
     );
     try {
+      // Review #47: approving shows and does it only for a proposal that makes its machine the relay.
+      const proposalOf = (file: string, text: string) => {
+        git("switch", "-q", "-c", `proposal-${file.replace(/\W/g, "-")}`);
+        fs.writeFileSync(join(repo, file), text);
+        git("add", file);
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", file);
+        const commit = git("rev-parse", "HEAD");
+        git("switch", "-q", "main");
+        return commit;
+      };
+      const asRelay = proposalOf("nodes/box.toml", 'roles = ["member", "relay"]\n');
+      const unrelated = proposalOf("nodes/desk.toml", 'roles = ["member"]\n');
+      const now = await run(loadConfig);
+      const access = await run(ownerAccess(now, { node: "box", commit: asRelay }));
+      expect(access).toEqual({ hub: "box", login: "me@example.com" });
+      expect(ownerAccessLine(access!)).toContain(
+        'Approving also lets me@example.com open the app on box: [ui] allow = ["me@example.com"]',
+      );
+      expect(await run(ownerAccess(now, { node: "desk", commit: unrelated }))).toBe(null);
+      // A node that is the relay already, approving another change of its own: nothing.
+      expect(show("nodes/hub.toml")).toContain("relay");
+      expect(await run(ownerAccess(now, { node: "hub", commit: unrelated }))).toBe(null);
       const lines = await run(allowOwner);
       expect(lines.join("\n")).toMatch(
         /\[ui\] allow in t3-fleet\.toml: the app on hub opens for me@example\.com/,
@@ -699,6 +760,23 @@ describe("the setup wizard's engine", () => {
     );
     expect(jobs.map((j) => j.kind)).toEqual(["setup", "setup-hub"]);
     fs.rmSync(join(home, "scratch"), { recursive: true, force: true });
+  });
+
+  it("keeps hub.json whole: written by rename, and an unreadable one is said, never taken for none", async () => {
+    const at = fs.mkdtempSync(join(tmpdir(), "t3-fleet-hubjson-"));
+    expect(await run(readHub(at))).toEqual(Option.none());
+    const saved = { node: "hub", ssh: "me@hub", relayUrl: null, error: null };
+    await run(writeHub(at, saved));
+    const file = hubPath(at);
+    const first = fs.statSync(file);
+    expect(first.mode & 0o777).toBe(0o600);
+    await run(writeHub(at, { ...saved, error: "no ssh" }));
+    // A new file put in place, never the old one truncated and rewritten under a reader.
+    expect(fs.statSync(file).ino).not.toBe(first.ino);
+    expect(fs.readdirSync(dirname(file))).toEqual(["hub.json"]);
+    expect(await run(readHub(at))).toEqual(Option.some({ ...saved, error: "no ssh" }));
+    fs.writeFileSync(file, '{"node": "hub", "ss');
+    expect(await fails(readHub(at))).toContain("hub.json is unreadable");
   });
 
   it("abandons holding the run lock throughout, so no setup starts meanwhile (PR #47)", async () => {

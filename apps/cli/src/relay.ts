@@ -15,6 +15,7 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -94,6 +95,21 @@ const answerHere = (url: string, token: string) => (node: string, id: string) =>
     Effect.catchCause((cause) => timestamped(`answering a fix request failed: ${String(cause)}`)),
   );
 
+/**
+ * What the relay serves from, read once as it starts: this node's [mcp] hub
+ * and ports (the hosted servers, the gateway), and [relay] port and url.
+ */
+export const servingOf = (config: Config) => {
+  const self = config.nodes.find((n) => n.name === config.self);
+  const mcp = (self?.settings.table["mcp"] ?? {}) as { ports?: unknown; hub?: unknown };
+  return JSON.stringify({
+    hub: mcp.hub === true,
+    ports: mcp.ports ?? {},
+    port: config.settings.relay?.port ?? 8399,
+    url: config.settings.relay?.url ?? null,
+  });
+};
+
 /** Every upstream base some node's [models] declares: where /egress may forward. */
 const egressBasesOf = (config: Config) => [
   ...new Set(
@@ -127,11 +143,21 @@ const serve = Command.make("serve").pipe(
       // Followed as sync updates the config repo; a read that fails keeps the last good one.
       let current = config;
       let egressBases = egressBasesOf(config);
+      // What the relay reads only as it starts (the MCP hub, its port): a change restarts it.
+      const serving = servingOf(config);
+      const changed = yield* Deferred.make<string>();
       yield* loadConfig.pipe(
-        Effect.map((c) => {
-          current = c;
-          egressBases = egressBasesOf(c);
-        }),
+        Effect.flatMap((c) =>
+          Effect.gen(function* () {
+            current = c;
+            egressBases = egressBasesOf(c);
+            if (servingOf(c) !== serving)
+              yield* Deferred.succeed(
+                changed,
+                "the relay's settings changed (its MCP hub, ports or address); exiting so the service restarts with them",
+              );
+          }),
+        ),
         Effect.ignore,
         Effect.repeat(Schedule.spaced(Duration.seconds(30))),
         Effect.forkDetach,
@@ -188,6 +214,7 @@ const serve = Command.make("serve").pipe(
             ),
           ),
         ),
+        { restart: Deferred.await(changed) },
       );
     }).pipe(reportUserErrors),
   ),

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { hostingOf, hostingPlan, hostingWords } from "./HubHosting.ts";
+// @effect-diagnostics nodeBuiltinImport:off
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+
+import { moveServersBack, moveServersToHub, writtenPaths } from "./Apply.ts";
+import { backFromHub, hostingOf, hostingPlan, hostingWords } from "./HubHosting.ts";
 
 describe("which MCP servers the hub takes over (B5)", () => {
   it("moves a plain https server, its bearer secret kept, and leaves what it cannot host, saying why", () => {
@@ -16,6 +25,11 @@ describe("which MCP servers the hub takes over (B5)", () => {
         kind: "remote",
         url: "https://mcp.posthog.example/mcp",
         auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+        moved_from: {
+          kind: "direct",
+          url: "https://mcp.posthog.example/mcp",
+          auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+        },
       },
     });
     // Every field the hub reads for a remote goes along: its OAuth login, static client, denied tools.
@@ -49,6 +63,7 @@ describe("which MCP servers the hub takes over (B5)", () => {
         },
         tools: { deny: ["delete_*"] },
         description: "Linear",
+        moved_from: oauth,
       },
     });
     const why = (definition: Record<string, unknown>) => {
@@ -96,5 +111,41 @@ describe("which MCP servers the hub takes over (B5)", () => {
     expect(hostingWords("box", [])).toEqual([
       "No MCP server moves to box: none is one it can host",
     ]);
+  });
+});
+
+describe("turning the MCP hub off (review #47)", () => {
+  it("puts every server the hub took back as it was, and leaves a remote written as one", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "t3-fleet-hub-off-"));
+    mkdirSync(join(repo, "mcp"));
+    const posthog = {
+      kind: "direct",
+      url: "https://mcp.posthog.example/mcp",
+      auth: { type: "bearer", token_env: "POSTHOG_KEY" },
+      remote_auth_scopes: ["read"],
+    };
+    const own = { kind: "remote", url: "https://own.example/mcp" };
+    const text = (d: unknown) => `${JSON.stringify(d, null, 2)}\n`;
+    writeFileSync(join(repo, "mcp/posthog.json"), text(posthog));
+    writeFileSync(join(repo, "mcp/own.json"), text(own));
+    const run = <A, E>(e: Effect.Effect<A, E, NodeServices.NodeServices>) =>
+      Effect.runPromise(e.pipe(Effect.provide(NodeServices.layer)));
+    expect((await run(moveServersToHub(repo))).moved).toEqual(["posthog"]);
+    const read = (name: string) =>
+      JSON.parse(readFileSync(join(repo, `mcp/${name}.json`), "utf8")) as Record<string, unknown>;
+    expect(read("posthog")["kind"]).toBe("remote");
+    const back = await run(moveServersBack(repo));
+    expect(back).toEqual({ back: ["posthog"], files: ["mcp/posthog.json"] });
+    expect(read("posthog")).toEqual(posthog);
+    expect(read("own")).toEqual(own);
+    expect(backFromHub(own)).toBe(null);
+    // And the run commits what it put back.
+    const input = {
+      node: "laptop",
+      extras: { relay: null },
+      upkeep: { mcpHub: false },
+      actions: { skills: [], servers: [], instructions: [] },
+    } as unknown as Parameters<typeof writtenPaths>[0];
+    expect(writtenPaths(input)).toContain("mcp");
   });
 });

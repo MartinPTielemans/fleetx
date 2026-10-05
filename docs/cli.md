@@ -228,7 +228,9 @@ allow = ["you@example.com"]
 The wizard writes the login of the authority it brought the hub up from. In
 the terminal, `t3-fleet setup --relay` on the server is a proposal, and the
 authority that approves it (`t3-fleet approve`, or Proposals in its app)
-writes its own login, when the fleet has a relay and no `[ui]` yet; an
+writes its own login, when the fleet has no `[ui]` yet: `t3-fleet review`,
+`approve` and the app say so with the proposal, before it is approved, and
+approving any other proposal never changes who may open the app; an
 authority that is its own relay does so at the end of its setup. Without a
 Tailscale login there to name, it says what to add: your login
 (`tailscale status --json | jq -r .User[].LoginName` lists it) in

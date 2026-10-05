@@ -35,7 +35,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import type { UiAlert, UiProposal, UiSession } from "@t3-fleet/core/Api";
 import type { NodeState } from "@t3-fleet/core/State";
 import { checkNodes } from "@t3-fleet/core/Check";
-import { allowOwner, readHub } from "@t3-fleet/core/setup/Hub";
+import { allowLogin, ownerAccess, ownerAccessLine, readHub } from "@t3-fleet/core/setup/Hub";
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
 import { exec } from "@t3-fleet/core/Exec";
 import { git, snapshot } from "@t3-fleet/core/Git";
@@ -175,6 +175,7 @@ export const proposalsOf = (config: Config) =>
     const prefixes = config.settings.fleet?.auto_approve ?? [];
     return yield* Effect.forEach(proposals, (p) =>
       Effect.gen(function* () {
+        const access = yield* ownerAccess(config, p).pipe(Effect.orElseSucceed(() => null));
         const diff = yield* git(config.repo, [
           "diff",
           `origin/${config.branch}`,
@@ -191,6 +192,7 @@ export const proposalsOf = (config: Config) =>
           files: p.files,
           diff: diff.stdout,
           autoApprovable: yield* autoApproves(config.repo, p, prefixes),
+          ...(access === null ? {} : { also: [ownerAccessLine(access)] }),
         } satisfies UiProposal;
       }),
     );
@@ -355,7 +357,14 @@ export const hostedApp = Effect.gen(function* () {
   if (Option.isNone(config)) return Option.none();
   const home = process.env["HOME"] ?? "";
   if (Option.isSome(yield* unfinishedRun(home))) return Option.none();
-  if (Option.isSome(yield* readHub(home))) return Option.none();
+  // A hub.json that is there, readable or not, is a bring-up not finished: the app stays here.
+  if (
+    yield* readHub(home).pipe(
+      Effect.map(Option.isSome),
+      Effect.orElseSucceed(() => true),
+    )
+  )
+    return Option.none();
   if (config.value.settings.ui?.hosted === false) return Option.none();
   const url = config.value.settings.relay?.url?.replace(/\/+$/, "");
   if (url === undefined || url === "") return Option.none();
@@ -522,13 +531,14 @@ export const serveUi = ({
         proposals: live(proposalsOf),
         approve: (node, change) =>
           live((config) =>
-            proposalFrom(config, node, change).pipe(
-              Effect.flatMap((p) => approve(config.repo, config.branch, p, config.self)),
-              // A relay approved here: the app it hosts opens for this machine's Tailscale login.
-              Effect.flatMap((approved) =>
-                allowOwner.pipe(Effect.map((more) => [...approved.notes, ...more])),
-              ),
-            ),
+            Effect.gen(function* () {
+              const p = yield* proposalFrom(config, node, change);
+              // Only what the proposal showed (`also`): a relay's proposal lets this login in.
+              const access = yield* ownerAccess(config, p);
+              const approved = yield* approve(config.repo, config.branch, p, config.self);
+              const more = access === null ? [] : yield* allowLogin(access);
+              return [...approved.notes, ...more];
+            }),
           ),
         reject: (node, change) =>
           live((config) =>
