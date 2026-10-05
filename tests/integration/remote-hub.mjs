@@ -42,7 +42,6 @@ const input = {
   node: "server",
   repoUrl: "/srv/remote/fleet.git",
   relayUrl: null,
-  bundle,
   onStep: (step) =>
     Effect.sync(() => {
       steps.push(step);
@@ -53,13 +52,20 @@ const input = {
 docker("chmod", "-R", "a-w", "/srv/remote/fleet.git");
 const failed = await run(bringUpHub(input).pipe(Effect.result));
 assert.equal(failed._tag, "Failure");
-assert(!steps.includes("Reading the hub's public key"));
-console.log("PASS interrupted join stopped before the key handoff");
+assert(!steps.includes("The hub has already joined the fleet"));
+console.log("PASS interrupted join reported failure without an authority key read");
+const key = () =>
+  ssh('node "$HOME/.local/share/t3-fleet/t3-fleet.mjs" secrets init').match(
+    /public: (age1[0-9a-z]+)/,
+  )?.[1];
+const recipientBeforeResume = key();
 docker("chmod", "-R", "u+w", "/srv/remote/fleet.git");
 steps.length = 0;
 const joined = await run(bringUpHub(input));
+assert.equal(joined, undefined);
 assert(steps.includes("Resuming the hub's unfinished setup"));
-assert.match(joined.recipient, /^age1[0-9a-z]+$/);
+assert.match(key(), /^age1[0-9a-z]+$/);
+assert.equal(key(), recipientBeforeResume);
 console.log("PASS unfinished join resumed with the same saved plan");
 const roles = ssh('cat "$HOME/fleet/nodes/server.toml"');
 assert(roles.includes('"member"') && roles.includes('"relay"'));
@@ -69,10 +75,11 @@ assert.equal(installed, createHash("sha256").update(bundle).digest("hex"));
 console.log("PASS installed bundle equals the authority build byte for byte");
 steps.length = 0;
 const again = await run(bringUpHub(input));
-assert.equal(again.recipient, joined.recipient);
+assert.equal(again, undefined);
+assert.equal(key(), recipientBeforeResume);
 assert(steps.includes("The hub has already joined the fleet"));
 assert(!steps.includes("Joining the fleet"));
-console.log("PASS completed rerun skipped join and returned the same public recipient");
+console.log("PASS completed rerun skipped join; the separate authority key read stayed stable");
 console.log(
   "NOT VERIFIED service startup, Tailscale HTTPS, Docker MCP servers, authority approval and secrets grants",
 );

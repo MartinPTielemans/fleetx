@@ -8,8 +8,11 @@
  *   POST /api/fixes/plan, /api/fixes, /api/proposals/<node>/approve | /reject,
  *        /api/hub/servers/<name>/login | /logout | /restart,
  *        /api/skills/lookup | /add | /preview | /update | /remove
+ *   GET  /api/setup/state, POST /api/setup/probe | /plan | /apply | /invite
+ *                        the setup wizard (SetupApi.ts)
  *   GET  /api/events     server-sent events: the latest status first, then the
- *                        relay's, plus "check", "check-failed" and "job"
+ *                        relay's, plus "check", "check-failed", "job" and
+ *                        "session"
  *   GET  *               the app
  *
  * Shapes are the ones in Api.ts, encoded here and decoded by the app.
@@ -47,6 +50,15 @@
  * them. Linking them on each machine stays a fix, shown before it runs. An
  * update is previewed first and kept only if upstream still gives the same
  * change.
+ *
+ * On a machine not in a fleet yet (or whose setup stopped part-way) the same
+ * server serves the setup wizard: `inFleet` is false, so no check runs, and
+ * the session names the machine setup would make. Apply runs setup as jobs
+ * ("setup", then "setup-hub" when a hub was asked for), one run at a time.
+ * Nothing restarts when it is done: the session, the relay and the checks are
+ * read as they are now, so once the "setup" job is done the same server is
+ * the fleet's. It says so with a "session" event carrying the new session;
+ * the app reloads into the fleet's views on it.
  */
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -115,6 +127,18 @@ import { renderStatus } from "./Render.ts";
 import type { NodeState } from "./State.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
 import { isLauncher } from "./Names.ts";
+import {
+  UiInvite,
+  UiInviteRequest,
+  UiProbe,
+  UiProbeRequest,
+  UiSetupApplyRequest,
+  UiSetupPlan,
+  UiSetupPlanRequest,
+  UiSetupStarted,
+  UiSetupState,
+} from "./SetupApi.ts";
+import type { SetupActions, SetupJob } from "./setup/Wizard.ts";
 
 /** A full check, with what it needs to be shown: published sync states and accepted differences. */
 export interface UiCheck {
@@ -155,6 +179,11 @@ export interface UiActions {
 }
 type UiConfigRow = typeof UiConfigRow.Type;
 
+export interface UiRelay {
+  readonly url: string;
+  readonly token: string;
+}
+
 export interface UiAsset {
   readonly type: string;
   readonly body: Uint8Array;
@@ -169,10 +198,15 @@ export interface UiServerOptions {
   readonly port: number;
   /** The built app, by URL path ("/index.html", "/assets/…"). */
   readonly assets: ReadonlyMap<string, UiAsset>;
-  readonly session: UiSession;
+  /** This machine and its fleet; read as it is now when given as an effect (it changes once setup is done). */
+  readonly session: UiSession | Effect.Effect<UiSession>;
   readonly actions: UiActions;
-  /** The relay and its token, when the fleet has one. */
-  readonly relay: { readonly url: string; readonly token: string } | null;
+  /** The relay and its token, when the fleet has one; read as it is now when given as an effect. */
+  readonly relay: UiRelay | null | Effect.Effect<UiRelay | null>;
+  /** Whether this machine is in a fleet yet; checks run only once it is. Always, unless given. */
+  readonly inFleet?: Effect.Effect<boolean>;
+  /** The setup wizard's engine; without it, the /api/setup routes answer 404. */
+  readonly setup?: SetupActions;
   readonly checkEvery?: Duration.Input;
   /** How long finished jobs stay listed; half an hour unless a test says otherwise. */
   readonly keepJobsFor?: Duration.Input;
@@ -501,6 +535,16 @@ export const uiLayer = (options: UiServerOptions) =>
     Effect.gen(function* () {
       const { actions } = options;
       const client = yield* HttpClient.HttpClient;
+      const sessionNow: Effect.Effect<UiSession> = Effect.isEffect(options.session)
+        ? options.session
+        : Effect.succeed(options.session);
+      const relayNow: Effect.Effect<UiRelay | null> = Effect.isEffect(options.relay)
+        ? options.relay
+        : Effect.succeed(options.relay);
+      const inFleet = options.inFleet ?? Effect.succeed(true);
+      /** A check nobody asked for runs only on a machine in a fleet. */
+      const whenInFleet = <E>(effect: Effect.Effect<unknown, E>) =>
+        inFleet.pipe(Effect.flatMap((yes) => (yes ? Effect.ignore(effect) : Effect.void)));
       // Background work (checks, the relay, jobs) runs here rather than in the layer's own
       // scope, so stopping the server can wait for jobs before anything is interrupted.
       const scope = yield* Scope.make();
@@ -607,9 +651,9 @@ export const uiLayer = (options: UiServerOptions) =>
       const current = checked(Number.POSITIVE_INFINITY);
 
       // A check at start, then every minute while a tab is looking.
-      yield* checked(0).pipe(Effect.ignore, Effect.forkIn(scope));
+      yield* whenInFleet(checked(0)).pipe(Effect.forkIn(scope));
       yield* Effect.gen(function* () {
-        if ((yield* Ref.get(clients)) > 0) yield* checked(everyMs).pipe(Effect.ignore);
+        if ((yield* Ref.get(clients)) > 0) yield* whenInFleet(checked(everyMs));
       }).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(5))), Effect.forkIn(scope));
 
       // ── jobs ──
@@ -730,11 +774,13 @@ export const uiLayer = (options: UiServerOptions) =>
         }),
       );
 
-      // Relay events pass through, so the app hears about syncs and the hub as they happen.
+      // Relay events pass through, so the app hears about syncs and the hub as they happen;
+      // a relay that comes later (setup made one) is picked up on the next try.
       if (options.relay !== null) {
-        const relay = options.relay;
         let lastId = 0;
         yield* Effect.gen(function* () {
+          const relay = yield* relayNow;
+          if (relay === null) return yield* Effect.fail("no relay yet");
           const response = yield* client.execute(
             HttpClientRequest.get(`${relay.url}/events?since=${lastId}`).pipe(
               HttpClientRequest.bearerToken(relay.token),
@@ -854,7 +900,7 @@ export const uiLayer = (options: UiServerOptions) =>
       const session = HttpRouter.add(
         "GET",
         "/api/session",
-        api(() => jsonResponse(UiSession)(options.session)),
+        api(() => sessionNow.pipe(Effect.flatMap(jsonResponse(UiSession)))),
       );
 
       const status = HttpRouter.add(
@@ -1209,11 +1255,12 @@ export const uiLayer = (options: UiServerOptions) =>
         schema: S | null,
       ) =>
         Effect.gen(function* () {
-          if (options.relay === null) return plain("this fleet has no relay, so no hub", 503);
+          const relay = yield* relayNow;
+          if (relay === null) return plain("this fleet has no relay, so no hub", 503);
           const response = yield* client
             .execute(
-              HttpClientRequest.make(method)(`${options.relay.url}${path}`).pipe(
-                HttpClientRequest.bearerToken(options.relay.token),
+              HttpClientRequest.make(method)(`${relay.url}${path}`).pipe(
+                HttpClientRequest.bearerToken(relay.token),
               ),
             )
             .pipe(Effect.timeout(Duration.seconds(15)), Effect.option);
@@ -1288,7 +1335,7 @@ export const uiLayer = (options: UiServerOptions) =>
                 const subscription = yield* PubSub.subscribe(events);
                 yield* Ref.update(clients, (n) => n + 1);
                 yield* Effect.addFinalizer(() => Ref.update(clients, (n) => n - 1));
-                yield* checked(everyMs).pipe(Effect.ignore, Effect.forkIn(scope));
+                yield* whenInFleet(checked(everyMs)).pipe(Effect.forkIn(scope));
                 const snapshot: Array<string> = [": connected\n\n"];
                 const kept = yield* Ref.get(latest);
                 if (kept !== null)
@@ -1340,6 +1387,107 @@ export const uiLayer = (options: UiServerOptions) =>
           },
           { queryToken: true },
         ),
+      );
+
+      // ── the setup wizard ──
+
+      /** One setup at a time: deciding to start one, and its jobs, until the last ends. */
+      const startingSetup = yield* Semaphore.make(1);
+      const settingUp = yield* Semaphore.make(1);
+      const encodeSession = Schema.encodeEffect(Schema.fromJsonString(UiSession));
+      const setupRunning = Ref.get(jobs).pipe(
+        Effect.map((all) =>
+          [...all.values()].some(
+            (j) => (j.kind === "setup" || j.kind === "setup-hub") && j.finishedAt === null,
+          ),
+        ),
+      );
+
+      /** Start each job once the one before it has succeeded; the first one's id. */
+      const chain = (setupJobs: ReadonlyArray<SetupJob>): Effect.Effect<string | null> => {
+        const [first, ...rest] = setupJobs;
+        if (first === undefined) return Effect.succeed(null);
+        return startJob(first.kind, first.title, settingUp, (step) =>
+          first.run(step).pipe(
+            // Set up now: the app reloads into the fleet's views on this.
+            Effect.tap(() =>
+              first.kind !== "setup"
+                ? Effect.void
+                : sessionNow.pipe(
+                    Effect.flatMap(encodeSession),
+                    Effect.flatMap((data) => publish("session", data)),
+                    Effect.ignore,
+                  ),
+            ),
+            Effect.tap(() => chain(rest)),
+            Effect.as({}),
+          ),
+        ).pipe(Effect.map((job) => job.id));
+      };
+
+      /** An ssh destination as ssh takes it: never an option, never more than one word. */
+      const SSH_DESTINATION = /^(?!-)[A-Za-z0-9_.@:[\]%-]+$/;
+
+      const setupRoute = <S extends Schema.Top & { readonly DecodingServices: never }>(
+        path: `/api/setup/${string}`,
+        schema: S,
+        run: (
+          setup: SetupActions,
+          request: S["Type"],
+        ) => Effect.Effect<HttpServerResponse.HttpServerResponse, string>,
+      ) =>
+        HttpRouter.add(
+          "POST",
+          path,
+          api((request) =>
+            Effect.gen(function* () {
+              if (options.setup === undefined) return plain("no setup here", 404);
+              const asked = yield* body(schema)(request);
+              return yield* run(options.setup, asked).pipe(Effect.catch(fail(409)));
+            }).pipe(Effect.catch(fail(400))),
+          ),
+        );
+
+      const setupState = HttpRouter.add(
+        "GET",
+        "/api/setup/state",
+        api(() =>
+          options.setup === undefined
+            ? Effect.succeed(plain("no setup here", 404))
+            : options.setup.state.pipe(
+                Effect.flatMap(jsonResponse(UiSetupState)),
+                Effect.catch(fail(500)),
+              ),
+        ),
+      );
+
+      const setupProbe = setupRoute("/api/setup/probe", UiProbeRequest, (setup, r) =>
+        SSH_DESTINATION.test(r.ssh)
+          ? setup.probe(r.ssh).pipe(Effect.flatMap(jsonResponse(UiProbe)))
+          : Effect.succeed(plain("not an ssh destination: host, or user@host", 400)),
+      );
+
+      const setupPlan = setupRoute("/api/setup/plan", UiSetupPlanRequest, (setup, r) =>
+        r.hub !== null && !SSH_DESTINATION.test(r.hub.ssh)
+          ? Effect.succeed(plain("not an ssh destination: host, or user@host", 400))
+          : setup.plan(r).pipe(Effect.flatMap(jsonResponse(UiSetupPlan))),
+      );
+
+      const setupApply = setupRoute("/api/setup/apply", UiSetupApplyRequest, (setup, r) =>
+        startingSetup.withPermits(1)(
+          Effect.gen(function* () {
+            if (yield* setupRunning)
+              return yield* Effect.fail("setup is running already; watch its job");
+            const jobId = yield* chain(yield* setup.apply(r));
+            return yield* jsonResponse(UiSetupStarted, jobId === null ? 200 : 202)({ jobId });
+          }),
+        ),
+      );
+
+      const setupInvite = setupRoute("/api/setup/invite", UiInviteRequest, (setup, r) =>
+        editingRepo
+          .withPermits(1)(setup.invite(r.node))
+          .pipe(Effect.flatMap(jsonResponse(UiInvite))),
       );
 
       const unknownApi = HttpRouter.add(
@@ -1405,6 +1553,11 @@ export const uiLayer = (options: UiServerOptions) =>
         hubAction("login"),
         hubAction("logout"),
         hubAction("restart"),
+        setupState,
+        setupProbe,
+        setupPlan,
+        setupApply,
+        setupInvite,
         eventStream,
         unknownApi,
         app,

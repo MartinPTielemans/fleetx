@@ -21,6 +21,7 @@ docker cp "$scratch/key.pub" "$name:/home/dev/.ssh/authorized_keys"
 docker cp apps/cli/dist/bin.mjs "$name:/tmp/wizrem-build.mjs"
 docker exec "$name" bash -c 'chown -R dev:dev /home/dev/.ssh; chmod 700 /home/dev/.ssh; chmod 600 /home/dev/.ssh/authorized_keys; mkdir -p /srv/remote /home/dev/authority; chown -R dev:dev /srv/remote /home/dev/authority; passwd -d dev >/dev/null'
 docker exec -u dev "$name" bash -c 'git init -q --bare -b main /srv/remote/fleet.git && HOME=/home/dev/authority node /tmp/wizrem-build.mjs setup --dir /home/dev/authority/fleet --remote /srv/remote/fleet.git --yes' > "$scratch/authority.txt"
+docker exec -u dev "$name" bash -ec 'git -C /home/dev/authority/fleet config user.name "Wizard integration"; git -C /home/dev/authority/fleet config user.email "wizard@example.test"; printf "roles = [\"member\", \"relay\"]\n" > /home/dev/authority/fleet/nodes/server.toml; printf "\n[relay]\nport = 8399\n" >> /home/dev/authority/fleet/t3-fleet.toml; HOME=/home/dev/authority git -C /home/dev/authority/fleet add nodes/server.toml t3-fleet.toml; HOME=/home/dev/authority git -C /home/dev/authority/fleet commit -qm "Admit the hub"; HOME=/home/dev/authority git -C /home/dev/authority/fleet push -q; HOME=/home/dev/authority node /tmp/wizrem-build.mjs secrets set T3_FLEET_RELAY_TOKEN=SEKRIT_wizrem_relay_001' >> "$scratch/authority.txt"
 port=$(docker port "$name" 22/tcp | cut -d: -f2)
 cat > "$scratch/config" <<CONFIG
 Host wizrem-hub

@@ -1,8 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { runningBuild } from "../Build.ts";
 import { exec, type ExecInput, type ExecResult } from "../Exec.ts";
 import { probeHub, bringUpHub, hubPlanSteps } from "./Remote.ts";
 
@@ -10,6 +12,14 @@ vi.mock("../Exec.ts", async (original) => ({
   ...(await original<typeof import("../Exec.ts")>()),
   exec: vi.fn(),
 }));
+
+vi.mock("../Build.ts", async (original) => ({
+  ...(await original<typeof import("../Build.ts")>()),
+  runningBuild: vi.fn(() => null),
+}));
+const bundle = "#!/usr/bin/env node\nconsole.log('same build');\n";
+const readBundle = vi.fn<FileSystem.FileSystem["readFileString"]>(() => Effect.succeed(bundle));
+const fs = FileSystem.makeNoop({ readFileString: readBundle });
 
 const ok = (stdout = ""): ExecResult => ({ stdout, stderr: "", code: 0, timedOut: false });
 const failed = (code = 1, stderr = ""): ExecResult => ({ ...ok(), code, stderr });
@@ -53,7 +63,6 @@ const input = {
   node: "server",
   repoUrl: "https://example.test/fleet.git",
   relayUrl: "https://box.tailnet.ts.net:8399",
-  bundle: "#!/usr/bin/env node\nconsole.log('same build');\n",
   onStep: (step: string) =>
     Effect.sync(() => {
       steps.push(step);
@@ -61,7 +70,11 @@ const input = {
 };
 const bringUp = (over: Partial<typeof input> = {}) =>
   Effect.runPromise(
-    bringUpHub({ ...input, ...over }).pipe(Effect.result, Effect.provide(NodeServices.layer)),
+    bringUpHub({ ...input, ...over }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.result,
+      Effect.provide(NodeServices.layer),
+    ),
   );
 const saved = (over: Record<string, unknown> = {}) => ({
   startedAt: 1,
@@ -77,6 +90,8 @@ const saved = (over: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
+  readBundle.mockReset().mockReturnValue(Effect.succeed(bundle));
+  vi.mocked(runningBuild).mockReset().mockReturnValue(null);
   overrides.clear();
   progress = null;
   steps.length = 0;
@@ -289,31 +304,32 @@ describe("probeHub", () => {
   it("plans the exact build, resumable join and public key handoff without executing", async () => {
     const p = await probe();
     fake.mockClear();
-    expect(hubPlanSteps(p)).toEqual([
-      "Install this computer's T3 Fleet build on box",
-      "Join the fleet as a member and relay, or resume its unfinished setup",
-      "Create or read the hub's public key for the authority to grant secrets access",
-    ]);
-    expect(hubPlanSteps({ ...p, hostname: null })[0]).toContain(p.ssh);
+    const plan = hubPlanSteps(p);
+    expect(plan).toHaveLength(3);
+    expect(plan[0]).toContain("unfinished");
+    expect(plan[1]).toContain("build on box");
+    expect(plan[1]).toContain("restarting any existing");
+    expect(plan[2]).toContain("member and relay");
+    expect(hubPlanSteps({ ...p, hostname: null })[1]).toContain(p.ssh);
     expect(fake).not.toHaveBeenCalled();
   });
 });
 
 describe("bringUpHub", () => {
-  it("reports each mutating step before executing, ships the same build, joins non-interactively and returns only the public key", async () => {
+  it("installs the authority build and joins non-interactively, returning void", async () => {
     const result = await bringUp();
-    expect(result).toMatchObject({ _tag: "Success", success: { recipient: "age1testrecipient" } });
+    expect(result).toMatchObject({ _tag: "Success", success: undefined });
     expect(steps).toEqual([
       "Checking for an unfinished setup on box",
       "Installing T3 Fleet on box",
       "Joining the fleet",
-      "Reading the hub's public key",
     ]);
-    expect(scripts()).toHaveLength(5);
-    expect(scripts()[2]).toContain(Buffer.from(input.bundle).toString("base64").slice(0, 50));
+    expect(scripts()).toHaveLength(4);
+    expect(scripts()[2]).toContain(Buffer.from(bundle).toString("base64").slice(0, 50));
     expect(scripts()[3]).toContain("setup https://example.test/fleet.git server --relay --yes");
     expect(scripts()[3]).not.toContain("--resume");
-    expect(scripts()[4]).toContain(" secrets init");
+    expect(scripts().join("\n")).not.toContain("secrets init");
+    expect(readBundle.mock.calls[0]?.[0]).toMatch(/apps\/cli\/dist\/bin\.mjs$/);
   });
   it("resumes a matching unfinished setup and never starts a fresh plan", async () => {
     progress = saved();
@@ -321,15 +337,15 @@ describe("bringUpHub", () => {
     expect(steps[2]).toBe("Resuming the hub's unfinished setup");
     expect(scripts()[3]).toContain("--yes --resume");
   });
-  it("does not repeat a completed join while its proposal awaits approval, and preserves the recipient", async () => {
+  it("skips completed join while its proposal awaits approval", async () => {
     progress = saved({ finishedAt: 2 });
     expect((await bringUp())._tag).toBe("Success");
     expect(scripts().some((s) => s.includes(" --relay --yes"))).toBe(false);
     expect(steps[2]).toBe("The hub has already joined the fleet");
     expect((await bringUp())._tag).toBe("Success");
   });
-  it.each([{ node: "someone-else" }, { url: "https://example.test/other.git" }])(
-    "refuses unrelated saved setup before installing",
+  it.each([{ node: "someone-else" }, { url: "https://example.test/other.git" }, { mode: "first" }])(
+    "refuses unrelated or authority setup before installing",
     async (over) => {
       progress = saved(over);
       expect(await bringUp()).toMatchObject({
@@ -356,7 +372,6 @@ describe("bringUpHub", () => {
       expect(scripts().some((s) => s.includes("base64 -d"))).toBe(false);
     },
   );
-
   it("announces a step before its remote writes", async () => {
     const seen: Array<string | undefined> = [];
     fake.mockImplementation((i) => {
@@ -369,10 +384,8 @@ describe("bringUpHub", () => {
       "Checking for an unfinished setup on box",
       "Installing T3 Fleet on box",
       "Joining the fleet",
-      "Reading the hub's public key",
     ]);
   });
-
   it("scrubs embedded repository credentials and private keys from failures", async () => {
     overrides.set(
       " --relay --yes",
@@ -382,7 +395,6 @@ describe("bringUpHub", () => {
     expect(JSON.stringify(result)).not.toContain("SEKRIT");
     expect(JSON.stringify(result)).not.toContain("AGE-SECRET-KEY-PRIVATE");
   });
-
   it("refuses unreadable saved setup", async () => {
     overrides.set("setup.json", ok("not JSON"));
     expect(await bringUp()).toMatchObject({
@@ -392,9 +404,9 @@ describe("bringUpHub", () => {
     expect(fake).toHaveBeenCalledTimes(1);
   });
   it.each([
-    { bundle: "" },
     { ssh: "-oops" },
     { node: "../server" },
+    { node: "Uppercase" },
     { repoUrl: "--help" },
     { relayUrl: "bad" },
   ])("rejects bad inputs before any machine changes", async (over) => {
@@ -402,7 +414,29 @@ describe("bringUpHub", () => {
     expect(fake).not.toHaveBeenCalled();
     expect(steps).toHaveLength(0);
   });
-  it("stops after a failed install, leaving join and key untouched", async () => {
+  it("rejects an empty or missing authority build before SSH", async () => {
+    readBundle.mockReturnValueOnce(Effect.succeed(""));
+    expect(await bringUp()).toMatchObject({
+      _tag: "Failure",
+      failure: expect.stringContaining("empty"),
+    });
+    expect(fake).not.toHaveBeenCalled();
+  });
+  it("refuses a build replaced since the running wizard started", async () => {
+    vi.mocked(runningBuild).mockReturnValue({ version: "0.6.0", builtAt: 1, commit: "abc1234" });
+    readBundle.mockReturnValue(Effect.succeed("t3-fleet-build:0.6.0:2:abc1234"));
+    expect(await bringUp()).toMatchObject({
+      _tag: "Failure",
+      failure: expect.stringContaining("Restart the wizard"),
+    });
+    expect(fake).not.toHaveBeenCalled();
+  });
+  it("allows the running build when its on-disk marker still matches", async () => {
+    vi.mocked(runningBuild).mockReturnValue({ version: "0.6.0", builtAt: 1, commit: "abc1234" });
+    readBundle.mockReturnValue(Effect.succeed("t3-fleet-build:0.6.0:1:abc1234"));
+    expect((await bringUp())._tag).toBe("Success");
+  });
+  it("stops after a failed install, leaving join untouched", async () => {
     overrides.set("base64 -d", failed(1, "Permission denied"));
     expect(await bringUp()).toMatchObject({
       _tag: "Failure",
@@ -427,24 +461,6 @@ describe("bringUpHub", () => {
     steps.length = 0;
     expect((await bringUp())._tag).toBe("Success");
     expect(scripts()[3]).toContain("--resume");
-  });
-  it("a key-read failure can be re-run after completed setup", async () => {
-    overrides.set(" secrets init", failed());
-    expect((await bringUp())._tag).toBe("Failure");
-    overrides.clear();
-    progress = saved({ finishedAt: 2 });
-    fake.mockClear();
-    expect((await bringUp())._tag).toBe("Success");
-    expect(scripts()[3]).not.toContain("--resume");
-  });
-  it("does not return a private or malformed key", async () => {
-    overrides.set(" secrets init", ok("AGE-SECRET-KEY-PRIVATE"));
-    const result = await bringUp();
-    expect(result).toMatchObject({
-      _tag: "Failure",
-      failure: expect.stringContaining("public key"),
-    });
-    expect(JSON.stringify(result)).not.toContain("AGE-SECRET-KEY");
   });
   it("reports a timeout as a recoverable SSH error", async () => {
     overrides.set(" --relay --yes", timedOut);

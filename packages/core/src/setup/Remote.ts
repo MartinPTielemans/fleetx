@@ -2,18 +2,17 @@
  * The hub's half of browser setup, run over the existing checks/fixes SSH transport.
  * No probe writes files, accepts a new host key, installs software, or starts a service.
  *
- * Authority handoff (two small additions to the wizard contract):
- *   input.bundle: the CLI bundle captured by the authority's ownBundle/liveController.
- *     Shipping that exact build, with Fix.installEngineScript, keeps both machines equal
- *     even before a release exists. The caller must reject a stale liveController first.
- *   result.recipient: the hub's public age key, never its private key or any secret.
- *     After joining, the authority approves the hub's proposal, adds this recipient,
- *     and syncs the hub so the approved relay configuration and token take effect.
+ * Hub.ts owns admitting the hub, relay configuration/token, reading its public key,
+ * approval, secrets access, and the final sync. This module only installs the build
+ * and joins the fleet. It returns void and uses the wizard's exact input signature.
  *
- * The authority owns [relay], its token, the hub's member/relay roles and MCP defaults.
- * It must publish those before this call when [relay] already exists: setup --relay
- * only offers a new relay when the fleet has none. relayUrl is the approved address;
- * this module does not override it or generate a second authority-side token.
+ * The bundle is read from this running CLI's own file, or apps/cli/dist/bin.mjs in
+ * development, as checks do. Shipping that exact build with Fix.installEngineScript
+ * keeps both machines equal before a release exists. A replaced running build is
+ * refused before any SSH writes; restart the wizard to use its replacement.
+ * Hub.ts publishes the member/relay node and [relay] before calling this module.
+ * relayUrl is the approved address; setup reads it from the admitted repository.
+ * This module does not override that address or create a second relay token.
  *
  * T3's CLI reports its version and installed service. It has no live descriptor
  * discovery command, so the descriptor probe reads only server-runtime.json's origin
@@ -22,10 +21,13 @@
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
+import { buildMarker, buildOf, runningBuild } from "../Build.ts";
 import { sh, shPath } from "../Area.ts";
 import { parseVersion, type ExecResult } from "../Exec.ts";
 import { installEngineScript } from "../Fix.ts";
@@ -314,10 +316,45 @@ export const probeHub = (ssh: string) =>
 
 /** The hub half only. Approval, secrets access and the relay's first sync belong to the authority. */
 export const hubPlanSteps = (probe: UiProbe): ReadonlyArray<string> => [
-  `Install this computer's T3 Fleet build on ${probe.hostname ?? probe.ssh}`,
-  "Join the fleet as a member and relay, or resume its unfinished setup",
-  "Create or read the hub's public key for the authority to grant secrets access",
+  "Check for an unfinished hub setup and resume the same plan",
+  `Install this computer's T3 Fleet build on ${probe.hostname ?? probe.ssh}, restarting any existing Fleet relay or listener`,
+  "Join the fleet as its admitted member and relay",
 ];
+
+/** Like the CLI's ownBundle, this is the running bundle or the source checkout's build. */
+const ownBundle = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const self = new URL(import.meta.url);
+  const source = /\.[cm]?tsx?$/.test(self.pathname);
+  const file = yield* path
+    .fromFileUrl(source ? new URL("../../../../apps/cli/dist/bin.mjs", self) : self)
+    .pipe(
+      Effect.mapError(
+        () =>
+          "The running T3 Fleet bundle path could not be read. Restart or reinstall T3 Fleet, then try again.",
+      ),
+    );
+  const bundle = yield* fs
+    .readFileString(file)
+    .pipe(
+      Effect.mapError(
+        () =>
+          "This computer has no T3 Fleet build to send. Run pnpm build in a source checkout, or reinstall T3 Fleet, then restart the wizard.",
+      ),
+    );
+  if (bundle.trim() === "")
+    return yield* Effect.fail(
+      "This computer's T3 Fleet build is empty. Build or reinstall T3 Fleet, then restart the wizard.",
+    );
+  const running = runningBuild();
+  const disk = buildOf(bundle);
+  if (running !== null && (disk === null || buildMarker(running) !== buildMarker(disk)))
+    return yield* Effect.fail(
+      "The T3 Fleet build changed since the wizard started. Restart the wizard before installing its build on the hub.",
+    );
+  return bundle;
+});
 
 const LocalConfig = Schema.Struct({ repo: Schema.String, node: Schema.String });
 const decodeLocalConfig = Schema.decodeUnknownEffect(LocalConfig);
@@ -349,7 +386,6 @@ export const bringUpHub = (input: {
   readonly node: string;
   readonly repoUrl: string;
   readonly relayUrl: string | null;
-  readonly bundle: string;
   readonly onStep: (step: string) => Effect.Effect<void>;
 }) =>
   Effect.gen(function* () {
@@ -365,14 +401,11 @@ export const bringUpHub = (input: {
       Array.from(input.repoUrl).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
     )
       return yield* Effect.fail("Give the fleet's repository URL, then try again.");
-    if (input.bundle.trim() === "")
-      return yield* Effect.fail(
-        "This computer has no T3 Fleet build to send. Build or reinstall T3 Fleet and restart the wizard.",
-      );
     if (input.relayUrl !== null && !/^https?:\/\/[^\s]+$/.test(input.relayUrl))
       return yield* Effect.fail(
         "Give an http or https relay URL, or leave it unset until the hub is reachable.",
       );
+    const bundle = yield* ownBundle;
     yield* input.onStep(`Checking for an unfinished setup on ${input.ssh}`);
     const saved = yield* decodeProgress(
       yield* checked(input.ssh, progressScript, "Reading setup progress"),
@@ -425,7 +458,7 @@ export const bringUpHub = (input: {
         );
     }
     yield* input.onStep(`Installing T3 Fleet on ${input.ssh}`);
-    yield* checked(input.ssh, installEngineScript(input.bundle), "Installing T3 Fleet", 120);
+    yield* checked(input.ssh, installEngineScript(bundle), "Installing T3 Fleet", 120);
     const cli = `node "$HOME/${SHARE_DIR}/${BUNDLE_FILE}"`;
     const resume = saved !== null && saved.finishedAt === null;
     if (saved?.finishedAt != null) {
@@ -439,12 +472,4 @@ export const bringUpHub = (input: {
         600,
       );
     }
-    yield* input.onStep("Reading the hub's public key");
-    const key = yield* checked(input.ssh, `${cli} secrets init`, "Reading the hub's public key");
-    const recipient = /\bpublic: (age1[0-9a-z]+)\b/.exec(key)?.[1];
-    if (recipient === undefined)
-      return yield* Effect.fail(
-        "The hub did not return its public key. Run t3-fleet secrets init there and retry the wizard; no private key is needed.",
-      );
-    return { recipient };
   });
