@@ -45,6 +45,14 @@ export const UiSetupState = Schema.Struct({
   unfinished: Schema.NullOr(
     Schema.Struct({ startedAt: Schema.Number, done: Schema.Number, total: Schema.Number }),
   ),
+  /**
+   * A hub asked for whose bring-up has not finished: apply's `resume` tries
+   * it again, `abandon` forgets it. `error` is why the last try stopped; null
+   * before the first, or while one runs.
+   */
+  hub: Schema.NullOr(
+    Schema.Struct({ node: Schema.String, ssh: Schema.String, error: Schema.NullOr(Schema.String) }),
+  ),
 });
 export type UiSetupState = typeof UiSetupState.Type;
 
@@ -133,6 +141,12 @@ export const UiPlanConflict = Schema.Struct({
   default: Schema.String,
   /** The conflict whose choice this one follows; it applies only when that choice differs. */
   after: Schema.NullOr(Schema.String),
+  /**
+   * With `after`: that conflict's choice value → this one's diff once it is
+   * chosen, or null when that choice settles this one (setup/Plan.ts detailOf
+   * and applies, worked out for each choice). Absent: `detail`, always asked.
+   */
+  byChoice: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
 });
 export type UiPlanConflict = typeof UiPlanConflict.Type;
 

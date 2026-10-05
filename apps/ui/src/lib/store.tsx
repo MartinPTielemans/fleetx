@@ -4,7 +4,8 @@
  * stand (the latest status, a newer failed check, every job), so a reload or
  * reconnect needs nothing else. A "check" event replaces the status in place,
  * "check-failed" keeps it and says why the next one did not come, "job"
- * updates a job; any other event (the relay's "state", "pull", "hub") is
+ * updates a job, "session" (setup just finished) replaces the session; any
+ * other event (the relay's "state", "pull", "hub") is
  * handed to whoever listens for it, and after a gap each listener runs once,
  * since some may have been missed.
  *
@@ -27,6 +28,7 @@ import {
   api,
   decodeCheckFailedEvent,
   decodeJobEvent,
+  decodeSessionEvent,
   decodeStatusEvent,
   isUnauthorized,
   type UiJobT,
@@ -161,6 +163,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         } catch {
           // A job this page cannot read stays out of the tray; the next event replaces it.
         }
+      });
+      // Setup finished and the server is the fleet's now: its new session, for whoever switches views.
+      current.addEventListener("session", (event) => {
+        const data = (event as MessageEvent<string>).data;
+        try {
+          setSession(decodeSessionEvent("/api/events", data));
+        } catch {
+          // The listeners re-fetch what they need.
+        }
+        dispatch("session", data);
       });
       for (const type of RELAY_EVENTS)
         current.addEventListener(type, (event) =>

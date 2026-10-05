@@ -14,12 +14,16 @@ import {
   ActivityIcon,
   PlugZapIcon,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type * as React from "react";
+import type { UiSetupState } from "@t3-fleet/core/SetupApi";
 
-import { Dot } from "./components/common";
+import { Dot, ErrorState } from "./components/common";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { JobsTray } from "./components/Jobs";
 import { Empty } from "./components/ui/empty";
+import { Spinner } from "./components/ui/spinner";
+import { ApiError, api } from "./lib/api";
 import { follow, useRoute, type View } from "./lib/router";
 import { StoreProvider, useStore } from "./lib/store";
 import { useTheme, type ThemeChoice } from "./lib/theme";
@@ -31,6 +35,8 @@ import { FindingsView } from "./views/Findings";
 import { McpView } from "./views/Mcp";
 import { ModelsView } from "./views/Models";
 import { ProposalsView } from "./views/Proposals";
+import { loadRun, saveRun } from "./views/setup/run";
+import { SetupWizard } from "./views/setup/Setup";
 import { SkillsView } from "./views/Skills";
 
 const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> = [
@@ -44,10 +50,63 @@ const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> =
   { view: "config", label: "Config", icon: <SlidersHorizontalIcon /> },
 ];
 
+type Gate =
+  | { readonly kind: "loading" }
+  | { readonly kind: "error"; readonly error: unknown }
+  | { readonly kind: "setup"; readonly state: UiSetupState }
+  | { readonly kind: "fleet" };
+
+/**
+ * A machine in a fleet gets the fleet; one that is not yet, or whose setup
+ * stopped part-way, gets the setup wizard, which hands over when it is done.
+ * A server without the setup endpoints is a fleet's.
+ */
 export function App() {
+  const [gate, setGate] = useState<Gate>({ kind: "loading" });
+  const load = () => {
+    setGate({ kind: "loading" });
+    api.setupState().then(
+      (state) => {
+        // The wizard stays for a hub still to bring up, and for its last screen, the
+        // invites, until the fleet is opened.
+        if (state.stage === "member" && state.hub === null && loadRun()?.finished !== true) {
+          saveRun(null);
+          setGate({ kind: "fleet" });
+        } else setGate({ kind: "setup", state });
+      },
+      (error: unknown) =>
+        setGate(
+          error instanceof ApiError && error.status === 404
+            ? { kind: "fleet" }
+            : { kind: "error", error },
+        ),
+    );
+  };
+  useEffect(load, []);
+  if (gate.kind === "loading")
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Spinner className="size-5 text-muted-foreground motion-safe:animate-[fade-in_200ms_ease_400ms_both,spin_1s_linear_infinite]" />
+      </div>
+    );
+  if (gate.kind === "error")
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <ErrorState error={gate.error} what="this machine's setup" onRetry={load} />
+      </div>
+    );
   return (
-    <StoreProvider>
-      <Shell />
+    <StoreProvider key={gate.kind}>
+      {gate.kind === "setup" ? (
+        <SetupWizard
+          initial={gate.state}
+          onMember={() => setGate({ kind: "fleet" })}
+          railFooter={<ThemeSwitch />}
+          banner={<Stale />}
+        />
+      ) : (
+        <Shell />
+      )}
     </StoreProvider>
   );
 }
