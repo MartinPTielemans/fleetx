@@ -116,7 +116,7 @@ import {
 } from "./Api.ts";
 import { Desired as SkillsDesired, Observed as SkillsObserved } from "./areas/Skills.ts";
 import type { CheckReport } from "./Check.ts";
-import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
+import { keptCopy, providerLabel, type Finding, type Fix } from "./Diagnose.ts";
 import { fixDigest, type FixOutcome } from "./Fix.ts";
 import { constantTimeEqual } from "./hub/Policy.ts";
 import { identify, refusedPage, type HubGate } from "./HubUi.ts";
@@ -340,7 +340,7 @@ export const toUiStatus = (check: UiCheck, checkedAt: number): UiStatus => {
       },
       agents: obs.agents.map((a) => ({
         name: a.name,
-        version: a.managedVersion,
+        version: keptCopy(a).version,
         latest: report.latest.agents[a.name],
       })),
       providers: obs.t3.providers.map((p) => ({
