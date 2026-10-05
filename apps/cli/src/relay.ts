@@ -150,6 +150,7 @@ const serve = Command.make("serve").pipe(
       ).pipe(Effect.ignore, Effect.forkDetach);
       const routes = relayLayer({
         token,
+        node: config.self,
         repo: config.repo,
         branch: config.branch,
         hub: {

@@ -30,3 +30,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Three throwaway nodes in containers
         run: tests/integration/run.sh
+      - name: Relay notifications with a fake ntfy sink
+        run: tests/integration/notify.sh

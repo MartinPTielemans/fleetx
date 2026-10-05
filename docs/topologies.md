@@ -10,6 +10,12 @@ Topology is configuration. Every node has one or more roles:
 
 Git is always the hub. A relay only makes things faster.
 
+With `[notify]`, the relay delivers ntfy pushes for every node. Nodes listed in
+`desktop` display fleet OS notifications through their listener. Without a relay,
+each node delivers only its own alerts after sync. A returning laptop receives at
+most a summary of missed alerts per path. No agent or scheduled T3 thread is
+required. See [notifications](areas.md#notifications).
+
 You don't have to choose a layout by hand. The [setup wizard](design/setup-wizard.md)
 asks what machines you have and recommends one: your own computer as the
 authority, an always-on machine as the hub. It checks that machine over ssh

@@ -70,6 +70,7 @@ import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
 import { NodeState, REPORT_FORMAT, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
+import { deliverAlerts } from "./Notify.ts";
 import { localSecrets, reportToRelay } from "./RelayClient.ts";
 import { approve, autoApproves, listProposals, settleRejection } from "./Staging.ts";
 import { isDepartureProposal } from "./leave/Fleet.ts";
@@ -834,9 +835,11 @@ export const report = ({
       );
       yield* record(unpublished);
       yield* reportToRelay(config, unpublished).pipe(Effect.ignore);
+      lines.push(...(yield* deliverAlerts(config, [unpublished], "sync")));
       return yield* Effect.fail(published.failure);
     }
     yield* record(state);
+    lines.push(...(yield* deliverAlerts(config, [state], "sync")));
     if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
     return state;
   });

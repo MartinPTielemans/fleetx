@@ -87,6 +87,11 @@ const RelaySection = Schema.Struct({
   port: Schema.optionalKey(Schema.Number),
 });
 
+const NotifySection = Schema.Struct({
+  desktop: Schema.optionalKey(Schema.Array(Schema.String)),
+  ntfy: Schema.optionalKey(Schema.String),
+});
+
 /**
  * The app on the hub (HubUi.ts): the Tailscale logins it opens for. Setup
  * writes the login of the authority that made the hub; none means nobody.
@@ -96,6 +101,7 @@ const UiSection = Schema.Struct({
 });
 
 const FleetFile = Schema.Struct({
+  notify: Schema.optionalKey(NotifySection),
   fleet: Schema.optionalKey(FleetSection),
   /** Plugin areas, relative to the config repo (see Plugins.ts). */
   plugins: Schema.optionalKey(

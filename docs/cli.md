@@ -94,15 +94,17 @@ disappears without anyone remembering why.
 
 `t3-fleet status --changes` compares with the previous `--changes` run and prints
 only findings that appeared, got worse, or were resolved, or one line saying
-nothing changed. Scheduled checks use this to stay quiet.
+nothing changed. Optional scheduled agent checks use this to stay quiet. Fleet sync and notification delivery run without an agent.
 
 ## From a T3 thread
 
-`t3-fleet mcp` serves two tools over stdio:
+`t3-fleet mcp` serves three tools over stdio:
 
 - `fleet_status`: the same report, as text to show plus findings with ids such
   as `server:t3-behind`. With `changesOnly` it also says what changed since the
   last such call.
+- `fleet_alerts`: reads reported health changes. This is an optional way to ask
+  a thread about alerts; notifications do not require a thread or schedule.
 - `fleet_apply_fixes`: runs fixes by id, only ones T3 Fleet proposed, after
   checking again that each still applies.
 
@@ -141,6 +143,29 @@ prints a new one for each further tab. `--port` pins the port (and implies
 when T3 Fleet is upgraded on this machine while it runs (as `t3-fleet mcp`
 does too), it stops installing its build on other machines until you restart
 it, since that would put the old build back.
+
+## Notifications
+
+In the fleet's `t3-fleet.toml`, both settings are optional:
+
+```toml
+[notify]
+desktop = ["laptop"]           # nodes that display fleet OS notifications
+ntfy = "T3_FLEET_NTFY_URL"     # secret name, never the topic URL itself
+```
+
+Store the topic URL with `t3-fleet secrets set` on an authority and sync it to the
+sending node. `t3-fleet notify test` sends one test through each configured path
+on the node where you run it. Run it on the relay to test the fleet push path,
+and on a selected desktop to test the OS path. The command shows the send plan
+before sending and reports accepted, skipped or failed transport results. A failed
+transport exits nonzero and persists the result for `status` and `doctor`.
+
+`status` and `doctor` show local delivery failures, unconfirmed interrupted sends,
+and missing desktop capability. `status --json` includes a `notifications` list.
+A successful notifier invocation does not prove the OS displayed the notification;
+use the explicit test to confirm it. See [areas](areas.md#notifications) for routing,
+persisted dedupe, catch-up summaries and ambiguous receipt limits.
 
 ### On the hub
 
