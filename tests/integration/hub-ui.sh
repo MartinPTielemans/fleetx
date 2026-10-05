@@ -83,8 +83,12 @@ on server "node -e 'require(\"net\").connect(8399,\"$SERVER\").on(\"connect\",()
 sess=$(on desktop "node /tmp/hub-browser.mjs $HUB session")
 printf '%s' "$sess" | grep -q '"status":403' || fail "mallory should get no session: $sess"
 # A program on the hub itself, as the relay's own user, connecting to the loopback port with the headers serve sets.
-local=$(on server "node -e 'fetch(\"http://127.0.0.1:8399/api/session\",{method:\"POST\",headers:{host:\"server.tailnet.ts.net:8399\",\"tailscale-user-login\":\"me@example.com\",\"x-t3-fleet-hub\":\"1\"}}).then(async r=>console.log(r.status, await r.text()))'")
-printf '%s' "$local" | grep -q '^403 ' || fail "a program on the hub must not mint a session as me@example.com: $local"
+onhub=$(on server "node -e '
+  const r = require(\"http\").request({ host: \"127.0.0.1\", port: 8399, method: \"POST\", path: \"/api/session\",
+    headers: { host: \"server.tailnet.ts.net:8399\", \"tailscale-user-login\": \"me@example.com\", \"x-t3-fleet-hub\": \"1\" } },
+    (a) => { let b = \"\"; a.on(\"data\", (d) => (b += d)).on(\"end\", () => console.log(a.statusCode, b)); });
+  r.end();'")
+printf '%s' "$onhub" | grep -q '^403 ' || fail "a program on the hub must not mint a session as me@example.com: $onhub"
 pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused"
 
 # A fix applied from the hub, run by laptop's listener.
