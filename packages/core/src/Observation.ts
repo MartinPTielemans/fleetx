@@ -20,6 +20,14 @@ export const AgentObservation = Schema.Struct({
   managedVersion: Schema.NullOr(Schema.String),
   /** Every match on the login PATH, in resolution order. */
   onPath: Schema.Array(Schema.String),
+  /**
+   * The copy Nix installed, whose version Nix keeps: the managed path when it
+   * links into /nix/store, else the first such copy on PATH. Absent when
+   * neither does (and from probes older than this field).
+   */
+  nix: Schema.optionalKey(
+    Schema.Struct({ path: Schema.String, version: Schema.NullOr(Schema.String) }),
+  ),
 });
 export type AgentObservation = typeof AgentObservation.Type;
 
@@ -32,6 +40,8 @@ export const ProviderObservation = Schema.Struct({
   binaryPath: Schema.NullOr(Schema.String),
   /** Resolved against the T3 server's own PATH, not the login shell's. */
   resolved: Schema.NullOr(Schema.String),
+  /** `resolved` links into /nix/store. */
+  resolvedFromNix: Schema.optionalKey(Schema.Boolean),
   /** `<resolved> --version` run with the server's environment. */
   launch: Schema.Struct({
     ok: Schema.Boolean,
@@ -66,6 +76,8 @@ export const T3Observation = Schema.Struct({
   installedVersion: Schema.NullOr(Schema.String),
   /** The `t3` binary the server runs from (~/.t3/runtime/versions/<v>/t3); null for the desktop app. */
   runtimeBinary: Schema.NullOr(Schema.String),
+  /** The running server comes from /nix/store, so Nix, not T3, updates it. */
+  fromNix: Schema.optionalKey(Schema.Boolean),
   /** PATH of the running server process; null when unreadable. */
   serverPath: Schema.NullOr(Schema.String),
   providers: Schema.Array(ProviderObservation),

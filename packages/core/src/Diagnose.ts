@@ -134,6 +134,23 @@ const pinCommand = (agent: "claude" | "codex", version: string) =>
     ? `curl -fsSL https://claude.ai/install.sh | bash -s ${version}`
     : `npm install -g --prefix ~/.local @openai/codex@${version}`;
 
+/**
+ * The copy of an agent a node keeps: the managed one, unless Nix installed it
+ * (there, or in place of it). Nix keeps a Nix copy's version, so T3 Fleet
+ * never installs or upgrades over it: that would fight the Nix configuration.
+ */
+export const keptCopy = (agent: AgentObservation) => {
+  const nix = agent.nix;
+  return nix !== undefined && (agent.managedVersion === null || nix.path === agent.managedPath)
+    ? { path: nix.path, version: nix.version, fromNix: true, label: `${agent.name} from Nix` }
+    : {
+        path: agent.managedPath,
+        version: agent.managedVersion,
+        fromNix: false,
+        label: `managed ${agent.name}`,
+      };
+};
+
 const agentFindings = (
   node: string,
   rawAgent: AgentObservation,
@@ -143,7 +160,10 @@ const agentFindings = (
   const agent = { ...rawAgent, onPath: rawAgent.onPath.filter((p) => !isSessionShim(p)) };
   const out: Array<Finding> = [];
   const how = AGENT_INSTALL[agent.name];
-  if (agent.managedVersion === null) {
+  const kept = keptCopy(agent);
+  const inNix = (what: string) =>
+    `it comes from Nix (${tilde(kept.path)}); ${what} it in your Nix configuration`;
+  if (!kept.fromNix && agent.managedVersion === null) {
     out.push({
       node,
       severity: "error",
@@ -154,50 +174,57 @@ const agentFindings = (
     });
     return out;
   }
-  if (policy.kind === "pin" && agent.managedVersion !== policy.version) {
+  // A Nix copy whose version could not be read has nothing to compare; its path still counts.
+  const version = kept.version;
+  if (version !== null && policy.kind === "pin" && version !== policy.version) {
     out.push({
       node,
       key: `${agent.name}-off-pin`,
       severity: "warn",
       area: "agents",
-      title: `${agent.name} ${agent.managedVersion} is not the pinned ${policy.version}`,
-      fix: { command: pinCommand(agent.name, policy.version), safe: true },
+      title: `${agent.name} ${version} is not the pinned ${policy.version}`,
+      ...(kept.fromNix
+        ? { detail: inNix("pin") }
+        : { fix: { command: pinCommand(agent.name, policy.version), safe: true } }),
     });
   }
   const newest = latest.agents[agent.name];
   const failed = latest.failed?.[agent.name];
-  if (policy.kind === "track" && newest === null && failed !== undefined) {
+  if (version !== null && policy.kind === "track" && newest === null && failed !== undefined) {
     out.push({
       node,
       severity: "info",
       area: "agents",
       key: `${agent.name}-latest-unknown`,
-      title: `could not look up the newest ${agent.name}, so whether ${agent.managedVersion} is current is unknown`,
+      title: `could not look up the newest ${agent.name}, so whether ${version} is current is unknown`,
       detail: failed,
     });
   }
-  if (policy.kind === "track" && newest !== null && newest !== agent.managedVersion) {
+  if (version !== null && policy.kind === "track" && newest !== null && newest !== version) {
     out.push({
       node,
-      severity: "warn",
+      // nixpkgs trails the agents' releases by design; a Nix copy behind is a note, not a problem.
+      severity: kept.fromNix ? "info" : "warn",
       area: "agents",
       key: `${agent.name}-behind`,
-      title: `${agent.name} ${agent.managedVersion} is behind ${newest}`,
-      fix: { command: how.upgrade, safe: true },
+      title: `${agent.name} ${version} is behind ${newest}`,
+      ...(kept.fromNix
+        ? { detail: inNix("update") }
+        : { fix: { command: how.upgrade, safe: true } }),
     });
   }
   const first = agent.onPath[0];
-  if (first !== undefined && first !== agent.managedPath) {
+  if (first !== undefined && first !== kept.path) {
     out.push({
       node,
       severity: "warn",
       area: "agents",
       key: `${agent.name}-shell-copy`,
-      title: `your shell runs ${tilde(first)}, not the managed ${agent.name}`,
-      detail: `${tilde(first)} comes before ${tilde(agent.managedPath)} on PATH; upgrades of the managed copy will not reach it`,
+      title: `your shell runs ${tilde(first)}, not the ${kept.label}`,
+      detail: `${tilde(first)} comes before ${tilde(kept.path)} on PATH; upgrades of the ${kept.fromNix ? "Nix" : "managed"} copy will not reach it`,
     });
   }
-  const extra = agent.onPath.filter((p) => p !== agent.managedPath && p !== first);
+  const extra = agent.onPath.filter((p) => p !== kept.path && p !== first);
   if (extra.length > 0) {
     out.push({
       node,
@@ -235,22 +262,30 @@ const providerFindings = (
     const agent = obs.agents.find((a) => a.name === agentName);
     // A t3-fleet models launcher (t3-fleet-claude, t3-fleet-codex, …) runs the managed CLI itself.
     const viaModels = p.resolved !== null && isLauncher(basename(p.resolved));
+    const kept = agent === undefined ? undefined : keptCopy(agent);
     if (
       agent !== undefined &&
+      kept !== undefined &&
       p.resolved !== null &&
       !viaLauncher(proxy, p.instanceId, p.resolved) &&
       !viaModels &&
-      p.resolved !== agent.managedPath
+      p.resolved !== kept.path &&
+      // Another profile's link to the Nix-installed agent (/etc/profiles/per-user, say), at the same version.
+      !(
+        kept.fromNix &&
+        p.resolvedFromNix === true &&
+        (p.launch.version === null || kept.version === null || p.launch.version === kept.version)
+      )
     ) {
       out.push({
         node,
         severity: "warn",
         area: "providers",
         key: `${providerLabel(p.instanceId)}-not-managed-in-t3`,
-        title: `T3 runs ${providerLabel(p.instanceId)} from ${tilde(p.resolved)}, not the managed ${agent.name}`,
-        detail: `upgrades of ${tilde(agent.managedPath)} never reach T3 here${
-          p.launch.version && agent.managedVersion && p.launch.version !== agent.managedVersion
-            ? ` (T3 gets ${p.launch.version}, managed is ${agent.managedVersion})`
+        title: `T3 runs ${providerLabel(p.instanceId)} from ${tilde(p.resolved)}, not the ${kept.label}`,
+        detail: `upgrades of ${tilde(kept.path)} never reach T3 here${
+          p.launch.version && kept.version && p.launch.version !== kept.version
+            ? ` (T3 gets ${p.launch.version}, ${kept.fromNix ? "Nix has" : "managed is"} ${kept.version})`
             : ""
         }`,
       });
@@ -339,15 +374,19 @@ const t3Findings = (
       severity: "warn",
       area: "t3",
       title: `T3 is on ${cliReleaseChannelOf(version)}, but this machine should follow ${wantChannel}`,
-      ...(t3.runtimeBinary !== null
+      ...(t3.fromNix === true
         ? {
-            fix: {
-              command: `${tilde(t3.runtimeBinary)} update --channel ${wantChannel} --allow-downgrade --yes`,
-              safe: false,
-              disrupts: `restarts the T3 server on ${node}; threads running there stop`,
-            },
+            detail: `T3 comes from Nix here; switch it to ${wantChannel} in your Nix configuration`,
           }
-        : { detail: `install T3 Code's ${wantChannel} desktop app` }),
+        : t3.runtimeBinary !== null
+          ? {
+              fix: {
+                command: `${tilde(t3.runtimeBinary)} update --channel ${wantChannel} --allow-downgrade --yes`,
+                safe: false,
+                disrupts: `restarts the T3 server on ${node}; threads running there stop`,
+              },
+            }
+          : { detail: `install T3 Code's ${wantChannel} desktop app` }),
     });
     return out;
   }
@@ -379,7 +418,7 @@ const t3Findings = (
       const channel = cliReleaseChannelOf(version);
       // When idle, sync updates it itself: the command waits while a thread runs.
       const idle =
-        update === "when-idle"
+        update === "when-idle" && t3.fromNix !== true
           ? {
               command: "t3-fleet t3 update --if-idle",
               safe: true,
@@ -400,14 +439,16 @@ const t3Findings = (
         severity,
         area: "t3",
         title: `T3 is ${behind === null ? "behind" : `${behind} ${channel} release${behind === 1 ? "" : "s"} behind`} (${versionPair(version, newest)})`,
-        ...(idle !== undefined
-          ? { detail: "sync updates it when no thread is running here", fix: idle }
-          : how === undefined
-            ? {
-                detail:
-                  'the desktop app updates when asked in its UI; [t3] update = "when-idle" lets sync do it',
-              }
-            : { fix: how }),
+        ...(t3.fromNix === true
+          ? { detail: "T3 comes from Nix here; update it in your Nix configuration" }
+          : idle !== undefined
+            ? { detail: "sync updates it when no thread is running here", fix: idle }
+            : how === undefined
+              ? {
+                  detail:
+                    'the desktop app updates when asked in its UI; [t3] update = "when-idle" lets sync do it',
+                }
+              : { fix: how }),
       });
     }
   }

@@ -14,9 +14,10 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
 import type { CheckReport } from "./Check.ts";
-import { providerLabel, type Finding, type Fix } from "./Diagnose.ts";
+import { keptCopy, providerLabel, type Finding, type Fix } from "./Diagnose.ts";
 import type { FixOutcome } from "./Fix.ts";
 import { findingId, type Changes } from "./Memory.ts";
+import type { AgentObservation } from "./Observation.ts";
 import { renderStatus } from "./Render.ts";
 
 export class FleetFailure extends Schema.TaggedError<FleetFailure>()("FleetFailure", {
@@ -141,6 +142,12 @@ const AlertsTool = Tool.make("fleet_alerts", {
 
 export const FleetToolkit = Toolkit.make(StatusTool, ApplyTool, AlertsTool);
 
+/** The version of the copy a node keeps (a Nix one where Nix installed it). */
+const keptVersion = (agents: ReadonlyArray<AgentObservation>, name: "claude" | "codex") => {
+  const agent = agents.find((a) => a.name === name);
+  return agent === undefined ? null : keptCopy(agent).version;
+};
+
 const view = (report: CheckReport) => ({
   summary: renderStatus(report.results, report.findings, report.latest, {
     verbose: false,
@@ -153,8 +160,8 @@ const view = (report: CheckReport) => ({
           reachable: true,
           t3Version:
             r.observation.t3.descriptor?.serverVersion ?? r.observation.t3.installedVersion,
-          claude: r.observation.agents.find((a) => a.name === "claude")?.managedVersion ?? null,
-          codex: r.observation.agents.find((a) => a.name === "codex")?.managedVersion ?? null,
+          claude: keptVersion(r.observation.agents, "claude"),
+          codex: keptVersion(r.observation.agents, "codex"),
           providers: r.observation.t3.providers
             .filter((p) => p.enabled)
             .map((p) => ({
