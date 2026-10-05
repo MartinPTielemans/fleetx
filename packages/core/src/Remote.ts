@@ -76,11 +76,16 @@ export const validSshDestination = (ssh: string) =>
   !/\s/.test(ssh) &&
   !Array.from(ssh).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 
-/** The same bounded, non-interactive transport for checks and setup. Stdin may be a bundle or shell script. */
+/**
+ * The same bounded, non-interactive transport for checks and setup. Stdin may
+ * be a bundle or shell script. Regular checks respect the user's SSH host-key
+ * policy; the wizard opts into read-only host-key handling.
+ */
 export const remoteExec = (
   ssh: string,
   input: Omit<ExecInput, "command" | "args" | "env" | "extendEnv"> & {
     readonly command: string;
+    readonly readonlyHostKeys?: boolean;
   },
 ) =>
   validSshDestination(ssh)
@@ -88,10 +93,9 @@ export const remoteExec = (
         command: "ssh",
         args: [
           ...SSH,
-          "-o",
-          "StrictHostKeyChecking=yes",
-          "-o",
-          "UpdateHostKeys=no",
+          ...(input.readonlyHostKeys
+            ? ["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+            : []),
           ...(input.stdin === undefined ? ["-n"] : ["-o", "Compression=yes"]),
           "--",
           ssh,

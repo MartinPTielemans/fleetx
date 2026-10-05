@@ -1,4 +1,4 @@
-// A fleet in a temp directory (a bare remote; box, an authority; laptop, the
+// A fleet in a temp directory (a bare remote; hub, an authority; laptop, the
 // member that leaves; desk, a member or a second authority), and a temp HOME
 // for the machine that leaves. launchctl and systemctl are fakes that keep
 // state in files, so a stop can be made to fail; nothing else is faked: the
@@ -176,7 +176,7 @@ const makeFleet = async (
 
   const keys: Record<string, string> = {};
   const recipients: Record<string, string> = {};
-  for (const n of ["box", "laptop", "desk"]) {
+  for (const n of ["hub", "laptop", "desk"]) {
     keys[n] = await generateX25519Identity();
     recipients[n] = await identityToRecipient(keys[n] ?? "");
   }
@@ -185,28 +185,28 @@ const makeFleet = async (
 
   const origin = join(root, "origin.git");
   git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
-  const box = join(root, "box");
-  git(root, "init", "-q", "-b", "main", "box");
-  git(box, "remote", "add", "origin", origin);
-  put(box, "t3-fleet.toml", '[fleet]\nbranch = "main"\n');
-  put(box, "nodes/box.toml", 'roles = ["authority"]\n');
-  put(box, "nodes/desk.toml", `roles = ["${options.desk ?? "member"}"]\n`);
-  put(box, "nodes/laptop.toml", options.node ?? LAPTOP);
-  put(box, "skills/a/SKILL.md", "a from the repo\n");
-  put(box, "skills/shared/ref.md", "shared from the repo\n");
-  put(box, "skills/b/SKILL.md", "b from the repo\n");
+  const hub = join(root, "hub");
+  git(root, "init", "-q", "-b", "main", "hub");
+  git(hub, "remote", "add", "origin", origin);
+  put(hub, "t3-fleet.toml", '[fleet]\nbranch = "main"\n');
+  put(hub, "nodes/hub.toml", 'roles = ["authority"]\n');
+  put(hub, "nodes/desk.toml", `roles = ["${options.desk ?? "member"}"]\n`);
+  put(hub, "nodes/laptop.toml", options.node ?? LAPTOP);
+  put(hub, "skills/a/SKILL.md", "a from the repo\n");
+  put(hub, "skills/shared/ref.md", "shared from the repo\n");
+  put(hub, "skills/b/SKILL.md", "b from the repo\n");
   // A skill linking a shared file in the repo, by a relative link.
-  fs.symlinkSync("../shared/ref.md", join(box, "skills/a/ref.md"));
-  put(box, "dotfiles/zshrc", "export FLEET=1\n");
-  put(box, "mcp/fetch.json", '{ "kind": "remote", "url": "https://fetch.example/mcp" }\n');
+  fs.symlinkSync("../shared/ref.md", join(hub, "skills/a/ref.md"));
+  put(hub, "dotfiles/zshrc", "export FLEET=1\n");
+  put(hub, "mcp/fetch.json", '{ "kind": "remote", "url": "https://fetch.example/mcp" }\n');
   put(
-    box,
+    hub,
     "mcp/docs.json",
     '{ "kind": "stdio", "command": "~/bin/docs-mcp", "args": ["--quiet"] }\n',
   );
-  put(box, "mcp/notes.json", '{ "kind": "stdio", "command": "notes-mcp" }\n');
+  put(hub, "mcp/notes.json", '{ "kind": "stdio", "command": "notes-mcp" }\n');
   put(
-    box,
+    hub,
     "secrets/recipients.toml",
     `# keys\n${Object.keys(recipients)
       .sort()
@@ -214,15 +214,15 @@ const makeFleet = async (
       .join("\n")}\n`,
   );
   put(
-    box,
+    hub,
     "secrets/secrets.env.age",
     await encrypt(Object.values(recipients), "API=one\nT3_FLEET_MCP_TOKEN_LAPTOP=x\n"),
   );
-  git(box, "add", "-A");
-  git(box, "commit", "-qm", "fleet");
-  git(box, "push", "-q", "-u", "origin", "main");
+  git(hub, "add", "-A");
+  git(hub, "commit", "-qm", "fleet");
+  git(hub, "push", "-q", "-u", "origin", "main");
   const repo = join(root, self);
-  if (self !== "box") git(root, "clone", "-q", origin, self);
+  if (self !== "hub") git(root, "clone", "-q", origin, self);
   put(home, ".config/t3-fleet/config.toml", `repo = "${repo}"\nnode = "${self}"\n`);
   const config = await run(loadConfigFrom(repo, self));
   const calls = () => (exists(root, "calls") ? read(root, "calls") : "");
@@ -239,7 +239,7 @@ const makeFleet = async (
     );
   const plan = (purge = false, platform = "darwin") =>
     planFor(departureOf(config), purge, platform);
-  return { root, home, origin, box, repo, keys, recipients, config, calls, plan, planFor };
+  return { root, home, origin, hub, repo, keys, recipients, config, calls, plan, planFor };
 };
 
 type Fleet = Awaited<ReturnType<typeof makeFleet>>;
@@ -469,23 +469,23 @@ describe("a member leaving", () => {
     if (node === undefined) throw new Error("no laptop");
     await run(underSyncLock(exchange(f.config, node, [])));
     expect(onBranch(f.origin, "nodes/laptop.toml", "t3-fleet/staging/laptop")).toBeNull();
-    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).not.toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml", "t3-fleet/staging/laptop")).not.toBeNull();
     // The secrets change before an authority approves; the member is long gone by then.
-    const boxHome = join(f.root, "box-home");
-    process.env["HOME"] = boxHome;
-    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
-    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
-    put(f.box, "secrets/secrets.env.age", await encrypt(Object.values(f.recipients), "API=two\n"));
-    commitAll(f.box, "new secret");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const hubHome = join(f.root, "hub-home");
+    process.env["HOME"] = hubHome;
+    put(hubHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(hubHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
+    put(f.hub, "secrets/secrets.env.age", await encrypt(Object.values(f.recipients), "API=two\n"));
+    commitAll(f.hub, "new secret");
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) throw new Error("no proposal");
-    await run(approve(f.box, "main", proposal, "box"));
+    await run(approve(f.hub, "main", proposal, "hub"));
     expect(onBranch(f.origin, "nodes/laptop.toml")).toBeNull();
     expect(onBranch(f.origin, "secrets/recipients.toml")).not.toContain(f.recipients["laptop"]);
     const sealed = onBranch(f.origin, "secrets/secrets.env.age") ?? "";
-    expect(await decrypt(f.keys["box"] ?? "", sealed)).toBe("API=two\n");
+    expect(await decrypt(f.keys["hub"] ?? "", sealed)).toBe("API=two\n");
     await expect(decrypt(f.keys["laptop"] ?? "", sealed)).rejects.toThrow();
-    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml", "t3-fleet/staging/laptop")).toBeNull();
   });
 
   it("keeps its MCP registrations without a snapshot, says which use the hub, and removes only t3-fleet mcp", async () => {
@@ -667,7 +667,7 @@ describe("--purge", () => {
 
 describe("an authority leaving", () => {
   it("is refused when it is the only authority, and nothing runs", async () => {
-    const f = await makeFleet({ self: "box" });
+    const f = await makeFleet({ self: "hub" });
     const plan = await f.plan(true);
     expect(plan.refusal).toContain("only authority");
     expect(plan.steps).toEqual([]);
@@ -676,7 +676,7 @@ describe("an authority leaving", () => {
   });
 
   it("goes by origin's authorities, not a stale checkout's, when it plans and again when it runs", async () => {
-    const f = await makeFleet({ self: "box", desk: "authority" });
+    const f = await makeFleet({ self: "hub", desk: "authority" });
     const other = join(f.root, "other");
     git(f.root, "clone", "-q", f.origin, "other");
     const demote = () => {
@@ -698,12 +698,12 @@ describe("an authority leaving", () => {
     const outcomes = await run(applyLeave(plan));
     expect(outcomes[0]).toMatchObject({ ok: false });
     expect(outcomes[0]?.lines.join("")).toContain("only authority");
-    expect(onBranch(f.origin, "nodes/box.toml")).not.toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml")).not.toBeNull();
   });
 
   it("removes itself, and a later run resumes once its node file is gone", async () => {
-    const f = await makeFleet({ self: "box", desk: "authority" });
-    git(f.box, "push", "-q", "origin", "main:t3-fleet/state/box");
+    const f = await makeFleet({ self: "hub", desk: "authority" });
+    git(f.hub, "push", "-q", "origin", "main:t3-fleet/state/hub");
     put(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist", "<plist/>");
     put(f.root, "loaded/dev.t3-fleet.sync", "");
     put(f.root, "stuck", "");
@@ -711,20 +711,20 @@ describe("an authority leaving", () => {
     expect(first.map((o) => o.ok)).toEqual([true, false]);
     expect(first[1]?.lines.join("")).toContain("launchd still has dev.t3-fleet.sync loaded");
     expect(exists(f.home, "Library/LaunchAgents/dev.t3-fleet.sync.plist")).toBe(true);
-    expect(onBranch(f.origin, "nodes/box.toml")).toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml")).toBeNull();
     expect(onBranch(f.origin, "nodes/desk.toml")).not.toBeNull();
     const sealed = onBranch(f.origin, "secrets/secrets.env.age") ?? "";
     expect(await decrypt(f.keys["desk"] ?? "", sealed)).toContain("API=one");
-    await expect(decrypt(f.keys["box"] ?? "", sealed)).rejects.toThrow();
+    await expect(decrypt(f.keys["hub"] ?? "", sealed)).rejects.toThrow();
     expect(
-      spawnSync("git", ["rev-parse", "--verify", "t3-fleet/state/box"], { cwd: f.origin }).status,
+      spawnSync("git", ["rev-parse", "--verify", "t3-fleet/state/hub"], { cwd: f.origin }).status,
     ).not.toBe(0);
-    // The checkout followed, so the config no longer has box: leave goes on from its record.
-    expect(exists(f.box, "nodes/box.toml")).toBe(false);
+    // The checkout followed, so the config no longer has hub: leave goes on from its record.
+    expect(exists(f.hub, "nodes/hub.toml")).toBe(false);
     fs.rmSync(join(f.root, "stuck"));
     const { departure, resumed } = await run(currentDeparture(f.home));
     expect(resumed).toBe(true);
-    expect(departure).toMatchObject({ node: "box", finished: false });
+    expect(departure).toMatchObject({ node: "hub", finished: false });
     const again = await f.planFor(departure);
     expect(titles(again)).toEqual(["Stop and remove the sync timer"]);
     expect((await run(applyLeave(again))).every((o) => o.ok)).toBe(true);
@@ -787,7 +787,7 @@ describe("services", () => {
     );
     expect(plan.refusal).not.toContain("--user");
     expect(await run(applyLeave(plan))).toEqual([]);
-    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml", "t3-fleet/staging/laptop")).toBeNull();
     expect(exists(f.root, "etc-systemd/t3-fleet-sync.timer")).toBe(true);
     expect(exists(f.home, ".config/t3-fleet/age-key.txt")).toBe(true);
   });
@@ -950,11 +950,11 @@ describe("round two", () => {
     git(f.repo, "add", "skills");
     git(f.repo, "commit", "-qm", "ordinary skills edit\n\nT3-Fleet-Departure: laptop");
     git(f.repo, "push", "-q", "origin", "HEAD:refs/heads/t3-fleet/staging/laptop");
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) throw new Error("no proposal");
     // A skills-only change, approved as what it is: laptop stays.
     expect(autoApprovable(proposal, ["skills/"])).toBe(true);
-    await run(approve(f.box, "main", proposal, "box"));
+    await run(approve(f.hub, "main", proposal, "hub"));
     expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
     expect(onBranch(f.origin, "skills/new/SKILL.md")).toBe("new");
   });
@@ -962,11 +962,11 @@ describe("round two", () => {
   it("never auto-approves a real departure, and sync protects only that", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
     await run(applyLeave(await f.plan()));
-    const [departure] = await run(listProposals(f.box, "main"));
+    const [departure] = await run(listProposals(f.hub, "main"));
     if (departure === undefined) throw new Error("no proposal");
     // Under trusting prefixes, by its paths it would pass; as a departure it never does.
     expect(autoApprovable(departure, ["nodes/", "secrets/"])).toBe(true);
-    expect(await run(autoApproves(f.box, departure, ["nodes/", "secrets/"]))).toBe(false);
+    expect(await run(autoApproves(f.hub, departure, ["nodes/", "secrets/"]))).toBe(false);
     // A marked proposal that is not a departure gets no protection from sync.
     git(f.repo, "fetch", "-q", "origin");
     git(f.repo, "reset", "-q", "--hard", "origin/main");
@@ -988,18 +988,18 @@ describe("round two", () => {
   it("goes by origin's role: a member since promoted to the only authority is refused, planned or running", async () => {
     const f = await makeFleet();
     const recorded = departureOf(f.config);
-    put(f.box, "nodes/box.toml", 'roles = ["member"]\n');
-    put(f.box, "nodes/laptop.toml", 'roles = ["authority"]\n');
-    commitAll(f.box, "laptop is the only authority");
+    put(f.hub, "nodes/hub.toml", 'roles = ["member"]\n');
+    put(f.hub, "nodes/laptop.toml", 'roles = ["authority"]\n');
+    commitAll(f.hub, "laptop is the only authority");
     const plan = await f.planFor(recorded);
     expect(plan.refusal).toContain("only authority");
-    // Planned while box was an authority too, demoted before it runs.
-    put(f.box, "nodes/box.toml", 'roles = ["authority"]\n');
-    commitAll(f.box, "box again");
+    // Planned while hub was an authority too, demoted before it runs.
+    put(f.hub, "nodes/hub.toml", 'roles = ["authority"]\n');
+    commitAll(f.hub, "hub again");
     const ok = await f.planFor(recorded);
     expect(ok.refusal).toBeNull();
-    put(f.box, "nodes/box.toml", 'roles = ["member"]\n');
-    commitAll(f.box, "box demoted");
+    put(f.hub, "nodes/hub.toml", 'roles = ["member"]\n');
+    commitAll(f.hub, "hub demoted");
     const outcomes = await run(applyLeave(ok));
     expect(outcomes[0]).toMatchObject({ ok: false });
     expect(outcomes[0]?.lines.join("")).toContain("only authority");
@@ -1594,11 +1594,11 @@ describe("final review", () => {
   it("lets an authority's own sync approve a member's ordinary edit of its node file, never a departure", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
     put(
-      f.box,
+      f.hub,
       "t3-fleet.toml",
       '[fleet]\nbranch = "main"\nauto_commit = ["skills/", "nodes/"]\nauto_approve = ["nodes/", "secrets/"]\n',
     );
-    commitAll(f.box, "trust nodes/");
+    commitAll(f.hub, "trust nodes/");
     git(f.repo, "pull", "-q", "--ff-only", "origin", "main");
     // The member edits its own node file; its sync proposes it.
     put(f.repo, "nodes/laptop.toml", 'roles = ["member"]\n[mcp]\nservers = []\n');
@@ -1607,19 +1607,19 @@ describe("final review", () => {
     if (laptop === undefined) throw new Error("no laptop");
     await run(underSyncLock(exchange(member, laptop, [])));
     // The authority's own sync, unattended, approves it.
-    const authorityHome = join(f.root, "box-home");
+    const authorityHome = join(f.root, "hub-home");
     process.env["HOME"] = authorityHome;
     put(
       authorityHome,
       ".config/t3-fleet/gitconfig",
       "[user]\n\tname = T\n\temail = t@example.com\n",
     );
-    put(authorityHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
-    const authority = await run(loadConfigFrom(f.box, "box"));
-    const box = authority.nodes.find((n) => n.name === "box");
-    if (box === undefined) throw new Error("no box");
+    put(authorityHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
+    const authority = await run(loadConfigFrom(f.hub, "hub"));
+    const hub = authority.nodes.find((n) => n.name === "hub");
+    if (hub === undefined) throw new Error("no hub");
     const lines: Array<string> = [];
-    await run(underSyncLock(exchange(authority, box, lines)));
+    await run(underSyncLock(exchange(authority, hub, lines)));
     expect(lines.join("\n")).toContain("approved laptop's proposal");
     expect(onBranch(f.origin, "nodes/laptop.toml")).toContain("servers = []");
     // A real departure under the same trust stays for a person to approve.
@@ -1630,10 +1630,10 @@ describe("final review", () => {
     await run(applyLeave(await f.planFor(departureOf(again))));
     process.env["HOME"] = authorityHome;
     const after: Array<string> = [];
-    await run(underSyncLock(exchange(await run(loadConfigFrom(f.box, "box")), box, after)));
+    await run(underSyncLock(exchange(await run(loadConfigFrom(f.hub, "hub")), hub, after)));
     expect(after.join("\n")).not.toContain("approved laptop's");
     expect(onBranch(f.origin, "nodes/laptop.toml")).not.toBeNull();
-    expect(onBranch(f.origin, "nodes/box.toml", "t3-fleet/staging/laptop")).not.toBeNull();
+    expect(onBranch(f.origin, "nodes/hub.toml", "t3-fleet/staging/laptop")).not.toBeNull();
   });
 });
 
@@ -1649,18 +1649,18 @@ describe("the secrets' two files, from a recipients.toml written before encrypte
   };
 
   it("an authority's removal commits both, recording the set the secrets were encrypted to", async () => {
-    const f = await makeFleet({ self: "box", desk: "authority" });
+    const f = await makeFleet({ self: "hub", desk: "authority" });
     legacy(f);
     expect((await run(applyLeave(await f.plan()))).every((o) => o.ok)).toBe(true);
     expect(secretsChanged(f.origin, "main")).toEqual([
       "secrets/recipients.toml",
       "secrets/secrets.env.age",
     ]);
-    const { box: _box, ...rest } = f.recipients;
+    const { hub: _hub, ...rest } = f.recipients;
     expect(encryptedForIn(onBranch(f.origin, "secrets/recipients.toml") ?? "")).toBe(
       await run(recipientSet(Object.values(rest))),
     );
-    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
   });
 
   it("a member's proposal and its approval each commit both, and both checkouts are clean", async () => {
@@ -1682,22 +1682,22 @@ describe("the secrets' two files, from a recipients.toml written before encrypte
     ).rejects.toThrow();
     expect(git(f.repo, "status", "--porcelain")).toBe("");
     // An authority approves it: one commit, both files, its own copy encrypted again.
-    const boxHome = join(f.root, "box-home");
-    process.env["HOME"] = boxHome;
-    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
-    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
-    const [proposal] = await run(listProposals(f.box, "main"));
+    const hubHome = join(f.root, "hub-home");
+    process.env["HOME"] = hubHome;
+    put(hubHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(hubHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
+    const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) throw new Error("no proposal");
-    await run(approve(f.box, "main", proposal, "box"));
+    await run(approve(f.hub, "main", proposal, "hub"));
     expect(secretsChanged(f.origin, "main")).toEqual([
       "secrets/recipients.toml",
       "secrets/secrets.env.age",
     ]);
     expect(encryptedForIn(onBranch(f.origin, "secrets/recipients.toml") ?? "")).toBe(remaining);
     expect(
-      await decrypt(f.keys["box"] ?? "", onBranch(f.origin, "secrets/secrets.env.age") ?? ""),
+      await decrypt(f.keys["hub"] ?? "", onBranch(f.origin, "secrets/secrets.env.age") ?? ""),
     ).toContain("API=one");
-    expect(git(f.box, "status", "--porcelain")).toBe("");
+    expect(git(f.hub, "status", "--porcelain")).toBe("");
   });
 });
 
@@ -1705,11 +1705,11 @@ describe("a proposal that cannot be read", () => {
   it("is never approved unattended: an undiffable commit needs a person", async () => {
     const f = await makeFleet({ node: 'roles = ["member"]\n' });
     put(
-      f.box,
+      f.hub,
       "t3-fleet.toml",
       '[fleet]\nbranch = "main"\nauto_approve = ["nodes/", "secrets/", "skills/"]\n',
     );
-    commitAll(f.box, "trust nodes/");
+    commitAll(f.hub, "trust nodes/");
     // A root commit on laptop's staging branch: it has no parent to diff against.
     const scratch = join(f.root, "orphan");
     git(f.root, "init", "-q", "-b", "x", "orphan");
@@ -1718,7 +1718,7 @@ describe("a proposal that cannot be read", () => {
     git(scratch, "commit", "-qm", "orphan");
     git(scratch, "push", "-q", f.origin, "HEAD:refs/heads/t3-fleet/staging/laptop");
     const commit = git(scratch, "rev-parse", "HEAD").trim();
-    expect(await run(isDeparture(f.box, commit, "laptop").pipe(Effect.flip))).toContain(
+    expect(await run(isDeparture(f.hub, commit, "laptop").pipe(Effect.flip))).toContain(
       "cannot tell what",
     );
     const proposal = {
@@ -1729,18 +1729,18 @@ describe("a proposal that cannot be read", () => {
       stat: "",
     };
     expect(autoApprovable(proposal, ["nodes/"])).toBe(true);
-    expect(await run(autoApproves(f.box, proposal, ["nodes/"]))).toBe(false);
+    expect(await run(autoApproves(f.hub, proposal, ["nodes/"]))).toBe(false);
     // The authority's own sync, unattended: nothing is approved, the proposal stays.
-    const boxHome = join(f.root, "box-home");
-    process.env["HOME"] = boxHome;
-    put(boxHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
-    put(boxHome, ".config/t3-fleet/age-key.txt", `${f.keys["box"]}\n`, 0o600);
+    const hubHome = join(f.root, "hub-home");
+    process.env["HOME"] = hubHome;
+    put(hubHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
+    put(hubHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
     const main = git(f.origin, "rev-parse", "main").trim();
-    const config = await run(loadConfigFrom(f.box, "box"));
-    const box = config.nodes.find((n) => n.name === "box");
-    if (box === undefined) throw new Error("no box");
+    const config = await run(loadConfigFrom(f.hub, "hub"));
+    const hub = config.nodes.find((n) => n.name === "hub");
+    if (hub === undefined) throw new Error("no hub");
     const lines: Array<string> = [];
-    await run(underSyncLock(exchange(config, box, lines)));
+    await run(underSyncLock(exchange(config, hub, lines)));
     expect(lines.join("\n")).not.toContain("approved laptop's");
     expect(git(f.origin, "rev-parse", "main").trim()).toBe(main);
     expect(git(f.origin, "rev-parse", "t3-fleet/staging/laptop").trim()).toBe(commit);

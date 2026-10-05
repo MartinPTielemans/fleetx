@@ -43,6 +43,7 @@ const environment =
 const run = (ssh: string, script: string, seconds = 10) =>
   remoteExec(ssh, {
     command: "bash -l -s",
+    readonlyHostKeys: true,
     stdin: `${environment}${script}\n`,
     timeout: Duration.seconds(seconds),
   });
@@ -189,6 +190,7 @@ export const probeHub = (ssh: string) =>
       node.state === "ok"
         ? yield* remoteExec(ssh, {
             command: "bash -lc 'node --input-type=module -'",
+            readonlyHostKeys: true,
             stdin: descriptorScript,
             timeout: Duration.seconds(10),
           })

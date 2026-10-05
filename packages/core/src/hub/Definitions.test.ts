@@ -118,7 +118,7 @@ describe("hub definitions", () => {
     expect(
       parseDefinition(
         "x",
-        JSON.stringify({ kind: "remote", url: "http://box.tailnet.ts.net:3000/mcp" }),
+        JSON.stringify({ kind: "remote", url: "http://hub.tailnet.ts.net:3000/mcp" }),
       ),
     ).toMatchObject({ problem: expect.stringMatching(/https/) });
     expect(

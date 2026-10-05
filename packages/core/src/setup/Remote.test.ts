@@ -31,7 +31,7 @@ const scripts = () => fake.mock.calls.map(([input]) => scriptOf(input));
 const overrides = new Map<string, ExecResult>();
 let progress: unknown = null;
 const defaults = (script: string): ExecResult => {
-  if (script.includes("hostname && uname")) return ok("box\nLinux\n");
+  if (script.includes("hostname && uname")) return ok("hub\nLinux\n");
   if (script.includes("node --version")) return ok("v24.13.1\n");
   if (script.includes("git --version")) return ok("git version 2.47.0\n");
   if (script.includes("t3 --version")) return ok("t3 0.1.0\n");
@@ -43,7 +43,7 @@ const defaults = (script: string): ExecResult => {
     return ok(
       JSON.stringify({
         BackendState: "Running",
-        Self: { DNSName: "box.tailnet.ts.net." },
+        Self: { DNSName: "hub.tailnet.ts.net." },
         Peer: { somebody: { DNSName: "wrong.tailnet.ts.net." } },
       }),
     );
@@ -56,13 +56,13 @@ const defaults = (script: string): ExecResult => {
   return ok();
 };
 // The mocked exec still has its real spawner requirement. Keep real platform services on the runtime.
-const probe = () => Effect.runPromise(probeHub("box").pipe(Effect.provide(NodeServices.layer)));
+const probe = () => Effect.runPromise(probeHub("hub").pipe(Effect.provide(NodeServices.layer)));
 const steps: Array<string> = [];
 const input = {
-  ssh: "box",
+  ssh: "hub",
   node: "server",
   repoUrl: "https://example.test/fleet.git",
-  relayUrl: "https://box.tailnet.ts.net:8399",
+  relayUrl: "https://hub.tailnet.ts.net:8399",
   onStep: (step: string) =>
     Effect.sync(() => {
       steps.push(step);
@@ -109,7 +109,7 @@ describe("probeHub", () => {
     expect(p).toMatchObject({
       reachable: true,
       error: null,
-      hostname: "box",
+      hostname: "hub",
       os: "Linux",
       ready: true,
       relayUrl: input.relayUrl,
@@ -127,7 +127,7 @@ describe("probeHub", () => {
           "StrictHostKeyChecking=yes",
           "UpdateHostKeys=no",
           "--",
-          "box",
+          "hub",
         ]),
       );
       expect(Duration.toMillis(call.timeout!)).toBeLessThanOrEqual(15_000);
@@ -141,7 +141,7 @@ describe("probeHub", () => {
     ["Permission denied (publickey).", "SSH key"],
     ["Host key verification failed.", "host key"],
     ["REMOTE HOST IDENTIFICATION HAS CHANGED!", "host key"],
-    ["Could not resolve hostname box", "cannot find"],
+    ["Could not resolve hostname hub", "cannot find"],
     ["Connection timed out", "in time"],
     ["Connection refused", "SSH service"],
   ])("explains unreachable SSH: %s", async (error, words) => {
@@ -162,7 +162,7 @@ describe("probeHub", () => {
     expect((await probe()).error).toContain(words);
   });
 
-  it.each(["", "-oProxyCommand=oops", "box\nwhoami", "user@box extra"])(
+  it.each(["", "-oProxyCommand=oops", "hub\nwhoami", "user@hub extra"])(
     "rejects an SSH destination before executing: %s",
     async (ssh) => {
       const p = await Effect.runPromise(probeHub(ssh).pipe(Effect.provide(NodeServices.layer)));
@@ -201,7 +201,7 @@ describe("probeHub", () => {
     ['"$ts" status --json', failed(), "tailscale", "warn", "tailscale up"],
     [
       '"$ts" status --json',
-      ok('{"BackendState":"Stopped","Self":{"DNSName":"box.tailnet.ts.net"}}'),
+      ok('{"BackendState":"Stopped","Self":{"DNSName":"hub.tailnet.ts.net"}}'),
       "tailscale",
       "warn",
       "tailscale up",
@@ -297,7 +297,7 @@ describe("probeHub", () => {
     overrides.set("hostname && uname", ok("mini\nDarwin\n"));
     overrides.set("git --version", failed(127));
     expect((await probe()).git.remedy).toContain("brew install git");
-    overrides.set("hostname && uname", ok("box\nFreeBSD\n"));
+    overrides.set("hostname && uname", ok("hub\nFreeBSD\n"));
     overrides.set("exit 127", failed(127));
     expect((await probe()).service.state).toBe("missing");
   });
@@ -307,7 +307,7 @@ describe("probeHub", () => {
     const plan = hubPlanSteps(p);
     expect(plan).toHaveLength(3);
     expect(plan[0]).toContain("unfinished");
-    expect(plan[1]).toContain("build on box");
+    expect(plan[1]).toContain("build on hub");
     expect(plan[1]).toContain("restarting any existing");
     expect(plan[2]).toContain("member and relay");
     expect(hubPlanSteps({ ...p, hostname: null })[1]).toContain(p.ssh);
@@ -320,8 +320,8 @@ describe("bringUpHub", () => {
     const result = await bringUp();
     expect(result).toMatchObject({ _tag: "Success", success: undefined });
     expect(steps).toEqual([
-      "Checking for an unfinished setup on box",
-      "Installing T3 Fleet on box",
+      "Checking for an unfinished setup on hub",
+      "Installing T3 Fleet on hub",
       "Joining the fleet",
     ]);
     expect(scripts()).toHaveLength(4);
@@ -380,9 +380,9 @@ describe("bringUpHub", () => {
     });
     expect((await bringUp())._tag).toBe("Success");
     expect(seen).toEqual([
-      "Checking for an unfinished setup on box",
-      "Checking for an unfinished setup on box",
-      "Installing T3 Fleet on box",
+      "Checking for an unfinished setup on hub",
+      "Checking for an unfinished setup on hub",
+      "Installing T3 Fleet on hub",
       "Joining the fleet",
     ]);
   });

@@ -34,7 +34,7 @@ describe("letting a node read the secrets", () => {
     process.env["HOME"] = home;
     const repo = join(home, "fleet");
     const { recipient: own } = await run(ensureIdentity);
-    await run(writeRecipients(repo, { box: own }));
+    await run(writeRecipients(repo, { hub: own }));
     await run(writeSecrets(repo, "A=1\n"));
     const laptop = await identityToRecipient(await generateX25519Identity());
 
@@ -55,11 +55,11 @@ describe("letting a node read the secrets", () => {
     process.env["HOME"] = home;
     const repo = join(home, "fleet");
     const { recipient: own } = await run(ensureIdentity);
-    await run(writeRecipients(repo, { box: own }));
+    await run(writeRecipients(repo, { hub: own }));
     await run(writeSecrets(repo, "A=1\n"));
     const laptop = await identityToRecipient(await generateX25519Identity());
     // Listed by hand, never re-encrypted.
-    await run(writeRecipients(repo, { box: own, laptop }));
+    await run(writeRecipients(repo, { hub: own, laptop }));
     expect(await run(addRecipient(repo, "laptop", laptop))).toBe(true);
     expect(await run(addRecipient(repo, "laptop", laptop))).toBe(false);
   });
@@ -70,12 +70,12 @@ describe("letting a node read the secrets", () => {
     const repo = join(home, "fleet");
     const { recipient: own } = await run(ensureIdentity);
     const departed = await identityToRecipient(await generateX25519Identity());
-    await run(writeRecipients(repo, { box: own, old: departed }));
+    await run(writeRecipients(repo, { hub: own, old: departed }));
     await run(writeSecrets(repo, "A=1\n"));
     // A node leaves without re-encrypting (its secrets could not be read), and another joins:
     // two keys listed, two stanzas, but not the same two.
     const laptop = await identityToRecipient(await generateX25519Identity());
-    await run(writeRecipients(repo, { box: own, laptop }));
+    await run(writeRecipients(repo, { hub: own, laptop }));
     expect(await run(addRecipient(repo, "laptop", laptop))).toBe(true);
     expect(await run(encryptedFor(repo))).toBe(await run(recipientSet([own, laptop])));
   });
@@ -85,12 +85,12 @@ describe("letting a node read the secrets", () => {
     process.env["HOME"] = home;
     const repo = join(home, "fleet");
     const { recipient: own } = await run(ensureIdentity);
-    await run(writeRecipients(repo, { box: own }));
+    await run(writeRecipients(repo, { hub: own }));
     await run(writeSecrets(repo, "A=1\n"));
     const recorded = await run(encryptedFor(repo));
     const laptop = await identityToRecipient(await generateX25519Identity());
     // Listing alone keeps the set the file was encrypted to.
-    await run(writeRecipients(repo, { box: own, laptop }));
+    await run(writeRecipients(repo, { hub: own, laptop }));
     expect(await run(encryptedFor(repo))).toBe(recorded);
     expect(readFileSync(recipientsPath(repo), "utf8")).toContain(`laptop = "${laptop}"`);
   });

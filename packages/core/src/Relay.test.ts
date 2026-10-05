@@ -125,10 +125,10 @@ describe("relay events", () => {
 
     const first = await startRelay(dir, identity);
     expect(
-      (await first.request("/report", { method: "POST", body: report("box", "aaaaaaa") })).status,
+      (await first.request("/report", { method: "POST", body: report("hub", "aaaaaaa") })).status,
     ).toBe(204);
     expect(
-      (await first.request("/report", { method: "POST", body: report("box", "bbbbbbb") })).status,
+      (await first.request("/report", { method: "POST", body: report("hub", "bbbbbbb") })).status,
     ).toBe(204);
     const before = await readEvents(await first.request("/events?since=0"), (f) => f.length >= 2);
     const since = before.at(-1)?.id ?? 0;
@@ -139,14 +139,14 @@ describe("relay events", () => {
     const second = await startRelay(dir, identity);
     try {
       expect(
-        (await second.request("/report", { method: "POST", body: report("omarchy", "ccccccc") }))
+        (await second.request("/report", { method: "POST", body: report("desktop", "ccccccc") }))
           .status,
       ).toBe(204);
       const after = await readEvents(await second.request(`/events?since=${since}`), (f) =>
         f.some((e) => e.event === "pull"),
       );
       expect(after.map((e) => [e.event, e.data.node ?? null])).toEqual([
-        ["state", "omarchy"],
+        ["state", "desktop"],
         ["pull", null],
       ]);
       // Ids rise across the restart, and the listener's next `since` is one this run knows.

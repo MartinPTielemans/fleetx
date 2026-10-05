@@ -16,7 +16,7 @@ trap cleanup EXIT
 pnpm --filter t3-fleet build
 ssh-keygen -q -t ed25519 -N '' -f "$scratch/key"
 docker build -q -t "$image" -f tests/integration/Dockerfile tests/integration
-docker run -d --name "$name" --hostname box -p 127.0.0.1::22 "$image" >/dev/null
+docker run -d --name "$name" --hostname hub -p 127.0.0.1::22 "$image" >/dev/null
 docker cp "$scratch/key.pub" "$name:/home/dev/.ssh/authorized_keys"
 docker cp apps/cli/dist/bin.mjs "$name:/tmp/wizrem-build.mjs"
 docker exec "$name" bash -c 'chown -R dev:dev /home/dev/.ssh; chmod 700 /home/dev/.ssh; chmod 600 /home/dev/.ssh/authorized_keys; mkdir -p /srv/remote /home/dev/authority; chown -R dev:dev /srv/remote /home/dev/authority; passwd -d dev >/dev/null'

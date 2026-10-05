@@ -98,7 +98,7 @@ describe("the setup wizard's engine", () => {
   it("plans a first machine, refuses a plan gone stale, and applies one as a setup job", async () => {
     const wizard = await engine();
     expect(await run(wizard.state)).toMatchObject({ stage: "fresh", unfinished: null, hub: null });
-    expect(await fails(wizard.plan({ ...request, hub: { ssh: "me@box", node: "box" } }))).toContain(
+    expect(await fails(wizard.plan({ ...request, hub: { ssh: "me@hub", node: "hub" } }))).toContain(
       "the hub joins through the fleet's repository",
     );
     expect(await fails(wizard.plan({ ...request, node: "Laptop" }))).toContain(
@@ -151,20 +151,25 @@ describe("the setup wizard's engine", () => {
     git("remote", "add", "origin", bare);
     git("push", "-q", "-u", "origin", "main");
     const config = await run(loadConfig);
-    const hub = { node: "box", ssh: "me@box", relayUrl: "https://box.ts.net:8399", error: null };
+    const hub = {
+      node: "hub",
+      ssh: "me@hub",
+      relayUrl: "https://hub.tailnet.ts.net:8399",
+      error: null,
+    };
     const lines = await run(admitHub(config, hub));
     expect(lines.join("\n")).toContain("committed and pushed");
     const show = (file: string) =>
       execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
-    expect(show("nodes/box.toml")).toMatch(/roles = \["member", "relay"\]/);
-    expect(show("nodes/box.toml")).toContain('ssh = "me@box"');
-    expect(show("t3-fleet.toml")).toContain('url = "https://box.ts.net:8399"');
+    expect(show("nodes/hub.toml")).toMatch(/roles = \["member", "relay"\]/);
+    expect(show("nodes/hub.toml")).toContain('ssh = "me@hub"');
+    expect(show("t3-fleet.toml")).toContain('url = "https://hub.tailnet.ts.net:8399"');
     expect(await run(readSecrets(repo))).toMatch(/^T3_FLEET_RELAY_TOKEN=[0-9a-f]{64}$/m);
     expect(await run(admitHub(await run(loadConfig), hub))).toEqual([
-      "box is in the fleet already",
+      "hub is in the fleet already",
     ]);
-    expect(ownFilesOnly("box", ["nodes/box.toml", "secrets-proposed/box.env.age"])).toBe(true);
-    expect(ownFilesOnly("box", ["nodes/box.toml", "skills/x/SKILL.md"])).toBe(false);
+    expect(ownFilesOnly("hub", ["nodes/hub.toml", "secrets-proposed/hub.env.age"])).toBe(true);
+    expect(ownFilesOnly("hub", ["nodes/hub.toml", "skills/x/SKILL.md"])).toBe(false);
   });
 
   it("invites with the line `t3-fleet invite` prints, committing the node once", async () => {

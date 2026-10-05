@@ -17,7 +17,7 @@ describe("the bundle this runs from", () => {
 describe("t3-fleet fix --area", () => {
   it("narrows the findings that need a decision too", () => {
     const finding = (area: string, fix?: { safe: boolean }) => ({
-      node: "box",
+      node: "hub",
       key: `${area}-x`,
       severity: "warn" as const,
       area,
