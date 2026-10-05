@@ -1,5 +1,10 @@
-/** The first step: this computer, whether there is an always-on machine, how many others; the layout that makes, as they answer. */
+/**
+ * The first step: this computer, whether there is an always-on machine, how
+ * many others, the layout that makes as they answer; and how the fleet looks
+ * after them (updates, notifications).
+ */
 import type { UiSetupCheck, UiSetupState } from "@t3-fleet/core/SetupApi";
+import { UPDATE_WORDS } from "@t3-fleet/core/Upkeep";
 import {
   ArrowRightIcon,
   LaptopIcon,
@@ -12,11 +17,21 @@ import {
 
 import { SeverityIcon } from "../../components/common";
 import { Button } from "../../components/ui/button";
+import { Group } from "../../components/ui/group";
 import { Spinner } from "../../components/ui/spinner";
 import { cn } from "../../lib/utils";
 import { FleetSketch } from "./FleetSketch";
-import { ChoiceCard, CopyCommand, Field, isCommand, Prose, Question, StepFrame } from "./parts";
-import { nodeNameProblem, type Answers } from "./wizard";
+import {
+  ChoiceCard,
+  CopyCommand,
+  Field,
+  isCommand,
+  Prose,
+  Question,
+  StepFrame,
+  Toggle,
+} from "./parts";
+import { nodeNameProblem, ntfyPatch, type Answers } from "./wizard";
 
 export function MachinesStep({
   state,
@@ -110,6 +125,8 @@ export function MachinesStep({
           >
             <Counter value={answers.others} onChange={(others) => set({ others })} />
           </Question>
+
+          <LookingAfter answers={answers} set={set} />
         </div>
 
         <div className="lg:sticky lg:top-0 lg:self-start">
@@ -118,6 +135,61 @@ export function MachinesStep({
         <button type="submit" hidden />
       </form>
     </StepFrame>
+  );
+}
+
+/** Updates and notifications: what T3 Fleet does by itself about what it finds. */
+function LookingAfter({
+  answers,
+  set,
+}: {
+  answers: Answers;
+  set: (patch: Partial<Answers>) => void;
+}) {
+  return (
+    <Question
+      title="Looking after them"
+      help="T3 Fleet checks every machine each time it syncs. Choose what it does by itself, and how it tells you when something needs you. Both stay editable in your fleet's t3-fleet.toml."
+    >
+      <Group>
+        <Toggle
+          title="Keep things up to date automatically"
+          description={
+            answers.autoUpdate
+              ? UPDATE_WORDS.join(" · ")
+              : "Off: T3 Fleet shows what's out of date, and you apply each update yourself."
+          }
+          checked={answers.autoUpdate}
+          onChange={(autoUpdate) => set({ autoUpdate })}
+        />
+        <Toggle
+          title="Notify me on this computer"
+          description="A notification for every fleet alert: a machine that stopped syncing, a login that ran out."
+          checked={answers.notifyDesktop}
+          onChange={(notifyDesktop) => set({ notifyDesktop })}
+        />
+        <Toggle
+          title="Push to my phone with ntfy"
+          description="The same alerts on your phone, through ntfy.sh, on a private topic made for you."
+          checked={answers.ntfy}
+          onChange={(on) => set(ntfyPatch(answers, on))}
+        >
+          <div className="flex flex-col gap-1.5">
+            <CopyCommand
+              command={answers.ntfyUrl}
+              prompt={false}
+              label="Copy topic URL"
+              className="bg-background/70"
+            />
+            <p className="text-pretty text-muted-foreground text-xs leading-5">
+              Subscribe to it in the ntfy app on your phone, or open it in a browser. Anyone with
+              this link can read your alerts, so keep it to yourself. Setup keeps it with your
+              fleet's encrypted secrets.
+            </p>
+          </div>
+        </Toggle>
+      </Group>
+    </Question>
   );
 }
 

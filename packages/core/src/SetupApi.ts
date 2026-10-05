@@ -10,6 +10,7 @@
  *   POST /api/setup/plan      everything setup would do, before anything is written
  *   POST /api/setup/apply     do it, as a job ("setup"), then the hub ("setup-hub")
  *   POST /api/setup/invite    the line another machine runs to join
+ *   POST /api/setup/notify-test  one test alert through this machine's [notify] paths
  *
  * Progress comes as the existing "job" events on /api/events. A run that
  * stops part-way is "unfinished" in the state and continues with apply's
@@ -118,10 +119,28 @@ export const UiSetupPlanRequest = Schema.Struct({
   repo: UiSetupRepo,
   /** This machine's node name. */
   node: Schema.String,
-  /** The always-on machine to make the relay and MCP hub, checked first with probe; null for none. */
-  hub: Schema.NullOr(Schema.Struct({ ssh: Schema.String, node: Schema.String })),
+  /**
+   * The always-on machine to make the relay, checked first with probe; null
+   * for none. `mcp`: it hosts the fleet's MCP servers too ([defaults.mcp]
+   * hub, reached at its relay URL), so each OAuth login happens once, there.
+   */
+  hub: Schema.NullOr(
+    Schema.Struct({ ssh: Schema.String, node: Schema.String, mcp: Schema.Boolean }),
+  ),
   /** Extras chosen (setup/Extras.ts names); the relay is implied by a hub. */
   extras: Schema.Array(Schema.Literals(["model proxy", "T3 access"])),
+  /**
+   * Sync applies updates by itself: T3 Code when no thread runs, Claude Code
+   * and Codex, skills ([fleet] apply, Upkeep.ts). Only a new fleet takes it;
+   * one this machine joins keeps its own.
+   */
+  autoUpdate: Schema.Boolean,
+  /**
+   * Where fleet alerts go ([notify]): `desktop`, an OS notification on this
+   * machine; `ntfy`, the ntfy.sh topic URL to push to (Upkeep.newNtfyUrl),
+   * stored as the secret T3_FLEET_NTFY_URL, or null for no push.
+   */
+  notify: Schema.Struct({ desktop: Schema.Boolean, ntfy: Schema.NullOr(Schema.String) }),
 });
 export type UiSetupPlanRequest = typeof UiSetupPlanRequest.Type;
 
@@ -190,10 +209,14 @@ export const UiSetupPlan = Schema.Struct({
       node: Schema.String,
       ssh: Schema.String,
       relayUrl: Schema.NullOr(Schema.String),
+      /** Whether it hosts the fleet's MCP servers. */
+      mcp: Schema.Boolean,
       /** "Install T3 Fleet", "Join the fleet as a member", "Run the relay as a service", … */
       steps: Schema.Array(Schema.String),
     }),
   ),
+  /** What setup sets for looking after the machines, in plain words: MCP hosting, updates, notifications. */
+  settings: Schema.Array(Schema.String),
   /** Every step apply will run here, in order, in plain words. */
   steps: Schema.Array(Schema.String),
 });
@@ -219,6 +242,13 @@ export type UiSetupApplyRequest = typeof UiSetupApplyRequest.Type;
 
 /** The job apply started: watch it with the "job" events. Null for abandon. */
 export const UiSetupStarted = Schema.Struct({ jobId: Schema.NullOr(Schema.String) });
+
+/** What `t3-fleet notify test` says, a line per path ("desktop: delivered"); `failed` when one did not go. */
+export const UiNotifyTest = Schema.Struct({
+  lines: Schema.Array(Schema.String),
+  failed: Schema.Boolean,
+});
+export type UiNotifyTest = typeof UiNotifyTest.Type;
 
 export const UiInviteRequest = Schema.Struct({ node: Schema.String });
 export const UiInvite = Schema.Struct({

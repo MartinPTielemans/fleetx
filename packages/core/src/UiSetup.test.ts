@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { UiJob, UiSession, UiSessionGrant, type UiSession as Session } from "./Api.ts";
 import {
   UiInvite,
+  UiNotifyTest,
   UiProbe,
   UiSetupPlan,
   UiSetupStarted,
@@ -41,8 +42,10 @@ const PLAN_ID = "f".repeat(64);
 const request: UiSetupPlanRequest = {
   repo: { kind: "github", name: "t3-fleet" },
   node: "laptop",
-  hub: { ssh: "me@hub", node: "hub" },
+  hub: { ssh: "me@hub", node: "hub", mcp: false },
   extras: [],
+  autoUpdate: true,
+  notify: { desktop: true, ntfy: null },
 };
 
 const plan: typeof UiSetupPlan.Type = {
@@ -61,8 +64,10 @@ const plan: typeof UiSetupPlan.Type = {
     node: "hub",
     ssh: "me@hub",
     relayUrl: "https://hub.tailnet.ts.net:8399",
+    mcp: false,
     steps: ["Add hub"],
   },
+  settings: [],
   steps: ["the config repo at ~/fleet"],
 };
 
@@ -122,6 +127,7 @@ const fakeSetup = () => {
     },
     invite: (node) =>
       Effect.succeed({ command: `curl -fsSL https://x/install.sh | sh -s -- setup url ${node}` }),
+    notifyTest: Effect.succeed({ lines: ["desktop: delivered"], failed: false }),
   };
   return { actions, ran, values, state };
 };
@@ -344,6 +350,10 @@ describe("the UI server in setup mode", () => {
       await (await server.post("/api/setup/invite", { node: "desk" })).text(),
     );
     expect(invite.command).toMatch(/setup url desk$/);
+    // The done screen's "Send a test", as `t3-fleet notify test` sends it.
+    expect(
+      decode(UiNotifyTest, await (await server.post("/api/setup/notify-test", {})).text()),
+    ).toEqual({ lines: ["desktop: delivered"], failed: false });
     await server.dispose();
   });
 });

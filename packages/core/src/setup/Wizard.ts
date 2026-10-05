@@ -26,9 +26,12 @@ import { loadConfig, type Config } from "../Config.ts";
 import { exec } from "../Exec.ts";
 import { git, out } from "../Git.ts";
 import { sha256 } from "../Hash.ts";
+import { testNotification } from "../Notify.ts";
 import { addNode, inviteLine } from "../Init.ts";
 import type {
   UiInvite,
+  UiNotifyTest,
+  UiPlanConflict,
   UiPlanItem,
   UiProbe,
   UiSetupApplyRequest,
@@ -36,12 +39,21 @@ import type {
   UiSetupPlanRequest,
   UiSetupState,
 } from "../SetupApi.ts";
-import type { Extras, SetupInput } from "./Apply.ts";
+import { NTFY_SECRET, isNtfyUrl } from "../Upkeep.ts";
+import { settingsLines, upkeepFor, type Extras, type SetupInput, type Upkeep } from "./Apply.ts";
 import type { Secret } from "./Credentials.ts";
 import { cleanUrl, nodeName, tilde } from "./Discover.ts";
-import { applies, detailOf, type Choice, type Plan, type PlanServer } from "./Plan.ts";
+import {
+  applies,
+  detailOf,
+  type Choice,
+  type FleetView,
+  type Plan,
+  type PlanServer,
+} from "./Plan.ts";
 import { preflight, type Preflight } from "./Preflight.ts";
-import { bringUp, dropHub, hubStepTitles, readHub, writeHub, type HubRequest } from "./Hub.ts";
+import { bringUp, dropHub, readHub, writeHub, type HubRequest } from "./Hub.ts";
+import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
 import { probeHub } from "./Remote.ts";
 import { SELF_SERVER } from "./Repo.ts";
 import {
@@ -79,6 +91,8 @@ export interface SetupActions {
   /** The jobs to run, in order; refused with why (a stale plan, say). None for abandon. */
   readonly apply: (request: UiSetupApplyRequest) => Effect.Effect<ReadonlyArray<SetupJob>, string>;
   readonly invite: (node: string) => Effect.Effect<UiInvite, string>;
+  /** Once set up: one test alert through this machine's [notify] paths, as `t3-fleet notify test`. */
+  readonly notifyTest: Effect.Effect<UiNotifyTest, string>;
 }
 
 /** Claude's long-lived token, which the model proxy uses: asked for like a missing credential. */
@@ -112,6 +126,39 @@ const serverItem = (s: PlanServer): UiPlanItem => ({
         ? `declared, registered nowhere: ${s.why ?? ""}`
         : null,
 });
+
+/**
+ * The conflicts as the plan screen asks them. One that follows another gets
+ * `byChoice`: for each of that one's choices, its diff then, or null when
+ * that choice settles it (as the terminal skips it, Plan.applies).
+ */
+export const uiConflicts = (plan: Plan, fleet: FleetView): Array<UiPlanConflict> =>
+  plan.conflicts.map((c) => {
+    const first = c.after === undefined ? undefined : plan.conflicts.find((x) => x.id === c.after);
+    return {
+      id: c.id,
+      kind: c.kind,
+      name: c.name,
+      title: c.title,
+      detail: detailOf(c, {}, fleet),
+      choices: c.choices.map((x) => ({ value: x.value, label: x.label })),
+      default: c.default,
+      after: c.after ?? null,
+      ...(first === undefined
+        ? {}
+        : {
+            byChoice: Object.fromEntries(
+              first.choices.map((x) => {
+                const picked = { [first.id]: x.value };
+                return [
+                  x.value,
+                  applies(c, picked, plan.conflicts) ? detailOf(c, picked, fleet) : null,
+                ];
+              }),
+            ),
+          }),
+    };
+  });
 
 /** The plan as the plan screen shows it. */
 export const toUiPlan = (
@@ -168,16 +215,7 @@ export const toUiPlan = (
       ...plan.same.servers.map(serverItem),
       ...plan.same.instructions.map(instructionItem),
     ],
-    conflicts: plan.conflicts.map((c) => ({
-      id: c.id,
-      kind: c.kind,
-      name: c.name,
-      title: c.title,
-      detail: detailOf(c, {}, p.fleet),
-      choices: c.choices.map((x) => ({ value: x.value, label: x.label })),
-      default: c.default,
-      after: c.after ?? null,
-    })),
+    conflicts: uiConflicts(plan, p.fleet),
     leftAlone: [
       ...plan.ignored.map((i) => ({
         item: { kind: "server" as const, name: i.name, from: "", note: null },
@@ -190,14 +228,19 @@ export const toUiPlan = (
         why: l.why,
       })),
     ],
-    secrets: plan.secrets.map((s) => {
-      const server = serverOf(plan, s.name);
-      return {
-        name: s.name,
-        server: server?.name ?? "",
-        from: server === undefined ? s.where : `${clientName(server.found.client)}: ${s.where}`,
-      };
-    }),
+    secrets: [
+      ...plan.secrets.map((s) => {
+        const server = serverOf(plan, s.name);
+        return {
+          name: s.name,
+          server: server?.name ?? "",
+          from: server === undefined ? s.where : `${clientName(server.found.client)}: ${s.where}`,
+        };
+      }),
+      ...(input.upkeep?.ntfy == null
+        ? []
+        : [{ name: NTFY_SECRET, server: "notifications", from: "the ntfy topic setup made" }]),
+    ],
     missing: extra.missing,
     hub:
       extra.hub === null
@@ -206,8 +249,13 @@ export const toUiPlan = (
             node: extra.hub.node,
             ssh: extra.hub.ssh,
             relayUrl: extra.hub.relayUrl,
+            mcp: extra.hub.mcp === true,
             steps: hubStepTitles(extra.hub),
           },
+    settings: [
+      ...(extra.hub?.mcp === true ? [mcpHubLine(extra.hub.node)] : []),
+      ...settingsLines(input),
+    ],
     steps: [
       ...(p.pending
         ? [`Finish what the setup of ${p.record?.node ?? p.node} dropped earlier left`]
@@ -317,6 +365,14 @@ const extrasOf = (
   };
 };
 
+/** Updates and notifications as the run takes them: [fleet] apply only for a new fleet. */
+export const upkeepOf = (mode: Prepared["mode"], request: UiSetupPlanRequest): Upkeep =>
+  upkeepFor(mode, {
+    autoUpdate: mode === "first" ? request.autoUpdate : null,
+    desktop: request.notify.desktop,
+    ntfy: request.notify.ntfy,
+  });
+
 /** Credentials the run needs that were not found: the servers', and Claude's token for the model proxy. */
 const missingOf = (p: Prepared, request: UiSetupPlanRequest) => [
   ...p.plan.missing.map((m) => ({ name: m.name, why: m.why })),
@@ -406,6 +462,10 @@ export const make = (hooks: {
               "the hub joins through the fleet's repository: choose a GitHub repository or an existing URL",
             );
         }
+        if (request.notify.ntfy !== null && !isNtfyUrl(request.notify.ntfy))
+          return yield* Effect.fail(
+            "the ntfy topic is not one setup makes: https://ntfy.sh/ and a long random name",
+          );
         const pre = yield* preflight;
         const refused = preflightRefusal(pre);
         if (refused !== null) return yield* Effect.fail(refused);
@@ -499,10 +559,15 @@ export const make = (hooks: {
                 `${request.hub.ssh} is not ready to be the hub${lacking.length > 0 ? `: ${lacking.join("; ")}` : ""}`,
               );
             }
+            if (request.hub.mcp && probed.relayUrl === null)
+              return yield* Effect.fail(
+                `${request.hub.ssh} has no tailnet address for your machines to reach its MCP servers at: set up tailscale there, or leave MCP hosting off`,
+              );
             hub = {
               node: request.hub.node,
               ssh: request.hub.ssh,
               relayUrl: probed.relayUrl,
+              mcp: request.hub.mcp,
               error: null,
             };
           }
@@ -510,6 +575,7 @@ export const make = (hooks: {
             choices: {},
             entered: [],
             extras: extrasOf(p, request, {}),
+            upkeep: upkeepOf(p.mode, request),
           });
           const remote =
             p.mode === "join" || p.mode === "first"
@@ -652,6 +718,7 @@ export const make = (hooks: {
             choices,
             entered,
             extras: extrasOf(p, found.request, request.values),
+            upkeep: upkeepOf(p.mode, found.request),
           });
           const title = `Set up ${p.node}`;
           const local: SetupJob = p.nothing
@@ -699,8 +766,18 @@ export const make = (hooks: {
         }),
       );
 
+    const notifyTest: SetupActions["notifyTest"] = closed(
+      Effect.gen(function* () {
+        const config = yield* loadConfig.pipe(
+          Effect.mapError(() => "this machine is not set up yet: finish setup first"),
+        );
+        return yield* testNotification(config);
+      }),
+    );
+
     return {
       state,
+      notifyTest,
       probe: (ssh) => probeHub(ssh).pipe(Effect.provide(services)),
       plan,
       apply,

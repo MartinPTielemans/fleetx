@@ -326,7 +326,9 @@ describe("bringUpHub", () => {
     ]);
     expect(scripts()).toHaveLength(4);
     expect(scripts()[2]).toContain(Buffer.from(bundle).toString("base64").slice(0, 50));
-    expect(scripts()[3]).toContain("setup https://example.test/fleet.git server --relay --yes");
+    expect(scripts()[3]).toContain(
+      "setup https://example.test/fleet.git server --relay --yes --no-notify",
+    );
     expect(scripts()[3]).not.toContain("--resume");
     expect(scripts().join("\n")).not.toContain("secrets init");
     expect(readBundle.mock.calls[0]?.[0]).toMatch(/apps\/cli\/dist\/bin\.mjs$/);
@@ -335,7 +337,7 @@ describe("bringUpHub", () => {
     progress = saved();
     expect((await bringUp())._tag).toBe("Success");
     expect(steps[2]).toBe("Resuming the hub's unfinished setup");
-    expect(scripts()[3]).toContain("--yes --resume");
+    expect(scripts()[3]).toContain("--yes --no-notify --resume");
   });
   it("skips completed join while its proposal awaits approval", async () => {
     progress = saved({ finishedAt: 2 });

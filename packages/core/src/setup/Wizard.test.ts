@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { parse as parseToml } from "smol-toml";
 import { FetchHttpClient } from "effect/unstable/http";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
@@ -18,6 +19,7 @@ import type { ProbeServices } from "../Area.ts";
 import { loadConfig } from "../Config.ts";
 import { readSecrets } from "../Secrets.ts";
 import type { UiSetupPlanRequest } from "../SetupApi.ts";
+import { DEFAULT_APPLY, newNtfyUrl, NTFY_SECRET } from "../Upkeep.ts";
 import { admitHub, ownFilesOnly } from "./Hub.ts";
 import * as Wizard from "./Wizard.ts";
 
@@ -84,11 +86,14 @@ afterAll(() => {
   if (saved.KEY !== undefined) process.env["CTX_API_KEY"] = saved.KEY;
 });
 
+const NTFY = newNtfyUrl();
 const request: UiSetupPlanRequest = {
   repo: { kind: "local" },
   node: "laptop",
   hub: null,
   extras: [],
+  autoUpdate: true,
+  notify: { desktop: true, ntfy: NTFY },
 };
 
 const engine = () =>
@@ -98,9 +103,14 @@ describe("the setup wizard's engine", () => {
   it("plans a first machine, refuses a plan gone stale, and applies one as a setup job", async () => {
     const wizard = await engine();
     expect(await run(wizard.state)).toMatchObject({ stage: "fresh", unfinished: null, hub: null });
-    expect(await fails(wizard.plan({ ...request, hub: { ssh: "me@hub", node: "hub" } }))).toContain(
-      "the hub joins through the fleet's repository",
-    );
+    expect(
+      await fails(wizard.plan({ ...request, hub: { ssh: "me@hub", node: "hub", mcp: false } })),
+    ).toContain("the hub joins through the fleet's repository");
+    expect(
+      await fails(
+        wizard.plan({ ...request, notify: { desktop: true, ntfy: "https://ntfy.sh/alerts" } }),
+      ),
+    ).toContain("not one setup makes");
     expect(await fails(wizard.plan({ ...request, node: "Laptop" }))).toContain(
       "not a machine name",
     );
@@ -113,6 +123,14 @@ describe("the setup wizard's engine", () => {
     );
     expect(first.missing.map((m) => m.name)).toEqual(["CTX_API_KEY"]);
     expect(first.steps[0]).toBe("snapshot of the clients' MCP servers (for t3-fleet leave)");
+    // What it sets for looking after the machines, and the topic among the secrets, by name only.
+    expect(first.settings).toEqual([
+      "Keep things up to date automatically: T3 Code, when no thread is running · Claude Code and Codex · skills ([fleet] apply)",
+      "Notify you on laptop for every fleet alert ([notify] desktop)",
+      `Push every fleet alert to your phone with ntfy ([notify] ntfy; the topic URL is the secret ${NTFY_SECRET})`,
+    ]);
+    expect(first.secrets.map((x) => x.name)).toContain(NTFY_SECRET);
+    expect(JSON.stringify(first)).not.toContain(NTFY);
     // The id says nothing about what was read: planning again, with nothing changed, gives it again.
     expect((await run(wizard.plan(request))).planId).toBe(first.planId);
 
@@ -141,13 +159,28 @@ describe("the setup wizard's engine", () => {
     expect(steps).toContain("laptop is set up.");
     expect(steps.join("\n")).not.toContain("SEKRIT");
     expect(await run(readSecrets(repo))).toContain(`CTX_API_KEY=${KEY}`);
+    expect(await run(readSecrets(repo))).toContain(`${NTFY_SECRET}=${NTFY}`);
+    expect(steps.join("\n")).not.toContain(NTFY);
+    // Exactly the shape the notification side reads, and every update area applied by sync.
+    const written = parseToml(fs.readFileSync(join(repo, "t3-fleet.toml"), "utf8")) as {
+      fleet: { apply: Array<string> };
+      defaults: { t3: { update: string } };
+      notify: Record<string, unknown>;
+    };
+    expect(written.fleet.apply).toEqual([...DEFAULT_APPLY]);
+    expect(written.defaults.t3.update).toBe("when-idle");
+    expect(written.notify).toEqual({ desktop: ["laptop"], ntfy: NTFY_SECRET });
+    expect((await run(loadConfig)).settings.notify).toEqual({
+      desktop: ["laptop"],
+      ntfy: NTFY_SECRET,
+    });
     expect(fs.readlinkSync(join(home, ".agents/skills/demo"))).toBe(join(repo, "skills/demo"));
     expect(fs.existsSync(join(home, "scratch"))).toBe(false);
     expect(await run(wizard.state)).toMatchObject({ stage: "member", suggestedName: "laptop" });
     expect(await fails(wizard.apply({ kind: "resume" }))).toContain("no unfinished setup");
   });
 
-  it("admits the hub on the authority: its node file, [relay], a relay token; once", async () => {
+  it("admits the hub on the authority: its node file, [relay], a relay token, MCP hosting only when asked; once", async () => {
     git("remote", "add", "origin", bare);
     git("push", "-q", "-u", "origin", "main");
     const config = await run(loadConfig);
@@ -167,9 +200,24 @@ describe("the setup wizard's engine", () => {
     expect(show("t3-fleet.toml")).toContain('url = "https://hub.tailnet.ts.net:8399"');
     expect(show("t3-fleet.toml")).toMatch(/\[ui\]\nallow = \["me@example\.com"\]/);
     expect(await run(readSecrets(repo))).toMatch(/^T3_FLEET_RELAY_TOKEN=[0-9a-f]{64}$/m);
+    const mcpOf = () =>
+      (parseToml(show("t3-fleet.toml")) as { defaults: { mcp: Record<string, unknown> } }).defaults
+        .mcp;
+    expect(mcpOf()["hub"]).toBeUndefined();
+    expect(mcpOf()["gateway"]).toBeUndefined();
     expect(await run(admitHub(await run(loadConfig), hub, "someone@example.com"))).toEqual([
       "hub is in the fleet already",
     ]);
+    // Switched on: [defaults.mcp] hub, served at the relay's URL, as docs/topologies.md says.
+    const hosted = await run(admitHub(await run(loadConfig), { ...hub, mcp: true }));
+    expect(hosted[0]).toBe("[defaults.mcp] hub in t3-fleet.toml: your MCP servers run on hub");
+    expect(mcpOf()).toMatchObject({ hub: true, gateway: "https://hub.tailnet.ts.net:8399" });
+    expect(await run(admitHub(await run(loadConfig), { ...hub, mcp: true }))).toEqual([
+      "hub is in the fleet already",
+    ]);
+    expect(
+      await fails(admitHub(await run(loadConfig), { ...hub, relayUrl: null, mcp: true })),
+    ).toContain("no relay URL");
     expect(ownFilesOnly("hub", ["nodes/hub.toml", "secrets-proposed/hub.env.age"])).toBe(true);
     expect(ownFilesOnly("hub", ["nodes/hub.toml", "skills/x/SKILL.md"])).toBe(false);
   });

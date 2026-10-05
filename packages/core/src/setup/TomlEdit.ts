@@ -133,9 +133,9 @@ export const setKey = (
     const { last, comment } = valueExtent(lines, existing, found.end);
     lines.splice(existing, last - existing + 1, comment === "" ? line : `${line} ${comment}`);
   } else {
-    // After the table's last key, before the blank lines that end it.
+    // After the table's last key, before the blank lines (and the next table's comments) that end it.
     let insert = found.end;
-    while (insert > found.start + 1 && (lines[insert - 1] ?? "").trim() === "") insert--;
+    while (insert > found.start + 1 && /^\s*(?:#.*)?$/.test(lines[insert - 1] ?? "")) insert--;
     lines.splice(insert, 0, ...note, line);
   }
   return check(lines.join("\n"), [...path, key], value, what);

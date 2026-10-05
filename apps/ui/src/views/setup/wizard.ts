@@ -13,6 +13,7 @@ import type {
   UiSetupRepo,
   UiSetupState,
 } from "@t3-fleet/core/SetupApi";
+import { newNtfyUrl, UPKEEP_DEFAULTS } from "@t3-fleet/core/Upkeep";
 
 export type StepId = "machines" | "repo" | "hub" | "plan" | "apply" | "done";
 
@@ -33,6 +34,16 @@ export interface Answers {
   readonly hubNode: string;
   /** "Skip the hub for now": set up without one. */
   readonly hubSkipped: boolean;
+  /** The hub hosts the fleet's MCP servers ([defaults.mcp] hub). */
+  readonly hubMcp: boolean;
+  /** Sync applies updates by itself ([fleet] apply). */
+  readonly autoUpdate: boolean;
+  /** An OS notification on this computer for every fleet alert. */
+  readonly notifyDesktop: boolean;
+  /** Push alerts to a phone with ntfy, at `ntfyUrl`. */
+  readonly ntfy: boolean;
+  /** The topic made the first time ntfy was turned on, kept if it is turned off and on again. */
+  readonly ntfyUrl: string;
 }
 
 export const initialAnswers = (state: UiSetupState): Answers => ({
@@ -46,7 +57,16 @@ export const initialAnswers = (state: UiSetupState): Answers => ({
   hubSsh: "",
   hubNode: "",
   hubSkipped: false,
+  hubMcp: UPKEEP_DEFAULTS.mcpHub,
+  autoUpdate: UPKEEP_DEFAULTS.autoUpdate,
+  notifyDesktop: UPKEEP_DEFAULTS.desktop,
+  ntfy: UPKEEP_DEFAULTS.ntfy,
+  ntfyUrl: "",
 });
+
+/** Turning ntfy on or off: a topic is made the first time, and kept after. */
+export const ntfyPatch = (answers: Answers, on: boolean): Partial<Answers> =>
+  on && answers.ntfyUrl === "" ? { ntfy: true, ntfyUrl: newNtfyUrl() } : { ntfy: on };
 
 export const STEP_LABEL: Readonly<Record<StepId, string>> = {
   machines: "Your machines",
@@ -154,10 +174,25 @@ export const planRequest = (answers: Answers): UiSetupPlanRequest => ({
   node: answers.node.trim(),
   hub:
     answers.alwaysOn === true && !answers.hubSkipped && answers.hubSsh.trim() !== ""
-      ? { ssh: answers.hubSsh.trim(), node: answers.hubNode.trim() }
+      ? { ssh: answers.hubSsh.trim(), node: answers.hubNode.trim(), mcp: answers.hubMcp }
       : null,
   extras: answers.extras,
+  autoUpdate: answers.autoUpdate,
+  notify: {
+    desktop: answers.notifyDesktop,
+    ntfy: answers.ntfy && answers.ntfyUrl !== "" ? answers.ntfyUrl : null,
+  },
 });
+
+// ── the plan's settings ─────────────────────────────────────────────────
+
+/** "Notify you on laptop … ([notify] desktop)" → the sentence, and where it goes in the config. */
+export const settingParts = (line: string) => {
+  const m = /^(.*) \((\[[^\]]+\][^)]*)\)$/.exec(line);
+  return m === null
+    ? { text: line, where: null }
+    : { text: m[1] ?? line, where: (m[2] ?? "").split(";")[0] ?? null };
+};
 
 // ── the plan's conflicts ─────────────────────────────────────────────────
 

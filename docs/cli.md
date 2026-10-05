@@ -112,6 +112,32 @@ nothing changed. Optional scheduled agent checks use this to stay quiet. Fleet s
 Claude Code and Codex, so any thread can be asked "what's wrong with my
 environments?".
 
+## Setting up
+
+`t3-fleet setup` starts a fleet, joins one (`t3-fleet setup <repo-url> [name]`),
+or shows what still differs on a machine set up already. It shows its plan
+before it writes anything; [the quickstart](quickstart.md#2-start-a-fleet-on-this-machine)
+walks through it. `--ui` asks the same questions in the browser.
+
+| flag                                | does                                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `--plan`                            | shows the plan and stops                                                                               |
+| `--yes`, `-y`                       | takes every default                                                                                    |
+| `--resume`, `--abandon`             | continues, or drops, a setup that stopped part-way                                                     |
+| `--dir <path>`                      | where the config repo lives here (`~/fleet`)                                                           |
+| `--github <owner/name>`             | first machine: the private repository to create                                                        |
+| `--remote <url>`                    | first machine: push to this empty repository instead                                                   |
+| `--relay`                           | makes this machine the relay                                                                           |
+| `--mcp-hub`                         | with `--relay`: hosts the fleet's MCP servers here too (`[defaults.mcp] hub`); off by default          |
+| `--models`                          | sets up the model proxy                                                                                |
+| `--auto-update`, `--no-auto-update` | a new fleet: sync updates T3 Code (when idle), Claude Code and Codex, and skills (`[fleet] apply`); on |
+| `--notify`, `--no-notify`           | an OS notification on this machine for every fleet alert (`[notify] desktop`); on where one can show   |
+| `--ntfy`                            | push alerts to a phone: a private ntfy.sh topic, printed, kept as `T3_FLEET_NTFY_URL`; off             |
+| `--ui`                              | sets up in the browser instead                                                                         |
+
+A flag not given is asked, with the default shown; `--yes` takes the defaults.
+On a machine set up already only what a flag names changes.
+
 ## In the browser
 
 ```

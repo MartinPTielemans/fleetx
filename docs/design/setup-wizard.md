@@ -72,6 +72,36 @@ Each screen decides one thing.
 6. **Apply.** A job with live progress. This computer first, then the hub.
 7. **Invite.** The line another machine runs to join, per machine.
 
+## Choices and defaults
+
+Besides the layout and the repository, setup asks how the fleet looks after
+the machines. Each is a switch in the wizard and a flag in the terminal, with
+the same default in both (`UPKEEP_DEFAULTS` in `packages/core/src/Upkeep.ts`),
+and the plan lists what each writes before anything is.
+
+| choice                               | where                 | default | writes                                                                                             |
+| ------------------------------------ | --------------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| Keep things up to date automatically | first screen          | on      | `[fleet] apply` with or without `t3`, `agents`, `skills`; on, `[defaults.t3] update = "when-idle"` |
+| Notify me on this computer           | first screen          | on      | this machine in `[notify] desktop`                                                                 |
+| Push to my phone with ntfy           | first screen          | off     | `[notify] ntfy = "T3_FLEET_NTFY_URL"`, the topic URL stored as that secret                         |
+| Host your MCP servers on the hub     | the hub, once checked | off     | `[defaults.mcp] hub = true`, `gateway` = the relay URL                                             |
+
+- **Upkeep is deterministic.** Updates are sync applying safe fixes; no agent
+  turn is needed to keep machines current. Off, sync still applies `engine`,
+  `secrets`, `dotfiles`, `instructions` and `mcp`, so the machines stay the
+  fleet's; updates and new skills wait for the user. Only a new fleet takes
+  this choice: a fleet being joined keeps its own `[fleet] apply`.
+- **Notifications need no agent either.** The ntfy topic is 128 random bits
+  on ntfy.sh, made in the browser (or by the terminal), shown once with a copy
+  button, and stored like any setup secret: encrypted before the first step,
+  never in job events or the saved run. A fleet that pushes already keeps its
+  topic. Once setup is done, the last screen offers "Send a test", which sends
+  one through the paths just set up, as `t3-fleet notify test` does.
+- **The MCP hub is opt-in** because it moves every OAuth login: until each is
+  signed in on the hub, those servers stop working on every machine. It needs
+  the hub's tailnet address; without tailscale there the switch is off and
+  says why. The hub's plan steps say "relay and MCP hub" exactly when it is on.
+
 ## The layout recommendation
 
 The rules are in `packages/core/src/setup/Topology.ts`, as one pure function,
@@ -95,21 +125,24 @@ not stop it, and reopening the wizard shows where it is.
   skills and instructions, installs the timer, declares T3 Fleet's MCP server,
   and syncs once.
 - The `setup-hub` job then brings the hub up over ssh from this computer
-  (install T3 Fleet there, join the fleet, run the relay as a service). The
-  steps are listed on the plan screen before anything runs.
+  (install T3 Fleet there, join the fleet, run the relay as a service, and
+  host the MCP servers when that was chosen). The steps are listed on the plan
+  screen before anything runs, in the words the job reports them
+  (`setup/PlanWords.ts`).
 
 ## The HTTP contract
 
 `t3-fleet ui` serves a few endpoints under `/api/setup/`. The schemas and the
 full description are in `packages/core/src/SetupApi.ts`; this is the shape.
 
-| endpoint        | does                                                    |
-| --------------- | ------------------------------------------------------- |
-| `GET  …/state`  | where this machine stands, and its pre-flight checks    |
-| `POST …/probe`  | checks a candidate hub over ssh (read-only)             |
-| `POST …/plan`   | everything setup would do, before anything is written   |
-| `POST …/apply`  | does it, as a job; or resumes or abandons a stopped run |
-| `POST …/invite` | the line another machine runs to join                   |
+| endpoint             | does                                                    |
+| -------------------- | ------------------------------------------------------- |
+| `GET  …/state`       | where this machine stands, and its pre-flight checks    |
+| `POST …/probe`       | checks a candidate hub over ssh (read-only)             |
+| `POST …/plan`        | everything setup would do, before anything is written   |
+| `POST …/apply`       | does it, as a job; or resumes or abandons a stopped run |
+| `POST …/invite`      | the line another machine runs to join                   |
+| `POST …/notify-test` | once set up: one test alert, as `t3-fleet notify test`  |
 
 Progress arrives as the existing `job` events on `/api/events`. A plan is only
 applied while nothing it read has changed; if something has, the wizard plans

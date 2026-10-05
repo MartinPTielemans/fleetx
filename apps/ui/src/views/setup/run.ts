@@ -18,8 +18,12 @@ export interface SetupRun {
     readonly node: string;
     readonly ssh: string;
     readonly relayUrl: string | null;
+    /** It hosts the fleet's MCP servers: each needs its sign-in there. */
+    readonly mcp?: boolean;
     readonly steps: ReadonlyArray<string>;
   } | null;
+  /** What setup set for looking after the machines (the plan's settings), for the last screen. */
+  readonly settings?: ReadonlyArray<string>;
   /** The repository's remote; without one there is nothing for another machine to join yet. */
   readonly remote?: string | null;
   /** How many other machines the user said they have, for the invites. */

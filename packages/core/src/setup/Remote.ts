@@ -469,7 +469,7 @@ export const bringUpHub = (input: {
       yield* input.onStep(resume ? "Resuming the hub's unfinished setup" : "Joining the fleet");
       yield* checked(
         input.ssh,
-        `${cli} setup ${sh(input.repoUrl)} ${sh(input.node)} --relay --yes${resume ? " --resume" : ""}`,
+        `${cli} setup ${sh(input.repoUrl)} ${sh(input.node)} --relay --yes --no-notify${resume ? " --resume" : ""}`,
         "Joining the fleet",
         600,
       );

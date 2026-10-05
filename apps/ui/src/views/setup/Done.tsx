@@ -2,6 +2,9 @@
 import {
   ArrowRightIcon,
   ArrowUpRightIcon,
+  BellRingIcon,
+  CircleCheckIcon,
+  KeyRoundIcon,
   LaptopIcon,
   MonitorSmartphoneIcon,
   PlusIcon,
@@ -12,12 +15,12 @@ import { useState, type ReactNode } from "react";
 import { Failure } from "../../components/dialogs";
 import { Button } from "../../components/ui/button";
 import { Spinner } from "../../components/ui/spinner";
-import { api, type UiInvite } from "../../lib/api";
+import { api, type UiInvite, type UiNotifyTest } from "../../lib/api";
 import { useAction } from "../../lib/store";
 import { cn } from "../../lib/utils";
-import { CopyCommand, inputClass, StepFrame } from "./parts";
+import { CopyCommand, inputClass, Prose, StepFrame } from "./parts";
 import type { SetupRun } from "./run";
-import { nodeNameProblem } from "./wizard";
+import { nodeNameProblem, settingParts } from "./wizard";
 
 const SUGGESTED = ["desktop", "workstation", "studio", "travel", "office", "spare"];
 
@@ -104,6 +107,29 @@ export function DoneStep({
           )}
         </ul>
 
+        {run?.hub?.mcp === true ? <SignIn hub={run.hub.node} /> : null}
+
+        {(run?.settings ?? []).length === 0 ? null : (
+          <div className="-mt-4 flex flex-col gap-3 px-1">
+            <ul aria-label="Set for you" className="flex flex-col gap-1.5">
+              {(run?.settings ?? []).map((line) => (
+                <li
+                  key={line}
+                  className="flex items-start gap-2 text-muted-foreground text-xs leading-5"
+                >
+                  <CircleCheckIcon className="mt-0.5 size-3.5 shrink-0 text-success" />
+                  <span>
+                    <Prose text={settingParts(line).text} />
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {(run?.settings ?? []).some((l) => settingParts(l).where?.startsWith("[notify]")) ? (
+              <NotifyTest />
+            ) : null}
+          </div>
+        )}
+
         {run?.remote === null ? (
           <NoRemote />
         ) : (
@@ -138,6 +164,64 @@ export function DoneStep({
         )}
       </div>
     </StepFrame>
+  );
+}
+
+/** One test alert through the paths just set up, as `t3-fleet notify test` sends it. */
+function NotifyTest() {
+  const action = useAction(api.setupNotifyTest);
+  const [result, setResult] = useState<UiNotifyTest | null>(null);
+  return (
+    <div className="flex flex-col gap-1.5 pl-5.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={action.running}
+          onClick={() => void action.start().then((r) => r !== null && setResult(r))}
+        >
+          {action.running ? <Spinner className="size-3.5" /> : <BellRingIcon />}
+          Send a test
+        </Button>
+        {result === null ? null : (
+          <span
+            aria-live="polite"
+            className={cn(
+              "text-xs",
+              result.failed ? "text-destructive-foreground" : "text-muted-foreground",
+            )}
+          >
+            {result.lines.join(" · ")}
+          </span>
+        )}
+      </div>
+      <Failure error={action.error} />
+    </div>
+  );
+}
+
+/** The hub hosts the MCP servers now: each with a login needs it once, there, before it works again. */
+function SignIn({ hub }: { hub: string }) {
+  return (
+    <section
+      aria-labelledby="mcp-sign-in"
+      className="flex flex-col gap-3 rounded-xl border border-warning/25 bg-warning-surface p-4"
+    >
+      <div className="flex items-start gap-3">
+        <KeyRoundIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <h2 id="mcp-sign-in" className="font-medium text-sm text-warning-foreground">
+            Sign in to your MCP servers on {hub}
+          </h2>
+          <p className="text-pretty text-foreground/80 text-xs leading-5">
+            Your MCP servers run on {hub} now. Each one with a login asks for it once, there; until
+            then it doesn't work on your machines. The fleet's MCP view lists them with a sign-in
+            button, or from a terminal:
+          </p>
+        </div>
+      </div>
+      <CopyCommand command="t3-fleet mcp servers" className="bg-background/70 sm:ml-7" />
+    </section>
   );
 }
 

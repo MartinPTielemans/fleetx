@@ -27,7 +27,7 @@ export interface Recommendation {
 const THIS = { machine: "This computer", does: "Approves changes and holds the keys" } as const;
 const HUB = {
   machine: "Your always-on machine",
-  does: "Hub: sends changes the moment they happen, hosts your MCP servers, keeps OAuth logins",
+  does: "Hub: sends changes the moment they happen, serves the fleet app, can host your MCP servers",
 } as const;
 
 export const recommend = ({ alwaysOn, others }: Machines): Recommendation => {

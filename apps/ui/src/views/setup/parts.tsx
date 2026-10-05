@@ -360,28 +360,38 @@ export function ChoiceCard({
   );
 }
 
-/** A checkbox row: native underneath, a T3 switch on top. */
+/** A checkbox row: native underneath, a T3 switch on top. What only matters once it is on opens below. */
 export function Toggle({
   checked,
   onChange,
   title,
   description,
+  disabled = false,
+  children,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   title: ReactNode;
   description: ReactNode;
+  disabled?: boolean;
+  children?: ReactNode;
 }) {
-  return (
-    <label className="flex cursor-pointer items-start gap-3 px-4 py-3 has-focus-visible:ring-2 has-focus-visible:ring-ring has-focus-visible:ring-inset">
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+  const row = (
+    <label
+      className={cn(
+        "flex items-start gap-3 px-4 py-3 has-focus-visible:ring-2 has-focus-visible:ring-ring has-focus-visible:ring-inset",
+        disabled ? "cursor-not-allowed" : "cursor-pointer",
+      )}
+    >
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", disabled && "opacity-64")}>
         <span className="font-medium text-sm">{title}</span>
-        <span className="text-muted-foreground text-xs leading-5">{description}</span>
+        <span className="text-pretty text-muted-foreground text-xs leading-5">{description}</span>
       </span>
       <input
         type="checkbox"
         role="switch"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.currentTarget.checked)}
         className="sr-only"
       />
@@ -390,6 +400,7 @@ export function Toggle({
         className={cn(
           "relative mt-0.5 h-5 w-8.5 shrink-0 rounded-full transition-colors duration-200",
           checked ? "bg-primary" : "bg-input dark:bg-white/12",
+          disabled && "opacity-48",
         )}
       >
         <span
@@ -400,6 +411,17 @@ export function Toggle({
         />
       </span>
     </label>
+  );
+  if (children === undefined) return row;
+  return (
+    <div>
+      {row}
+      {checked ? (
+        <div className="px-4 pb-3.5 motion-safe:animate-enter motion-reduce:animate-fade-in">
+          {children}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -465,7 +487,18 @@ export function Field({
 
 // ── a command to copy ───────────────────────────────────────────────────
 
-export function CopyCommand({ command, className }: { command: string; className?: string }) {
+export function CopyCommand({
+  command,
+  className,
+  prompt = true,
+  label = "Copy command",
+}: {
+  command: string;
+  className?: string;
+  /** The "$" before it; off for what is not a command (a URL). */
+  prompt?: boolean;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -494,15 +527,17 @@ export function CopyCommand({ command, className }: { command: string; className
         id={`cmd-${command.length}`}
         className="min-w-0 flex-1 select-all whitespace-pre-wrap py-0.5 [overflow-wrap:anywhere] font-mono text-code-foreground text-xs leading-5"
       >
-        <span aria-hidden className="mr-2 select-none text-muted-foreground/60">
-          $
-        </span>
+        {prompt ? (
+          <span aria-hidden className="mr-2 select-none text-muted-foreground/60">
+            $
+          </span>
+        ) : null}
         {command}
       </code>
       <Button
         size="icon-xs"
         variant="ghost"
-        aria-label={copied ? "Copied" : "Copy command"}
+        aria-label={copied ? "Copied" : label}
         title={copied ? "Copied" : "Copy"}
         onClick={() => void copy()}
         className="relative shrink-0"

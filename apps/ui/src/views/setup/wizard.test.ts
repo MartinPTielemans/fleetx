@@ -8,8 +8,10 @@ import {
   initialAnswers,
   looksLikeRemote,
   nodeNameProblem,
+  ntfyPatch,
   openConflicts,
   planRequest,
+  settingParts,
   stepIndex,
   stepStates,
   stepsFor,
@@ -116,7 +118,12 @@ describe("blocker", () => {
 describe("requests", () => {
   it("sends the hub only when there is one and it was not skipped", () => {
     const hub = answers({ alwaysOn: true, hubSsh: " me@server ", hubNode: "server" });
-    expect(planRequest(hub).hub).toEqual({ ssh: "me@server", node: "server" });
+    expect(planRequest(hub).hub).toEqual({ ssh: "me@server", node: "server", mcp: false });
+    expect(planRequest({ ...hub, hubMcp: true }).hub).toEqual({
+      ssh: "me@server",
+      node: "server",
+      mcp: true,
+    });
     expect(planRequest({ ...hub, hubSkipped: true }).hub).toBeNull();
     expect(planRequest({ ...hub, alwaysOn: false }).hub).toBeNull();
   });
@@ -133,8 +140,42 @@ describe("requests", () => {
     expect(planRequest(answers({ repo: "local" })).repo).toEqual({ kind: "local" });
   });
 
+  it("asks for updates and a notification here by default, nothing pushed, no MCP hosting", () => {
+    const a = initialAnswers(state);
+    expect(planRequest(a)).toMatchObject({
+      autoUpdate: true,
+      notify: { desktop: true, ntfy: null },
+    });
+    expect(a.hubMcp).toBe(false);
+    expect(planRequest({ ...a, autoUpdate: false, notifyDesktop: false }).autoUpdate).toBe(false);
+  });
+
+  it("makes an ntfy topic once, keeps it through off and on, and sends it only while on", () => {
+    const on = { ...answers(), ...ntfyPatch(answers(), true) };
+    expect(on.ntfyUrl).toMatch(/^https:\/\/ntfy\.sh\/[a-z0-9]{24,}$/);
+    expect(planRequest(on).notify.ntfy).toBe(on.ntfyUrl);
+    const off = { ...on, ...ntfyPatch(on, false) };
+    expect(planRequest(off).notify.ntfy).toBeNull();
+    expect({ ...off, ...ntfyPatch(off, true) }.ntfyUrl).toBe(on.ntfyUrl);
+  });
+
   it("leaves out credentials set later or left blank", () => {
     expect(typedValues({ A: "1", B: "", C: "3" }, new Set(["C"]))).toEqual({ A: "1" });
+  });
+});
+
+describe("settings", () => {
+  it("splits a plan's setting into its sentence and where it goes", () => {
+    expect(settingParts("Notify you on laptop for every fleet alert ([notify] desktop)")).toEqual({
+      text: "Notify you on laptop for every fleet alert",
+      where: "[notify] desktop",
+    });
+    expect(
+      settingParts(
+        "Push alerts with ntfy ([notify] ntfy; the topic URL is the secret T3_FLEET_NTFY_URL)",
+      ),
+    ).toEqual({ text: "Push alerts with ntfy", where: "[notify] ntfy" });
+    expect(settingParts("Plain words")).toEqual({ text: "Plain words", where: null });
   });
 });
 

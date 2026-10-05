@@ -60,22 +60,61 @@ import {
 import { refusal } from "../SecretScan.ts";
 import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
+import { applyAreas, NTFY_SECRET } from "../Upkeep.ts";
 import type { Secret } from "./Credentials.ts";
 import { cleanUrl, type Discovery } from "./Discover.ts";
 import { PROPOSED_SECRETS, type Actions, type Mode } from "./Plan.ts";
+import { settingsWords } from "./PlanWords.ts";
 import type { Preflight } from "./Preflight.ts";
 import { cloneFleet, GITIGNORE, newFleetFile, newNodeFile } from "./Repo.ts";
 import { addSetupProposed, backupDir, recordMoved, takeSnapshot } from "./State.ts";
-import { addToList, appendEntry, setKey, type Edit } from "./TomlEdit.ts";
+import { addToList, appendEntry, edits, setKey, type Edit } from "./TomlEdit.ts";
 
 export interface Extras {
-  /** An always-on machine: the relay. `url` is where the others reach it. */
-  readonly relay: { readonly url: string | null; readonly token: string | null } | null;
+  /**
+   * An always-on machine: the relay. `url` is where the others reach it;
+   * `mcp` hosts the fleet's MCP servers there too ([defaults.mcp] hub).
+   */
+  readonly relay: {
+    readonly url: string | null;
+    readonly token: string | null;
+    readonly mcp?: boolean;
+  } | null;
   /** The model proxy, with Claude's long-lived token when one was given. */
   readonly models: { readonly token: string | null } | null;
   /** T3 Fleet's read-only token for T3. */
   readonly t3: boolean;
 }
+
+/** How the fleet looks after its machines (Upkeep.ts), as a run sets it. */
+export interface Upkeep {
+  /**
+   * [fleet] apply with updates on or off, and [defaults.t3] update to match;
+   * null leaves the fleet's as they are (a fleet this machine joins).
+   */
+  readonly autoUpdate: boolean | null;
+  /** This machine in [notify] desktop: an OS notification here for every fleet alert. */
+  readonly desktop: boolean;
+  /** [notify] ntfy, the topic URL stored as T3_FLEET_NTFY_URL; null for no push. A saved run keeps no URL. */
+  readonly ntfy: { readonly url: string | null } | null;
+}
+
+/**
+ * Updates and notifications as a run takes them, whichever front end asked:
+ * a fleet being joined keeps its own [fleet] apply.
+ */
+export const upkeepFor = (
+  mode: Mode,
+  chosen: {
+    readonly autoUpdate: boolean | null;
+    readonly desktop: boolean;
+    readonly ntfy: string | null;
+  },
+): Upkeep => ({
+  autoUpdate: mode === "join" ? null : chosen.autoUpdate,
+  desktop: chosen.desktop,
+  ntfy: chosen.ntfy === null ? null : { url: chosen.ntfy },
+});
 
 export interface SetupInput {
   readonly mode: Mode;
@@ -96,6 +135,8 @@ export interface SetupInput {
   readonly now: number;
   /** The fleet's branch (config.branch); main when a saved run predates it. */
   readonly branch?: string;
+  /** Updates and notifications; a run saved before setup asked about them sets neither. */
+  readonly upkeep?: Upkeep;
 }
 
 export interface Step {
@@ -172,6 +213,9 @@ export const secretsToStore = (input: SetupInput): ReadonlyArray<Secret> => [
         },
       ]
     : []),
+  ...(input.upkeep?.ntfy?.url != null
+    ? [{ name: NTFY_SECRET, value: input.upkeep.ntfy.url, where: "the ntfy topic setup made" }]
+    : []),
 ];
 
 /** A run as setup.json keeps it: no secret value, no credential in a URL. */
@@ -191,6 +235,14 @@ export const persistable = (input: SetupInput): SetupInput => ({
     relay: input.extras.relay === null ? null : { ...input.extras.relay, token: null },
     models: input.extras.models === null ? null : { token: null },
   },
+  ...(input.upkeep === undefined
+    ? {}
+    : {
+        upkeep: {
+          ...input.upkeep,
+          ntfy: input.upkeep.ntfy === null ? null : { url: null },
+        },
+      }),
 });
 
 /**
@@ -212,6 +264,7 @@ export const restored = (
   const missing = [
     ...saved.actions.secrets.map((s) => s.name),
     ...(saved.extras.relay === null ? [] : ["T3_FLEET_RELAY_TOKEN"]),
+    ...(saved.upkeep?.ntfy == null ? [] : [NTFY_SECRET]),
   ].filter((n) => !values.has(n) || values.get(n) === "");
   if (missing.length > 0) return { missing };
   return {
@@ -228,6 +281,14 @@ export const restored = (
           : { ...saved.extras.relay, token: value("T3_FLEET_RELAY_TOKEN") },
       models: saved.extras.models === null ? null : { token: value("CLAUDE_CODE_OAUTH_TOKEN") },
     },
+    ...(saved.upkeep === undefined
+      ? {}
+      : {
+          upkeep: {
+            ...saved.upkeep,
+            ntfy: saved.upkeep.ntfy === null ? null : { url: value(NTFY_SECRET) },
+          },
+        }),
   };
 };
 
@@ -284,6 +345,72 @@ export const relayEdits = (text: string, url: string | null): Edit => {
   if ("error" in port || url === null) return port;
   return setKey(port.text, ["relay"], "url", url);
 };
+
+const valueAt = (text: string, path: ReadonlyArray<string>): unknown => {
+  try {
+    let at: unknown = parseToml(text);
+    for (const key of path)
+      at = typeof at === "object" && at !== null ? (at as Record<string, unknown>)[key] : undefined;
+    return at;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Whether a t3-fleet.toml pushes alerts to ntfy already ([notify] ntfy). */
+export const pushesToNtfy = (fleetText: string) =>
+  valueAt(fleetText, ["notify", "ntfy"]) !== undefined;
+
+/** [defaults.mcp]: the relay hosts every machine's MCP servers, reached at `gateway` (docs/topologies.md). */
+export const mcpHubEdits = (text: string, gateway: string): Edit =>
+  edits(
+    text,
+    (t) => setKey(t, ["defaults", "mcp"], "hub", true),
+    (t) => setKey(t, ["defaults", "mcp"], "gateway", gateway),
+  );
+
+/** [fleet] apply, [defaults.t3] update and [notify], as `upkeep` says; nothing for a run that did not ask. */
+export const upkeepEdits = (
+  upkeep: Upkeep | undefined,
+  node: string,
+): ReadonlyArray<(text: string) => Edit> => {
+  if (upkeep === undefined) return [];
+  const out: Array<(text: string) => Edit> = [];
+  const auto = upkeep.autoUpdate;
+  if (auto !== null) {
+    out.push((t) =>
+      setKey(
+        t,
+        ["fleet"],
+        "apply",
+        [...applyAreas(auto)],
+        auto
+          ? "Areas whose safe fixes sync applies by itself; updates included (T3 waits until no thread runs)."
+          : "Areas whose safe fixes sync applies by itself; add t3, agents and skills to keep them up to date too.",
+      ),
+    );
+    out.push((t) =>
+      auto
+        ? setKey(t, ["defaults", "t3"], "update", "when-idle")
+        : valueAt(t, ["defaults", "t3", "update"]) === undefined
+          ? { text: t }
+          : setKey(t, ["defaults", "t3"], "update", "manual"),
+    );
+  }
+  if (upkeep.desktop) out.push((t) => addToList(t, ["notify"], "desktop", [node]));
+  if (upkeep.ntfy !== null) out.push((t) => setKey(t, ["notify"], "ntfy", NTFY_SECRET));
+  return out;
+};
+
+/** What a run sets for looking after the machines, in plain words, for its plan. */
+export const settingsLines = (input: SetupInput): ReadonlyArray<string> =>
+  settingsWords({
+    node: input.node,
+    mcpHub: input.extras.relay?.mcp === true && input.extras.relay.url !== null,
+    autoUpdate: input.upkeep?.autoUpdate ?? null,
+    desktop: input.upkeep?.desktop === true,
+    ntfy: input.upkeep?.ntfy != null,
+  });
 
 /** Setup's first sync: everything but MCP until this machine reads the fleet's secrets. */
 export const firstSync = (repo: string) =>
@@ -496,6 +623,10 @@ export const setupSteps = (
           input.extras.relay === null || /^\[relay\]/m.test(t)
             ? { text: t }
             : relayEdits(t, input.extras.relay.url),
+        (t) =>
+          input.extras.relay?.mcp === true && input.extras.relay.url !== null
+            ? mcpHubEdits(t, input.extras.relay.url)
+            : { text: t },
         ...(input.extras.models === null
           ? []
           : [
@@ -504,6 +635,7 @@ export const setupSteps = (
                   ? { text: t }
                   : setKey(t, ["defaults", "models"], "egress", "direct"),
             ]),
+        ...upkeepEdits(input.upkeep, input.node),
       ]);
       const roles = input.extras.relay === null ? ["member"] : ["relay", "member"];
       const ignored = a.ignored.map((i) => i.name);

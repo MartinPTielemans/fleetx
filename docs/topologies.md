@@ -90,7 +90,13 @@ repo anyway, as any authority can.
 Why: an MCP server with an OAuth login otherwise needs that login on every
 machine, and a server run in docker needs docker everywhere. The relay can
 host your MCP servers instead, so every machine reaches them through one
-endpoint and one token, and OAuth logins live in one place:
+endpoint and one token, and OAuth logins live in one place.
+
+It is a choice, off by default: "Host your MCP servers on the hub" on the
+wizard's hub step, or `--mcp-hub` with `--relay` in the terminal. The trade-off:
+you sign in to each server once, on the hub, and every machine uses it; until
+you sign in there, those servers stop working on your machines. On, setup
+writes:
 
 ```toml
 # t3-fleet.toml

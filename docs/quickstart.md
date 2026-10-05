@@ -28,16 +28,29 @@ After the installer, a wizard opens on your own computer (or run
 yet). It runs only on 127.0.0.1 and answers only the tab it opened. It asks:
 
 1. **What machines do you have?** Whether one stays on (a home server, a Mac
-   mini, a VPS), and how many others you run T3 on.
+   mini, a VPS), and how many others you run T3 on. And how T3 Fleet looks
+   after them:
+   - **Keep things up to date automatically** (on): each sync updates T3 Code
+     (only when no thread is running), Claude Code and Codex, and skills.
+     Off, they wait for you to apply them; MCP servers, instructions and
+     secrets are kept in place either way. This is `[fleet] apply`.
+   - **Notify me on this computer** (on): an OS notification for every fleet
+     alert (`[notify] desktop`).
+   - **Push to my phone with ntfy** (off): setup makes a private ntfy.sh topic
+     and shows it to subscribe to in the ntfy app; it is kept as the secret
+     `T3_FLEET_NTFY_URL` (`[notify] ntfy`). Anyone with the link can read your
+     alerts.
 2. **The recommended layout.** This computer is the **authority**: it
    approves changes and holds the keys. An always-on machine is the **hub**:
-   it runs the relay and the MCP hub for the fleet. A laptop is never the hub,
-   because it sleeps. See [topologies](topologies.md).
+   it runs the relay for the fleet, and can host your MCP servers. A laptop is
+   never the hub, because it sleeps. See [topologies](topologies.md).
 3. **Where your setup lives.** A new private GitHub repository, an existing
    repository URL, or local only.
 4. **Your hub, checked.** You give its ssh address; this computer checks it
    read-only (Node, git, T3, tailscale, docker, a service manager) and says how
-   to fix anything missing.
+   to fix anything missing. **Host your MCP servers on the hub** is off: on,
+   you sign in to each server once, on the hub, and every machine uses it;
+   until you sign in there, those servers stop working on your machines.
 5. **The plan.** The same plan `t3-fleet setup` shows, below, plus what the hub
    will be asked to do. Credentials the plan needs and didn't find are typed
    here; they are encrypted before the first step and never shown in progress.
@@ -128,6 +141,14 @@ an empty repository elsewhere, or local only, with the next step shown),
 encrypts the secrets, commits and pushes, links skills and instructions into
 place, installs the sync timer when pre-flight says it will run, declares T3
 Fleet's own MCP server, and syncs once.
+
+After the conflicts and extras it asks the same questions the wizard does:
+keep things up to date automatically (on), a notification on this machine
+(on where one can be shown), push to a phone with ntfy (off), and, when this
+machine becomes the relay, whether it hosts the MCP servers (off). Each has a
+flag: `--auto-update`/`--no-auto-update`, `--notify`/`--no-notify`, `--ntfy`,
+`--mcp-hub` (with `--relay`). A machine joining a fleet keeps the fleet's
+updates setting.
 
 `--plan` shows the plan and stops; it never writes anything. `--yes` takes
 every default. Without gh or `--remote`, the fleet stays local and setup

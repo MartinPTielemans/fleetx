@@ -14,10 +14,11 @@ import {
 import type { ReactNode } from "react";
 
 import { Button } from "../../components/ui/button";
+import { Group } from "../../components/ui/group";
 import { Skeleton } from "../../components/ui/skeleton";
 import { Spinner } from "../../components/ui/spinner";
 import { cn } from "../../lib/utils";
-import { CopyCommand, Field, inputClass, isCommand, Prose, StepFrame } from "./parts";
+import { CopyCommand, Field, inputClass, isCommand, Prose, StepFrame, Toggle } from "./parts";
 import { nodeNameProblem, type Answers } from "./wizard";
 
 export interface ProbeState {
@@ -62,7 +63,7 @@ export function HubStep({
   return (
     <StepFrame
       title="Your hub"
-      lead="The always-on machine sends each change to every machine the moment it happens, hosts your MCP servers, and keeps their OAuth logins. It also serves this app on your tailnet, so the fleet opens from any of your machines. Setup reaches it over ssh and only looks until you confirm the plan."
+      lead="The always-on machine sends each change to every machine the moment it happens, and serves this app on your tailnet, so the fleet opens from any of your machines. It can host your MCP servers too. Setup reaches it over ssh and only looks until you confirm the plan."
       back={onBack}
       hint={hint}
       actions={
@@ -227,9 +228,11 @@ function Checklist({
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-info/25 bg-info/8 text-info-foreground dark:bg-info/14">
             <ServerIcon className="size-4" />
           </span>
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-sm">{probe.hostname ?? probe.ssh}</div>
-            <div className="truncate text-muted-foreground text-xs">
+          <div className="min-w-0 flex-1 basis-40">
+            <div className="font-medium text-sm [overflow-wrap:anywhere]">
+              {probe.hostname ?? probe.ssh}
+            </div>
+            <div className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
               {[probe.os, `reached as ${probe.ssh}`].filter(Boolean).join(" · ")}
             </div>
           </div>
@@ -278,17 +281,32 @@ function Checklist({
         )}
       </section>
       {probe.ready ? (
-        <Field
-          className="max-w-xs motion-safe:animate-enter motion-reduce:animate-fade-in"
-          label="The hub's name in the fleet"
-          value={answers.hubNode}
-          onChange={(e) => set({ hubNode: e.currentTarget.value })}
-          problem={
-            nodeNameProblem(answers.hubNode) ??
-            (answers.hubNode === answers.node ? "This computer already has that name" : null)
-          }
-          maxLength={63}
-        />
+        <div className="flex flex-col gap-6 motion-safe:animate-enter motion-reduce:animate-fade-in">
+          <Field
+            className="max-w-xs"
+            label="The hub's name in the fleet"
+            value={answers.hubNode}
+            onChange={(e) => set({ hubNode: e.currentTarget.value })}
+            problem={
+              nodeNameProblem(answers.hubNode) ??
+              (answers.hubNode === answers.node ? "This computer already has that name" : null)
+            }
+            maxLength={63}
+          />
+          <Group>
+            <Toggle
+              title="Host your MCP servers on the hub"
+              description={
+                probe.relayUrl === null
+                  ? "Needs Tailscale on the hub, so your machines can reach the servers there."
+                  : "Sign in to each server once, on the hub, and every machine uses it. Until you sign in there, those servers stop working on your machines."
+              }
+              disabled={probe.relayUrl === null}
+              checked={answers.hubMcp && probe.relayUrl !== null}
+              onChange={(hubMcp) => set({ hubMcp })}
+            />
+          </Group>
+        </div>
       ) : null}
     </>
   );

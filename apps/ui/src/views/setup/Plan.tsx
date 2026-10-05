@@ -20,6 +20,7 @@ import {
   PlugIcon,
   RefreshCwIcon,
   ServerIcon,
+  SlidersHorizontalIcon,
   SparklesIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -33,7 +34,7 @@ import { Spinner } from "../../components/ui/spinner";
 import { ApiError } from "../../lib/api";
 import { cn, plural } from "../../lib/utils";
 import { inputClass, Prose, StepFrame } from "./parts";
-import { choiceOf, conflictNow, openConflicts, type Choices } from "./wizard";
+import { choiceOf, conflictNow, openConflicts, settingParts, type Choices } from "./wizard";
 
 const KIND: Readonly<Record<UiPlanItem["kind"], { one: string; many: string; icon: ReactNode }>> = {
   skill: { one: "Skill", many: "Skills", icon: <SparklesIcon /> },
@@ -146,6 +147,7 @@ export function PlanStep({
             later={later}
             onLater={onLater}
           />
+          <Settings settings={plan.settings} />
           <Collapsed
             title="Already the same"
             note="In the fleet and on this computer alike: nothing to do."
@@ -687,6 +689,36 @@ function Missing({
         </label>
       </div>
     </li>
+  );
+}
+
+// ── settings ────────────────────────────────────────────────────────────
+
+function Settings({ settings }: { settings: ReadonlyArray<string> }) {
+  if (settings.length === 0) return null;
+  return (
+    <Section
+      id="plan-settings"
+      title="Looking after your machines"
+      note="What you chose earlier, as it goes into the fleet's settings."
+    >
+      <ul className={cn(card, "flex flex-col py-1.5")}>
+        {settings.map((line) => {
+          const { text, where } = settingParts(line);
+          return (
+            <li key={line} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-4 py-1.5">
+              <SlidersHorizontalIcon className="size-3.5 shrink-0 translate-y-0.5 text-muted-foreground" />
+              <span className="min-w-0 flex-1 basis-56 text-pretty text-sm leading-5">
+                <Prose text={text} />
+              </span>
+              {where === null ? null : (
+                <code className="font-mono text-2xs text-muted-foreground">{where}</code>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Section>
   );
 }
 
