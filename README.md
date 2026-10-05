@@ -48,21 +48,31 @@ More on roles and layouts: [topologies](docs/topologies.md).
 
 ```sh
 curl -fsSL https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh | sh
+```
+
+When it finishes, a setup wizard opens in your browser, on your own computer.
+It asks what machines you have, recommends a layout, and asks where your setup
+should live: a new private GitHub repository, one you already have, or just
+this computer. If you have an always-on machine, it checks it over ssh from
+here and sets it up as your hub. Before anything is written you see the whole
+plan: what goes into your repository, each conflict with a choice, and every
+credential it found. Credentials go into an encrypted file, never a plain one.
+
+Close the tab and want it back? `t3-fleet ui`. When it's done, the wizard gives
+you the line to run on each next machine.
+
+### Prefer the terminal?
+
+The wizard and the CLI run the same setup, so you get the same plan either way.
+
+```sh
 t3-fleet setup        # on your own computer: starts the fleet
 t3-fleet invite hub   # prints the line to run on the next machine
 ```
 
-Or `brew install martinptielemans/tap/t3-fleet`.
-
-Setup looks at what the machine already has and shows you the whole plan
-before it writes anything: what goes into your repository, each conflict with
-a choice, and every credential it found. Credentials go into an encrypted
-file, never a plain one. The [quickstart](docs/quickstart.md) walks through
-it, from one machine to two.
-
-> A guided setup in the browser is in progress. It will ask what machines you
-> have, recommend a layout, and set up your server from your own computer over
-> ssh. Until then, `t3-fleet setup` does the same steps in the terminal.
+Or `brew install martinptielemans/tap/t3-fleet`. The
+[quickstart](docs/quickstart.md) walks through both paths, from one machine to
+two.
 
 ## See your fleet
 

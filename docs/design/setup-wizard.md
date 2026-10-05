@@ -1,0 +1,169 @@
+# Design: the browser setup wizard
+
+Setting up T3 Fleet is a handful of decisions: what machines you have, which
+one is always on, where the setup lives, what to do with each difference. The
+wizard asks them in a browser, on your own computer, and sets up the always-on
+machine for you over ssh.
+
+## Goals
+
+- **Visual first.** `curl … | sh` installs, the browser opens, and each screen
+  asks one thing. You see the layout before you pick it and the plan before
+  anything is written.
+- **The CLI is not left behind.** `t3-fleet setup` stays, with every flag it
+  has. It is an equal way in, not a fallback.
+- **One engine.** The wizard and `t3-fleet setup` run the same planning and
+  apply code (`setup/Plan.ts`, `setup/Apply.ts`). The wizard moves the
+  questions from terminal prompts to screens; it does not decide anything
+  differently. The same plan comes out of both.
+- **Same rules as the rest of T3 Fleet.** Probes only read. Anything that
+  changes a machine is shown before it runs.
+
+## Starting it
+
+`t3-fleet ui` (or `t3-fleet setup --ui`) on a machine that is not in a fleet
+opens the wizard instead of the fleet app. The state it reads says which of
+three things it is:
+
+| stage        | the app shows                                      |
+| ------------ | -------------------------------------------------- |
+| `fresh`      | the wizard, from the first screen                  |
+| `unfinished` | a setup stopped part-way: resume it, or abandon it |
+| `member`     | the fleet app; the wizard is not needed            |
+
+The installer opens the browser at the end of a first install.
+
+## Roles: authority and hub
+
+The wizard keeps two roles apart because they ask different things of a
+machine.
+
+- The **authority** decides. It approves changes and decrypts the secrets.
+  That belongs to the computer you sit at, so it is always the one the wizard
+  runs on.
+- The **hub** works for the fleet. It runs the relay and the MCP hub, so
+  changes arrive at once, OAuth logins happen once, and containers run in one
+  place. It needs to be always on and reachable from the other machines.
+
+A machine can be both (a single VPS is), but the wizard does not suggest it:
+the machine you sit at is usually not the machine that stays on, and a laptop
+that sleeps is never the hub.
+
+## The screens
+
+Each screen decides one thing.
+
+1. **What do you have?** Whether you have an always-on machine, and how many
+   other machines you run T3 on. Nothing is checked or written yet.
+2. **The recommended layout.** One of three, with the reason and what each
+   machine does. You can change your answer and watch it change.
+3. **Where the setup lives.** A new private GitHub repository (when `gh` is
+   signed in), an existing repository URL (joining a fleet, or one made by
+   hand), or local only, with a remote added later.
+4. **The hub, checked.** Only when the layout has one. You give its ssh
+   address and this computer checks it, read-only: Node, git, T3, tailscale,
+   docker, and a service manager. Each missing item says how to fix it.
+   Tailscale and docker are recommended, not required.
+5. **The plan.** What setup would add, what is already the same, each
+   conflict with a diff and a default, what it leaves alone and why, every
+   credential it found (by name, never the value), and every step in order,
+   including what the hub will be asked to do. Credentials a server needs and
+   did not find are asked for here.
+6. **Apply.** A job with live progress. This computer first, then the hub.
+7. **Invite.** The line another machine runs to join, per machine.
+
+## The layout recommendation
+
+The rules are in `packages/core/src/setup/Topology.ts`, as one pure function,
+so the app and the server agree and every rule is tested.
+
+| you have                     | layout    | what it means                                                    |
+| ---------------------------- | --------- | ---------------------------------------------------------------- |
+| an always-on machine         | `hub`     | this computer is the authority; the always-on machine is the hub |
+| no always-on machine, others | `several` | every machine syncs from the repository; a hub can come later    |
+| nothing else                 | `single`  | T3 and its providers kept healthy here, backed up to the repo    |
+
+Other machines join with what they already have, whichever layout it is.
+
+## What apply does
+
+Apply runs the plan the user saw, as a server-side job. Closing the tab does
+not stop it, and reopening the wizard shows where it is.
+
+- The `setup` job does what `t3-fleet setup` does on this computer: creates or
+  connects the repository, encrypts the secrets, commits and pushes, links
+  skills and instructions, installs the timer, declares T3 Fleet's MCP server,
+  and syncs once.
+- The `setup-hub` job then brings the hub up over ssh from this computer
+  (install T3 Fleet there, join the fleet, run the relay as a service). The
+  steps are listed on the plan screen before anything runs.
+
+## The HTTP contract
+
+`t3-fleet ui` serves a few endpoints under `/api/setup/`. The schemas and the
+full description are in `packages/core/src/SetupApi.ts`; this is the shape.
+
+| endpoint        | does                                                    |
+| --------------- | ------------------------------------------------------- |
+| `GET  …/state`  | where this machine stands, and its pre-flight checks    |
+| `POST …/probe`  | checks a candidate hub over ssh (read-only)             |
+| `POST …/plan`   | everything setup would do, before anything is written   |
+| `POST …/apply`  | does it, as a job; or resumes or abandons a stopped run |
+| `POST …/invite` | the line another machine runs to join                   |
+
+Progress arrives as the existing `job` events on `/api/events`. A plan is only
+applied while nothing it read has changed; if something has, the wizard plans
+again and shows what moved.
+
+## Security
+
+- **Local only.** The server listens on 127.0.0.1 and answers only the tab it
+  opened, with a one-use ticket in the URL. The ticket is spent by the first
+  load; a copied URL does not work.
+- **Secrets are typed in the browser and encrypted before the first step.**
+  The values go to the server once, with the apply request, and are encrypted
+  to this machine's key before anything else runs. They are never in job
+  events, logs, or the saved run.
+- **The probe is read-only.** It runs a fixed set of read commands over ssh
+  and changes nothing on the hub.
+- **Hub bring-up is shown before it runs.** What the hub will be asked to do
+  is on the plan screen as plain steps. Nothing touches it until the user
+  confirms the plan.
+- **Ssh is yours.** The wizard uses the ssh the user already has (their
+  config, keys and agent). It does not store a key or a password.
+
+## Resume and abandon
+
+Once the user confirms, the whole run is decided and saved, as with
+`t3-fleet setup`. If it stops part-way, the wizard opens on it (`unfinished`)
+and says how far it got. Resume does exactly what was decided, from there;
+abandon drops the run and says what it had already done. What it did stays,
+and the next setup finishes it. `t3-fleet setup --resume` and `--abandon` do
+the same from the terminal.
+
+## The hub boundary
+
+Two sides, kept apart:
+
+- **Authority side** (this computer): the wizard, the plan, the secrets'
+  decryption, the repository, approving changes. Everything the user decides
+  happens here.
+- **Hub side** (over ssh): a T3 Fleet install, the machine's own key, the
+  relay, the MCP hub. It runs things; it holds only what the fleet gives it,
+  and it is brought up from here, not by running the wizard on it.
+
+If the hub is down, every machine still syncs from the repository. The hub
+only makes things faster.
+
+## Open questions
+
+- **Several hubs.** The wizard sets up one. Whether it should offer a second
+  for a fleet that spans sites is open.
+- **No ssh to the hub.** A hub you can only reach through a console or a cloud
+  agent could get a pasted command instead of an ssh bring-up. Not decided.
+- **A hub that is already running.** How the wizard treats a machine that
+  already has a relay (adopt it, or ask to replace it) depends on the
+  implementation and is not settled.
+- **Installer opening the browser.** Whether this happens on headless or
+  remote installs, or only where a browser can be opened, is left to the
+  installer.
