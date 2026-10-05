@@ -19,12 +19,14 @@ import { UiJob, UiSession, UiSessionGrant, UiStatus } from "./Api.ts";
 import type { Node } from "./Config.ts";
 import type { Finding, Fix } from "./Diagnose.ts";
 import {
+  addressBytes,
   connectionOf,
   darwinSocket,
   decodeHeaderValue,
   identify,
   liveDarwinLookup,
   liveLinuxLookup,
+  procAddressBytes,
   refusedPage,
   servedByTailscale,
   installedTailscaled,
@@ -46,6 +48,9 @@ const through = (headers: Record<string, string>, remoteAddress: string | null =
   headers: { host: HOST, ...headers },
   remoteAddress,
 });
+
+/** Both ends of a connection on 127.0.0.1, as Node names them. */
+const LO = { remoteAddress: "127.0.0.1", localAddress: "127.0.0.1" };
 
 describe("identify", () => {
   it("lets an allowed login in through the local tailscale proxy, without regard to case", () => {
@@ -409,17 +414,71 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
   ].join("\n");
 
   it("reads whose socket asked from the kernel's table", () => {
-    expect(socketOwner(TCP, { remotePort: 41000, localPort: 8399 })).toBe(0);
-    expect(socketOwner(TCP, { remotePort: 42000, localPort: 8399 })).toBe(1000);
-    expect(socketOwner(TCP, { remotePort: 43000, localPort: 8399 })).toBe(null);
+    expect(socketOwner(TCP, { remotePort: 41000, localPort: 8399, ...LO })).toBe(0);
+    // The same connection as a dual-stack server names its ends.
+    const mapped = { remoteAddress: "::ffff:127.0.0.1", localAddress: "::ffff:127.0.0.1" };
+    expect(socketOwner(TCP, { remotePort: 41000, localPort: 8399, ...mapped })).toBe(0);
+    expect(socketOwner(TCP, { remotePort: 42000, localPort: 8399, ...LO })).toBe(1000);
+    expect(socketOwner(TCP, { remotePort: 43000, localPort: 8399, ...LO })).toBe(null);
     expect(statusUid("Name:\ttailscaled\nUid:\t0\t0\t0\t0\n")).toBe(0);
     expect(statusUid("Name:\tnode\nUid:\t1000\t1000\t1000\t1000\n")).toBe(1000);
     expect(statusUid("Name:\tnode\n")).toBe(null);
-    expect(connectionOf({ socket: { remotePort: 41000, localPort: 8399 } })).toEqual({
+    expect(connectionOf({ socket: { remotePort: 41000, localPort: 8399, ...LO } })).toEqual({
       remotePort: 41000,
+      ...LO,
       localPort: 8399,
     });
     expect(connectionOf(new Request("http://x/"))).toBe(null);
+  });
+
+  it("believes only the established socket with the connection's exact loopback ends (PR #47)", () => {
+    // tailscaled's (root's) earlier connection from 127.0.0.1:41000 lingers in TIME_WAIT, which
+    // /proc lists as root's; a program of uid 1000 asks from 127.0.0.2:41000, the same ports.
+    const forged = [
+      "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+      "   0: 0100007F:A028 0100007F:20CF 06 00000000:00000000 03:00000000 00000000     0        0 0 1",
+      "   1: 0200007F:A028 0100007F:20CF 01 00000000:00000000 00:00000000 00000000  1000        0 5 1",
+      "",
+    ].join("\n");
+    const from = (remoteAddress: string) => ({
+      remotePort: 41000,
+      localPort: 8399,
+      remoteAddress,
+      localAddress: "127.0.0.1",
+    });
+    expect(socketOwner(forged, from("127.0.0.2"))).toBe(1000);
+    expect(socketOwner(forged, from("::ffff:127.0.0.2"))).toBe(1000);
+    // The lingering one is closed: nothing asks from it.
+    expect(socketOwner(forged, from("127.0.0.1"))).toBe(null);
+    // Two sockets claiming one connection: neither is believed.
+    const twice = `${forged.trimEnd()}\n   2: 0200007F:A028 0100007F:20CF 01 00000000:00000000 00:00000000 00000000     0        0 6 1\n`;
+    expect(socketOwner(twice, from("127.0.0.2"))).toBe(null);
+    // Not on loopback, or not an address: never.
+    expect(socketOwner(TCP, { ...from("10.0.0.5"), remotePort: 41000 })).toBe(null);
+    expect(socketOwner(TCP, from("nonsense"))).toBe(null);
+    // IPv6 loopback, as tcp6 lists it.
+    const tcp6 = [
+      "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+      "   0: 00000000000000000000000001000000:A028 00000000000000000000000001000000:20CF 01 00000000:00000000 00:00000000 00000000     0        0 7 1",
+      "",
+    ].join("\n");
+    expect(
+      socketOwner(tcp6, {
+        remotePort: 41000,
+        localPort: 8399,
+        remoteAddress: "::1",
+        localAddress: "::1",
+      }),
+    ).toBe(0);
+    expect(socketOwner(tcp6, from("127.0.0.1"))).toBe(null);
+    // A big-endian machine writes each word as it is.
+    const bigEndian = "header\n   1: 7F000001:A028 7F000001:20CF 01 0:0 00:0 0     0 0 2 1\n";
+    expect(socketOwner(bigEndian, from("127.0.0.1"), false)).toBe(0);
+    expect(socketOwner(bigEndian, from("127.0.0.1"), true)).toBe(null);
+    expect(addressBytes("::ffff:127.0.0.2")).toEqual(addressBytes("127.0.0.2"));
+    expect(addressBytes("::1")?.[15]).toBe(1);
+    expect(addressBytes("1:2:3")).toBe(null);
+    expect(procAddressBytes("0200007F", true)).toEqual(addressBytes("127.0.0.2"));
   });
 
   // A Linux hub as the relay's check sees it. Where systemd's tailscaled unit runs
@@ -465,7 +524,7 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     (remotePort: number, platform = "linux") =>
       Effect.runPromise(
         servedByTailscale(
-          { remotePort, localPort: 8399 },
+          { remotePort, localPort: 8399, ...LO },
           platform,
           proc,
           liveDarwinLookup,
@@ -668,7 +727,7 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
 
   it("reads whose socket asked from macOS's TCP table", () => {
     const table = tcpTable(MAC);
-    const at = (remotePort: number) => darwinSocket(table, { remotePort, localPort: 8399 });
+    const at = (remotePort: number) => darwinSocket(table, { remotePort, localPort: 8399, ...LO });
     expect(at(41000)).toEqual({ uid: 0, pid: 893, ePid: 0 });
     // Root's socket to another machine from the same port is not the one asking.
     expect(at(42000)).toEqual({ uid: 501, pid: 600, ePid: 0 });
@@ -676,14 +735,21 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     // Only an established connection.
     expect(at(45000)).toBe(null);
     // A table cut short, or not one at all, names no one.
-    expect(darwinSocket(tcpTable(MAC, false), { remotePort: 41000, localPort: 8399 })).toBe(null);
-    expect(darwinSocket(table.subarray(0, 200), { remotePort: 41000, localPort: 8399 })).toBe(null);
-    expect(darwinSocket(new Uint8Array(0), { remotePort: 41000, localPort: 8399 })).toBe(null);
+    expect(darwinSocket(tcpTable(MAC, false), { remotePort: 41000, localPort: 8399, ...LO })).toBe(
+      null,
+    );
+    expect(
+      darwinSocket(table.subarray(0, 200), { remotePort: 41000, localPort: 8399, ...LO }),
+    ).toBe(null);
+    expect(darwinSocket(new Uint8Array(0), { remotePort: 41000, localPort: 8399, ...LO })).toBe(
+      null,
+    );
     // Two sockets claiming the same connection: neither is believed.
     expect(
       darwinSocket(tcpTable([...MAC, { lport: 41000, fport: 8399, uid: 501, pid: 9 }]), {
         remotePort: 41000,
         localPort: 8399,
+        ...LO,
       }),
     ).toBe(null);
   });
@@ -697,7 +763,7 @@ describe("a program on the hub posing as tailscale serve (review A-G)", () => {
     const check = (remotePort: number, table: Uint8Array | null = tcpTable(MAC)) =>
       Effect.runPromise(
         servedByTailscale(
-          { remotePort, localPort: 8399 },
+          { remotePort, localPort: 8399, ...LO },
           "darwin",
           "/nonexistent",
           lookup(table),

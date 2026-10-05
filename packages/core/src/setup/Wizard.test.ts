@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 import { FetchHttpClient } from "effect/unstable/http";
@@ -19,7 +20,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import type { ProbeServices } from "../Area.ts";
 import { loadConfig } from "../Config.ts";
 import { readSecrets } from "../Secrets.ts";
-import type { UiSetupPlanRequest } from "../SetupApi.ts";
+import type { UiProbe, UiSetupPlanRequest } from "../SetupApi.ts";
+import { machineLockHolder, syncLockPath } from "../SyncLock.ts";
 import { DEFAULT_APPLY, newNtfyUrl, NTFY_SECRET } from "../Upkeep.ts";
 import { dropTable } from "./TomlEdit.ts";
 import {
@@ -29,6 +31,7 @@ import {
   dropHub,
   hostMcp,
   onboardingOnly,
+  otherRelay,
   undoAdmission,
   writeHub,
 } from "./Hub.ts";
@@ -292,6 +295,35 @@ describe("the setup wizard's engine", () => {
     await run(undoAdmission({ ...hub, admitted: plain.added }));
     expect(parseToml(show("t3-fleet.toml"))).not.toHaveProperty("ui");
 
+    // PR #47: a hub whose node file was there already gets back exactly what it had.
+    const hubFile = join(repo, "nodes/hub.toml");
+    const own_ = '# hub: added by t3-fleet invite.\nroles = ["member"]\n\n[engine]\ntimer = true\n';
+    fs.writeFileSync(hubFile, own_);
+    git("add", "nodes/hub.toml");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "hub, invited");
+    git("push", "-q");
+    const existing = await run(admitHub(await run(loadConfig), hub, "me@example.com"));
+    expect(existing.added).toMatchObject({ node: false, relayRole: true, ssh: true });
+    expect(show("nodes/hub.toml")).toMatch(/roles = \["member", "relay"\]/);
+    expect(show("nodes/hub.toml")).toContain('ssh = "me@hub"');
+    const restored = await run(undoAdmission({ ...hub, admitted: existing.added }));
+    expect(restored.join("\n")).toContain("hub's relay role, hub's ssh");
+    expect(show("nodes/hub.toml")).toBe(own_);
+    expect(parseToml(show("t3-fleet.toml"))).not.toHaveProperty("relay");
+    // An ssh it had already is its own: kept.
+    fs.writeFileSync(hubFile, `${own_.replace("\n\n[engine]", '\nssh = "admin@hub"\n\n[engine]')}`);
+    git("commit", "-qam", "hub's own ssh");
+    git("push", "-q");
+    const withSsh = await run(admitHub(await run(loadConfig), hub, "me@example.com"));
+    expect(withSsh.added).toMatchObject({ node: false, relayRole: true });
+    expect(withSsh.added.ssh).toBeUndefined();
+    await run(undoAdmission({ ...hub, admitted: withSsh.added }));
+    expect(show("nodes/hub.toml")).toContain('ssh = "admin@hub"');
+    expect(show("nodes/hub.toml")).not.toContain("relay");
+    git("rm", "-q", "nodes/hub.toml");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "hub, out again");
+    git("push", "-q");
+
     // Admitted again; [defaults.mcp] only through hostMcp, which bringUp calls once the hub synced.
     await run(admitHub(await run(loadConfig), { ...hub, mcp: true }, "me@example.com"));
     expect(mcpOf()["hub"]).toBeUndefined();
@@ -552,5 +584,171 @@ describe("the setup wizard's engine", () => {
     }
     expect(await run(withRunLock(home, Effect.succeed("ran")))).toBe("ran");
     expect(await run(runningElsewhere(home))).toBe(false);
+  });
+
+  // A hub, as the check of it over ssh would find it (Remote.probeHub), for the engine's hook.
+  const probed = (app: UiProbe["app"]) => (ssh: string) => {
+    const ok = (label: string) => ({ state: "ok" as const, label, remedy: null });
+    return Effect.succeed({
+      ssh,
+      reachable: true,
+      error: null,
+      hostname: "hub",
+      os: "Linux",
+      node: ok("Node 24"),
+      git: ok("git version 2"),
+      t3: ok("T3 is running"),
+      tailscale: ok("on the tailnet"),
+      docker: ok("Docker 27"),
+      service: ok("systemd"),
+      fleet: ok("in this fleet"),
+      ...(app === undefined ? {} : { app }),
+      relayUrl: "https://hub.tailnet.ts.net:8399",
+      ready: true,
+    } satisfies UiProbe);
+  };
+  const serves = {
+    state: "ok" as const,
+    label: "Serves the fleet app on the tailnet",
+    remedy: null,
+  };
+  const cannot = { state: "warn" as const, label: "Cannot serve the fleet app", remedy: null };
+  const asHub = (node: string) => ({
+    ...request,
+    repo: { kind: "url" as const, url: bare },
+    hub: { ssh: `me@${node}`, node, mcp: false },
+  });
+
+  it("refuses a second hub while the fleet has one: one relay, never two (PR #47)", async () => {
+    const show = (file: string) =>
+      execFileSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
+    const head = () => execFileSync("git", ["-C", bare, "rev-parse", "main"], { encoding: "utf8" });
+    const config = await run(loadConfig);
+    expect(config.nodes.find((n) => n.name === "hub")?.roles).toContain("relay");
+    const url = config.settings.relay?.url ?? null;
+    expect(url).toBe("https://hub.tailnet.ts.net:8399");
+    const box = {
+      node: "box",
+      ssh: "me@box",
+      relayUrl: "https://box.tailnet.ts.net:8399",
+      error: null,
+    };
+    const before = head();
+    const why = await fails(admitHub(config, box, "me@example.com"));
+    expect(why).toContain("hub is the fleet's hub (its relay) already, so box cannot be one");
+    expect(head()).toBe(before);
+    expect(() => show("nodes/box.toml")).toThrow();
+    expect(show("nodes/hub.toml")).toContain("relay");
+    // Refused at plan already, before anything is asked of the hub's machine.
+    const wizard = await run(
+      Wizard.make({
+        t3Connect: Effect.fail("no T3 here"),
+        scratchDir: join(home, "scratch"),
+        probeHub: probed(serves),
+      }),
+    );
+    expect(await fails(wizard.plan(asHub("box")))).toContain("hub is the fleet's hub");
+    // [relay] url at another address than the hub answers at; or a relay no node serves.
+    const elsewhere = { ...box, node: "hub", relayUrl: "https://hub-2.tailnet.ts.net:8399" };
+    expect(otherRelay(config, url, elsewhere)).toContain(
+      "relay is at https://hub.tailnet.ts.net:8399 already, not at https://hub-2.tailnet.ts.net:8399",
+    );
+    const noServer = { ...config, nodes: config.nodes.filter((n) => n.name !== "hub") };
+    expect(otherRelay(noServer, url, box)).toContain("relay is at https://hub.tailnet.ts.net:8399");
+    // The hub that is the relay, again (a resume): not refused.
+    expect(otherRelay(config, url, { ...box, node: "hub", relayUrl: url })).toBe(null);
+    expect(otherRelay(noServer, null, box)).toBe(null);
+  });
+
+  it("applies a hub as a check of it finds it then, and a plan whose hub changed is stale (PR #47)", async () => {
+    let app: UiProbe["app"] = serves;
+    const wizard = await run(
+      Wizard.make({
+        t3Connect: Effect.fail("no T3 here"),
+        scratchDir: join(home, "scratch"),
+        probeHub: (ssh) => probed(app)(ssh),
+      }),
+    );
+    const plan = await run(wizard.plan(asHub("hub")));
+    expect(plan.hub).toMatchObject({ node: "hub", relayUrl: "https://hub.tailnet.ts.net:8399" });
+    // Since the review, the hub stopped being able to serve the app: `[ui] hosted = false` is now due.
+    app = cannot;
+    const stale = await fails(
+      wizard.apply({ kind: "plan", planId: plan.planId, choices: {}, values: {} }),
+    );
+    expect(Schema.is(Wizard.StalePlan)(stale)).toBe(true);
+    const again = await run(wizard.plan(asHub("hub")));
+    expect(again.planId).not.toBe(plan.planId);
+    const jobs = await run(
+      wizard.apply({ kind: "plan", planId: again.planId, choices: {}, values: {} }),
+    );
+    expect(jobs.map((j) => j.kind)).toEqual(["setup", "setup-hub"]);
+    fs.rmSync(join(home, "scratch"), { recursive: true, force: true });
+  });
+
+  it("abandons holding the run lock throughout, so no setup starts meanwhile (PR #47)", async () => {
+    const wizard = await engine();
+    await run(
+      writeHub(home, {
+        node: "ghost",
+        ssh: "me@ghost",
+        relayUrl: null,
+        error: "x",
+        admitted: { node: true, relay: false, ui: false, token: false },
+      }),
+    );
+    // A sync running elsewhere: taking ghost out of the fleet waits for it, part-way through abandoning.
+    const syncLock = syncLockPath(home);
+    fs.mkdirSync(syncLock, { recursive: true });
+    fs.writeFileSync(
+      join(syncLock, "owner.json"),
+      JSON.stringify({ pid: process.ppid, start: 0, token: "a sync elsewhere" }),
+    );
+    const abandoning = Effect.runPromise(wizard.abandon);
+    try {
+      const holder = await run(
+        machineLockHolder(runLockPath(home)).pipe(
+          Effect.repeat({
+            until: (h) => h === "here",
+            schedule: Schedule.spaced("100 millis"),
+            times: 50,
+          }),
+        ),
+      );
+      expect(holder).toBe("here");
+      // Meanwhile nothing else starts a setup here: withRunLock is what apply and resume take.
+      expect(await fails(withRunLock(home, Effect.succeed("ran")))).toBe(RUN_ELSEWHERE);
+    } finally {
+      fs.rmSync(syncLock, { recursive: true, force: true });
+    }
+    const lines = await abandoning;
+    expect(lines.join("\n")).toContain("Dropped bringing up ghost as the hub");
+    expect(await run(machineLockHolder(runLockPath(home)))).toBe("free");
+  }, 20_000);
+
+  it("checks a remote with this user's own environment, as cloning it does (PR #47)", async () => {
+    // A remote only an ssh agent opens: git reaches it only with HOME and SSH_AUTH_SOCK.
+    const gitBin = join(bin, "git");
+    const real = fs.readlinkSync(gitBin);
+    const agent = process.env["SSH_AUTH_SOCK"];
+    fs.rmSync(gitBin);
+    fs.writeFileSync(
+      gitBin,
+      `#!/bin/sh\n[ "$HOME" = "${home}" ] && [ "$SSH_AUTH_SOCK" = "${join(home, "agent.sock")}" ] && [ "$GIT_TERMINAL_PROMPT" = 0 ] && exit 0\necho "git@github.com: Permission denied (publickey)." >&2\nexit 128\n`,
+      { mode: 0o755 },
+    );
+    process.env["SSH_AUTH_SOCK"] = join(home, "agent.sock");
+    try {
+      expect(await run(Wizard.isEmptyRemote("git@github.com:me/fleet.git"))).toBe(true);
+      delete process.env["SSH_AUTH_SOCK"];
+      expect(await fails(Wizard.isEmptyRemote("git@github.com:me/fleet.git"))).toContain(
+        "Permission denied (publickey)",
+      );
+    } finally {
+      fs.rmSync(gitBin);
+      fs.symlinkSync(real, gitBin);
+      if (agent === undefined) delete process.env["SSH_AUTH_SOCK"];
+      else process.env["SSH_AUTH_SOCK"] = agent;
+    }
   });
 });

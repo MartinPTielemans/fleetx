@@ -14,7 +14,8 @@
 # Services run by hand (no systemd here).
 #
 # Shown: the gate (allowed login, unknown login, a client's own identity header
-# replaced, a program on the hub posing as tailscale serve refused), a fix
+# replaced, a program on the hub posing as tailscale serve refused, also from
+# 127.0.0.2 on the ports of root's connection lingering in TIME_WAIT), a fix
 # applied from the hub and run by laptop's listener, a fix
 # laptop never proposed refused, approving refused on the hub.
 # Usage: tests/integration/hub-ui.sh   (needs Docker; builds the bundle first)
@@ -101,7 +102,19 @@ spoofed=$(on server "node -e '
   r.end();'")
 printf '%s' "$spoofed" | grep -q '^403 ' || fail "a user's program named tailscaled must not make its user tailscaled's: $spoofed"
 on server 'pkill -x tailscaled' || true
-pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused, also when its user runs a program named tailscaled"
+# Root's earlier connection from 127.0.0.1:41777 lingers in TIME_WAIT, which /proc lists as root's; dev
+# asks from 127.0.0.2:41777, the same two ports: the kernel's table says the asking socket is dev's.
+docker compose exec -T -u root server node -e '
+  const s = require("net").connect({ host: "127.0.0.1", port: 8399, localPort: 41777 });
+  s.on("connect", () => s.end()).on("close", () => process.exit(0));' || fail "root's connection to the relay"
+on server 'grep -q "0100007F:A331 0100007F:20CF 06" /proc/net/tcp' || fail "root's closed connection should linger in TIME_WAIT"
+lingering=$(on server "node -e '
+  const r = require(\"http\").request({ host: \"127.0.0.1\", port: 8399, localAddress: \"127.0.0.2\", localPort: 41777, method: \"POST\", path: \"/api/session\",
+    headers: { host: \"server.tailnet.ts.net:8399\", \"tailscale-user-login\": \"me@example.com\", \"x-t3-fleet-hub\": \"1\" } },
+    (a) => { let b = \"\"; a.on(\"data\", (d) => (b += d)).on(\"end\", () => console.log(a.statusCode, b)); });
+  r.end();'")
+printf '%s' "$lingering" | grep -q '^403 ' || fail "root's connection in TIME_WAIT must not vouch for dev's on 127.0.0.2 with the same ports: $lingering"
+pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused, also when its user runs a program named tailscaled, and when root's closed connection on the same ports lingers"
 
 # A fix applied from the hub, run by laptop's listener.
 on laptop '[ ! -e ~/.agents/skills/demo ]' || fail "demo should not be linked on laptop yet (apply = [])"
