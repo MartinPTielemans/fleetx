@@ -17,7 +17,7 @@ export function CheckButton() {
 }
 
 export function CheckedLine() {
-  const { status, now } = useStore();
+  const { status, now, session } = useStore();
   if (status === null) return <>checking every machine…</>;
   const errors = status.findings.filter((f) => f.severity === "error").length;
   const warns = status.findings.filter((f) => f.severity === "warn").length;
@@ -25,7 +25,11 @@ export function CheckedLine() {
   if (errors + warns === 0) parts.push("everything matches");
   if (errors > 0) parts.push(plural(errors, "problem"));
   if (warns > 0) parts.push(plural(warns, "warning"));
-  parts.push(`checked ${ago(status.checkedAt, now)} in ${(status.elapsedMs / 1000).toFixed(1)}s`);
+  parts.push(
+    session?.hub !== undefined
+      ? `each as it last reported to the hub, read ${ago(status.checkedAt, now)}`
+      : `checked ${ago(status.checkedAt, now)} in ${(status.elapsedMs / 1000).toFixed(1)}s`,
+  );
   return <>{parts.join(" · ")}</>;
 }
 

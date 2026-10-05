@@ -92,6 +92,7 @@ const fakeSetup = () => {
       github: "me",
       unfinished: null,
       hub: null,
+      fleetUrl: state.inFleet ? "https://box.tailnet.ts.net:8399/" : null,
     })),
     probe: (ssh) =>
       Effect.succeed({

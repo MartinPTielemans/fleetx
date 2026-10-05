@@ -447,5 +447,13 @@ export const UiSession = Schema.Struct({
   nodes: Schema.Array(Schema.String),
   /** The relay's URL, when the fleet has one; the hub and live events go through it. */
   relay: Schema.NullOr(Schema.String),
+  /**
+   * Present when the app is served by the hub (HubUi.ts), not `t3-fleet ui`
+   * on this machine: who is signed in, and where proposals are decided
+   * (never on the hub). Machines are shown as they last reported.
+   */
+  hub: Schema.optionalKey(
+    Schema.Struct({ login: Schema.String, approveOn: Schema.Array(Schema.String) }),
+  ),
 });
 export type UiSession = typeof UiSession.Type;
