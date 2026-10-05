@@ -7,8 +7,10 @@
 # to the relay on 127.0.0.1:8399, drops Tailscale-* headers the client sent, and
 # sets Tailscale-User-Login by source address (laptop = me@example.com, desktop
 # = mallory@example.com). It runs as root, as tailscaled does: the relay lets
-# in only connections made by root or by tailscaled's user (HubUi.ts). The
-# relay URL is plain http on a ts.net name in /etc/hosts; real serve adds TLS.
+# in only connections made by root, or by the user an installed tailscaled
+# runs as under systemd (HubUi.ts); not by a user who names a program
+# tailscaled. The relay URL is plain http on a ts.net name in /etc/hosts; real
+# serve adds TLS.
 # Services run by hand (no systemd here).
 #
 # Shown: the gate (allowed login, unknown login, a client's own identity header
@@ -89,7 +91,17 @@ onhub=$(on server "node -e '
     (a) => { let b = \"\"; a.on(\"data\", (d) => (b += d)).on(\"end\", () => console.log(a.statusCode, b)); });
   r.end();'")
 printf '%s' "$onhub" | grep -q '^403 ' || fail "a program on the hub must not mint a session as me@example.com: $onhub"
-pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused"
+# The same, with dev running a program it named tailscaled: a name anyone can give is not tailscaled.
+docker compose exec -d -u dev server bash -c 'cp /bin/sleep /tmp/tailscaled && exec /tmp/tailscaled 600'
+on server 'for i in $(seq 50); do pgrep -x tailscaled >/dev/null && exit 0; sleep 0.1; done; exit 1' || fail "the fake tailscaled did not start"
+spoofed=$(on server "node -e '
+  const r = require(\"http\").request({ host: \"127.0.0.1\", port: 8399, method: \"POST\", path: \"/api/session\",
+    headers: { host: \"server.tailnet.ts.net:8399\", \"tailscale-user-login\": \"me@example.com\", \"x-t3-fleet-hub\": \"1\" } },
+    (a) => { let b = \"\"; a.on(\"data\", (d) => (b += d)).on(\"end\", () => console.log(a.statusCode, b)); });
+  r.end();'")
+printf '%s' "$spoofed" | grep -q '^403 ' || fail "a user's program named tailscaled must not make its user tailscaled's: $spoofed"
+on server 'pkill -x tailscaled' || true
+pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused, also when its user runs a program named tailscaled"
 
 # A fix applied from the hub, run by laptop's listener.
 on laptop '[ ! -e ~/.agents/skills/demo ]' || fail "demo should not be linked on laptop yet (apply = [])"

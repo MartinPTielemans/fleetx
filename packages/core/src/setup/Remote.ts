@@ -28,6 +28,7 @@ import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import { buildMarker, buildOf, runningBuild } from "../Build.ts";
+import { installedTailscaled, type PathOwner } from "../HubUi.ts";
 import { sh, shPath } from "../Area.ts";
 import { parseVersion, type ExecResult } from "../Exec.ts";
 import { installEngineScript } from "../Fix.ts";
@@ -125,17 +126,70 @@ process.stdout.write(JSON.stringify(result) + "\\n");
 export const LOCAL_APP = "The fleet app will open locally on this computer instead";
 
 /**
+ * What says, on a Linux hub, how its tailscaled runs (HubUi.tailscaledUser):
+ * `<uid> tailscaled` for each process of that name; then, when systemd runs a
+ * tailscaled unit (the system's, else the user's), `main <uid> <exe>` for its
+ * main process and `<uid> <mode> <path>` for the program and each directory
+ * above it. Read-only, and nothing in it needs root.
+ */
+export const LINUX_APP_PROBE = String.raw`for f in $(grep -lsx "Name:$(printf '\t')tailscaled" /proc/[0-9]*/status); do sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1 tailscaled/p' "$f"; done
+pid=$(systemctl show -p MainPID --value tailscaled.service 2>/dev/null)
+case "$pid" in ""|0|*[!0-9]*) pid=$(systemctl --user show -p MainPID --value tailscaled.service 2>/dev/null);; esac
+case "$pid" in ""|0|*[!0-9]*) exit 0;; esac
+uid=$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status" 2>/dev/null)
+exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || exit 0
+echo "main $uid $exe"
+p=$exe; while :; do [ -L "$p" ] || stat -c '%u %a %n' "$p" 2>/dev/null; [ "$p" = / ] && break; p=$(dirname "$p"); done`;
+
+const linuxAppItem = (probe: string | null): UiProbeItem => {
+  if (probe === null)
+    return unknown(
+      "Whether the hub can serve the fleet app",
+      "Check that /proc and systemctl can be read on the hub, then check again.",
+    );
+  const lines = probe.split("\n").map((l) => l.trim());
+  const named = lines.flatMap((l) => {
+    const m = /^(\d+) tailscaled$/.exec(l);
+    return m === null ? [] : [Number(m[1])];
+  });
+  const main = lines.map((l) => /^main (\d+) (\/.*)$/.exec(l)).find((m) => m !== null) ?? null;
+  const owners = new Map<string, PathOwner>();
+  for (const l of lines) {
+    const m = /^(\d+) ([0-7]+) (\/.*)$/.exec(l);
+    if (m !== null)
+      owners.set(m[3] ?? "", { uid: Number(m[1]), mode: Number.parseInt(m[2] ?? "", 8) });
+  }
+  if (
+    named.includes(0) ||
+    (main !== null && installedTailscaled(main[2] ?? "", (p) => owners.get(p) ?? null))
+  )
+    return item("ok", "Serves the fleet app on the tailnet");
+  if (named.length > 0 || main !== null)
+    return item(
+      "warn",
+      `${LOCAL_APP}: tailscaled runs as a user on the hub, not as an installed systemd service, so it cannot tell tailscale serve from other programs`,
+      "To open the app from the hub, run tailscaled as root (Tailscale's package does: https://tailscale.com/download/linux), then check again.",
+    );
+  return unknown(
+    "Whether the hub can serve the fleet app",
+    "Start Tailscale on the hub, then check again.",
+  );
+};
+
+/**
  * Whether a hub on `os` can serve the fleet's app on the tailnet: whether the
  * relay there can tell tailscale serve's connections from another program's
- * (HubUi.servedByTailscale). On macOS that depends on how Tailscale runs, read
- * from `ps -axo uid=,comm=` there: as root (the standalone app's system
- * extension, or tailscaled as a daemon), or the App Store app's extension.
- * `ps` is null when it could not be read. "warn" means it cannot: setup then
- * writes [ui] hosted = false. The names here only guide setup; the relay
- * checks each connection itself.
+ * (HubUi.servedByTailscale). On Linux that depends on how tailscaled runs,
+ * read with LINUX_APP_PROBE: as root, or as a user from an installed program
+ * under its systemd unit. On macOS it depends on how Tailscale runs, read from
+ * `ps -axo uid=,comm=` there: as root (the standalone app's system extension,
+ * or tailscaled as a daemon), or the App Store app's extension. `ps` is that
+ * output, null when it could not be read. "warn" means it cannot: setup then
+ * writes [ui] hosted = false. This only guides setup; the relay checks each
+ * connection itself.
  */
 export const appItem = (os: string, ps: string | null): UiProbeItem => {
-  if (os === "Linux") return item("ok", "Serves the fleet app on the tailnet");
+  if (os === "Linux") return linuxAppItem(ps);
   if (os !== "Darwin")
     return item(
       "warn",
@@ -214,7 +268,10 @@ export const probeHub = (ssh: string, repo: string | null = null) =>
           ),
           run(ssh, command("docker", "version --format '{{.Server.Version}}'")),
           run(ssh, serviceProbe(os)),
-          run(ssh, os === "Darwin" ? "ps -axo uid=,comm=" : "true"),
+          run(
+            ssh,
+            os === "Darwin" ? "ps -axo uid=,comm=" : os === "Linux" ? LINUX_APP_PROBE : "true",
+          ),
         ],
         { concurrency: 4 },
       );
