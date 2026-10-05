@@ -94,7 +94,7 @@ export type McpDesired = typeof Desired.Type;
 /** Environment variables or headers: a literal value, or `$NAME` for the fleet secret NAME. */
 const Values = Schema.Record(Schema.String, Schema.String);
 
-const Definition = Schema.Struct({
+export const Definition = Schema.Struct({
   kind: Schema.String,
   url: Schema.optionalKey(Schema.String),
   command: Schema.optionalKey(Schema.String),
@@ -137,7 +137,7 @@ export const embeddedRefs = (text: string) =>
   [...text.matchAll(EMBEDDED)].map((m) => m[1] ?? m[2] ?? "");
 
 /** Text with its variables filled in as the shell would: an unknown one is empty. */
-const expandEmbedded = (text: string, value: (name: string) => string | undefined) =>
+export const expandEmbedded = (text: string, value: (name: string) => string | undefined) =>
   text.replace(
     EMBEDDED,
     (_, a: string | undefined, b: string | undefined) => value(a ?? b ?? "") ?? "",
