@@ -171,6 +171,14 @@ refusal shows the server's own words (SetupApi.ts lists the statuses).
 - **Hub bring-up is shown before it runs.** What the hub will be asked to do
   is on the plan screen as plain steps. Nothing touches it until the user
   confirms the plan.
+- **Only an authority sets up a hub.** Plan, apply, resume and each step of
+  the bring-up that changes the fleet refuse unless this machine is an
+  authority. The hub's own proposal is approved unattended only when it is
+  exactly its proposed secrets; anything else, its node file included, waits
+  for review.
+- **The hub gets the build the wizard started with.** Its SHA-256 is kept
+  from the start, the file is refused if it changed since, and the hub
+  checks what arrived against it before installing.
 - **Ssh is yours.** The wizard uses the ssh the user already has (their
   config, keys and agent). It does not store a key or a password.
 
@@ -180,8 +188,14 @@ Once the user confirms, the whole run is decided and saved, as with
 `t3-fleet setup`. If it stops part-way, the wizard opens on it (`unfinished`)
 and says how far it got. Resume does exactly what was decided, from there;
 abandon drops the run and says what it had already done. What it did stays,
-and the next setup finishes it. `t3-fleet setup --resume` and `--abandon` do
-the same from the terminal.
+and the next setup finishes it, with one exception: a hub whose bring-up did
+not finish is taken out of the fleet again (its node file and key, `[relay]`,
+`[ui]` and the relay token, whichever its admission added), each as a new
+commit, so no machine is left pointed at a hub that never came up. The MCP
+hub (`[defaults.mcp]`) is only switched on once the hub has synced, so there
+is nothing of it to undo. `t3-fleet setup --resume` and `--abandon` do the
+same from the terminal, the hub's part included. One process applies a run
+at a time: another `t3-fleet ui` or `setup --resume` waits until it is done.
 
 ## The hub boundary
 

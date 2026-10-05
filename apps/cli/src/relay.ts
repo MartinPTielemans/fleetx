@@ -46,8 +46,10 @@ const timestamped = (line: string) =>
 /**
  * Answer the fix request `id` if it names this node: check here again, run
  * only what this node proposes, report through the relay at `url`; then sync,
- * so the hub sees the machine as it is now. Holds the sync lock from the
- * check to the last fix, waiting for a sync already running.
+ * so the hub sees the machine as it is now. Holds the sync lock from reading
+ * the request to the last fix, waiting for a sync already running; the
+ * request is read again under it, and the relay takes only one claim
+ * (FixRequest.ts), so a request answered meanwhile is left alone.
  */
 const answerHere = (url: string, token: string) => (node: string, id: string) =>
   Effect.gen(function* () {
@@ -55,23 +57,26 @@ const answerHere = (url: string, token: string) => (node: string, id: string) =>
     if (node !== config.self) return;
     const self = config.nodes.find((n) => n.name === config.self);
     if (self === undefined) return;
-    const request = yield* fetchFixRequest(url, token, id);
-    if (request === null) return;
-    yield* timestamped(`the hub asks for ${request.fixes.length} fix(es) here`);
     const bundle = yield* ownBundle.pipe(Effect.orElseSucceed(() => ""));
     const local = { ...self, ssh: null };
     const answered = yield* withSyncLock(
-      answerFixRequest({
-        self: config.self,
-        request,
-        progress: (p) => sendFixProgress(url, token, id, p),
-        findings: readStates(config.repo).pipe(
-          Effect.flatMap((others) => ownCheck(config, self, others)),
-          Effect.map((r) => r.findings),
-          Effect.mapError(failureText),
-        ),
-        run: (fixes) => runFixes([local], fixes, config.repo, bundle, config.repo),
-        secrets: yield* localSecrets,
+      Effect.gen(function* () {
+        const request = yield* fetchFixRequest(url, token, id);
+        if (request === null || request.state !== "waiting") return false;
+        yield* timestamped(`the hub asks for ${request.fixes.length} fix(es) here`);
+        return yield* answerFixRequest({
+          self: config.self,
+          request,
+          progress: (p) => sendFixProgress(url, token, id, p),
+          findings: readStates(config.repo).pipe(
+            Effect.flatMap((others) => ownCheck(config, self, others)),
+            Effect.map((r) => r.findings),
+            Effect.mapError(failureText),
+          ),
+          run: (fixes, secrets) =>
+            runFixes([local], fixes, config.repo, bundle, config.repo, secrets),
+          secrets: yield* localSecrets,
+        });
       }),
       Effect.fail("busy"),
       { children: true },

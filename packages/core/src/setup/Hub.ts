@@ -15,10 +15,18 @@
  *            joining the fleet as that node
  *   key      the hub's public key added as a recipient of the secrets, so it
  *            reads the relay token
- *   approve  the hub's proposal, when it only touches the hub's own files;
- *            anything more waits for review like any proposal
+ *   approve  the hub's proposal, when it is exactly its own proposed secrets
+ *            (onboardingOnly), bound to the commit checked; anything more
+ *            (its node file included) waits for review like any proposal
  *   sync     a sync on the hub, so it reads the secrets and starts the relay
  *            now rather than on its timer
+ *   mcp      when asked: [defaults.mcp] hub and gateway, only once that sync
+ *            succeeded, so no machine's MCP servers move to a hub that is
+ *            not up
+ *
+ * Every step that changes the fleet is an authority's: each refuses unless
+ * this machine is one (requireAuthority), read again before it runs. An
+ * abandoned bring-up takes out what admission added (undoAdmission).
  *
  * Every step can run again over its own half-done work. What was asked for is
  * kept in ~/.local/state/t3-fleet/setup/hub.json until the hub is up, so a
@@ -33,7 +41,8 @@ import * as Schema from "effect/Schema";
 import type { ProbeServices } from "../Area.ts";
 import { loadConfig, type Config } from "../Config.ts";
 import { exec } from "../Exec.ts";
-import { commitAndPush, git, out } from "../Git.ts";
+import { changedFiles, commitAndPush, git, ok, out, pullBranch, restorePaths } from "../Git.ts";
+import { removeNode } from "../leave/Fleet.ts";
 import { randomBytes } from "../hub/Policy.ts";
 import { FLEET_FILE, stateDir } from "../Names.ts";
 import { TAILSCALE_APP } from "../areas/RelayArea.ts";
@@ -54,7 +63,20 @@ import { PROPOSED_SECRETS } from "./Plan.ts";
 import { hubStepTitles } from "./PlanWords.ts";
 import { bringUpHub } from "./Remote.ts";
 import { newNodeFile } from "./Repo.ts";
-import { setKey, type Edit } from "./TomlEdit.ts";
+import { dropTable, setKey, type Edit } from "./TomlEdit.ts";
+
+/** What admission added to the repo, so an abandoned bring-up can take it out again. */
+export const Admitted = Schema.Struct({
+  /** nodes/<hub>.toml was created by admission. */
+  node: Schema.Boolean,
+  /** [relay] in t3-fleet.toml. */
+  relay: Schema.Boolean,
+  /** [ui] allow. */
+  ui: Schema.Boolean,
+  /** The relay token among the secrets. */
+  token: Schema.Boolean,
+});
+export type Admitted = typeof Admitted.Type;
 
 /** A hub asked for, until it is up. */
 export const HubRequest = Schema.Struct({
@@ -68,6 +90,10 @@ export const HubRequest = Schema.Struct({
   mcp: Schema.optionalKey(Schema.Boolean),
   /** Why the last bring-up stopped; null before the first, or while one runs. */
   error: Schema.NullOr(Schema.String),
+  /** What admission committed, once it has (an abandon takes it out again). */
+  admitted: Schema.optionalKey(Admitted),
+  /** The hub's key was added to the secrets' recipients by this bring-up. */
+  recipient: Schema.optionalKey(Schema.Boolean),
 });
 export type HubRequest = typeof HubRequest.Type;
 
@@ -89,11 +115,43 @@ export const writeHub = (home: string, hub: HubRequest) =>
     yield* fs.writeFileString(hubPath(home), `${text}\n`, { mode: 0o600 });
   });
 
+/** Change the saved hub as it is now (what an earlier step recorded stays). */
+export const updateHub = (home: string, change: (hub: HubRequest) => HubRequest) =>
+  Effect.gen(function* () {
+    const now = yield* readHub(home);
+    if (Option.isSome(now)) yield* writeHub(home, change(now.value));
+  });
+
 export const dropHub = (home: string) =>
   FileSystem.FileSystem.pipe(
     Effect.flatMap((fs) => fs.remove(hubPath(home), { force: true })),
     Effect.ignore,
   );
+
+/** Whether `config`'s own machine is an authority. */
+export const isAuthority = (config: Config) =>
+  config.nodes.find((n) => n.name === config.self)?.roles.includes("authority") ?? false;
+
+/**
+ * Setting up a hub changes the fleet for every machine and grants it the
+ * secrets: an authority's to do, never a member's (a member proposes).
+ */
+export const requireAuthority = (config: Config) =>
+  isAuthority(config)
+    ? Effect.void
+    : Effect.fail(
+        `${config.self} is not an authority, so it cannot set up the fleet's hub: run the setup of the hub on an authority (t3-fleet ui there), or have an authority give ${config.self} the authority role`,
+      );
+
+/** Refuse when `paths` have edits of someone's own: committing them along would publish them unseen. */
+const refuseDirty = (repo: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const dirty = yield* changedFiles(repo, paths);
+    if (dirty.length > 0)
+      return yield* Effect.fail(
+        `${repo} has uncommitted changes to ${dirty.join(", ")}; commit and push them (or set them aside with git stash) first, then try again`,
+      );
+  });
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -143,19 +201,30 @@ export const tailscaleLogin = Effect.gen(function* () {
  * The hub in the repo: its node file, [relay], the relay token, and `owner`
  * (this machine's Tailscale login) as the one login the app on the hub opens
  * for. Only what is missing is written; committed and pushed in one commit.
+ * Only an authority admits a hub, and never over edits of the user's own to
+ * those files. [defaults.mcp] is not part of it: that moves every machine's
+ * MCP servers, so it waits until the hub is up (hostMcp).
  */
 export const admitHub = (config: Config, hub: HubRequest, owner: string | null = null) =>
   underSyncLock(
     Effect.gen(function* () {
+      yield* requireAuthority(config);
       const fs = yield* FileSystem.FileSystem;
       const repo = config.repo;
+      const paths = [`nodes/${hub.node}.toml`, FLEET_FILE, ...SECRETS_FILES];
+      yield* refuseDirty(repo, paths);
       const lines: Array<string> = [];
+      const added: { -readonly [K in keyof Admitted]: Admitted[K] } = {
+        node: false,
+        relay: false,
+        ui: false,
+        token: false,
+      };
       const nodeFile = `${repo}/nodes/${hub.node}.toml`;
-      const nodeBefore = yield* fs
-        .readFileString(nodeFile)
-        .pipe(
-          Effect.orElseSucceed(() => newNodeFile(hub.node, ["member", "relay"], "t3-fleet setup")),
-        );
+      const nodeExisted = yield* fs.exists(nodeFile);
+      const nodeBefore = nodeExisted
+        ? yield* fs.readFileString(nodeFile)
+        : newNodeFile(hub.node, ["member", "relay"], "t3-fleet setup");
       const nodeAfter = yield* edited(`nodes/${hub.node}.toml`, nodeBefore, [
         (t) => {
           const roles = rolesOf(t);
@@ -165,8 +234,9 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
         },
         (t) => (/^ssh\s*=/m.test(t) ? { text: t } : setKey(t, [], "ssh", hub.ssh)),
       ]);
-      if (nodeAfter !== nodeBefore || !(yield* fs.exists(nodeFile))) {
+      if (nodeAfter !== nodeBefore || !nodeExisted) {
         yield* fs.writeFileString(nodeFile, nodeAfter);
+        added.node = !nodeExisted;
         lines.push(`nodes/${hub.node}.toml: the relay, reached at ${hub.ssh}`);
       }
       const fleetFile = `${repo}/${FLEET_FILE}`;
@@ -174,47 +244,80 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
       let fleetAfter = fleetBefore;
       if (!/^\[relay\]/m.test(fleetAfter)) {
         fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [(t) => relayEdits(t, hub.relayUrl)]);
+        added.relay = true;
         lines.push(
           hub.relayUrl === null
             ? `[relay] in ${FLEET_FILE}; set its url once ${hub.node} can be reached`
             : `[relay] in ${FLEET_FILE}: ${hub.relayUrl}`,
         );
       }
-      if (hub.mcp === true) {
-        if (hub.relayUrl === null)
-          return yield* Effect.fail(
-            `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
-          );
-        const gateway = hub.relayUrl;
-        const hosted = yield* edited(FLEET_FILE, fleetAfter, [(t) => mcpHubEdits(t, gateway)]);
-        if (hosted !== fleetAfter)
-          lines.push(`[defaults.mcp] hub in ${FLEET_FILE}: your MCP servers run on ${hub.node}`);
-        fleetAfter = hosted;
+      if (hub.mcp === true && hub.relayUrl === null)
+        return yield* Effect.fail(
+          `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
+        );
+      if (
+        owner !== null &&
+        config.settings.ui?.allow === undefined &&
+        !/^\[ui\]/m.test(fleetAfter)
+      ) {
+        fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [
+          (t) => setKey(t, ["ui"], "allow", [owner]),
+        ]);
+        added.ui = true;
+        lines.push(`[ui] in ${FLEET_FILE}: the app on ${hub.node} opens for ${owner}`);
       }
       if (fleetAfter !== fleetBefore) yield* fs.writeFileString(fleetFile, fleetAfter);
-      if (owner !== null) {
-        const text = yield* fs.readFileString(fleetFile);
-        if (config.settings.ui?.allow === undefined && !/^\[ui\]/m.test(text)) {
-          const after = yield* edited(FLEET_FILE, text, [
-            (t) => setKey(t, ["ui"], "allow", [owner]),
-          ]);
-          yield* fs.writeFileString(fleetFile, after);
-          lines.push(`[ui] in ${FLEET_FILE}: the app on ${hub.node} opens for ${owner}`);
-        }
-      }
       const secrets = yield* readSecrets(repo);
       if (!varNames(secrets).includes(RELAY_TOKEN)) {
         yield* writeSecrets(repo, setVar(secrets, RELAY_TOKEN, hex(randomBytes(32))));
         yield* installSecrets(repo);
+        added.token = true;
         lines.push(`a new ${RELAY_TOKEN}, encrypted among the secrets`);
       }
-      const rev = yield* commitAndPush(
-        repo,
-        [`nodes/${hub.node}.toml`, FLEET_FILE, ...SECRETS_FILES],
-        `Make ${hub.node} the relay`,
+      const rev = yield* commitAndPush(repo, paths, `Make ${hub.node} the relay`).pipe(
+        // Nothing of this run's stays uncommitted: what was refused is put back.
+        Effect.tapError(() =>
+          changedFiles(repo, paths).pipe(
+            Effect.flatMap((left) => restorePaths(repo, left)),
+            Effect.ignore,
+          ),
+        ),
       );
       if (rev !== "nothing to commit") lines.push(`committed and pushed ${rev}`);
-      return lines.length === 0 ? [`${hub.node} is in the fleet already`] : lines;
+      return {
+        lines: lines.length === 0 ? [`${hub.node} is in the fleet already`] : lines,
+        added: added as Admitted,
+      };
+    }),
+  );
+
+/**
+ * [defaults.mcp] hub and gateway: every machine's MCP servers go through the
+ * hub from their next sync. Only once the hub is up (its sync succeeded),
+ * and only from an authority.
+ */
+export const hostMcp = (config: Config, hub: HubRequest) =>
+  underSyncLock(
+    Effect.gen(function* () {
+      yield* requireAuthority(config);
+      if (hub.relayUrl === null)
+        return yield* Effect.fail(
+          `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
+        );
+      const gateway = hub.relayUrl;
+      const fs = yield* FileSystem.FileSystem;
+      yield* refuseDirty(config.repo, [FLEET_FILE]);
+      const fleetFile = `${config.repo}/${FLEET_FILE}`;
+      const before = yield* fs.readFileString(fleetFile);
+      const after = yield* edited(FLEET_FILE, before, [(t) => mcpHubEdits(t, gateway)]);
+      if (after === before) return [`your MCP servers run on ${hub.node} already`];
+      yield* fs.writeFileString(fleetFile, after);
+      const rev = yield* commitAndPush(
+        config.repo,
+        [FLEET_FILE],
+        `Host the fleet's MCP servers on ${hub.node}`,
+      ).pipe(Effect.tapError(() => restorePaths(config.repo, [FLEET_FILE]).pipe(Effect.ignore)));
+      return [`[defaults.mcp] hub in ${FLEET_FILE}: your MCP servers run on ${hub.node} (${rev})`];
     }),
   );
 
@@ -238,14 +341,33 @@ export const hubRecipient = (destination: string) =>
     return key;
   });
 
-/** Whether a proposal only touches the hub's own files: its node file and its proposed secrets. */
-export const ownFilesOnly = (node: string, files: ReadonlyArray<string>) =>
-  files.every((f) => f === `nodes/${node}.toml` || f === `${PROPOSED_SECRETS}/${node}.env.age`);
+/**
+ * Whether the hub's proposal, `commit`, is exactly what joining brings that
+ * admission could not write for it: its own proposed secrets, one regular
+ * file, added or changed. Anything else (its node file, a role, a profile, a
+ * setting, a mode or a link) waits for a person's review like any proposal.
+ */
+export const onboardingOnly = (repo: string, node: string, commit: string) =>
+  Effect.gen(function* () {
+    const raw = yield* git(repo, ["diff-tree", "-r", "-z", "--no-renames", `${commit}^`, commit]);
+    if (!ok(raw)) return false;
+    // ":<old mode> <new mode> <old blob> <new blob> <status>\0<path>\0", once per file.
+    const fields = raw.stdout.split("\0").filter((f) => f !== "");
+    if (fields.length !== 2) return false;
+    const [meta, file] = fields as [string, string];
+    const [, newMode, , , status] = meta.replace(/^:/, "").split(" ");
+    return (
+      file === `${PROPOSED_SECRETS}/${node}.env.age` &&
+      newMode === "100644" &&
+      (status === "A" || status === "M")
+    );
+  });
 
-/** Bring the hub up: every step in order, each said through `step`. */
+/** Bring the hub up: every step in order, each said through `step`; `home` keeps what it committed. */
 export const bringUp = (
   hub: HubRequest,
   step: (text: string) => Effect.Effect<void>,
+  home: string = process.env["HOME"] ?? "",
 ): Effect.Effect<void, string, ProbeServices> =>
   Effect.gen(function* () {
     const message = (e: unknown) =>
@@ -255,11 +377,24 @@ export const bringUp = (
           ? String(e.message)
           : String(e);
     const config = yield* loadConfig.pipe(Effect.mapError(message));
-    const [admit, join, key, review, sync] = hubStepTitles(hub);
+    yield* requireAuthority(config);
+    // Read again before each step that changes the fleet: the repo may have changed under it.
+    const authorityNow = loadConfig.pipe(Effect.mapError(message), Effect.tap(requireAuthority));
+    const [admit, join, key, review, sync, publish] = hubStepTitles(hub);
     yield* step(admit ?? "");
     const owner = yield* tailscaleLogin;
-    for (const line of yield* admitHub(config, hub, owner).pipe(Effect.mapError(message)))
-      yield* step(`✓ ${line}`);
+    const admitted = yield* admitHub(config, hub, owner).pipe(Effect.mapError(message));
+    // A resume admits nothing new: what the first admission added is kept.
+    yield* updateHub(home, (h) => ({
+      ...h,
+      admitted: {
+        node: (h.admitted?.node ?? false) || admitted.added.node,
+        relay: (h.admitted?.relay ?? false) || admitted.added.relay,
+        ui: (h.admitted?.ui ?? false) || admitted.added.ui,
+        token: (h.admitted?.token ?? false) || admitted.added.token,
+      },
+    })).pipe(Effect.ignore);
+    for (const line of admitted.lines) yield* step(`✓ ${line}`);
 
     yield* step(join ?? "");
     const repoUrl = out(yield* git(config.repo, ["remote", "get-url", "origin"]));
@@ -275,8 +410,10 @@ export const bringUp = (
 
     yield* step(key ?? "");
     const recipient = yield* hubRecipient(hub.ssh);
+    yield* authorityNow;
     const added = yield* underSyncLock(
-      addRecipient(config.repo, hub.node, recipient).pipe(
+      refuseDirty(config.repo, SECRETS_FILES).pipe(
+        Effect.andThen(addRecipient(config.repo, hub.node, recipient)),
         Effect.flatMap((changed) =>
           changed
             ? commitAndPush(config.repo, SECRETS_FILES, `Let ${hub.node} read the fleet's secrets`)
@@ -284,6 +421,8 @@ export const bringUp = (
         ),
       ),
     ).pipe(Effect.mapError(message));
+    if (added !== "nothing to commit")
+      yield* updateHub(home, (h) => ({ ...h, recipient: true })).pipe(Effect.ignore);
     yield* step(
       added === "nothing to commit"
         ? `✓ ${hub.node} can already read the secrets`
@@ -295,23 +434,123 @@ export const bringUp = (
       Effect.mapError(message),
     )).find((p) => p.node === hub.node);
     if (proposal === undefined) yield* step(`✓ ${hub.node} proposed nothing`);
-    else if (!ownFilesOnly(hub.node, proposal.files))
+    else if (!(yield* onboardingOnly(config.repo, hub.node, proposal.commit)))
       yield* step(
-        `${hub.node} proposed more than its own files (${proposal.files.join(", ")}); review it under Proposals`,
+        `${hub.node} proposed more than its own secrets (${proposal.files.join(", ")}); review it under Proposals`,
       );
     else {
-      const approved = yield* approve(config.repo, config.branch, proposal, config.self).pipe(
-        Effect.mapError(message),
-      );
-      yield* step(`✓ approved ${hub.node}'s proposal`);
+      yield* authorityNow;
+      // Bound to the commit just checked: a proposal changed since is refused, not approved.
+      const approved = yield* approve(
+        config.repo,
+        config.branch,
+        proposal,
+        config.self,
+        proposal.commit,
+      ).pipe(Effect.mapError(message));
+      yield* step(`✓ approved ${hub.node}'s proposed secrets`);
       for (const note of approved.notes) yield* step(`✓ ${note}`);
     }
 
     yield* step(sync ?? "");
     const synced = yield* ssh(hub.ssh, "t3-fleet sync", 300);
+    const why = synced.stderr.trim().split("\n").pop() ?? `exit ${synced.code}`;
+    if (synced.code !== 0 && hub.mcp === true)
+      // Every machine's MCP servers would move to a hub that is not serving them.
+      return yield* Effect.fail(
+        `${hub.node}'s sync did not finish (${why}); your MCP servers stay where they are until it does. Fix that, then resume`,
+      );
     yield* step(
       synced.code === 0
         ? `✓ ${hub.node} synced`
-        : `${hub.node}'s sync did not finish (${synced.stderr.trim().split("\n").pop() ?? `exit ${synced.code}`}); its timer tries again`,
+        : `${hub.node}'s sync did not finish (${why}); its timer tries again`,
     );
+
+    if (hub.mcp === true) {
+      yield* step(publish ?? "");
+      for (const line of yield* authorityNow.pipe(
+        Effect.flatMap((now) => hostMcp(now, hub)),
+        Effect.mapError(message),
+      ))
+        yield* step(`✓ ${line}`);
+    }
+  });
+
+/**
+ * Take out what an abandoned bring-up added to the fleet, each part as a new
+ * commit: the node (its file, its key among the recipients, its branches) when
+ * admission created it, [relay] and [ui] and the relay token when admission
+ * added them. What it does, a line each; what stays, said too.
+ */
+export const undoAdmission = (hub: HubRequest, home: string = process.env["HOME"] ?? "") =>
+  Effect.gen(function* () {
+    const message = (e: unknown) =>
+      typeof e === "string"
+        ? e
+        : typeof e === "object" && e !== null && "message" in e
+          ? String(e.message)
+          : String(e);
+    const lines: Array<string> = [];
+    const added = hub.admitted;
+    if (added === undefined && hub.recipient !== true)
+      return [`nothing of ${hub.node} was added to the fleet`];
+    const config = yield* loadConfig.pipe(Effect.mapError(message));
+    yield* requireAuthority(config);
+    const repo = config.repo;
+    if (added?.node === true) {
+      const removed = yield* removeNode(
+        repo,
+        config.branch,
+        hub.node,
+        home,
+        `Take ${hub.node} out of the fleet: its setup as the hub was abandoned`,
+      ).pipe(Effect.mapError(message));
+      lines.push(
+        removed.rev === null
+          ? `${hub.node} was out of the fleet already`
+          : `took ${hub.node} out of the fleet (${removed.rev}): its node file and its key`,
+      );
+    } else if (hub.recipient === true)
+      lines.push(
+        `${hub.node} was in the fleet before, so it stays, and so does its key among the secrets' recipients`,
+      );
+    if (added !== undefined && (added.relay || added.ui || added.token)) {
+      const fs = yield* FileSystem.FileSystem;
+      const rev = yield* underSyncLock(
+        Effect.gen(function* () {
+          yield* refuseDirty(repo, [FLEET_FILE, ...SECRETS_FILES]);
+          yield* pullBranch(repo, config.branch, "rebase");
+          const fleetFile = `${repo}/${FLEET_FILE}`;
+          const before = yield* fs.readFileString(fleetFile);
+          const after = yield* edited(FLEET_FILE, before, [
+            (t) => (added.relay ? dropTable(t, ["relay"]) : { text: t }),
+            (t) => (added.ui ? dropTable(t, ["ui"]) : { text: t }),
+          ]);
+          if (after !== before) yield* fs.writeFileString(fleetFile, after);
+          if (added.token) {
+            const secrets = yield* readSecrets(repo);
+            if (varNames(secrets).includes(RELAY_TOKEN)) {
+              yield* writeSecrets(repo, setVar(secrets, RELAY_TOKEN, null));
+              yield* installSecrets(repo);
+            }
+          }
+          return yield* commitAndPush(
+            repo,
+            [FLEET_FILE, ...SECRETS_FILES],
+            `Undo making ${hub.node} the relay: its setup as the hub was abandoned`,
+          );
+        }),
+      ).pipe(Effect.mapError(message));
+      lines.push(
+        `took out ${[
+          ...(added.relay ? ["[relay]"] : []),
+          ...(added.ui ? ["[ui]"] : []),
+          ...(added.token ? [RELAY_TOKEN] : []),
+        ].join(", ")}${rev === "nothing to commit" ? " (gone already)" : ` (${rev})`}`,
+      );
+    }
+    lines.push(
+      `T3 Fleet stays installed on ${hub.node}, if it got that far: \`t3-fleet leave\` there removes it`,
+    );
+    return lines;
   });

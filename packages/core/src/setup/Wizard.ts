@@ -52,9 +52,18 @@ import {
   type PlanServer,
 } from "./Plan.ts";
 import { preflight, type Preflight } from "./Preflight.ts";
-import { bringUp, dropHub, readHub, writeHub, type HubRequest } from "./Hub.ts";
+import {
+  bringUp,
+  dropHub,
+  readHub,
+  requireAuthority,
+  undoAdmission,
+  updateHub,
+  writeHub,
+  type HubRequest,
+} from "./Hub.ts";
 import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
-import { probeHub } from "./Remote.ts";
+import { pinOwnBundle, probeHub } from "./Remote.ts";
 import { SELF_SERVER } from "./Repo.ts";
 import {
   abandonRun,
@@ -65,11 +74,14 @@ import {
   NODE_NAME,
   prepare,
   resumeInput,
+  RUN_ELSEWHERE,
+  runningElsewhere,
   runSteps,
   savedSteps,
   startRun,
   stepTitles,
   unfinishedRun,
+  withRunLock,
   type Prepared,
   type PrepareRequest,
 } from "./Session.ts";
@@ -88,17 +100,30 @@ export class StalePlan extends Schema.TaggedError<StalePlan>()("StalePlan", {
   message: Schema.String,
 }) {}
 
+/** Another T3 Fleet process here is applying a setup now (Session.withRunLock): wait for it. */
+export class RunningElsewhere extends Schema.TaggedError<RunningElsewhere>()(
+  "RunningElsewhere",
+  {},
+) {
+  override get message() {
+    return RUN_ELSEWHERE;
+  }
+}
+
 /** What the server asks of the wizard's engine; Wizard.make gives the real one, tests fakes. */
 export interface SetupActions {
   readonly state: Effect.Effect<UiSetupState, string>;
   readonly probe: (ssh: string) => Effect.Effect<UiProbe>;
   readonly plan: (request: UiSetupPlanRequest) => Effect.Effect<UiSetupPlan, string>;
-  /** The jobs to run, in order; refused with why, a stale plan as StalePlan. */
+  /** The jobs to run, in order; refused with why, a stale plan as StalePlan, a run locked by another process as RunningElsewhere. */
   readonly apply: (
     request: Exclude<UiSetupApplyRequest, { readonly kind: "abandon" }>,
-  ) => Effect.Effect<ReadonlyArray<SetupJob>, string | StalePlan>;
-  /** Drop the stopped run and any hub still to bring up; what the run had done, a line each. */
-  readonly abandon: Effect.Effect<ReadonlyArray<string>, string>;
+  ) => Effect.Effect<ReadonlyArray<SetupJob>, string | StalePlan | RunningElsewhere>;
+  /**
+   * Drop the stopped run and any hub still to bring up, taking out what the
+   * hub's admission committed; what the run had done, a line each.
+   */
+  readonly abandon: Effect.Effect<ReadonlyArray<string>, string | RunningElsewhere>;
   readonly invite: (node: string) => Effect.Effect<UiInvite, string>;
   /** Once set up: one test alert through this machine's [notify] paths, as `t3-fleet notify test`. */
   readonly notifyTest: Effect.Effect<UiNotifyTest, string>;
@@ -418,6 +443,8 @@ export const make = (hooks: {
 }) =>
   Effect.gen(function* () {
     const services = yield* Effect.context<ProbeServices>();
+    // The build the hub is sent is this one, as it is now (Remote.bundleAt).
+    yield* pinOwnBundle;
     const closed = <A, E>(effect: Effect.Effect<A, E, ProbeServices>) =>
       effect.pipe(Effect.provide(services), Effect.mapError(message));
     const key = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), (b) =>
@@ -484,6 +511,11 @@ export const make = (hooks: {
           pre,
           () => Effect.void,
         );
+        // The hub is set up from an authority (or the machine starting the fleet), never a member.
+        if (request.hub !== null && !p.authority)
+          return yield* Effect.fail(
+            `${p.node} is not an authority, so it cannot set up the fleet's hub: run this on an authority, or have one give ${p.node} the authority role`,
+          );
         const missing = missingOf(p, request);
         const digest = yield* Effect.promise(() =>
           sha256(`${key}\n${fingerprint(p, request, missing)}`),
@@ -502,6 +534,7 @@ export const make = (hooks: {
         const leaving = yield* leavingRefusal(home());
         const config = yield* member;
         const hub = yield* readHub(home());
+        const elsewhere = yield* runningElsewhere(home());
         return {
           stage: Option.isSome(unfinished) ? "unfinished" : config !== null ? "member" : "fresh",
           hostname,
@@ -531,14 +564,16 @@ export const make = (hooks: {
               startedAt: p.startedAt,
               done: p.done.length,
               total: savedSteps(p).length,
+              runningElsewhere: elsewhere,
             }),
           }),
           hub: Option.match(hub, {
             onNone: () => null,
             onSome: (h) => ({ node: h.node, ssh: h.ssh, error: h.error }),
           }),
+          // Not while the hub's bring-up is still to finish: the app here offers to try it again.
           fleetUrl:
-            config === null || Option.isSome(unfinished)
+            config === null || Option.isSome(unfinished) || Option.isSome(hub)
               ? null
               : (config.settings.relay?.url?.replace(/\/+$/, "").concat("/") ?? null),
         } satisfies UiSetupState;
@@ -612,22 +647,31 @@ export const make = (hooks: {
       work: (
         step: (text: string) => Effect.Effect<void>,
       ) => Effect.Effect<void, string, ProbeServices>,
-    ): SetupJob => ({ kind: "setup", title, run: (step) => closed(work(step)) });
+    ): SetupJob => ({
+      kind: "setup",
+      title,
+      run: (step) => closed(withRunLock(home(), work(step))),
+    });
 
     const hubJob = (hub: HubRequest): SetupJob => ({
       kind: "setup-hub",
       title: `Bring up ${hub.node}, the hub`,
       run: (step) =>
         closed(
-          Effect.gen(function* () {
-            yield* writeHub(home(), { ...hub, error: null });
-            yield* bringUp(hub, step).pipe(
-              Effect.tapError((why) =>
-                writeHub(home(), { ...hub, error: why }).pipe(Effect.ignore),
-              ),
-            );
-            yield* dropHub(home());
-          }),
+          withRunLock(
+            home(),
+            Effect.gen(function* () {
+              // What an earlier attempt recorded (what it committed) stays with the request.
+              const saved = Option.getOrElse(yield* readHub(home()), () => hub);
+              yield* writeHub(home(), { ...saved, error: null });
+              yield* bringUp(saved, step, home()).pipe(
+                Effect.tapError((why) =>
+                  updateHub(home(), (h) => ({ ...h, error: why })).pipe(Effect.ignore),
+                ),
+              );
+              yield* dropHub(home());
+            }),
+          ),
         ),
     });
 
@@ -651,25 +695,31 @@ export const make = (hooks: {
         Effect.flatMap((lines) => Effect.forEach([`${input.node} is set up.`, ...lines], step)),
       );
 
-    const abandon: SetupActions["abandon"] = closed(
-      Effect.gen(function* () {
-        const dropped = yield* abandonRun(home());
-        const hub = yield* readHub(home());
-        if (Option.isNone(dropped) && Option.isNone(hub))
-          return yield* Effect.fail("there is no unfinished setup to abandon");
-        yield* dropHub(home());
-        const lines: Array<string> = [];
-        if (Option.isSome(dropped)) {
-          const { stopped, report } = dropped.value;
-          if (stopped) lines.push(`It stopped at ${stopped.step}: ${stopped.why}`);
-          lines.push(...report);
-        }
-        if (Option.isSome(hub))
-          lines.push(
-            `Forgot bringing up ${hub.value.node} as the hub; what was done there stays. To add a hub later, run \`t3-fleet setup <repository> <name> --relay\` on it.`,
-          );
-        return lines;
-      }),
+    const abandon: SetupActions["abandon"] = Effect.gen(function* () {
+      if (yield* runningElsewhere(home())) return yield* new RunningElsewhere();
+      const hub = yield* readHub(home());
+      // What the hub's admission committed comes out again first; when it cannot, the hub stays to retry.
+      const undone = Option.isSome(hub) ? yield* undoAdmission(hub.value, home()) : [];
+      const dropped = yield* abandonRun(home());
+      if (Option.isNone(dropped) && Option.isNone(hub))
+        return yield* Effect.fail("there is no unfinished setup to abandon");
+      yield* dropHub(home());
+      const lines: Array<string> = [];
+      if (Option.isSome(dropped)) {
+        const { stopped, report } = dropped.value;
+        if (stopped) lines.push(`It stopped at ${stopped.step}: ${stopped.why}`);
+        lines.push(...report);
+      }
+      if (Option.isSome(hub))
+        lines.push(
+          `Dropped bringing up ${hub.value.node} as the hub; what its admission added to the fleet is taken out:`,
+          ...undone.map((l) => `  ${l}`),
+          `To add a hub later, set it up again from here (t3-fleet ui).`,
+        );
+      return lines;
+    }).pipe(
+      Effect.provide(services),
+      Effect.mapError((e) => (Schema.is(RunningElsewhere)(e) ? e : message(e))),
     );
 
     const apply: SetupActions["apply"] = (request) =>
@@ -677,8 +727,12 @@ export const make = (hooks: {
         if (request.kind === "resume") {
           const leaving = yield* leavingRefusal(home());
           if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
+          if (yield* runningElsewhere(home())) return yield* new RunningElsewhere();
           const unfinished = yield* unfinishedRun(home());
           const hub = Option.getOrNull(yield* readHub(home()));
+          // A machine in a fleet brings a hub up only as an authority (bringUp checks again).
+          const config = yield* member;
+          if (hub !== null && config !== null) yield* requireAuthority(config);
           const jobs: Array<SetupJob> = [];
           if (Option.isSome(unfinished)) {
             const progress = unfinished.value;
@@ -758,15 +812,18 @@ export const make = (hooks: {
             )
           : runJob(title, (step) =>
               Effect.gen(function* () {
-                if (found.hub !== null) yield* writeHub(p.home, found.hub);
                 const progress = yield* startRun(p, input, step);
+                // Saved once the run is: a hub without a run to resume would show a setup that is not.
+                if (found.hub !== null) yield* writeHub(p.home, found.hub);
                 yield* stepsOf(input, p.found.raw, progress, step);
               }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
             );
         return found.hub === null ? [local] : [local, hubJob(found.hub)];
       }).pipe(
         Effect.provide(services),
-        Effect.mapError((e) => (Schema.is(StalePlan)(e) ? e : message(e))),
+        Effect.mapError((e) =>
+          Schema.is(StalePlan)(e) || Schema.is(RunningElsewhere)(e) ? e : message(e),
+        ),
       );
 
     const invite: SetupActions["invite"] = (node) =>

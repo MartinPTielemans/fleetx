@@ -31,6 +31,7 @@ import { buildMarker, buildOf, runningBuild } from "../Build.ts";
 import { sh, shPath } from "../Area.ts";
 import { parseVersion, type ExecResult } from "../Exec.ts";
 import { installEngineScript } from "../Fix.ts";
+import { sha256 } from "../Hash.ts";
 import { BUNDLE_FILE, CONFIG_DIR, DEFAULT_RELAY_PORT, SHARE_DIR, STATE_DIR } from "../Names.ts";
 import { remoteExec, validSshDestination } from "../Remote.ts";
 import { MIN_NODE_MAJOR } from "../Runtime.ts";
@@ -323,13 +324,51 @@ export const hubPlanSteps = (probe: UiProbe): ReadonlyArray<string> => [
   "Join the fleet as its admitted member and relay",
 ];
 
-/** Like the CLI's ownBundle, this is the running bundle or the source checkout's build. */
-const ownBundle = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
+/** The build each bundle file held when this process first read it: what it ships, byte for byte. */
+const pinned = new Map<string, { readonly bundle: string; readonly digest: string }>();
+
+/** Forget the builds read so far, as a new process would: for tests, which swap the build under it. */
+export const forgetBundles = () => pinned.clear();
+
+/**
+ * The build at `file`, as this process first read it, with its SHA-256: a
+ * file changed since (another build, or the same marker over other bytes) is
+ * refused, never shipped.
+ */
+export const bundleAt = (file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const bundle = yield* fs
+      .readFileString(file)
+      .pipe(
+        Effect.mapError(
+          () =>
+            "This computer has no T3 Fleet build to send. Run pnpm build in a source checkout, or reinstall T3 Fleet, then restart the wizard.",
+        ),
+      );
+    if (bundle.trim() === "")
+      return yield* Effect.fail(
+        "This computer's T3 Fleet build is empty. Build or reinstall T3 Fleet, then restart the wizard.",
+      );
+    const digest = yield* Effect.promise(() => sha256(bundle));
+    const first = pinned.get(file);
+    if (first === undefined) {
+      pinned.set(file, { bundle, digest });
+      return { bundle, digest };
+    }
+    if (first.digest !== digest)
+      return yield* Effect.fail(
+        "The T3 Fleet build changed since the wizard started. Restart the wizard before installing its build on the hub.",
+      );
+    return first;
+  });
+
+/** Where this process's bundle is: the running bundle, or the source checkout's build. */
+const ownBundleFile = Effect.gen(function* () {
   const path = yield* Path.Path;
   const self = new URL(import.meta.url);
   const source = /\.[cm]?tsx?$/.test(self.pathname);
-  const file = yield* path
+  return yield* path
     .fromFileUrl(source ? new URL("../../../../apps/cli/dist/bin.mjs", self) : self)
     .pipe(
       Effect.mapError(
@@ -337,25 +376,24 @@ const ownBundle = Effect.gen(function* () {
           "The running T3 Fleet bundle path could not be read. Restart or reinstall T3 Fleet, then try again.",
       ),
     );
-  const bundle = yield* fs
-    .readFileString(file)
-    .pipe(
-      Effect.mapError(
-        () =>
-          "This computer has no T3 Fleet build to send. Run pnpm build in a source checkout, or reinstall T3 Fleet, then restart the wizard.",
-      ),
-    );
-  if (bundle.trim() === "")
-    return yield* Effect.fail(
-      "This computer's T3 Fleet build is empty. Build or reinstall T3 Fleet, then restart the wizard.",
-    );
+});
+
+/**
+ * Read (and keep) this process's build now, when the wizard starts: what the
+ * hub is sent later is exactly it, or nothing.
+ */
+export const pinOwnBundle = ownBundleFile.pipe(Effect.flatMap(bundleAt), Effect.ignore);
+
+/** Like the CLI's ownBundle, this is the running bundle or the source checkout's build, as first read. */
+const ownBundle = Effect.gen(function* () {
+  const found = yield* bundleAt(yield* ownBundleFile);
   const running = runningBuild();
-  const disk = buildOf(bundle);
+  const disk = buildOf(found.bundle);
   if (running !== null && (disk === null || buildMarker(running) !== buildMarker(disk)))
     return yield* Effect.fail(
       "The T3 Fleet build changed since the wizard started. Restart the wizard before installing its build on the hub.",
     );
-  return bundle;
+  return found;
 });
 
 const LocalConfig = Schema.Struct({ repo: Schema.String, node: Schema.String });
@@ -460,7 +498,12 @@ export const bringUpHub = (input: {
         );
     }
     yield* input.onStep(`Installing T3 Fleet on ${input.ssh}`);
-    yield* checked(input.ssh, installEngineScript(bundle), "Installing T3 Fleet", 120);
+    yield* checked(
+      input.ssh,
+      installEngineScript(bundle.bundle, bundle.digest),
+      "Installing T3 Fleet",
+      120,
+    );
     const cli = `node "$HOME/${SHARE_DIR}/${BUNDLE_FILE}"`;
     const resume = saved !== null && saved.finishedAt === null;
     if (saved?.finishedAt != null) {

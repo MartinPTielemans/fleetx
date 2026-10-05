@@ -22,7 +22,8 @@
  *   409  with `x-t3-fleet-error: stale-plan` (SETUP_ERROR_HEADER, STALE_PLAN):
  *        the plan is out of date, because something it read changed or its id
  *        is too old; plan again
- *   409  without it: a setup is running already; watch its job
+ *   409  without it: a setup is running already (here, or in another T3 Fleet
+ *        process on this machine); watch its job, or wait for it
  *   422  setup will not do this, and the text says why ("names are lowercase…")
  *   500  where this machine stands could not be read
  */
@@ -59,11 +60,17 @@ export const UiSetupState = Schema.Struct({
   github: Schema.NullOr(Schema.String),
   /** What the stopped run was doing, when stage is "unfinished". */
   unfinished: Schema.NullOr(
-    Schema.Struct({ startedAt: Schema.Number, done: Schema.Number, total: Schema.Number }),
+    Schema.Struct({
+      startedAt: Schema.Number,
+      done: Schema.Number,
+      total: Schema.Number,
+      /** Another T3 Fleet process on this machine is applying it now: resume and abandon wait. */
+      runningElsewhere: Schema.optionalKey(Schema.Boolean),
+    }),
   ),
   /**
    * A hub asked for whose bring-up has not finished: apply's `resume` tries
-   * it again, `abandon` forgets it. `error` is why the last try stopped; null
+   * it again, `abandon` takes out what its admission committed and forgets it. `error` is why the last try stopped; null
    * before the first, or while one runs.
    */
   hub: Schema.NullOr(

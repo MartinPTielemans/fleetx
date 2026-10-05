@@ -6,16 +6,19 @@
 # for `tailscale serve` on server: it forwards server's own address, port 8399,
 # to the relay on 127.0.0.1:8399, drops Tailscale-* headers the client sent, and
 # sets Tailscale-User-Login by source address (laptop = me@example.com, desktop
-# = mallory@example.com). The relay URL is plain http on a ts.net name in
-# /etc/hosts; real serve adds TLS. Services run by hand (no systemd here).
+# = mallory@example.com). It runs as root, as tailscaled does: the relay lets
+# in only connections made by root or by tailscaled's user (HubUi.ts). The
+# relay URL is plain http on a ts.net name in /etc/hosts; real serve adds TLS.
+# Services run by hand (no systemd here).
 #
 # Shown: the gate (allowed login, unknown login, a client's own identity header
-# replaced), a fix applied from the hub and run by laptop's listener, a fix
+# replaced, a program on the hub posing as tailscale serve refused), a fix
+# applied from the hub and run by laptop's listener, a fix
 # laptop never proposed refused, approving refused on the hub.
 # Usage: tests/integration/hub-ui.sh   (needs Docker; builds the bundle first)
 set -euo pipefail
 cd "$(dirname "$0")"
-export COMPOSE_PROJECT_NAME=wizhub-it
+export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-wizhub-it}
 pass() { printf '\033[32mpass\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
 on() { local node=$1; shift; docker compose exec -T -u dev "$node" bash -lc "export PATH=\$HOME/.local/bin:\$PATH; $*"; }
@@ -51,6 +54,7 @@ for n in server laptop server; do on "$n" 't3-fleet sync' >/dev/null || true; do
 on laptop "cd ~/fleet && node -e '
   const fs = require(\"fs\"); let t = fs.readFileSync(\"t3-fleet.toml\", \"utf8\");
   t = t.replace(/^\\[relay\\][^\\[]*/m, \"\");
+  t = t.replace(/^apply = .*\\n/m, \"\");
   t += \"\\n[relay]\\nurl = \\\"$HUB\\\"\\nport = 8399\\n\\n[ui]\\nallow = [\\\"me@example.com\\\"]\\n\";
   t = /^\\[fleet\\]/m.test(t) ? t.replace(/^\\[fleet\\]\\n/m, \"[fleet]\\napply = []\\n\") : t + \"\\n[fleet]\\napply = []\\n\";
   fs.writeFileSync(\"t3-fleet.toml\", t);'
@@ -61,7 +65,7 @@ on server 'grep -q "^T3_FLEET_RELAY_TOKEN=" ~/.config/t3-fleet/secrets.env' || f
 pass "a fleet with server as its hub, [ui] allow = me@example.com"
 
 docker compose exec -d -u dev server bash -lc 'export PATH=$HOME/.local/bin:$PATH; t3-fleet relay serve > /tmp/relay.log 2>&1'
-docker compose exec -d -u dev server bash -lc "node /tmp/serve-proxy.mjs $SERVER $LAPTOP=me@example.com,$DESKTOP=mallory@example.com > /tmp/proxy.log 2>&1"
+docker compose exec -d -u root server bash -lc "node /tmp/serve-proxy.mjs $SERVER $LAPTOP=me@example.com,$DESKTOP=mallory@example.com > /tmp/proxy.log 2>&1"
 docker compose exec -d -u dev laptop bash -lc 'export PATH=$HOME/.local/bin:$PATH; t3-fleet listen > /tmp/listen.log 2>&1'
 for i in $(seq 30); do on laptop "node -e 'fetch(\"$HUB/health\").then(r=>process.exit(r.ok?0:1),()=>process.exit(1))'" && break; sleep 1; done
 on laptop 't3-fleet sync' >/dev/null || true   # reports to the relay, findings with their fixes
@@ -78,7 +82,14 @@ spoof=$(on desktop "node -e 'fetch(\"$HUB/\",{headers:{\"tailscale-user-login\":
 on server "node -e 'require(\"net\").connect(8399,\"$SERVER\").on(\"connect\",()=>process.exit(0))'" || fail "the proxy should listen on server's address"
 sess=$(on desktop "node /tmp/hub-browser.mjs $HUB session")
 printf '%s' "$sess" | grep -q '"status":403' || fail "mallory should get no session: $sess"
-pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced"
+# A program on the hub itself, as the relay's own user, connecting to the loopback port with the headers serve sets.
+onhub=$(on server "node -e '
+  const r = require(\"http\").request({ host: \"127.0.0.1\", port: 8399, method: \"POST\", path: \"/api/session\",
+    headers: { host: \"server.tailnet.ts.net:8399\", \"tailscale-user-login\": \"me@example.com\", \"x-t3-fleet-hub\": \"1\" } },
+    (a) => { let b = \"\"; a.on(\"data\", (d) => (b += d)).on(\"end\", () => console.log(a.statusCode, b)); });
+  r.end();'")
+printf '%s' "$onhub" | grep -q '^403 ' || fail "a program on the hub must not mint a session as me@example.com: $onhub"
+pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused"
 
 # A fix applied from the hub, run by laptop's listener.
 on laptop '[ ! -e ~/.agents/skills/demo ]' || fail "demo should not be linked on laptop yet (apply = [])"

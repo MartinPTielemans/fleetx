@@ -106,3 +106,41 @@ describe("deciding a proposal", () => {
     );
   });
 });
+
+describe("where `t3-fleet ui` opens the app (review B-8)", () => {
+  it("on the hub once it is up, and here while its bring-up is still to finish", async () => {
+    const { hostedApp } = await import("./ui.ts");
+    const { writeHub, dropHub } = await import("@t3-fleet/core/setup/Hub");
+    const root = mkdtempSync(join(tmpdir(), "t3-fleet-ui-hosted-"));
+    const repo = join(root, "fleet");
+    mkdirSync(join(repo, "nodes"), { recursive: true });
+    writeFileSync(
+      join(repo, "t3-fleet.toml"),
+      '[relay]\nurl = "https://hub.tailnet.ts.net:8399"\nport = 8399\n\n[ui]\nallow = ["me@example.com"]\n',
+    );
+    writeFileSync(join(repo, "nodes/laptop.toml"), 'roles = ["authority"]\n');
+    writeFileSync(join(repo, "nodes/hub.toml"), 'roles = ["member", "relay"]\n');
+    git(root, ["init", "-q", "-b", "main", repo]);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "fleet"]);
+    mkdirSync(join(root, ".config/t3-fleet"), { recursive: true });
+    writeFileSync(
+      join(root, ".config/t3-fleet/config.toml"),
+      `repo = "${repo}"\nnode = "laptop"\n`,
+    );
+    const saved = process.env["HOME"];
+    process.env["HOME"] = root;
+    try {
+      const hosted = await run(hostedApp);
+      expect(hosted._tag === "Some" ? hosted.value.url : null).toBe(
+        "https://hub.tailnet.ts.net:8399/",
+      );
+      await run(writeHub(root, { node: "hub", ssh: "me@hub", relayUrl: null, error: "no ssh" }));
+      expect((await run(hostedApp))._tag).toBe("None");
+      await run(dropHub(root));
+      expect((await run(hostedApp))._tag).toBe("Some");
+    } finally {
+      process.env["HOME"] = saved;
+    }
+  });
+});

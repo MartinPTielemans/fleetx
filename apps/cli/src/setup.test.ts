@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import { Command } from "effect/unstable/cli";
 import { describe, expect, it } from "vite-plus/test";
 
-import { plannedSettings, setupFlags, upkeepFlags } from "./setup.ts";
+import { existingRelayHub, plannedSettings, setupFlags, upkeepFlags } from "./setup.ts";
 
 /** What `t3-fleet setup <args>` parses to, without running setup. */
 const parsed = async (args: ReadonlyArray<string>) => {
@@ -81,9 +81,14 @@ describe("t3-fleet setup's switches", () => {
     expect(upkeepFlags(await parsed([]), { ...first, mode: "join" }).autoUpdate).toBe(null);
     expect(upkeepFlags(await parsed([]), { ...first, mode: "again" })).toEqual({
       autoUpdate: null,
-      desktop: false,
+      desktop: null,
       ntfy: false,
     });
+    // Named on a machine set up already, it is set either way (review B-13).
+    expect(upkeepFlags(await parsed(["--no-notify"]), { ...first, mode: "again" }).desktop).toBe(
+      false,
+    );
+    expect(upkeepFlags(await parsed(["--notify"]), { ...first, mode: "again" }).desktop).toBe(true);
     expect(upkeepFlags(await parsed(["--ntfy"]), { ...first, mode: "again" }).ntfy).toBe(true);
     // A fleet that pushes to ntfy already keeps its topic.
     expect(upkeepFlags(await parsed(["--ntfy"]), { ...first, fleetNtfy: true }).ntfy).toBe(false);
@@ -108,5 +113,19 @@ describe("t3-fleet setup's switches", () => {
     expect(plannedSettings(await parsed([]), { ...here, mode: "join" })).toEqual([
       "Notify you on laptop for every fleet alert ([notify] desktop)",
     ]);
+  });
+});
+
+describe("--mcp-hub on a fleet whose relay is set up already (review B-13)", () => {
+  it("turns its MCP hub on at that relay, or off; a relay this run sets up carries its own", () => {
+    const none = { relay: null };
+    const url = "https://box.tailnet.ts.net:8399";
+    expect(existingRelayHub(Option.some(true), none, url)).toEqual({ gateway: url });
+    expect(existingRelayHub(Option.some(false), none, url)).toBe(false);
+    expect(existingRelayHub(Option.none(), none, url)).toBe(null);
+    expect(existingRelayHub(Option.some(true), none, null)).toBe(null);
+    expect(
+      existingRelayHub(Option.some(true), { relay: { url, token: "t", mcp: true } }, url),
+    ).toBe(null);
   });
 });

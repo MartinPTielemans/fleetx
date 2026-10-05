@@ -31,6 +31,7 @@ import type { CheckReport } from "@t3-fleet/core/Check";
 import type { Config } from "@t3-fleet/core/Config";
 import type { Finding } from "@t3-fleet/core/Diagnose";
 import { forwardFixes } from "@t3-fleet/core/FixRequest";
+import { connectionOf, servedByTailscale } from "@t3-fleet/core/HubUi";
 import { lookupLatest } from "@t3-fleet/core/Latest";
 import type { RelayHandle } from "@t3-fleet/core/Relay";
 import type { NodeResult } from "@t3-fleet/core/Remote";
@@ -168,6 +169,8 @@ export const hubUiLayer = (relay: RelayHandle, options: HubUiOptions) =>
               config.nodes.filter((n) => n.roles.includes("authority")).map((n) => n.name),
             ),
           ),
+          servedBy: (request) =>
+            servedByTailscale(connectionOf(request.source)).pipe(Effect.provide(services)),
         },
         actions: {
           check: live((config) =>

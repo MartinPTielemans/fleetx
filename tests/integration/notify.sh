@@ -3,7 +3,7 @@
 # repeats after the relay restarts. Only a local ntfy-compatible sink receives it.
 set -euo pipefail
 cd "$(dirname "$0")"
-export COMPOSE_PROJECT_NAME=wiznot-notify
+export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-wiznot-notify}
 compose() { docker compose -f notify-compose.yml "$@"; }
 on() { local node=$1; shift; compose exec -T -u dev "$node" "$@"; }
 cleanup() { compose down -v -t 1 >/dev/null 2>&1; }

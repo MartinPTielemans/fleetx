@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -135,11 +136,13 @@ const record = (over: Partial<FixRequestRecord> = {}): FixRequestRecord => ({
   error: null,
   ...over,
 });
-const progress = (state: FixProgress["state"]): FixProgress => ({
+const CLAIM = "c".repeat(32);
+const progress = (state: FixProgress["state"], claim = CLAIM): FixProgress => ({
   state,
   step: null,
   result: null,
   error: null,
+  claim,
 });
 
 describe("advance", () => {
@@ -150,6 +153,14 @@ describe("advance", () => {
     const claimed = advance(record(), progress("running"));
     expect(claimed).toMatchObject({ state: "running" });
     expect(advance(claimed as FixRequestRecord, progress("done"))).toMatchObject({ state: "done" });
+    // Another run's claim, on a request already running: refused.
+    expect(advance(claimed as FixRequestRecord, progress("running", "d".repeat(32)))).toBe(
+      "this request is claimed by another run",
+    );
+    expect(advance(claimed as FixRequestRecord, progress("done", "d".repeat(32)))).toBe(
+      "this request is claimed by another run",
+    );
+    expect(advance(record(), progress("running", ""))).toBe("a report names its claim");
     expect(advance(record({ state: "expired" }), progress("running"))).toBe(
       "this request is expired",
     );
@@ -302,5 +313,78 @@ describe("forwardFixes", () => {
     expect(outcomes[0]?.ok).toBe(false);
     expect(outcomes[0]?.summary).toContain("laptop did not pick this up");
     expect([...r.records.values()][0]?.state).toBe("expired");
+  });
+});
+
+describe("one request, two answering runs (review A-F3)", () => {
+  it("runs the fixes once, even when both read the request while it was waiting", async () => {
+    // The relay's store, with its real claim rule.
+    let current = record({ fixes: [await asked(upgrade)] });
+    const snapshot = current;
+    let started = 0;
+    let active = 0;
+    let most = 0;
+    const answer = () =>
+      answerFixRequest({
+        self: "laptop",
+        request: snapshot,
+        progress: (p) =>
+          Effect.sync(() => {
+            const next = advance(current, p);
+            if (typeof next === "string") return false;
+            current = next;
+            return true;
+          }),
+        findings: Effect.succeed([upgrade]),
+        run: (fixes) =>
+          Effect.gen(function* () {
+            started++;
+            active++;
+            most = Math.max(most, active);
+            yield* Effect.sleep("50 millis");
+            active--;
+            return fixes.map((finding) => ({ finding, ok: true, summary: "ok" }));
+          }),
+        secrets: new Map(),
+      });
+    const results = await run(Effect.all([answer(), answer()], { concurrency: 2 }));
+    expect(started).toBe(1);
+    expect(most).toBe(1);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(current.state).toBe("done");
+  });
+});
+
+describe("a fix's output and the secrets in it (review A-F4)", () => {
+  it("clears a long secret from the whole output before cutting it short", async () => {
+    const { runFix } = await import("./Fix.ts");
+    const secret = `long-secret-${"x".repeat(280)}`;
+    const finding: Finding & { fix: Fix } = {
+      ...upgrade,
+      fix: { command: `printf '%s\\n' '${secret}'`, safe: true },
+    };
+    const local = {
+      name: "laptop",
+      ssh: null,
+      roles: ["authority"],
+      profiles: [],
+      tailnet: null,
+      settings: { table: {}, origins: {} },
+    };
+    const sent: Array<FixProgress> = [];
+    await Effect.runPromise(
+      answerFixRequest({
+        self: "laptop",
+        request: record({ fixes: [await asked(finding)] }),
+        progress: (p) => Effect.sync(() => (sent.push(p), true)),
+        findings: Effect.succeed([finding]),
+        run: (fixes, secrets) =>
+          Effect.forEach(fixes, (f) => runFix(local as never, f, "/tmp", "", secrets)),
+        secrets: new Map([["TOKEN", secret]]),
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+    const output = sent.at(-1)?.result?.results[0]?.output ?? "";
+    expect(output).toBe("•••");
+    expect(JSON.stringify(sent)).not.toContain("long-secret-");
   });
 });

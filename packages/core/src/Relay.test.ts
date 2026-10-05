@@ -201,13 +201,29 @@ describe("fix requests", () => {
         request: id,
       });
       expect(JSON.stringify(events)).not.toContain("claude-behind");
-      const progress = (state: string) =>
+      const mine = "a".repeat(32);
+      const theirs = "b".repeat(32);
+      const progress = (state: string, claim = mine) =>
         relay.request(`/fixes/${id}/progress`, {
           method: "POST",
-          body: JSON.stringify({ state, step: null, result: null, error: null }),
+          body: JSON.stringify({ state, step: null, result: null, error: null, claim }),
         });
+      // A report without a claim (a listener from before claims) is refused, and runs nothing.
+      expect(
+        (
+          await relay.request(`/fixes/${id}/progress`, {
+            method: "POST",
+            body: JSON.stringify({ state: "running", step: null, result: null, error: null }),
+          })
+        ).status,
+      ).toBe(400);
       expect((await progress("done")).status).toBe(409);
       expect((await progress("running")).status).toBe(204);
+      // Claimed: a second run, with its own claim, is refused, its progress too.
+      expect((await progress("running", theirs)).status).toBe(409);
+      expect((await progress("done", theirs)).status).toBe(409);
+      // The claim is never handed out with the request.
+      expect(await (await relay.request(`/fixes/${id}`)).text()).not.toContain(mine);
       expect((await progress("done")).status).toBe(204);
       expect((await progress("running")).status).toBe(409);
       const record = JSON.parse(await (await relay.request(`/fixes/${id}`)).text()) as {

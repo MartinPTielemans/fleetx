@@ -41,7 +41,9 @@ import {
   syncLockPath,
   takeSyncLock,
   underSyncLock,
+  withSyncLock,
 } from "./SyncLock.ts";
+import { exec } from "./Exec.ts";
 
 const layer = Layer.merge(NodeServices.layer, FetchHttpClient.layer);
 const run = <A, E>(
@@ -1129,6 +1131,34 @@ describe("the sync lock's owner", () => {
     } finally {
       delete process.env[SYNC_LOCK_ENV];
     }
+  });
+
+  it("hands the lock to the commands its holder starts, never to another fiber here (review A-F3)", async () => {
+    process.env["HOME"] = mkdtempSync(join(tmpdir(), "t3-fleet-lock-"));
+    delete process.env[SYNC_LOCK_ENV];
+    let other = "";
+    let child = "";
+    const holder = withSyncLock(
+      Effect.gen(function* () {
+        child = (yield* exec({ command: "sh", args: ["-c", `printf %s "$${SYNC_LOCK_ENV}"`] }))
+          .stdout;
+        yield* Effect.sleep("150 millis");
+      }),
+      Effect.fail("busy"),
+      { children: true },
+    );
+    const another = Effect.sleep("50 millis").pipe(
+      Effect.andThen(
+        underSyncLock(Effect.succeed("entered")).pipe(
+          Effect.catch((e) => Effect.succeed(String(e))),
+        ),
+      ),
+      Effect.tap((r) => Effect.sync(() => (other = r))),
+    );
+    await run(Effect.all([holder, another], { concurrency: 2 }));
+    expect(child).not.toBe("");
+    expect(process.env[SYNC_LOCK_ENV]).toBeUndefined();
+    expect(other).toContain("a sync is running");
   });
 
   it("lets its holder's own steps through (sync approving), but never a second holder", async () => {
