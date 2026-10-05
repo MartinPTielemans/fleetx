@@ -10,7 +10,17 @@
  * `hosted-stdio` kinds declared for it. What setup imports is `direct` (a URL
  * each machine connects to) or `stdio` (a command each machine runs):
  *
- *   direct, https, nothing else    moves: `remote`, its bearer secret kept
+ *   direct, https, nothing else    moves: `remote`, every field the hub reads for
+ *                                  one kept (its bearer secret, remote_auth and
+ *                                  its scopes, a static oauth client, tools.deny)
+ *                                  and anything else it holds; only what a
+ *                                  machine alone reads (transport) goes
+ *   direct the hub could not serve stays: an oauth client without its https
+ *                                  issuer, say; the hub's own reason given
+ *
+ * A server moved keeps what it was under `moved_from` (the hub reads no such
+ * field): turning the hub off ([defaults.mcp] hub = false) puts that back
+ * (backFromHub), so each machine runs it again as before.
  *   direct with its own headers    stays: the hub sends only the credential
  *   direct over SSE                stays: the hub proxies streamable HTTP
  *   direct with a secret in its URL  stays: the hub does not fill one in
@@ -20,7 +30,7 @@
  *                                  for it (a container, a hosted-stdio command)
  *   remote, container, …           on the hub already
  */
-import { HOSTED_KINDS } from "../hub/Definitions.ts";
+import { HOSTED_KINDS, isProblem, parseDefinition } from "../hub/Definitions.ts";
 
 export type Hosting =
   | { readonly on: "hub"; readonly definition: Readonly<Record<string, unknown>> | null }
@@ -60,11 +70,31 @@ export const hostingOf = (definition: Readonly<Record<string, unknown>>): Hostin
       on: "machines",
       why: "it sends headers of its own, and the hub sends only the server's credential",
     };
-  const auth = definition["auth"];
-  return {
-    on: "hub",
-    definition: { kind: "remote", url, ...(auth === undefined ? {} : { auth }) },
-  };
+  // Everything but what only a machine reads: the hub reads the rest of a remote's fields too.
+  const { kind: _kind, transport: _transport, headers: _headers, ...rest } = definition;
+  const remote = { kind: "remote", ...rest, url, moved_from: definition };
+  const served = parseDefinition("server", JSON.stringify(remote));
+  if (isProblem(served))
+    return { on: "machines", why: `the hub could not serve it: ${served.problem}` };
+  return { on: "hub", definition: remote };
+};
+
+/**
+ * The definition a server had before the hub took it over, for when the hub
+ * stops hosting the fleet's servers; null for one it did not move (a
+ * `remote` written as one, or anything else).
+ */
+export const backFromHub = (
+  definition: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> | null => {
+  const before = definition["moved_from"];
+  return definition["kind"] === "remote" &&
+    typeof before === "object" &&
+    before !== null &&
+    !Array.isArray(before) &&
+    (before as Record<string, unknown>)["kind"] === "direct"
+    ? (before as Readonly<Record<string, unknown>>)
+    : null;
 };
 
 /** Each server by name, sorted: on the hub (moved now, or there already) or on each machine, with why. */

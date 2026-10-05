@@ -290,6 +290,12 @@ export const UiProposal = Schema.Struct({
   files: Schema.Array(Schema.String),
   diff: Schema.String,
   autoApprovable: Schema.Boolean,
+  /**
+   * What approving it does besides landing the change, shown with it: a
+   * proposal that makes its machine the relay also lets this authority's
+   * Tailscale login into the app the hub hosts. Absent when nothing.
+   */
+  also: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type UiProposal = typeof UiProposal.Type;
 

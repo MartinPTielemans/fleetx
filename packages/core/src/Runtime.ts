@@ -112,23 +112,33 @@ export const newBuild = (bundle: string, every: Duration.Input = Duration.minute
  * the service keeps running until `drain` completes (the model proxy waits
  * for its responses in flight), and `exit` is called once the service has
  * stopped, its own finalizers included.
+ *
+ * `restart` ends it the same way, for another reason (the relay: settings it
+ * reads only when it starts changed), saying that reason. Without `drain` only.
  */
-export const untilReplaced = <A, E, R, R2, R3 = never>(
+export const untilReplaced = <A, E, R, R2, R3 = never, R4 = never>(
   service: Effect.Effect<A, E, R>,
   replaced: Effect.Effect<unknown, never, R2>,
-  options: { readonly drain?: Effect.Effect<unknown, never, R3>; readonly exit: () => void },
+  options: {
+    readonly drain?: Effect.Effect<unknown, never, R3>;
+    readonly restart?: Effect.Effect<string, never, R4>;
+    readonly exit: () => void;
+  },
 ) =>
   Effect.suspend(() => {
     let drained = false;
     const drain = options.drain;
+    const NEW_BUILD = "a new T3 Fleet build is installed; exiting so the service restarts on it";
+    const why =
+      options.restart === undefined || drain !== undefined
+        ? replaced.pipe(Effect.as(NEW_BUILD))
+        : Effect.raceFirst(replaced.pipe(Effect.as(NEW_BUILD)), options.restart);
     return Effect.raceFirst(
       service,
-      replaced.pipe(
-        Effect.andThen(
+      why.pipe(
+        Effect.flatMap((said) =>
           drain === undefined
-            ? Console.log(
-                "a new T3 Fleet build is installed; exiting so the service restarts on it",
-              ).pipe(Effect.andThen(Effect.sync(options.exit)))
+            ? Console.log(said).pipe(Effect.andThen(Effect.sync(options.exit)))
             : Console.log(
                 "a new T3 Fleet build is installed; exiting once the requests in flight are done",
               ).pipe(

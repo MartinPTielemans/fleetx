@@ -46,7 +46,11 @@ export const secretVar = (name: string) =>
  */
 export const redactSecrets = (text: string, secrets: ReadonlyMap<string, string>) => {
   let out = text;
-  for (const value of secrets.values()) if (value.length >= 6) out = out.replaceAll(value, "•••");
+  // Longest first: a value that begins with another must not keep its tail.
+  const values = [...new Set(secrets.values())]
+    .filter((v) => v.length >= 6)
+    .sort((a, b) => b.length - a.length);
+  for (const value of values) out = out.replaceAll(value, "•••");
   return out;
 };
 
@@ -101,7 +105,20 @@ export const listen = <E, R, R2 = never>(
     if (token === "") return yield* Effect.fail(`no ${RELAY_TOKEN} in this node's secrets`);
     const client = yield* HttpClient.HttpClient;
     let lastId = 0;
+    const receive = (catchUp: boolean) =>
+      Effect.gen(function* () {
+        const fresh = yield* loadConfigFrom(config.repo, config.self);
+        if (deliveryChannels(fresh, "listen").length === 0) return;
+        const states = yield* fleetFromRelay(fresh, url);
+        if (states !== null)
+          for (const line of yield* deliverAlerts(fresh, states, "listen", { catchUp }))
+            yield* log(line);
+      }).pipe(Effect.ignore);
     const once = Effect.gen(function* () {
+      // Caught up before subscribing: a report made after this read reaches the stream (the
+      // relay replays what came after `since`, every kept event the first time), so the
+      // first catch-up never takes as seen an alert that arrived while it was connecting.
+      yield* receive(true);
       const response = yield* client.execute(
         HttpClientRequest.get(`${url}/events?since=${lastId}`).pipe(
           HttpClientRequest.bearerToken(token),
@@ -110,16 +127,6 @@ export const listen = <E, R, R2 = never>(
       );
       if (response.status !== 200) return yield* Effect.fail(`relay answered ${response.status}`);
       yield* log(`connected to ${url}`);
-      const receive = (catchUp: boolean) =>
-        Effect.gen(function* () {
-          const fresh = yield* loadConfigFrom(config.repo, config.self);
-          if (deliveryChannels(fresh, "listen").length === 0) return;
-          const states = yield* fleetFromRelay(fresh, url);
-          if (states !== null)
-            for (const line of yield* deliverAlerts(fresh, states, "listen", { catchUp }))
-              yield* log(line);
-        }).pipe(Effect.ignore);
-      yield* receive(true);
       let buffer = "";
       yield* response.stream.pipe(
         Stream.decodeText(),

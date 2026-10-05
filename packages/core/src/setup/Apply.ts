@@ -63,7 +63,7 @@ import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
 import { applyAreas, NTFY_SECRET } from "../Upkeep.ts";
 import type { Secret } from "./Credentials.ts";
-import { hostingOf } from "./HubHosting.ts";
+import { backFromHub, hostingOf } from "./HubHosting.ts";
 import { cleanUrl, type Discovery } from "./Discover.ts";
 import { PROPOSED_SECRETS, type Actions, type Mode } from "./Plan.ts";
 import { settingsWords } from "./PlanWords.ts";
@@ -233,6 +233,26 @@ export const secretsToStore = (input: SetupInput): ReadonlyArray<Secret> => [
     : []),
 ];
 
+/**
+ * A URL with a credential in it, as the run's encrypted values keep it
+ * (setup.json keeps it without): a resume, from the terminal or the browser,
+ * reaches the repository as the run did.
+ */
+export const RUN_JOIN_URL = "T3_FLEET_SETUP_JOIN_URL";
+export const RUN_REMOTE_URL = "T3_FLEET_SETUP_REMOTE_URL";
+
+/** The run's URLs that carry a credential, by the names its encrypted values keep them under. */
+export const credentialedUrls = (input: SetupInput) => [
+  ...(input.join !== null && cleanUrl(input.join.url) !== input.join.url
+    ? [{ name: RUN_JOIN_URL, value: input.join.url }]
+    : []),
+  ...(input.remote !== null &&
+  "url" in input.remote &&
+  cleanUrl(input.remote.url) !== input.remote.url
+    ? [{ name: RUN_REMOTE_URL, value: input.remote.url }]
+    : []),
+];
+
 /** A run as setup.json keeps it: no secret value, no credential in a URL. */
 export const persistable = (input: SetupInput): SetupInput => ({
   ...input,
@@ -282,8 +302,16 @@ export const restored = (
     ...(saved.upkeep?.ntfy == null ? [] : [NTFY_SECRET]),
   ].filter((n) => !values.has(n) || values.get(n) === "");
   if (missing.length > 0) return { missing };
+  // A URL kept with its credential (credentialedUrls); setup.json has it without.
+  const joinUrl = value(RUN_JOIN_URL);
+  const remoteUrl = value(RUN_REMOTE_URL);
   return {
     ...saved,
+    join: saved.join === null || joinUrl === null ? saved.join : { ...saved.join, url: joinUrl },
+    remote:
+      saved.remote !== null && "url" in saved.remote && remoteUrl !== null
+        ? { url: remoteUrl }
+        : saved.remote,
     actions: {
       ...saved.actions,
       secrets: saved.actions.secrets.map((s) => ({ ...s, value: value(s.name) ?? "" })),
@@ -311,8 +339,10 @@ export const restored = (
 export const writtenPaths = (input: SetupInput) => [
   ...input.actions.skills.map((s) => `skills/${s.name}`),
   ...(input.actions.skills.some((s) => s.source !== null) ? ["skills/SOURCES.json"] : []),
-  // Turning the MCP hub on rewrites every definition it can host, not only those added here.
-  ...(turnsMcpHubOn(input) ? ["mcp"] : input.actions.servers.map((s) => `mcp/${s.name}.json`)),
+  // Turning the MCP hub on (or off) rewrites every definition it can host (or took), not only those added here.
+  ...(turnsMcpHubOn(input) || turnsMcpHubOff(input)
+    ? ["mcp"]
+    : input.actions.servers.map((s) => `mcp/${s.name}.json`)),
   ...input.actions.instructions.map((i) => i.src),
   FLEET_FILE,
   `nodes/${input.node}.toml`,
@@ -377,6 +407,12 @@ export const applyRelay = (text: string): Edit => {
     : { text };
 };
 
+/** Whether [fleet] apply lists relay; null when the file has no such list (sync's default applies it). */
+export const appliesRelay = (text: string): boolean | null => {
+  const apply = valueAt(text, ["fleet", "apply"]);
+  return Array.isArray(apply) ? apply.includes("relay") : null;
+};
+
 const valueAt = (text: string, path: ReadonlyArray<string>): unknown => {
   try {
     let at: unknown = parseToml(text);
@@ -438,6 +474,37 @@ export const moveServersToHub = (repo: string) =>
       }
     }
     return { moved, stayed, files };
+  });
+
+/** Whether a run turns the MCP hub off (--no-mcp-hub): the servers it moved go back to each machine. */
+export const turnsMcpHubOff = (input: SetupInput) => input.upkeep?.mcpHub === false;
+
+/**
+ * The definitions the hub took over put back as they were (HubHosting.ts
+ * backFromHub): what went back, and the files changed.
+ */
+export const moveServersBack = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const names = (yield* fs
+      .readDirectory(`${repo}/mcp`)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+      .filter((f) => f.endsWith(".json"))
+      .sort();
+    const back: Array<string> = [];
+    const files: Array<string> = [];
+    for (const file of names) {
+      const definition = yield* fs
+        .readFileString(`${repo}/mcp/${file}`)
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(AnyObject))), Effect.option);
+      if (Option.isNone(definition)) continue;
+      const before = backFromHub(definition.value);
+      if (before === null) continue;
+      yield* fs.writeFileString(`${repo}/mcp/${file}`, pretty(before));
+      back.push(file.slice(0, -".json".length));
+      files.push(`mcp/${file}`);
+    }
+    return { back, files };
   });
 
 /** What moveServersToHub did, in the plan's words. */
@@ -750,6 +817,10 @@ export const setupSteps = (
       if (turnsMcpHubOn(input)) {
         const moved = yield* moveServersToHub(repo);
         lines.push(...movedLines("the hub", moved));
+      }
+      if (turnsMcpHubOff(input)) {
+        const { back } = yield* moveServersBack(repo);
+        if (back.length > 0) lines.push(`back on each machine: ${back.join(", ")}`);
       }
       const roles = input.extras.relay === null ? ["member"] : ["relay", "member"];
       const ignored = a.ignored.map((i) => i.name);

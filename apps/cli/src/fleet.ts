@@ -46,7 +46,7 @@ import {
   writeSecrets,
 } from "@t3-fleet/core/Secrets";
 import { describeProposed } from "@t3-fleet/core/ProposedSecrets";
-import { allowOwner } from "@t3-fleet/core/setup/Hub";
+import { allowLogin, ownerAccess, ownerAccessLine } from "@t3-fleet/core/setup/Hub";
 import { approve, listProposals, reject } from "@t3-fleet/core/Staging";
 import {
   readStates,
@@ -201,8 +201,11 @@ export const reviewCommand = Command.make("review").pipe(
         const secrets = yield* describeProposed(config.repo, p.commit, p.node).pipe(
           Effect.orElseSucceed(() => [] as Array<string>),
         );
+        // What approving does besides landing the change: shown here, where it is reviewed.
+        const access = yield* ownerAccess(config, p).pipe(Effect.orElseSucceed(() => null));
+        const also = access === null ? [] : [ownerAccessLine(access)];
         yield* Console.log(
-          `${p.node}  (${p.commit.slice(0, 7)})\n${[...p.stat.split("\n"), ...secrets]
+          `${p.node}  (${p.commit.slice(0, 7)})\n${[...p.stat.split("\n"), ...secrets, ...also]
             .map((l) => `  ${l}`)
             .join("\n")}\n`,
         );
@@ -238,6 +241,9 @@ export const approveCommand = Command.make("approve", {
       const proposal = yield* proposalOf(config, node);
       for (const line of yield* describeProposed(config.repo, proposal.commit, node))
         yield* Console.log(line);
+      // Only a proposal making its machine the relay lets anyone into the app it hosts, as review showed.
+      const access = yield* ownerAccess(config, proposal);
+      if (access !== null) yield* Console.log(ownerAccessLine(access));
       const { rev, notes } = yield* approve(
         config.repo,
         config.branch,
@@ -247,8 +253,7 @@ export const approveCommand = Command.make("approve", {
       );
       yield* Console.log(`approved ${node}'s proposal (${rev})`);
       for (const line of notes) yield* Console.log(line);
-      // A relay approved from here: the app it hosts opens for this machine's Tailscale login.
-      for (const line of yield* allowOwner) yield* Console.log(line);
+      if (access !== null) for (const line of yield* allowLogin(access)) yield* Console.log(line);
     }).pipe(reportUserErrors),
   ),
 );

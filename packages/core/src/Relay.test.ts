@@ -6,20 +6,24 @@ import { join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { generateX25519Identity } from "age-encryption";
 import { describe, expect, it } from "vite-plus/test";
 
-import { eventIds, relayLayer } from "./Relay.ts";
+import { eventIds, relayLayer, snapshotThenLive, type RelayHandle } from "./Relay.ts";
 
 const TOKEN = "relay-token-for-relay-tests";
 
-/** One run of the relay over `dir`; `stop` is the restart. */
+/** One run of the relay over `dir`; `stop` is the restart; `handle` what the app beside it gets. */
 const startRelay = async (dir: string, identity: string, withApp = false) => {
   const repo = join(dir, "repo");
+  let handle: RelayHandle | undefined;
   const app = relayLayer({
     token: TOKEN,
     repo,
@@ -36,9 +40,12 @@ const startRelay = async (dir: string, identity: string, withApp = false) => {
       stateDir: join(dir, "state"),
     },
     // Stands in for the app (HubUi.ts): it answers every path the relay does not.
-    ...(withApp
-      ? { extra: () => HttpRouter.add("GET", "/*", HttpServerResponse.text("the app")) }
-      : {}),
+    extra: (relay) => {
+      handle = relay;
+      return withApp
+        ? HttpRouter.add("GET", "/*", HttpServerResponse.text("the app"))
+        : Layer.empty;
+    },
   }).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)));
   const web = HttpRouter.toWebHandler(app, { disableLogger: true });
   const request = (path: string, init: RequestInit = {}) =>
@@ -48,7 +55,10 @@ const startRelay = async (dir: string, identity: string, withApp = false) => {
         headers: { authorization: `Bearer ${TOKEN}`, ...init.headers },
       }),
     );
-  return { request, stop: () => web.dispose() };
+  // The routes (and the handle) are built on the first request.
+  await request("/health");
+  if (handle === undefined) throw new Error("the relay gave the app no handle");
+  return { request, handle, stop: () => web.dispose() };
 };
 
 const report = (node: string, rev: string) =>
@@ -122,6 +132,26 @@ describe("relay events", () => {
     expect(eventIds(1_001).first).toBeGreaterThan(ids.first + 999);
   });
 
+  it("loses no event emitted while a listener's snapshot is read, and sends none twice", async () => {
+    const got = await Effect.runPromise(
+      Effect.gen(function* () {
+        const pubsub = yield* PubSub.unbounded<{ readonly id: number }>();
+        const snapshot = Effect.gen(function* () {
+          // 2 was kept before the snapshot read the events, 3 after: both are published meanwhile.
+          yield* PubSub.publish(pubsub, { id: 2 });
+          yield* PubSub.publish(pubsub, { id: 3 });
+          return { replay: [{ id: 1 }, { id: 2 }], kept: [{ id: 1 }, { id: 2 }] };
+        });
+        return yield* snapshotThenLive(pubsub, snapshot).pipe(
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.timeout("2 seconds"),
+        );
+      }),
+    );
+    expect(got.map((e) => e.id)).toEqual([1, 2, 3]);
+  });
+
   it("replays events to a listener whose `since` is from before a restart, and tells it to pull", async () => {
     const dir = mkdtempSync(join(tmpdir(), "t3-fleet-relay-events-"));
     mkdirSync(join(dir, "repo"), { recursive: true });
@@ -177,20 +207,30 @@ describe("fix requests", () => {
       const body = JSON.stringify({
         node: "laptop",
         fixes: [{ id: "laptop:claude-behind", digest: "d".repeat(64) }],
-        acknowledged: [],
+        acknowledged: ["laptop:claude-behind"],
       });
+      // Every member holds the relay token: with it, no one asks a machine to run a fix.
+      for (const authorization of [`Bearer ${TOKEN}`, "Bearer wrong"]) {
+        const asked = await relay.request("/fixes", {
+          method: "POST",
+          body,
+          headers: { authorization },
+        });
+        expect(asked.status).toBeGreaterThanOrEqual(400);
+      }
       expect(
-        (
-          await relay.request("/fixes", {
-            method: "POST",
-            body,
-            headers: { authorization: "Bearer wrong" },
-          })
-        ).status,
-      ).toBe(401);
-      const created = await relay.request("/fixes", { method: "POST", body });
-      expect(created.status).toBe(202);
-      const { id } = JSON.parse(await created.text()) as { id: string };
+        (await readEvents(await relay.request("/events?since=0"), () => false)).filter(
+          (e) => e.event === "fix",
+        ),
+      ).toEqual([]);
+      // The app beside the relay asks, in this process.
+      const { id } = await Effect.runPromise(
+        relay.handle.fixes.request({
+          node: "laptop",
+          fixes: [{ id: "laptop:claude-behind", digest: "d".repeat(64) }],
+          acknowledged: [],
+        }),
+      );
       const events = await readEvents(await relay.request("/events?since=0"), (f) =>
         f.some((e) => e.event === "fix"),
       );

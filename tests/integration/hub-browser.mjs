@@ -3,8 +3,11 @@
 //   session               POST /api/session as the app does
 //   fix <node> <area>     apply that machine's first fixable finding in <area>, as the app does; the job
 //   approve <node>        try to approve a proposal
-//   forge <node> <id>     as a hub that went bad: ask the relay directly (relay token in $TOKEN) for a fix
-//                         the machine never proposed; the request as the machine answered it
+//   forge <node> <area>   as a member holding the relay token ($TOKEN): ask the relay directly to run that
+//                         machine's first fixable finding in <area>, id and digest worked out from
+//                         /fleet, its interruption "acknowledged"; the relay's answer
+import { createHash } from "node:crypto";
+
 const [base, what, ...args] = process.argv.slice(2);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const out = (value) => console.log(JSON.stringify(value));
@@ -71,21 +74,30 @@ if (what === "page") {
   const r = await api(token, `/api/proposals/${args[0]}/approve`, { change: "e".repeat(64) });
   out({ status: r.status, text: r.text });
 } else if (what === "forge") {
-  const [node, id] = args;
+  const [node, area] = args;
   const auth = { authorization: `Bearer ${process.env.TOKEN}` };
+  const states = await (await fetch(`${base}/fleet`, { headers: auth })).json();
+  const finding = states
+    .find((s) => s.node === node)
+    ?.findings.find((f) => f.area === area && f.fix !== undefined);
+  if (finding === undefined) throw new Error(`no fixable ${area} finding on ${node} in /fleet`);
+  // Fix.ts fixDigest, from what /fleet hands every member.
+  const { command, on, disrupts, safe } = finding.fix;
+  const parts = [
+    finding.node,
+    on ?? finding.node,
+    command,
+    disrupts ?? "-",
+    safe ? "safe" : "unsafe",
+  ];
+  const digest = createHash("sha256")
+    .update(parts.map((p) => `${p.length}:${p}`).join(""))
+    .digest("hex");
+  const id = `${finding.node}:${finding.key}`;
   const r = await fetch(`${base}/fixes`, {
     method: "POST",
     headers: auth,
-    body: JSON.stringify({ node, fixes: [{ id, digest: "0".repeat(64) }], acknowledged: [] }),
+    body: JSON.stringify({ node, fixes: [{ id, digest }], acknowledged: [id] }),
   });
-  const request = await r.json();
-  for (let i = 0; i < 120; i++) {
-    const now = await (await fetch(`${base}/fixes/${request.id}`, { headers: auth })).json();
-    if (now.state !== "waiting" && now.state !== "running") {
-      out(now);
-      process.exit(0);
-    }
-    await sleep(1000);
-  }
-  throw new Error("the forged request was never answered");
+  out({ id, status: r.status, text: (await r.text()).slice(0, 500) });
 }

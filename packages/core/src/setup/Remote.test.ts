@@ -527,6 +527,17 @@ describe("bringUpHub", () => {
       expect(scripts().some((s) => s.includes("base64 -d"))).toBe(false);
     },
   );
+  it("takes the fleet's repository written another way as the same fleet, as the probe does", async () => {
+    overrides.set("config.toml", ok('node = "server"\nrepo = "~/fleet"\n'));
+    overrides.set("remote get-url", ok("git@example.test:fleet.git\n"));
+    expect((await bringUp())._tag).toBe("Success");
+    expect(scripts().some((s) => s.includes("--relay --yes"))).toBe(true);
+    overrides.clear();
+    fake.mockClear();
+    progress = saved({ url: "ssh://git@Example.test/fleet" });
+    expect((await bringUp())._tag).toBe("Success");
+    expect(scripts().at(-1)).toContain("--yes --no-notify --resume");
+  });
   it("announces a step before its remote writes", async () => {
     const seen: Array<string | undefined> = [];
     fake.mockImplementation((i) => {

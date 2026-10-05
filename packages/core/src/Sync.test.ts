@@ -1308,6 +1308,33 @@ describe("reporting a run", () => {
     expect(recovered.alerts.some((a) => a.kind === "problem")).toBe(false);
   });
 
+  it("carries nothing of a fleet it left into the next one it joins under the same name", async () => {
+    const before = makeFleet();
+    const was = await before.config(before.laptop, "laptop");
+    const previous = async () =>
+      Option.fromNullishOr((await run(readStates(before.laptop))).find((s) => s.node === "laptop"));
+    await run(report(outcome(was, "laptop", 1, [])));
+    await run(
+      report({
+        ...outcome(was, "laptop", 2, [
+          { key: "claude-down", title: "claude failed in the old fleet" },
+        ]),
+        previous: await previous(),
+      }),
+    );
+    for (const at of [3, 4, 5])
+      await run(report({ ...outcome(was, "laptop", at, [], true), previous: await previous() }));
+    // Left without --purge: this machine keeps its state directory, and joins another fleet as laptop.
+    const home = process.env["HOME"];
+    const after = makeFleet();
+    process.env["HOME"] = home;
+    const now = await after.config(after.laptop, "laptop");
+    const joined = await run(report(outcome(now, "laptop", 10, [], true)));
+    expect(joined.alerts).toEqual([]);
+    expect(joined.streak).toBe(1);
+    expect(JSON.stringify(await run(readStates(after.laptop)))).not.toContain("old fleet");
+  });
+
   it("raises a problem once though its state cannot reach git: the relay heard the last one", async () => {
     const f = makeFleet();
     const config = await f.config(f.laptop, "laptop");
@@ -1326,7 +1353,7 @@ describe("reporting a run", () => {
           Effect.flip,
         ),
       );
-    const kept = JSON.parse(readFileSync(lastReportPath(process.env["HOME"] ?? ""), "utf8"));
+    const kept = JSON.parse(readFileSync(lastReportPath(process.env["HOME"] ?? ""), "utf8")).state;
     expect(
       kept.alerts.map((a: { at: number; kind: string; message: string }) => [a.at, a.kind]),
     ).toEqual([

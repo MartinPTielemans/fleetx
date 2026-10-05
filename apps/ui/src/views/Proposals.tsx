@@ -136,6 +136,7 @@ function Proposal({
           </Button>
         </span>
       </div>
+      <AlsoNote proposal={p} />
       <div className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-2 text-xs">
         {p.files.map((f) => (
           <span key={f} className="flex items-center gap-1 font-mono text-muted-foreground">
@@ -146,6 +147,20 @@ function Proposal({
       </div>
       <Diff text={p.diff} />
     </Group>
+  );
+}
+
+/** What approving does besides landing the change (a relay's proposal: who may open its app). */
+function AlsoNote({ proposal }: { proposal: UiProposalT }) {
+  if (proposal.also === undefined || proposal.also.length === 0) return null;
+  return (
+    <div className="px-4 py-2 text-xs">
+      {proposal.also.map((line) => (
+        <p key={line} className="text-foreground">
+          {line}
+        </p>
+      ))}
+    </div>
   );
 }
 
@@ -208,6 +223,7 @@ function DecideDialog({
             : `${proposal.node} proposed something different while this was open. Close this and review the new one.`}
         </div>
       ) : null}
+      {verb === "approve" ? <AlsoNote proposal={proposal} /> : null}
       <div className="overflow-hidden rounded-lg border">
         <Diff text={proposal.diff} />
       </div>
