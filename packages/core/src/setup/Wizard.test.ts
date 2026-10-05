@@ -237,6 +237,21 @@ describe("the setup wizard's engine", () => {
     expect(head()).toBe(before);
     fs.writeFileSync(fleetFile, own);
 
+    // A push that fails after the commit: the commit is taken back, nothing of it stays.
+    const hook = join(bare, "hooks", "pre-receive");
+    fs.writeFileSync(hook, "#!/bin/sh\necho 'origin is down' >&2\nexit 1\n", { mode: 0o755 });
+    const pushFailed = await fails(admitHub(config, { ...hub, mcp: true }, "me@example.com"));
+    expect(String(pushFailed)).toContain("the push failed");
+    expect(String(pushFailed)).toContain("taken back");
+    expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "origin/main"));
+    expect(git("status", "--porcelain")).toBe("");
+    expect(head()).toBe(before);
+    fs.rmSync(hook);
+    // A run that stopped between commit and push left one: the next admission redoes it in full, and pushes.
+    fs.mkdirSync(join(repo, "nodes"), { recursive: true });
+    fs.writeFileSync(join(repo, "nodes/hub.toml"), 'roles = ["member", "relay"]\n');
+    git("add", "nodes/hub.toml");
+    git("commit", "-q", "-m", "Make hub the relay");
     const admitted = await run(admitHub(config, { ...hub, mcp: true }, "me@example.com"));
     expect(admitted.lines.join("\n")).toContain("committed and pushed");
     expect(admitted.lines.join("\n")).toContain("opens for me@example.com");

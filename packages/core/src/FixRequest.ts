@@ -2,9 +2,11 @@
  * Fixes asked for in the app on the hub, run by the machine they change.
  *
  * The hub has no ssh to the other machines and must not need any. When
- * someone applies a fix there, the hub hands the relay a request naming each
- * finding by id, with the digest of its fix as it was shown (Fix.ts
- * fixDigest). The relay announces it as a "fix" event carrying only the node
+ * someone the app lets in applies a fix there, the app hands the relay, in
+ * its own process, a request naming each finding by id, with the digest of
+ * its fix as it was shown (Fix.ts fixDigest). No route makes one: the relay
+ * token, which every member holds, never asks a machine for a fix
+ * (docs/topologies.md). The relay announces it as a "fix" event carrying only the node
  * and the request's id; that node's `t3-fleet listen` (for the relay node,
  * `t3-fleet relay serve` itself) claims it, checks itself again, and runs a
  * fix only if its own check proposes it, to run here, with the digest that was

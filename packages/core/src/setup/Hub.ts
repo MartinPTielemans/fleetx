@@ -238,6 +238,33 @@ export const otherRelay = (config: Config, url: string | null, hub: HubRequest):
   return null;
 };
 
+/** The commit admitting `node` as the hub. */
+const admissionMessage = (node: string) => `Make ${node} the relay`;
+
+/**
+ * Take back an admission commit that never reached origin: a push that failed
+ * after the commit, or a run that stopped between the two, leaves one, and a
+ * later admission would find nothing to commit and push nothing. Only HEAD,
+ * only when it is that commit, touching only `paths`, and not on its
+ * upstream; HEAD goes back one and `paths` back to it, so admission is done
+ * again in full and pushed. True when it took one back.
+ */
+const takeBackUnpushedAdmission = (repo: string, node: string, paths: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    if (out(yield* git(repo, ["log", "-1", "--format=%s"])) !== admissionMessage(node))
+      return false;
+    if (!ok(yield* git(repo, ["rev-parse", "-q", "--verify", "@{upstream}"]))) return false;
+    if (ok(yield* git(repo, ["merge-base", "--is-ancestor", "HEAD", "@{upstream}"]))) return false;
+    if (!ok(yield* git(repo, ["rev-parse", "-q", "--verify", "HEAD~1"]))) return false;
+    const touched = out(
+      yield* git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]),
+    ).split("\n");
+    if (touched.some((f) => f !== "" && !paths.includes(f))) return false;
+    if (!ok(yield* git(repo, ["reset", "-q", "--soft", "HEAD~1"]))) return false;
+    yield* restorePaths(repo, paths);
+    return true;
+  });
+
 /**
  * The hub in the repo: its node file, [relay], the relay token, and `owner`
  * (this machine's Tailscale login) as the one login the app on the hub opens
@@ -257,6 +284,8 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
       const fs = yield* FileSystem.FileSystem;
       const repo = config.repo;
       const paths = [`nodes/${hub.node}.toml`, FLEET_FILE, ...SECRETS_FILES];
+      // Left by a run that stopped after committing and before pushing: done again below.
+      yield* takeBackUnpushedAdmission(repo, hub.node, paths);
       yield* refuseDirty(repo, paths);
       // One relay: machines reach the one [relay] url names, so a second hub would split them.
       const fleetFile = `${repo}/${FLEET_FILE}`;
@@ -340,13 +369,24 @@ export const admitHub = (config: Config, hub: HubRequest, owner: string | null =
         added.token = true;
         lines.push(`a new ${RELAY_TOKEN}, encrypted among the secrets`);
       }
-      const rev = yield* commitAndPush(repo, paths, `Make ${hub.node} the relay`).pipe(
-        // Nothing of this run's stays uncommitted: what was refused is put back.
-        Effect.tapError(() =>
-          changedFiles(repo, paths).pipe(
-            Effect.flatMap((left) => restorePaths(repo, left)),
-            Effect.ignore,
-          ),
+      const rev = yield* commitAndPush(repo, paths, admissionMessage(hub.node)).pipe(
+        // Nothing of this run's stays, committed or not: a commit the push did not take is
+        // taken back, so trying again admits the hub afresh; what was refused is put back.
+        Effect.catch((e) =>
+          Effect.gen(function* () {
+            const takenBack = yield* takeBackUnpushedAdmission(repo, hub.node, paths).pipe(
+              Effect.orElseSucceed(() => false),
+            );
+            yield* changedFiles(repo, paths).pipe(
+              Effect.flatMap((left) => restorePaths(repo, left)),
+              Effect.ignore,
+            );
+            return yield* Effect.fail(
+              takenBack
+                ? `${e}; the commit was taken back, so trying again admits ${hub.node} afresh`
+                : e,
+            );
+          }),
         ),
       );
       if (rev !== "nothing to commit") lines.push(`committed and pushed ${rev}`);

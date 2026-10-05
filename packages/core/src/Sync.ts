@@ -28,6 +28,7 @@ import {
   addPaths,
   allowedAt,
   changedFiles,
+  checkoutId,
   ensureGitConfig,
   git,
   literal,
@@ -319,16 +320,33 @@ export const healthAlerts = (input: {
 /** This node's last report as it sent it, published or not (report() keeps it). */
 export const lastReportPath = (home: string) => `${stateDir(home)}/last-report.json`;
 
-/** The state this node last reported, when it kept one, for `node`. */
-const lastReported = (home: string, node: string) =>
+/**
+ * The kept report, with the checkout it was made from (Git.ts checkoutId): a
+ * machine that left a fleet without --purge and joined another, under the
+ * same name, has another checkout, and none of the old fleet's alerts or
+ * findings carry over into the new one's reports.
+ */
+const LastReport = Schema.Struct({ checkout: Schema.String, state: NodeState });
+const decodeLastReport = Schema.decodeUnknownOption(Schema.fromJsonString(LastReport));
+const encodeLastReport = Schema.encodeEffect(Schema.fromJsonString(LastReport));
+
+/**
+ * The state this node last reported, when it kept one, for `node` in the
+ * checkout `checkout`; and whether what is kept is another checkout's.
+ */
+const lastReported = (home: string, node: string, checkout: string | null) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(lastReportPath(home)).pipe(Effect.option);
-    if (Option.isNone(text)) return Option.none<NodeState>();
-    return Option.filter(
-      Schema.decodeOption(Schema.fromJsonString(NodeState))(text.value),
-      (s) => s.node === node,
-    );
+    const kept = Option.flatMap(text, decodeLastReport);
+    const another = Option.isSome(kept) && kept.value.checkout !== checkout;
+    return {
+      state: Option.filter(
+        Option.map(kept, (k) => k.state),
+        (s) => !another && checkout !== null && s.node === node,
+      ),
+      another,
+    };
   });
 
 /** The newer of two states of one node. */
@@ -791,13 +809,17 @@ export const report = ({
     const repo = config.repo;
     // What the relay last heard from this node may be newer than what reached git (a publish
     // that failed): transitions count from that, so a problem is never raised twice.
-    const previous = newestState(fromGit, yield* lastReported(home, node));
+    const checkout = yield* checkoutId(repo, true);
+    const kept = yield* lastReported(home, node, checkout);
+    const previous = newestState(fromGit, kept.state);
     // A fix whose command holds one of this node's secret values is not published: it runs here only.
     const secrets = [...(yield* localSecrets).values()].filter((v) => v.length >= 6);
     const publishable = (fix: Finding["fix"]) =>
       fix !== undefined && !secrets.some((v) => fix.command.includes(v));
-    const previousStreak = Option.getOrElse(yield* localStreak(home), () =>
-      Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
+    // The local streak is another enrollment's too when the kept report is.
+    const previousStreak = Option.getOrElse(
+      kept.another ? Option.none<number>() : yield* localStreak(home),
+      () => Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
     );
     const stateOf = (fail: boolean, reason: string): NodeState => {
       const streak = fail ? previousStreak + 1 : 0;
@@ -863,17 +885,26 @@ export const report = ({
       };
     };
     const record = (state: NodeState) =>
-      fs.makeDirectory(stateDir(home), { recursive: true }).pipe(
-        Effect.andThen(
-          fs.writeFileString(
-            lastSyncPath(home),
-            `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
+      fs
+        .makeDirectory(stateDir(home), { recursive: true })
+        .pipe(
+          Effect.andThen(
+            fs.writeFileString(
+              lastSyncPath(home),
+              `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
+            ),
           ),
-        ),
-        Effect.andThen(encodeState(state)),
-        Effect.flatMap((text) => fs.writeFileString(lastReportPath(home), text, { mode: 0o600 })),
-        Effect.ignore,
-      );
+          Effect.andThen(
+            checkout === null
+              ? fs.remove(lastReportPath(home), { force: true })
+              : encodeLastReport({ checkout, state }).pipe(
+                  Effect.flatMap((text) =>
+                    fs.writeFileString(lastReportPath(home), text, { mode: 0o600 }),
+                  ),
+                ),
+          ),
+          Effect.ignore,
+        );
     const rev = out(yield* git(repo, ["rev-parse", "--short", "HEAD"]));
     const state = stateOf(failed, message);
     // Recorded only after publishing, so a run nobody else could see is never "ok" here.

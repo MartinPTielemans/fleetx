@@ -691,7 +691,7 @@ export const bringUpHub = (input: {
       saved !== null &&
       (saved.mode === "first" ||
         saved.node !== input.node ||
-        (saved.url !== null && cleanUrl(saved.url) !== cleanUrl(input.repoUrl)))
+        (saved.url !== null && !sameRepo(saved.url, input.repoUrl)))
     )
       return yield* Effect.fail(
         saved.finishedAt === null
@@ -726,7 +726,8 @@ export const bringUpHub = (input: {
         `git -C ${shPath(config.repo)} remote get-url origin`,
         "Checking the hub's repository",
       );
-      if (cleanUrl(origin.trim()) !== cleanUrl(input.repoUrl))
+      // The same repository however it is written, as the probe judged it (membershipProblem).
+      if (!sameRepo(origin.trim(), input.repoUrl))
         return yield* Effect.fail(
           `The hub is already in another fleet (${cleanUrl(origin.trim()) || "a repository without a remote"}). Take it out of that fleet first (t3-fleet leave there), or choose another machine for the hub.`,
         );

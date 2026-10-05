@@ -81,6 +81,20 @@ Tailscale logins in `[ui] allow` (setup writes yours); `t3-fleet ui` opens it
 there. It is built from what machines report, sends each fix to the machine
 it changes, and never decides proposals. See [the CLI](cli.md#on-the-hub).
 
+Who can ask a machine to run a fix: only someone the app lets in, after
+reviewing it there. A fix request is made by the app itself, inside the relay's
+process, when a login in `[ui] allow` applies fixes it was shown, confirming
+any that interrupt something; the relay has no route that makes one. The relay
+token, which every member holds, reads what machines report and follows the
+relay's events, and a machine's listener uses it to pick up a request that
+names it and report back, but it cannot ask for a fix: a member, or any
+program on one, that posts a request with it, real finding id, digest and
+confirmation included, is refused, and nothing runs. The hub still needs no
+ssh to any machine, and a machine still checks itself again and runs only a
+fix it proposes itself. A token holder can still get in a request's way (claim
+it first, or answer it falsely), which runs nothing; the machine's next report
+shows what it really did.
+
 What the hub can and cannot do, should it be compromised: it can read what
 machines report (no secret values: a fix whose command holds one is not
 reported, and outputs have them taken out in full before anything is cut

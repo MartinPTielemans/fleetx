@@ -18,11 +18,48 @@ describe("which MCP servers the hub takes over (B5)", () => {
         auth: { type: "bearer", token_env: "POSTHOG_KEY" },
       },
     });
+    // Every field the hub reads for a remote goes along: its OAuth login, static client, denied tools.
+    const oauth = {
+      kind: "direct",
+      url: "https://mcp.linear.example/mcp",
+      transport: "streamable-http",
+      remote_auth: true,
+      remote_auth_scopes: ["read", "write"],
+      oauth: {
+        client_id: "fleet",
+        client_secret_env: "LINEAR_CLIENT_SECRET",
+        issuer: "https://auth.linear.example",
+        scopes: ["read"],
+      },
+      tools: { deny: ["delete_*"] },
+      description: "Linear",
+    };
+    expect(hostingOf(oauth)).toEqual({
+      on: "hub",
+      definition: {
+        kind: "remote",
+        url: "https://mcp.linear.example/mcp",
+        remote_auth: true,
+        remote_auth_scopes: ["read", "write"],
+        oauth: {
+          client_id: "fleet",
+          client_secret_env: "LINEAR_CLIENT_SECRET",
+          issuer: "https://auth.linear.example",
+          scopes: ["read"],
+        },
+        tools: { deny: ["delete_*"] },
+        description: "Linear",
+      },
+    });
     const why = (definition: Record<string, unknown>) => {
       const h = hostingOf(definition);
       return h.on === "machines" ? h.why : null;
     };
     expect(why({ kind: "stdio", command: "npx", args: ["notes"] })).toContain("runs a command");
+    // One the hub could not serve as a remote stays, rather than move and lose what it needs.
+    expect(
+      why({ ...oauth, oauth: { client_id: "fleet", client_secret_env: "LINEAR_CLIENT_SECRET" } }),
+    ).toContain("oauth needs the https issuer");
     expect(why({ kind: "direct", url: "https://x.example/mcp", headers: { A: "$B" } })).toContain(
       "headers of its own",
     );

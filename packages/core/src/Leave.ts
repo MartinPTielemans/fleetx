@@ -31,7 +31,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import { identityToRecipient } from "age-encryption";
 import { parse as parseToml } from "smol-toml";
@@ -40,7 +39,7 @@ import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessS
 
 import { shPath } from "./Area.ts";
 import { expandHome, loadConfig, localConfigPath, type Config } from "./Config.ts";
-import { git, ok, out } from "./Git.ts";
+import { checkoutId, git, ok, out } from "./Git.ts";
 import { leaveFleet, standing, type Standing } from "./leave/Fleet.ts";
 import { linkTarget, present, replaceWith, tilde, within, writeAtomically } from "./leave/Files.ts";
 import {
@@ -140,9 +139,7 @@ export const departureOf = (config: Config): Departure => {
   };
 };
 
-/** The enrollment of the repo at `repo` and this machine's key, as they are now. */
-/** The file in a checkout's .git holding its enrollment id, made the first time it is asked for. */
-export const ENROLLMENT_ID = "t3-fleet-enrollment";
+export { ENROLLMENT_ID } from "./Git.ts";
 
 /**
  * The enrollment of the checkout at `repo` and this machine's key, as they
@@ -163,29 +160,12 @@ export const enrollmentOf = (home: string, repo: string, create = false) =>
             Effect.orElseSucceed(() => null),
           );
     const checkout = Option.getOrNull(yield* fs.realPath(repo).pipe(Effect.option));
-    const gitDir = yield* git(repo, ["rev-parse", "--absolute-git-dir"]);
-    let id: string | null = null;
-    if (ok(gitDir)) {
-      const file = `${out(gitDir)}/${ENROLLMENT_ID}`;
-      id = Option.getOrNull(
-        yield* fs.readFileString(file).pipe(
-          Effect.map((t) => t.trim()),
-          Effect.option,
-        ),
-      );
-      if (id === null && create) {
-        const parts: Array<string> = [];
-        for (let i = 0; i < 4; i++)
-          parts.push((yield* Random.nextIntBetween(0, 2 ** 31)).toString(16).padStart(8, "0"));
-        id = parts.join("");
-        yield* fs.writeFileString(file, `${id}\n`).pipe(Effect.orElseSucceed(() => (id = null)));
-      }
-    }
+    const id = yield* checkoutId(repo, create);
     return {
       remote: ok(remote) ? out(remote) : null,
       key,
       checkout,
-      id: id === "" ? null : id,
+      id,
     } satisfies Enrollment;
   });
 

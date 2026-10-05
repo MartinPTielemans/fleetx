@@ -16,9 +16,12 @@
  *                       endpoint and one token (see hub/Hub.ts)
  *        /hub/*, /oauth/callback
  *                       managing the hub and signing in (see hub/Routes.ts)
- *   POST /fixes, GET /fixes/<id>, POST /fixes/<id>/progress
- *                       fix requests from the app on the hub, claimed and
- *                       answered by the node they name (FixRequest.ts)
+ *   GET /fixes/<id>, POST /fixes/<id>/progress
+ *                       fix requests, claimed and answered by the node they
+ *                       name (FixRequest.ts). Only the app beside the relay
+ *                       makes them, in this process (RelayHandle.fixes): no
+ *                       route does, so the relay token, which every member
+ *                       holds, never asks a machine to run a fix
  *   GET  /, /api/*      the app, when this relay hosts it (HubUi.ts): its own
  *                       guard, Tailscale identity, instead of the relay token
  *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
@@ -54,7 +57,6 @@ import { readStates } from "./Sync.ts";
 import {
   advance,
   FixProgress,
-  FixRequestBody,
   FixRequestRecord,
   publicRecord,
   type FixRelay,
@@ -131,13 +133,38 @@ export const eventIds = (startedAt: number) => {
 };
 
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(NodeState));
-const decodeFixBody = Schema.decodeUnknownEffect(Schema.fromJsonString(FixRequestBody));
 const decodeProgress = Schema.decodeUnknownEffect(Schema.fromJsonString(FixProgress));
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(FixRequestRecord));
-const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const unauthorized = HttpServerResponse.text("Unauthorized", { status: 401 });
+
+/**
+ * A listener's events: `snapshot`'s replay, then each event published after
+ * it, none lost and none twice. The subscription is taken before the snapshot
+ * is read, so an event emitted between the two is in one or the other; one in
+ * both (it was kept by the time the snapshot read them) is sent once.
+ */
+export const snapshotThenLive = <E extends { readonly id: number }, R>(
+  pubsub: PubSub.PubSub<E>,
+  snapshot: Effect.Effect<
+    { readonly replay: ReadonlyArray<E>; readonly kept: ReadonlyArray<E> },
+    never,
+    R
+  >,
+): Stream.Stream<E, never, R> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(pubsub);
+      const { replay, kept } = yield* snapshot;
+      const sent = new Set(kept.map((e) => e.id));
+      return Stream.fromIterable(replay).pipe(
+        Stream.concat(
+          Stream.fromSubscription(subscription).pipe(Stream.filter((e) => !sent.has(e.id))),
+        ),
+      );
+    }),
+  );
 
 /** The relay's routes and its background watcher, as one layer. */
 export const relayLayer = <R = never>(options: RelayOptions<R>) =>
@@ -260,21 +287,6 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
       const json = (body: string, status = 200) =>
         HttpServerResponse.text(body, { status, contentType: "application/json" });
 
-      const askFixes = HttpRouter.add(
-        "POST",
-        "/fixes",
-        Effect.gen(function* () {
-          if (!(yield* authorized)) return unauthorized;
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const body = yield* decodeFixBody(yield* request.text).pipe(Effect.option);
-          if (Option.isNone(body) || !NODE_NAME.test(body.value.node))
-            return HttpServerResponse.text("Not a fix request", { status: 400 });
-          return json(yield* encodeRecord(publicRecord(yield* fixRelay.request(body.value))), 202);
-        }).pipe(
-          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
-        ),
-      );
-
       const fixRequest = HttpRouter.add(
         "GET",
         "/fixes/:id",
@@ -363,29 +375,33 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
           const url = new URL(request.url, "http://relay");
           const since =
             Number(request.headers["last-event-id"] ?? url.searchParams.get("since") ?? "0") || 0;
-          const kept = yield* Ref.get(events);
-          const next = yield* Ref.get(nextId);
-          const known = ids.knows(since, kept, next);
-          const missed = known ? kept.filter((e) => e.id > since) : kept;
-          // With the newest id handed out, so the listener's next `since` is one of this run's.
-          const pull: ReadonlyArray<RelayEvent> = known
-            ? []
-            : [
-                {
-                  id: next - 1,
-                  at: yield* Clock.currentTimeMillis,
-                  type: "pull",
-                  rev: (yield* Ref.get(lastRev)).slice(0, 7),
-                },
-              ];
           const frame = (e: RelayEvent) =>
             `id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
-          const live = Stream.fromPubSub(hub);
+          const listened = snapshotThenLive(
+            hub,
+            Effect.gen(function* () {
+              const kept = yield* Ref.get(events);
+              const next = yield* Ref.get(nextId);
+              const known = ids.knows(since, kept, next);
+              const missed = known ? kept.filter((e) => e.id > since) : kept;
+              // With the newest id handed out, so the listener's next `since` is one of this run's.
+              const pull: ReadonlyArray<RelayEvent> = known
+                ? []
+                : [
+                    {
+                      id: next - 1,
+                      at: yield* Clock.currentTimeMillis,
+                      type: "pull",
+                      rev: (yield* Ref.get(lastRev)).slice(0, 7),
+                    },
+                  ];
+              return { replay: [...missed, ...pull], kept };
+            }),
+          );
           const keepalive = Stream.tick(Duration.seconds(25)).pipe(
             Stream.map(() => ": keepalive\n\n"),
           );
-          const body = Stream.make(...[...missed, ...pull].map(frame)).pipe(
-            Stream.concat(Stream.merge(live.pipe(Stream.map(frame)), keepalive)),
+          const body = Stream.merge(listened.pipe(Stream.map(frame)), keepalive).pipe(
             Stream.encodeText,
           );
           return HttpServerResponse.stream(body, {
@@ -405,7 +421,6 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
         report,
         fleet,
         eventStream,
-        askFixes,
         fixRequest,
         fixProgress,
         options.extra === undefined ? Layer.empty : options.extra(handle),

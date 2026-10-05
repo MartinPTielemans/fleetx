@@ -16,8 +16,8 @@
 # Shown: the gate (allowed login, unknown login, a client's own identity header
 # replaced, a program on the hub posing as tailscale serve refused, also from
 # 127.0.0.2 on the ports of root's connection lingering in TIME_WAIT), a fix
-# applied from the hub and run by laptop's listener, a fix
-# laptop never proposed refused, approving refused on the hub.
+# applied from the hub and run by laptop's listener, a fix request from a
+# member holding the relay token refused by the relay, approving refused on the hub.
 # Usage: tests/integration/hub-ui.sh   (needs Docker; builds the bundle first)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -116,6 +116,15 @@ lingering=$(on server "node -e '
 printf '%s' "$lingering" | grep -q '^403 ' || fail "root's connection in TIME_WAIT must not vouch for dev's on 127.0.0.2 with the same ports: $lingering"
 pass "the gate: me@example.com gets the app, mallory gets a page naming that login and [ui] allow, a forged header is replaced, a program on the hub posing as serve is refused, also when its user runs a program named tailscaled, and when root's closed connection on the same ports lingers"
 
+# A member holding the relay token asks the relay itself to run a fix laptop does propose, with its
+# real id and digest and its interruption "acknowledged": no one reviewed it in the app, so nothing runs.
+forged=$(on laptop "TOKEN=\$(sed -n 's/^T3_FLEET_RELAY_TOKEN=//p' ~/.config/t3-fleet/secrets.env | tr -d '\"') node /tmp/hub-browser.mjs $HUB forge laptop skills") || { logs; fail "forging a request: $forged"; }
+printf '%s' "$forged" | grep -q '"status":40[0-9]' || { logs; fail "the relay must refuse a fix request from the relay token: $forged"; }
+sleep 5
+on laptop '[ ! -e ~/.agents/skills/demo ]' || { logs; fail "laptop ran a fix no one approved in the app: $forged"; }
+on laptop '! grep -q "the hub asks for" /tmp/listen.log' || fail "laptop's listener should have been asked nothing"
+pass "a member with the relay token asking the relay for a fix is refused ($(printf '%s' "$forged" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).status))')), and nothing runs"
+
 # A fix applied from the hub, run by laptop's listener.
 on laptop '[ ! -e ~/.agents/skills/demo ]' || fail "demo should not be linked on laptop yet (apply = [])"
 job=$(on laptop "node /tmp/hub-browser.mjs $HUB fix laptop skills") || { logs; fail "applying from the hub failed"; }
@@ -124,13 +133,6 @@ printf '%s' "$job" | grep -q '"ok":true' || { logs; fail "the fix should succeed
 on laptop '[ -L ~/.agents/skills/demo ]' || { logs; fail "laptop's listener should have linked demo: $job"; }
 on laptop 'grep -q "the hub asks for" /tmp/listen.log' || fail "laptop's listener should say it answered the hub"
 pass "a fix applied in the app on the hub ran on laptop, by its own listener: $(printf '%s' "$job" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).finding))')"
-
-# A hub that went bad asks laptop for a fix it never proposed: refused, nothing run.
-forged=$(on laptop "TOKEN=\$(sed -n 's/^T3_FLEET_RELAY_TOKEN=//p' ~/.config/t3-fleet/secrets.env | tr -d '\"') node /tmp/hub-browser.mjs $HUB forge laptop laptop:made-up")
-printf '%s' "$forged" | grep -q '"state":"done"' || { logs; fail "laptop should answer the forged request: $forged"; }
-printf '%s' "$forged" | grep -q '"results":\[\]' || fail "nothing should run: $forged"
-printf '%s' "$forged" | grep -q 'laptop does not find this now' || fail "laptop should say why: $forged"
-pass "a fix laptop does not propose is refused by laptop itself"
 
 approve=$(on laptop "node /tmp/hub-browser.mjs $HUB approve server")
 printf '%s' "$approve" | grep -q '"status":403' || fail "approving on the hub should be refused: $approve"
