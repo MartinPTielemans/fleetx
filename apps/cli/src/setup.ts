@@ -22,85 +22,44 @@ import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
-import { expandHome, loadConfig, loadConfigFrom } from "@t3-fleet/core/Config";
-import { sh } from "@t3-fleet/core/Area";
 import { exec } from "@t3-fleet/core/Exec";
 import { randomBytes } from "@t3-fleet/core/hub/Policy";
-import { FLEET_FILE } from "@t3-fleet/core/Names";
-import { mergeProposedSecrets, parseDotenv } from "@t3-fleet/core/ProposedSecrets";
-import { localSecretsPath, readRecipients, setVar } from "@t3-fleet/core/Secrets";
-import {
-  persistable,
-  restored,
-  secretsToStore,
-  setupSteps,
-  writtenPaths,
-  type Extras,
-  type SetupInput,
-} from "@t3-fleet/core/setup/Apply";
+import type { Extras, SetupInput } from "@t3-fleet/core/setup/Apply";
 import type { Secret } from "@t3-fleet/core/setup/Credentials";
-import {
-  cleanUrl,
-  discover,
-  discoverServers,
-  nodeName,
-  tilde,
-  type Discovery,
-} from "@t3-fleet/core/setup/Discover";
+import { tilde, type Discovery } from "@t3-fleet/core/setup/Discover";
 import {
   applies,
-  buildPlan,
-  decide,
   detailOf,
-  EMPTY_FLEET,
   type Actions,
   type Choice,
-  type FleetView,
   type Mode,
   type Plan,
 } from "@t3-fleet/core/setup/Plan";
-import { extraOffers } from "@t3-fleet/core/setup/Extras";
-import { t3AccessPath } from "@t3-fleet/core/T3Access";
 import { preflight, type Check, type Preflight } from "@t3-fleet/core/setup/Preflight";
-import { registeredByFleet } from "@t3-fleet/core/setup/RegisteredByFleet";
+import { SELF_SERVER } from "@t3-fleet/core/setup/Repo";
 import {
-  cloneFleet,
-  readFleet,
-  SELF_SERVER,
-  uncommittedFleetFiles,
-} from "@t3-fleet/core/setup/Repo";
-import {
-  clearAbandoned,
-  dropRun,
-  loadRunSecrets,
-  readAbandoned,
-  readProgress,
-  recordAbandoned,
-  runSecretsPath,
-  saveRunSecrets,
-  writeProgress,
-  type Progress,
-} from "@t3-fleet/core/setup/State";
+  abandonRun,
+  decideRun,
+  finishAbandoned,
+  finishedLines,
+  leavingRefusal,
+  prepare,
+  resumeInput,
+  runSteps as runSessionSteps,
+  savedSteps,
+  startRun,
+  unfinishedRun,
+} from "@t3-fleet/core/setup/Session";
+import { clearAbandoned, type Progress } from "@t3-fleet/core/setup/State";
+import { unfinishedLines } from "@t3-fleet/core/setup/Unfinished";
 
-import {
-  abandonReport,
-  finishWork,
-  nothingUnfinished,
-  unfinishedLines,
-  unfinishedWork,
-} from "@t3-fleet/core/setup/Unfinished";
-
-import { unfinishedDeparture } from "@t3-fleet/core/Leave";
 import { reportUserErrors } from "./shared.ts";
 import { connectT3 } from "./t3.ts";
 
-const NAME = /^[a-z0-9][a-z0-9-]*$/;
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -356,38 +315,18 @@ export const setupCommand = Command.make("setup", {
 const setup = (flags: Flags) =>
   Effect.gen(function* () {
     const home = process.env["HOME"] ?? "";
-    const unfinished = Option.filter(yield* readProgress(home), (p) => p.finishedAt === null);
     if (flags.abandon) {
-      if (Option.isNone(unfinished)) return yield* Console.log("No unfinished setup to abandon.");
-      const p = unfinished.value;
-      const saved = p.input as SetupInput;
-      // The next setup finishes what this run started (Unfinished.ts); the record has no values.
-      const record = {
-        startedAt: p.startedAt,
-        abandonedAt: yield* Clock.currentTimeMillis,
-        node: p.node,
-        mode: p.mode,
-        checkout: p.checkout,
-        commits: saved.commits,
-        done: p.done,
-        written: writtenPaths(saved),
-      };
-      if (p.done.length > 0) yield* recordAbandoned(home, record);
-      yield* dropRun(home);
-      const steps = setupSteps(saved, {
-        t3Connect: Effect.fail("not run"),
-        raw: { claude: null, codex: null },
-      }).map((s) => s.id);
-      if (p.failed) yield* Console.log(`It stopped at ${p.failed.step}: ${p.failed.why}`);
-      yield* Console.log(abandonReport(record, steps, home).join("\n"));
+      const dropped = yield* abandonRun(home);
+      if (Option.isNone(dropped)) return yield* Console.log("No unfinished setup to abandon.");
+      const { stopped, report } = dropped.value;
+      if (stopped) yield* Console.log(`It stopped at ${stopped.step}: ${stopped.why}`);
+      yield* Console.log(report.join("\n"));
       return;
     }
+    const unfinished = yield* unfinishedRun(home);
     // Half a departure and a new setup would undo each other: leave finishes, or is set aside, first.
-    const leaving = yield* unfinishedDeparture(home);
-    if (Option.isSome(leaving))
-      return yield* Effect.fail(
-        `this machine is partway through leaving the fleet (${leaving.value.node}); finish that with \`t3-fleet leave\`, or, if that departure is over or given up, set it aside with \`t3-fleet leave --retire\`, then run setup again`,
-      );
+    const leaving = yield* leavingRefusal(home);
+    if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
     if (flags.resume) {
       if (Option.isNone(unfinished))
         return yield* Effect.fail("there is no unfinished setup to resume");
@@ -414,25 +353,19 @@ const setup = (flags: Flags) =>
 /** `--resume --plan`: what is left of a stopped run. Reads only. */
 const showRemaining = (p: Progress) =>
   Effect.gen(function* () {
-    const input = p.input as SetupInput;
-    const steps = setupSteps(input, {
-      t3Connect: Effect.succeed(""),
-      raw: { claude: null, codex: null },
-    });
     yield* Console.log(
       `Setup of ${p.node} (${MODE_LINE[p.mode]}, ${p.checkout})${p.failed ? `\nstopped at ${p.failed.step}: ${p.failed.why}` : ""}`,
     );
-    for (const step of steps)
-      yield* Console.log(`  ${p.done.includes(step.id) ? "✓" : "·"} ${step.title}`);
+    for (const step of savedSteps(p))
+      yield* Console.log(`  ${step.done ? "✓" : "·"} ${step.title}`);
     yield* Console.log("\n--plan: nothing was written. t3-fleet setup --resume continues it.");
   });
+
+const say = (line: string) => Console.log(line);
 
 const planAndApply = (flags: Flags, scratch: string) =>
   Effect.gen(function* () {
     const home = process.env["HOME"] ?? "";
-    const path = yield* Path.Path;
-    const fs = yield* FileSystem.FileSystem;
-    const now = yield* Clock.currentTimeMillis;
 
     // 1. Pre-flight.
     const pre = yield* preflight;
@@ -443,178 +376,35 @@ const planAndApply = (flags: Flags, scratch: string) =>
       return yield* Effect.fail("pre-flight failed; fix what is marked ✗ and run setup again");
     }
 
-    // Which kind of run this is, and the fleet to plan against.
-    const config = yield* loadConfig.pipe(Effect.option);
-    const url = Option.getOrNull(flags.url);
-    const mode: Mode = Option.isSome(config) ? "again" : url !== null ? "join" : "first";
-    if (mode === "again" && url !== null)
-      yield* Console.log(
-        `This machine is already set up; comparing it with its own fleet, not ${cleanUrl(url)}.`,
-      );
-    let checkout = "";
-    let fleet: FleetView = EMPTY_FLEET;
-    let mcp: Readonly<Record<string, unknown>> = {};
-    let timerOff = false;
-    let branch = Option.match(config, { onNone: () => "main", onSome: (c) => c.branch });
-    let node = Option.getOrNull(flags.name) ?? "";
-    let authority = mode === "first";
-    if (mode === "again" && Option.isSome(config)) {
-      checkout = config.value.repo;
-      node = config.value.self;
-      authority =
-        config.value.nodes.find((n) => n.name === node)?.roles.includes("authority") ?? false;
-      ({ view: fleet, mcp, timerOff } = yield* readFleet(checkout, node));
-      // Planned against, or committed, an uncommitted edit would pass for the fleet's.
-      const record = Option.filter(yield* readAbandoned(home), (a) => a.checkout === checkout);
-      const dirty = yield* uncommittedFleetFiles(
-        checkout,
-        node,
-        fleet,
-        Option.match(record, { onNone: () => [], onSome: (a) => a.written }),
-      );
-      if (dirty.length > 0) {
-        const files = dirty.map((l) => sh(l.slice(3))).join(" ");
-        const repo = sh(checkout);
-        return yield* Effect.fail(
-          [
-            `${checkout} has uncommitted changes to the fleet's files; setup would plan against them as if they were the fleet's:`,
-            ...dirty.map((l) => `  ${l.slice(0, 3)}${JSON.stringify(l.slice(3)).slice(1, -1)}`),
-            authority
-              ? `Publish them first (\`git -C ${repo} add -- ${files} && git -C ${repo} commit -m "…"\`, then \`t3-fleet sync\`), or set them aside (\`git -C ${repo} stash push -u -m t3-fleet -- ${files}\`), then run setup again.`
-              : `\`t3-fleet sync\` proposes edits under [fleet] auto_commit; set the rest aside (\`git -C ${repo} stash push -u -m t3-fleet -- ${files}\`), or wait for this machine's proposal to be approved; then run setup again.`,
-          ].join("\n"),
-        );
-      }
-    }
-    if (mode === "join" && url !== null) {
-      yield* cloneFleet(url, scratch);
-      if (node === "")
-        node = nodeName(
-          (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim(),
-        );
-      ({ view: fleet, mcp } = yield* readFleet(scratch, node));
-      const probe = yield* loadConfigFrom(scratch, node).pipe(Effect.option);
-      checkout = path.resolve(
-        expandHome(
-          Option.getOrElse(flags.dir, () =>
-            Option.isSome(probe) ? probe.value.checkout : "~/fleet",
-          ),
-          home,
-        ),
-      );
-      authority =
-        Option.isSome(probe) &&
-        (probe.value.nodes.find((n) => n.name === node)?.roles.includes("authority") ?? false);
-      if (Option.isSome(probe)) branch = probe.value.branch;
-    }
-
-    // 2. Discover.
-    const found = yield* discover({
-      taken: fleet.secretNames,
-      managed: mode === "again" ? checkout : null,
-    });
-    if (node === "") node = found.node;
-    if (!NAME.test(node))
-      return yield* Effect.fail(
-        `"${node}" is not a machine name: lowercase letters, digits and dashes`,
-      );
-    if (checkout === "")
-      checkout = path.resolve(
-        expandHome(
-          Option.getOrElse(flags.dir, () => "~/fleet"),
-          home,
-        ),
-      );
-
-    // 3. Plan. On a machine set up already, the fleet's own registrations are no difference.
-    const local = parseDotenv(
-      yield* fs.readFileString(localSecretsPath(home)).pipe(Effect.orElseSucceed(() => "")),
-    );
-    const registered =
-      mode === "again"
-        ? registeredByFleet({
-            servers: fleet.servers,
-            mcp,
-            home,
-            value: (n) => local.get(n) ?? process.env[n],
-          })
-        : undefined;
-    const plan = buildPlan({
-      mode,
-      node,
-      authority,
-      found,
-      fleet,
-      ...(registered === undefined ? {} : { registered }),
-    });
-    const paths = { home, checkout };
-    const withSelf = (actions: Actions): Actions =>
-      fleet.servers.has(SELF_SERVER.name) ||
-      actions.servers.some((s) => s.name === SELF_SERVER.name)
-        ? actions
-        : { ...actions, servers: [...actions.servers, { ...SELF_SERVER, scope: "fleet" }] };
-    const remoteTarget: SetupInput["remote"] =
-      mode !== "first"
-        ? null
-        : Option.isSome(flags.remote)
+    // 2. Discover, and 3. plan, against the fleet this run belongs to (Session.ts).
+    const p = yield* prepare(
+      {
+        url: Option.getOrNull(flags.url),
+        name: Option.getOrNull(flags.name),
+        dir: Option.getOrNull(flags.dir),
+        remote: Option.isSome(flags.remote)
           ? { url: flags.remote.value }
           : Option.isSome(flags.github)
             ? { github: flags.github.value }
-            : pre.github !== null
-              ? { github: `${pre.github}/t3-fleet` }
-              : null;
-    const remote =
-      mode !== "first"
-        ? ""
-        : remoteTarget === null
-          ? "local only for now: gh is not signed in (gh auth login), and no --remote was given; setup finishes here and says how to add one"
-          : "github" in remoteTarget
-            ? `gh repo create ${remoteTarget.github} --private`
-            : `push to ${cleanUrl(remoteTarget.url)}`;
-    const fleetText = yield* fs
-      .readFileString(`${mode === "join" ? scratch : checkout}/${FLEET_FILE}`)
-      .pipe(Effect.orElseSucceed(() => ""));
-    const nodeText = yield* fs
-      .readFileString(`${mode === "join" ? scratch : checkout}/nodes/${node}.toml`)
-      .pipe(Effect.orElseSucceed(() => ""));
-    // Only extras not set up yet, and on a machine set up already only those asked for (Extras.ts).
-    const offers = extraOffers({
-      mode,
-      configured: {
-        relay: mode !== "first" && /^\[relay\]/m.test(fleetText),
-        "model proxy":
-          mode !== "first" &&
-          (/^\[defaults\.models\]/m.test(fleetText) || /^\[models\]/m.test(nodeText)),
-        "T3 access": yield* fs.exists(t3AccessPath(home)).pipe(Effect.orElseSucceed(() => false)),
+            : "default",
+        asked: { relay: flags.relay, models: flags.models },
+        scratch,
       },
-      asked: { relay: flags.relay, "model proxy": flags.models },
-      t3Running: found.t3.running,
-    });
-    const timerNow = mode === "again" && timerOff && pre.timer.works;
-    const preview = withSelf(decide(plan, {}, paths));
-    const nothing =
-      mode === "again" &&
-      preview.skills.length + preview.servers.length + preview.instructions.length === 0 &&
-      preview.links.length + preview.ignored.length === 0 &&
-      plan.conflicts.length === 0 &&
-      plan.missing.length === 0 &&
-      !timerNow;
+      pre,
+      say,
+    );
+    const { plan, record, left, pending, nothing, node } = p;
     yield* Console.log(
-      renderPlan(plan, preview, {
-        checkout,
+      renderPlan(plan, p.preview, {
+        checkout: p.checkout,
         home,
         pre,
-        found,
-        remote,
-        extras: nothing ? [] : offers,
-        timer: timerNow,
+        found: p.found,
+        remote: p.remoteLine,
+        extras: nothing ? [] : p.offers,
+        timer: p.timerNow,
       }),
     );
-    // What a run dropped with --abandon left undone: the checkout already has its files, so the plan cannot see it.
-    const abandoned = mode === "again" ? yield* readAbandoned(home) : Option.none();
-    const record = Option.getOrNull(Option.filter(abandoned, (a) => a.checkout === checkout));
-    const left = record === null ? null : yield* unfinishedWork(home, record, authority, branch);
-    const pending = left !== null && !nothingUnfinished(left);
     if (record !== null && left !== null && pending)
       yield* Console.log(
         `\nUnfinished from the setup of ${record.node} dropped with --abandon:\n${unfinishedLines(
@@ -642,8 +432,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
           return yield* Console.log("Nothing was written.");
       }
       yield* Console.log("");
-      for (const line of yield* finishWork(home, record, left, { sync: true, branch }))
-        yield* Console.log(`✓ ${line}`);
+      for (const line of yield* finishAbandoned(p)) yield* Console.log(`✓ ${line}`);
       return yield* Console.log(`\n${node} is set up.`);
     }
     if (flags.planOnly) {
@@ -672,7 +461,7 @@ const planAndApply = (flags: Flags, scratch: string) =>
     if (!flags.yes)
       for (const c of plan.conflicts) {
         if (!applies(c, choices, plan.conflicts)) continue;
-        yield* Console.log(`\n${c.title}\n${detailOf(c, choices, fleet)}`);
+        yield* Console.log(`\n${c.title}\n${detailOf(c, choices, p.fleet)}`);
         const ordered = [...c.choices].sort((a, b) =>
           a.value === c.default ? -1 : b.value === c.default ? 1 : 0,
         );
@@ -692,155 +481,53 @@ const planAndApply = (flags: Flags, scratch: string) =>
       }
 
     // 6. Optional extras.
-    const extras = yield* chooseExtras({ flags, offers, found, mode });
-
-    const actions = withSelf(decide(plan, choices, paths, entered));
-    const keep = new Set([...actions.ignored.map((i) => i.name), ...actions.serversHereOnly]);
-    const input: SetupInput = {
-      mode,
-      node,
-      checkout,
-      join: mode === "join" && url !== null ? { url, clone: scratch } : null,
-      commits: plan.commits,
-      actions,
-      handed: found.servers
-        .filter((s) => s.project === null && !keep.has(s.name))
-        .map((s) => s.name),
-      extras,
-      timer: pre.timer,
-      remote: remoteTarget,
-      now,
-      branch,
-    };
-
-    // What an abandoned run left: published or marked for proposing now; this run's sync does the rest.
-    if (record !== null && left !== null && pending)
-      for (const line of yield* finishWork(home, record, left, { sync: false, branch }))
-        yield* Console.log(`✓ ${line}`);
+    const extras = yield* chooseExtras({ flags, offers: p.offers, found: p.found, mode: p.mode });
+    const input = decideRun(p, { choices, entered, extras });
 
     // 5. Apply: the run is saved first, so a resume does exactly this.
-    let plain = "";
-    for (const s of secretsToStore(input)) plain = setVar(plain, s.name, s.value);
-    yield* saveRunSecrets(home, now, plain);
-    const progress: Progress = {
-      startedAt: now,
-      mode,
-      node,
-      checkout,
-      url: url === null ? null : cleanUrl(url),
-      input: persistable(input),
-      done: [],
-      failed: null,
-      finishedAt: null,
-    };
-    yield* writeProgress(home, progress);
-    return yield* runSteps(input, found.raw, progress);
+    const progress = yield* startRun(p, input, say);
+    return yield* runSteps(input, p.found.raw, progress);
   });
 
 /** `--resume`: the saved run, its secret values decrypted; nothing is planned again. */
 const resumeRun = (progress: Progress, flags: Flags) =>
   Effect.gen(function* () {
-    const home = process.env["HOME"] ?? "";
-    const fs = yield* FileSystem.FileSystem;
-    const saved = progress.input as SetupInput;
-    // An authority may have been made of this machine (or not) since.
-    const nodeText = yield* fs
-      .readFileString(`${saved.checkout}/nodes/${saved.node}.toml`)
-      .pipe(Effect.option);
     const pre = yield* preflight;
-    const back = restored(saved, yield* loadRunSecrets(home, progress.startedAt));
-    if ("missing" in back)
-      return yield* Effect.fail(
-        `the saved values of ${back.missing.join(", ")} are missing; this run cannot resume without them. \`t3-fleet setup --abandon\` drops it, then run setup again`,
-      );
-    const input: SetupInput = {
-      ...back,
-      commits:
-        saved.mode === "first" ||
-        (Option.isSome(nodeText) ? /^roles\s*=.*"authority"/m.test(nodeText.value) : saved.commits),
-      timer: pre.timer,
-      join:
-        saved.join === null
-          ? null
-          : { ...saved.join, url: Option.getOrElse(flags.url, () => saved.join?.url ?? "") },
+    const { input, raw } = yield* resumeInput(progress, pre, {
+      url: Option.getOrNull(flags.url),
       remote: Option.isSome(flags.remote)
         ? { url: flags.remote.value }
         : Option.isSome(flags.github)
           ? { github: flags.github.value }
-          : saved.remote,
-    };
+          : null,
+    });
     yield* Console.log(
       `Resuming setup of ${progress.node} (${MODE_LINE[progress.mode]}); done: ${progress.done.join(", ") || "nothing yet"}`,
     );
-    // The clients' entries are only read when the snapshot is still to be taken.
-    const raw = progress.done.includes("snapshot")
-      ? { claude: null, codex: null }
-      : (yield* discoverServers(home, process.env, [])).raw;
     return yield* runSteps(input, raw, progress);
   });
 
 const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>
   Effect.gen(function* () {
-    const home = process.env["HOME"] ?? "";
-    const fs = yield* FileSystem.FileSystem;
-    let progress = start;
-    const steps = setupSteps(input, {
-      t3Connect: connectT3.pipe(Effect.map((lines) => lines.join("; "))),
-      raw,
-    });
     yield* Console.log("");
-    for (const step of steps) {
-      if (progress.done.includes(step.id)) continue;
-      const result = yield* step.run.pipe(Effect.result);
-      if (result._tag === "Failure") {
-        progress = { ...progress, failed: { step: step.id, why: result.failure } };
-        yield* writeProgress(home, progress);
-        yield* Console.log(`✗ ${step.title}: ${result.failure}`);
-        return yield* Effect.fail(
-          `setup stopped at "${step.id}"; fix that, then \`t3-fleet setup --resume\` (or \`t3-fleet setup --abandon\` to drop it)`,
-        );
-      }
-      yield* Console.log(
-        `✓ ${step.title}${result.success.length > 0 ? `\n    ${result.success.join("\n    ")}` : ""}`,
-      );
-      progress = { ...progress, done: [...progress.done, step.id], failed: null };
-      yield* writeProgress(home, progress);
-    }
-    if (input.commits && input.mode === "again") {
-      // Proposed secrets an approval elsewhere could not read: this authority may.
-      for (const line of yield* mergeProposedSecrets(input.checkout))
-        yield* Console.log(`✓ ${line}`);
-    }
-    yield* writeProgress(home, { ...progress, finishedAt: yield* Clock.currentTimeMillis });
-    yield* fs.remove(runSecretsPath(home), { force: true });
-
+    yield* runSessionSteps(
+      input,
+      { t3Connect: connectT3.pipe(Effect.map((lines) => lines.join("; "))), raw },
+      start,
+      {
+        done: (step, lines) =>
+          Console.log(`✓ ${step.title}${lines.length > 0 ? `\n    ${lines.join("\n    ")}` : ""}`),
+        failed: (step, why) => Console.log(`✗ ${step.title}: ${why}`),
+        note: say,
+      },
+    ).pipe(
+      Effect.mapError(
+        (stopped) =>
+          `setup stopped at "${stopped.step}"; fix that, then \`t3-fleet setup --resume\` (or \`t3-fleet setup --abandon\` to drop it)`,
+      ),
+    );
     yield* Console.log(`\n${input.node} is set up.`);
-    if (input.mode === "first") {
-      const t = tilde(input.checkout, home);
-      if (input.remote === null)
-        yield* Console.log(
-          `The repo is local for now. To share it, push it to a private repository and sync:\n  git -C ${t} remote add origin <url> && git -C ${t} push -u origin main\n  t3-fleet sync`,
-        );
-      yield* Console.log(
-        "Add another machine: t3-fleet invite <name>, then run what it prints there.",
-      );
-    } else if (!input.commits) {
-      if (
-        input.actions.skills.length +
-          input.actions.servers.length +
-          input.actions.instructions.length +
-          secretsToStore(input).length >
-        0
-      )
-        yield* Console.log(
-          `What this machine adds is proposed: on an authority, t3-fleet review, then t3-fleet approve ${input.node}.`,
-        );
-      const recipients = yield* readRecipients(input.checkout);
-      if (recipients[input.node] === undefined)
-        yield* Console.log(
-          "An authority's next sync adds this machine's key; then it reads the fleet's secrets.",
-        );
-    }
+    for (const line of yield* finishedLines(input)) yield* Console.log(line);
   });
 
 const chooseExtras = (input: {
