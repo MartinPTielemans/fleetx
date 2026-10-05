@@ -57,7 +57,12 @@ const plan: typeof UiSetupPlan.Type = {
   leftAlone: [],
   secrets: [{ name: "CTX_API_KEY", server: "ctx", from: "Claude Code: arg --api-key" }],
   missing: [],
-  hub: { node: "box", ssh: "me@box", relayUrl: "https://box.tailnet.ts.net:8399", steps: ["Add box"] },
+  hub: {
+    node: "box",
+    ssh: "me@box",
+    relayUrl: "https://box.tailnet.ts.net:8399",
+    steps: ["Add box"],
+  },
   steps: ["the config repo at ~/fleet"],
 };
 

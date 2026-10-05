@@ -151,7 +151,12 @@ describe("the setup wizard's engine", () => {
     git("remote", "add", "origin", bare);
     git("push", "-q", "-u", "origin", "main");
     const config = await run(loadConfig);
-    const hub = { node: "box", ssh: "me@box", relayUrl: "https://box.tailnet.ts.net:8399", error: null };
+    const hub = {
+      node: "box",
+      ssh: "me@box",
+      relayUrl: "https://box.tailnet.ts.net:8399",
+      error: null,
+    };
     const lines = await run(admitHub(config, hub));
     expect(lines.join("\n")).toContain("committed and pushed");
     const show = (file: string) =>
