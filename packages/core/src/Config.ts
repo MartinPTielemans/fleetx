@@ -10,7 +10,7 @@
  *
  * The repository holds the setup itself:
  *
- *   t3-fleet.toml          the whole fleet: [fleet], [proxy], [defaults], [[accept]]
+ *   t3-fleet.toml          the whole fleet: [fleet], [notify], [proxy], [defaults], [[accept]]
  *   profiles/<name>.toml settings shared by the nodes that list the profile
  *   nodes/<name>.toml    one machine: ssh, roles, profiles, its own settings
  *
@@ -87,6 +87,14 @@ const RelaySection = Schema.Struct({
   port: Schema.optionalKey(Schema.Number),
 });
 
+/** Where fleet alerts go besides the app (Upkeep.ts). */
+const NotifySection = Schema.Struct({
+  /** Nodes that show an OS notification for every fleet alert. */
+  desktop: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The name of a secret holding the ntfy topic URL; omitted, no push. */
+  ntfy: Schema.optionalKey(Schema.String),
+});
+
 const FleetFile = Schema.Struct({
   fleet: Schema.optionalKey(FleetSection),
   /** Plugin areas, relative to the config repo (see Plugins.ts). */
@@ -94,6 +102,7 @@ const FleetFile = Schema.Struct({
     Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) }),
   ),
   relay: Schema.optionalKey(RelaySection),
+  notify: Schema.optionalKey(NotifySection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
   allow_secret: Schema.optionalKey(Schema.Array(AllowedSecret)),

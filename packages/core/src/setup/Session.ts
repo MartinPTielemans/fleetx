@@ -31,6 +31,7 @@ import { localSecretsPath, readRecipients, setVar } from "../Secrets.ts";
 import { t3AccessPath } from "../T3Access.ts";
 import {
   persistable,
+  pushesToNtfy,
   restored,
   secretsToStore,
   setupSteps,
@@ -38,6 +39,7 @@ import {
   type Extras,
   type SetupInput,
   type Step,
+  type Upkeep,
 } from "./Apply.ts";
 import type { Secret } from "./Credentials.ts";
 import {
@@ -116,8 +118,16 @@ export interface PrepareRequest {
    * <gh account>/t3-fleet when gh is signed in, and stays local otherwise.
    */
   readonly remote: SetupInput["remote"] | "default";
-  /** Extras asked for outright (--relay, --models): offered even on a machine set up already. */
-  readonly asked: { readonly relay: boolean; readonly models: boolean };
+  /**
+   * Extras asked for outright (--relay, --models): offered even on a machine
+   * set up already. `upkeep`: updates or notifications named outright
+   * (--auto-update, --ntfy, …), a difference even where nothing else is.
+   */
+  readonly asked: {
+    readonly relay: boolean;
+    readonly models: boolean;
+    readonly upkeep?: boolean;
+  };
   /** A joining machine's clone for the plan: outside HOME, removed unless setup goes ahead. */
   readonly scratch: string;
 }
@@ -148,6 +158,8 @@ export interface Prepared {
   readonly preview: Actions;
   /** A machine set up already on which nothing differs from the fleet. */
   readonly nothing: boolean;
+  /** The fleet pushes alerts to ntfy already ([notify] ntfy): its topic stays. */
+  readonly fleetNtfy: boolean;
   /** A run dropped with --abandon on this checkout, and what it left to do. */
   readonly record: Abandoned | null;
   readonly left: Unfinished | null;
@@ -309,7 +321,8 @@ export const prepare = (request: PrepareRequest, pre: Preflight, say: Say) =>
       preview.links.length + preview.ignored.length === 0 &&
       plan.conflicts.length === 0 &&
       plan.missing.length === 0 &&
-      !timerNow;
+      !timerNow &&
+      request.asked.upkeep !== true;
     // What a run dropped with --abandon left undone: the checkout already has its files, so the plan cannot see it.
     const abandoned = mode === "again" ? yield* readAbandoned(home) : Option.none();
     const record = Option.getOrNull(Option.filter(abandoned, (a) => a.checkout === checkout));
@@ -336,6 +349,7 @@ export const prepare = (request: PrepareRequest, pre: Preflight, say: Say) =>
       timerNow,
       preview,
       nothing,
+      fleetNtfy: pushesToNtfy(fleetText),
       record,
       left,
       pending,
@@ -349,6 +363,8 @@ export const decideRun = (
     readonly choices: Readonly<Record<string, Choice>>;
     readonly entered: ReadonlyArray<Secret>;
     readonly extras: Extras;
+    /** Updates and notifications; a fleet being joined keeps its own [fleet] apply and ntfy topic. */
+    readonly upkeep?: Upkeep;
   },
 ): SetupInput => {
   const actions = withSelf(p.fleet, decide(p.plan, answers.choices, p.paths, answers.entered));
@@ -368,6 +384,15 @@ export const decideRun = (
     remote: p.remoteTarget,
     now: p.now,
     branch: p.branch,
+    ...(answers.upkeep === undefined
+      ? {}
+      : {
+          upkeep: {
+            autoUpdate: p.mode === "join" ? null : answers.upkeep.autoUpdate,
+            desktop: answers.upkeep.desktop,
+            ntfy: p.fleetNtfy ? null : answers.upkeep.ntfy,
+          },
+        }),
   };
 };
 

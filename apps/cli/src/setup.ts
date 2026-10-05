@@ -18,6 +18,12 @@
  * stops part-way continues with `--resume`, doing exactly what was decided,
  * or is dropped with `--abandon`.
  *
+ * Besides what this machine holds, setup asks how the fleet looks after it:
+ * `--auto-update` (on for a new fleet: sync applies updates by itself),
+ * `--notify` (an OS notification here for every alert), `--ntfy` (alerts
+ * pushed to a phone), and with `--relay`, `--mcp-hub` (the MCP servers run
+ * there). `--no-…` says no to any of them; `--yes` takes their defaults.
+ *
  * `--ui` asks the same questions in the browser: the setup wizard, served by
  * `t3-fleet ui` from the same engine (setup/Session.ts).
  */
@@ -31,7 +37,14 @@ import { Argument, Command, Flag, Prompt } from "effect/unstable/cli";
 
 import { exec } from "@t3-fleet/core/Exec";
 import { randomBytes } from "@t3-fleet/core/hub/Policy";
-import type { Extras, SetupInput } from "@t3-fleet/core/setup/Apply";
+import { NTFY_SECRET, newNtfyUrl, UPDATE_WORDS, UPKEEP_DEFAULTS } from "@t3-fleet/core/Upkeep";
+import {
+  settingsLines,
+  upkeepFor,
+  type Extras,
+  type SetupInput,
+  type Upkeep,
+} from "@t3-fleet/core/setup/Apply";
 import type { Secret } from "@t3-fleet/core/setup/Credentials";
 import { tilde, type Discovery } from "@t3-fleet/core/setup/Discover";
 import {
@@ -251,10 +264,15 @@ interface Flags {
   readonly remote: Option.Option<string>;
   readonly relay: boolean;
   readonly models: boolean;
+  readonly mcpHub: Option.Option<boolean>;
+  readonly autoUpdate: Option.Option<boolean>;
+  readonly notify: Option.Option<boolean>;
+  readonly ntfy: Option.Option<boolean>;
   readonly ui: boolean;
 }
 
-export const setupCommand = Command.make("setup", {
+/** `t3-fleet setup`'s arguments and flags. */
+export const setupFlags = {
   url: Argument.String("repo-url").pipe(
     Argument.withDescription(
       "The fleet's config repository, to join it. Leave out on the first machine.",
@@ -272,7 +290,7 @@ export const setupCommand = Command.make("setup", {
   yes: Flag.Boolean("yes").pipe(
     Flag.withAlias("y"),
     Flag.withDescription(
-      "Accept the defaults: every conflict's, and no optional extras unless named.",
+      "Accept the defaults: every conflict's, no optional extras unless named, updates on for a new fleet, notifications where they can be shown.",
     ),
     Flag.withDefault(false),
   ),
@@ -310,11 +328,37 @@ export const setupCommand = Command.make("setup", {
     Flag.withDescription("Set up the model proxy without asking."),
     Flag.withDefault(false),
   ),
+  mcpHub: Flag.Boolean("mcp-hub").pipe(
+    Flag.withDescription(
+      "With --relay: host the fleet's MCP servers on this machine too. Sign in to each once, here; until then they stop working on your machines. Off by default.",
+    ),
+    Flag.optional,
+  ),
+  autoUpdate: Flag.Boolean("auto-update").pipe(
+    Flag.withDescription(
+      `A new fleet: sync applies updates by itself (${UPDATE_WORDS.join(", ")}). On by default; --no-auto-update leaves them for you to apply.`,
+    ),
+    Flag.optional,
+  ),
+  notify: Flag.Boolean("notify").pipe(
+    Flag.withDescription(
+      "An OS notification on this machine for every fleet alert. On by default where one can be shown; --no-notify turns it off.",
+    ),
+    Flag.optional,
+  ),
+  ntfy: Flag.Boolean("ntfy").pipe(
+    Flag.withDescription(
+      "Push every fleet alert to your phone with ntfy: setup makes a private topic, prints it, and keeps it among the secrets. Off by default.",
+    ),
+    Flag.optional,
+  ),
   ui: Flag.Boolean("ui").pipe(
     Flag.withDescription("Set up in the browser instead: opens the setup wizard (t3-fleet ui)."),
     Flag.withDefault(false),
   ),
-}).pipe(
+};
+
+export const setupCommand = Command.make("setup", setupFlags).pipe(
   Command.withDescription(
     "Set this machine up: start a fleet, join one (with its URL), or show what still differs. Plan first, resumable.",
   ),
@@ -398,7 +442,11 @@ const planAndApply = (flags: Flags, scratch: string) =>
           : Option.isSome(flags.github)
             ? { github: flags.github.value }
             : "default",
-        asked: { relay: flags.relay, models: flags.models },
+        asked: {
+          relay: flags.relay,
+          models: flags.models,
+          upkeep: [flags.mcpHub, flags.autoUpdate, flags.notify, flags.ntfy].some(Option.isSome),
+        },
         scratch,
       },
       pre,
@@ -491,9 +539,13 @@ const planAndApply = (flags: Flags, scratch: string) =>
         if (value !== "") entered.push({ name: m.name, value, where: "entered during setup" });
       }
 
-    // 6. Optional extras.
+    // 6. Optional extras, then how the fleet looks after this machine.
     const extras = yield* chooseExtras({ flags, offers: p.offers, found: p.found, mode: p.mode });
-    const input = decideRun(p, { choices, entered, extras });
+    const upkeep = yield* chooseUpkeep({ flags, mode: p.mode, fleetNtfy: p.fleetNtfy });
+    const input = decideRun(p, { choices, entered, extras, upkeep });
+    const settings = settingsLines(input);
+    if (settings.length > 0)
+      yield* Console.log(["", "Settings", ...settings.map((l) => `  ${l}`)].join("\n"));
 
     // 5. Apply: the run is saved first, so a resume does exactly this.
     const progress = yield* startRun(p, input, say);
@@ -539,10 +591,103 @@ const runSteps = (input: SetupInput, raw: Discovery["raw"], start: Progress) =>
     );
     yield* Console.log(`\n${input.node} is set up.`);
     for (const line of yield* finishedLines(input)) yield* Console.log(line);
+    // Here only, never in the wizard's job events: the topic is a secret.
+    const topic = input.upkeep?.ntfy?.url;
+    if (topic != null)
+      yield* Console.log(
+        `Fleet alerts push to ${topic}: subscribe to it in the ntfy app. It is kept as the secret ${NTFY_SECRET}.`,
+      );
+  });
+
+/** Whether this machine can show an OS notification: a Mac, or a desktop session. */
+const canNotifyHere = () =>
+  process.platform === "darwin" ||
+  (process.env["DISPLAY"] ?? "") !== "" ||
+  (process.env["WAYLAND_DISPLAY"] ?? "") !== "";
+
+/**
+ * The flags as the run takes them, the wizard's choices by another name:
+ * each flag given wins; `--yes` (or no terminal) takes the defaults; anything
+ * else is asked. A machine set up already changes only what a flag names.
+ */
+export const upkeepFlags = (
+  flags: Pick<Flags, "autoUpdate" | "notify" | "ntfy">,
+  context: {
+    readonly mode: "first" | "join" | "again";
+    readonly fleetNtfy: boolean;
+    readonly canNotify: boolean;
+  },
+): {
+  readonly autoUpdate: boolean | null | "ask";
+  readonly desktop: boolean | "ask";
+  readonly ntfy: boolean | "ask";
+} => {
+  const again = context.mode === "again";
+  return {
+    autoUpdate: Option.getOrElse(flags.autoUpdate, () =>
+      context.mode === "first" ? ("ask" as const) : null,
+    ),
+    desktop: Option.getOrElse(flags.notify, () =>
+      again ? false : context.canNotify ? ("ask" as const) : false,
+    ),
+    ntfy: context.fleetNtfy
+      ? false
+      : Option.getOrElse(flags.ntfy, () => (again ? false : ("ask" as const))),
+  };
+};
+
+const chooseUpkeep = (input: {
+  readonly flags: Flags;
+  readonly mode: Mode;
+  readonly fleetNtfy: boolean;
+}) =>
+  Effect.gen(function* () {
+    const quiet = input.flags.yes || !interactive();
+    const wanted = upkeepFlags(input.flags, {
+      mode: input.mode,
+      fleetNtfy: input.fleetNtfy,
+      canNotify: canNotifyHere(),
+    });
+    const decide = (value: boolean | "ask", message: string, initial: boolean) =>
+      value !== "ask"
+        ? Effect.succeed(value)
+        : quiet
+          ? Effect.succeed(initial)
+          : ask(Prompt.Confirm({ message, initial }));
+    const autoUpdate =
+      wanted.autoUpdate === null
+        ? null
+        : yield* decide(
+            wanted.autoUpdate,
+            `Keep things up to date automatically (${UPDATE_WORDS.join(" · ")})`,
+            UPKEEP_DEFAULTS.autoUpdate,
+          );
+    const desktop = yield* decide(
+      wanted.desktop,
+      "Notify you on this machine for every fleet alert",
+      UPKEEP_DEFAULTS.desktop,
+    );
+    const ntfy = (yield* decide(
+      wanted.ntfy,
+      "Push fleet alerts to your phone with ntfy (setup makes a private topic)",
+      UPKEEP_DEFAULTS.ntfy,
+    ))
+      ? newNtfyUrl()
+      : null;
+    if (ntfy !== null)
+      yield* Console.log(
+        `  Your ntfy topic: ${ntfy}\n  Subscribe to it in the ntfy app (or open it in a browser). Anyone with the link reads your alerts: keep it to yourself.`,
+      );
+    return upkeepFor(input.mode, { autoUpdate, desktop, ntfy }) satisfies Upkeep;
   });
 
 const chooseExtras = (input: {
-  readonly flags: { readonly yes: boolean; readonly relay: boolean; readonly models: boolean };
+  readonly flags: {
+    readonly yes: boolean;
+    readonly relay: boolean;
+    readonly models: boolean;
+    readonly mcpHub: Option.Option<boolean>;
+  };
   readonly offers: ReadonlyArray<readonly [string, string]>;
   readonly found: Discovery;
   readonly mode: Mode;
@@ -567,8 +712,27 @@ const chooseExtras = (input: {
     ) {
       const checks = yield* relayChecks;
       for (const line of checks.lines) yield* Console.log(`  ${line}`);
-      relay = { url: checks.url, token: hex(randomBytes(32)) };
-    }
+      // The MCP hub: off unless asked, as in the wizard.
+      let mcp = Option.getOrElse(input.flags.mcpHub, () => UPKEEP_DEFAULTS.mcpHub);
+      if (Option.isNone(input.flags.mcpHub) && !input.flags.yes && interactive())
+        mcp = yield* ask(
+          Prompt.Confirm({
+            message:
+              "Host your MCP servers here too? Sign in to each once, here, and every machine uses it; until you do, those servers stop working on your machines",
+            initial: UPKEEP_DEFAULTS.mcpHub,
+          }),
+        );
+      if (mcp && checks.url === null) {
+        yield* Console.log(
+          "  ! the MCP hub is reached at the relay's URL, and tailscale gives none here: set [relay] url, then [defaults.mcp] hub and gateway (docs/topologies.md)",
+        );
+        mcp = false;
+      }
+      relay = { url: checks.url, token: hex(randomBytes(32)), mcp };
+    } else if (Option.getOrElse(input.flags.mcpHub, () => false))
+      return yield* Effect.fail(
+        "--mcp-hub hosts the MCP servers on the relay: pass --relay too, on the always-on machine",
+      );
     let models: Extras["models"] = null;
     if (
       yield* want(

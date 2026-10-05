@@ -41,8 +41,10 @@ const PLAN_ID = "f".repeat(64);
 const request: UiSetupPlanRequest = {
   repo: { kind: "github", name: "t3-fleet" },
   node: "laptop",
-  hub: { ssh: "me@box", node: "box" },
+  hub: { ssh: "me@box", node: "box", mcp: false },
   extras: [],
+  autoUpdate: true,
+  notify: { desktop: true, ntfy: null },
 };
 
 const plan: typeof UiSetupPlan.Type = {
@@ -61,8 +63,10 @@ const plan: typeof UiSetupPlan.Type = {
     node: "box",
     ssh: "me@box",
     relayUrl: "https://box.tailnet.ts.net:8399",
+    mcp: false,
     steps: ["Add box"],
   },
+  settings: [],
   steps: ["the config repo at ~/fleet"],
 };
 

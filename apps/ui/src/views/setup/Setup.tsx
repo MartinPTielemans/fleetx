@@ -166,6 +166,8 @@ export function SetupWizard({
     try {
       const data = await api.setupProbe(ssh);
       setProbe({ data, running: false, error: null });
+      // Without a tailnet address there is nowhere for the machines to reach hosted servers.
+      if (data.relayUrl === null) set({ hubMcp: false });
       // Name the hub after the machine, unless the user already named it.
       if (data.reachable)
         setAnswers((a) =>
@@ -219,8 +221,15 @@ export function SetupWizard({
         hub:
           p.hub === null
             ? null
-            : { node: p.hub.node, ssh: p.hub.ssh, relayUrl: p.hub.relayUrl, steps: p.hub.steps },
+            : {
+                node: p.hub.node,
+                ssh: p.hub.ssh,
+                relayUrl: p.hub.relayUrl,
+                mcp: p.hub.mcp,
+                steps: p.hub.steps,
+              },
         remote: p.repo.remote,
+        settings: p.settings,
         others: answers.others,
         reached: {},
         finished: false,

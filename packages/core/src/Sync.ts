@@ -75,21 +75,12 @@ import { approve, autoApproves, listProposals, settleRejection } from "./Staging
 import { isDepartureProposal } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { withSyncLock } from "./SyncLock.ts";
+import { DEFAULT_APPLY } from "./Upkeep.ts";
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
 
 const DEFAULT_AUTO_COMMIT = ["skills"];
-const DEFAULT_APPLY = [
-  "engine",
-  "secrets",
-  "dotfiles",
-  "instructions",
-  "skills",
-  "mcp",
-  "agents",
-  "t3",
-];
 const MAX_ALERTS = 50;
 
 const settingList = (

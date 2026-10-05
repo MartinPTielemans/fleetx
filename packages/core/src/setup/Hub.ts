@@ -6,7 +6,8 @@
  * `t3-fleet approve` take:
  *
  *   admit    nodes/<hub>.toml (roles member and relay, its ssh destination),
- *            [relay] in t3-fleet.toml, a relay token among the secrets;
+ *            [relay] in t3-fleet.toml, a relay token among the secrets, and
+ *            [defaults.mcp] hub and gateway when it hosts the MCP servers;
  *            committed and pushed, so the hub's setup finds itself in the fleet
  *   join     Remote.bringUpHub: T3 Fleet installed there, `t3-fleet setup`
  *            joining the fleet as that node
@@ -45,8 +46,9 @@ import {
 } from "../Secrets.ts";
 import { approve, listProposals } from "../Staging.ts";
 import { underSyncLock } from "../SyncLock.ts";
-import { relayEdits, rolesOf } from "./Apply.ts";
+import { mcpHubEdits, relayEdits, rolesOf } from "./Apply.ts";
 import { PROPOSED_SECRETS } from "./Plan.ts";
+import { hubStepTitles } from "./PlanWords.ts";
 import { bringUpHub } from "./Remote.ts";
 import { newNodeFile } from "./Repo.ts";
 import { setKey, type Edit } from "./TomlEdit.ts";
@@ -56,6 +58,11 @@ export const HubRequest = Schema.Struct({
   node: Schema.String,
   ssh: Schema.String,
   relayUrl: Schema.NullOr(Schema.String),
+  /**
+   * Host the fleet's MCP servers there ([defaults.mcp] hub, its gateway the
+   * relay URL); absent in a hub.json written before this was asked.
+   */
+  mcp: Schema.optionalKey(Schema.Boolean),
   /** Why the last bring-up stopped; null before the first, or while one runs. */
   error: Schema.NullOr(Schema.String),
 });
@@ -84,15 +91,6 @@ export const dropHub = (home: string) =>
     Effect.flatMap((fs) => fs.remove(hubPath(home), { force: true })),
     Effect.ignore,
   );
-
-/** What bringing the hub up does, in plain words, for the plan. */
-export const hubStepTitles = (hub: { readonly node: string }) => [
-  `Add ${hub.node} to the fleet as its relay, with a new relay token among the secrets`,
-  `Install T3 Fleet on ${hub.node} and join it to the fleet, over ssh`,
-  `Let ${hub.node} read the fleet's secrets`,
-  `Approve ${hub.node}'s proposal when it only touches its own files`,
-  `Sync ${hub.node}, so it starts the relay`,
-];
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -140,15 +138,27 @@ export const admitHub = (config: Config, hub: HubRequest) =>
       }
       const fleetFile = `${repo}/${FLEET_FILE}`;
       const fleetBefore = yield* fs.readFileString(fleetFile);
-      if (!/^\[relay\]/m.test(fleetBefore)) {
-        const after = yield* edited(FLEET_FILE, fleetBefore, [(t) => relayEdits(t, hub.relayUrl)]);
-        yield* fs.writeFileString(fleetFile, after);
+      let fleetAfter = fleetBefore;
+      if (!/^\[relay\]/m.test(fleetAfter)) {
+        fleetAfter = yield* edited(FLEET_FILE, fleetAfter, [(t) => relayEdits(t, hub.relayUrl)]);
         lines.push(
           hub.relayUrl === null
             ? `[relay] in ${FLEET_FILE}; set its url once ${hub.node} can be reached`
             : `[relay] in ${FLEET_FILE}: ${hub.relayUrl}`,
         );
       }
+      if (hub.mcp === true) {
+        if (hub.relayUrl === null)
+          return yield* Effect.fail(
+            `${hub.node} has no relay URL for the MCP hub to be reached at: tailscale on ${hub.node}, then try again`,
+          );
+        const gateway = hub.relayUrl;
+        const hosted = yield* edited(FLEET_FILE, fleetAfter, [(t) => mcpHubEdits(t, gateway)]);
+        if (hosted !== fleetAfter)
+          lines.push(`[defaults.mcp] hub in ${FLEET_FILE}: your MCP servers run on ${hub.node}`);
+        fleetAfter = hosted;
+      }
+      if (fleetAfter !== fleetBefore) yield* fs.writeFileString(fleetFile, fleetAfter);
       const secrets = yield* readSecrets(repo);
       if (!varNames(secrets).includes(RELAY_TOKEN)) {
         yield* writeSecrets(repo, setVar(secrets, RELAY_TOKEN, hex(randomBytes(32))));

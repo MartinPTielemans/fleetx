@@ -30,6 +30,8 @@ import type {
   UiSetupPlanRequest,
   UiSetupState,
 } from "@t3-fleet/core/SetupApi";
+import { hubStepTitles, mcpHubLine, settingsWords } from "@t3-fleet/core/setup/PlanWords";
+import { NTFY_SECRET } from "@t3-fleet/core/Upkeep";
 
 type Answer = { status: number; body: string; delay?: number };
 const json = (value: unknown, delay = 0): Answer => ({
@@ -272,14 +274,6 @@ const FLEET_TDD = `--- the fleet's skills/tdd/SKILL.md
 +description: Test-driven development. Use when building features or fixing bugs test-first.
  ---`;
 
-const HUB_STEPS = [
-  "Install T3 Fleet",
-  "Join the fleet as a member",
-  "Run the relay as a service",
-  "Start the MCP hub for linear, posthog and github",
-  "Move the OAuth logins to the hub",
-];
-
 const planFor = (request: UiSetupPlanRequest, github: string | null): UiSetupPlan => {
   const join = request.repo.kind === "url";
   const remote =
@@ -399,6 +393,10 @@ const planFor = (request: UiSetupPlanRequest, github: string | null): UiSetupPla
       { name: "POSTHOG_API_KEY", server: "posthog", from: "Claude Code env" },
       { name: "LINEAR_API_KEY", server: "linear", from: "Codex config" },
       { name: "CONTEXT7_API_KEY", server: "context7", from: "Claude Code env" },
+      // As the engine lists it: by name, never the topic.
+      ...(request.notify.ntfy === null
+        ? []
+        : [{ name: NTFY_SECRET, server: "notifications", from: "the ntfy topic setup made" }]),
     ],
     missing: [
       {
@@ -413,8 +411,20 @@ const planFor = (request: UiSetupPlanRequest, github: string | null): UiSetupPla
             node: request.hub.node,
             ssh: request.hub.ssh,
             relayUrl: `https://${HUB_HOST}`,
-            steps: HUB_STEPS,
+            mcp: request.hub.mcp,
+            steps: hubStepTitles(request.hub),
           },
+    // The engine's words (setup/PlanWords.ts); a fleet joined keeps its own [fleet] apply.
+    settings: [
+      ...(request.hub?.mcp === true ? [mcpHubLine(request.hub.node)] : []),
+      ...settingsWords({
+        node: request.node,
+        mcpHub: false,
+        autoUpdate: join ? null : request.autoUpdate,
+        desktop: request.notify.desktop,
+        ntfy: request.notify.ntfy !== null,
+      }),
+    ],
     steps: [
       "Snapshot the clients' MCP servers",
       join
@@ -510,7 +520,8 @@ const startHub = (sim: Sim, page: URLSearchParams, from: number): UiJob | null =
   // As the server does: in the fleet once this computer's part is done, said with "session".
   becomeMember(sim);
   const hub =
-    sim.lastPlan?.plan.hub ?? (sim.hub === null ? null : { node: sim.hub.node, steps: HUB_STEPS });
+    sim.lastPlan?.plan.hub ??
+    (sim.hub === null ? null : { node: sim.hub.node, steps: hubStepTitles(sim.hub) });
   if (hub == null) return null;
   if (sim.hub !== null) sim.hub = { ...sim.hub, error: null };
   const fail = page.get("apply") === "hubfail" && !sim.failedOnce ? 2 : null;
@@ -557,7 +568,14 @@ const apply = (sim: Sim, page: URLSearchParams, request: UiSetupApplyRequest): A
   const steps =
     sim.lastPlan?.plan.steps ??
     planFor(
-      { repo: { kind: "github", name: "fleet" }, node: "mbp-14", hub: null, extras: [] },
+      {
+        repo: { kind: "github", name: "fleet" },
+        node: "mbp-14",
+        hub: null,
+        extras: [],
+        autoUpdate: true,
+        notify: { desktop: true, ntfy: null },
+      },
       sim.github,
     ).steps;
   if (request.kind === "resume") {
