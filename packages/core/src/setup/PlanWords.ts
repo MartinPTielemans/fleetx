@@ -12,10 +12,13 @@ export const hubStepTitles = (hub: { readonly node: string; readonly mcp?: boole
     : `Add ${hub.node} to the fleet as its relay, with a new relay token among the secrets, and let your Tailscale login open the app it hosts`,
   `Install T3 Fleet on ${hub.node} and join it to the fleet, over ssh`,
   `Let ${hub.node} read the fleet's secrets`,
-  `Approve ${hub.node}'s proposal when it only touches its own files`,
+  `Approve ${hub.node}'s proposal when it only brings its own secrets`,
   hub.mcp === true
     ? `Sync ${hub.node}, so it starts the relay and hosts your MCP servers`
     : `Sync ${hub.node}, so it starts the relay`,
+  ...(hub.mcp === true
+    ? [`Once ${hub.node} is up, move your machines' MCP servers to it ([defaults.mcp] hub)`]
+    : []),
 ];
 
 /** The MCP hub, in the plan's words. */

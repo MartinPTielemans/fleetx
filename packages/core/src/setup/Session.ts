@@ -25,7 +25,8 @@ import { sh } from "../Area.ts";
 import { expandHome, loadConfig, loadConfigFrom } from "../Config.ts";
 import { exec } from "../Exec.ts";
 import { unfinishedDeparture } from "../Leave.ts";
-import { FLEET_FILE } from "../Names.ts";
+import { FLEET_FILE, stateDir } from "../Names.ts";
+import { machineLockHolder, withMachineLock } from "../SyncLock.ts";
 import { mergeProposedSecrets, parseDotenv } from "../ProposedSecrets.ts";
 import { localSecretsPath, readRecipients, setVar } from "../Secrets.ts";
 import { t3AccessPath } from "../T3Access.ts";
@@ -94,6 +95,23 @@ export type Say = (line: string) => Effect.Effect<void>;
 /** The run a setup stopped part-way through, if one did. */
 export const unfinishedRun = (home: string) =>
   readProgress(home).pipe(Effect.map(Option.filter((p) => p.finishedAt === null)));
+
+/** Held by whichever process is applying a setup here (a step, or the hub's bring-up). */
+export const runLockPath = (home: string) => `${stateDir(home)}/setup/run.lock`;
+
+export const RUN_ELSEWHERE =
+  "a setup is running in another T3 Fleet process on this machine (another `t3-fleet ui`, or `t3-fleet setup`); wait for it to finish, then look again";
+
+/**
+ * Apply holding the run lock: one process at a time, across processes, with
+ * sync's dead-owner recovery (SyncLock.ts), so two never resume one run.
+ */
+export const withRunLock = <A, E, R>(home: string, effect: Effect.Effect<A, E, R>) =>
+  withMachineLock(runLockPath(home), effect, Effect.fail(RUN_ELSEWHERE));
+
+/** Whether another process is applying a setup here now. */
+export const runningElsewhere = (home: string) =>
+  machineLockHolder(runLockPath(home)).pipe(Effect.map((h) => h === "elsewhere"));
 
 /** Why setup must not start now: this machine is partway through leaving the fleet. */
 export const leavingRefusal = (home: string) =>
@@ -228,6 +246,11 @@ export const prepare = (request: PrepareRequest, pre: Preflight, say: Say) =>
     }
     if (mode === "join" && url !== null) {
       yield* cloneFleet(url, request.scratch);
+      // A repository with commits but no t3-fleet.toml is not a fleet: joining it would set up nothing.
+      if (!(yield* fs.exists(`${request.scratch}/${FLEET_FILE}`)))
+        return yield* Effect.fail(
+          `${cleanUrl(url)} is not a fleet's repository: it has no ${FLEET_FILE}. To start a fleet, give an empty repository (or none, and setup makes one); to join one, give its repository's URL`,
+        );
       if (node === "")
         node = nodeName(
           (yield* exec({ command: "hostname", timeout: Duration.seconds(5) })).stdout.trim(),
@@ -492,8 +515,12 @@ export const runSteps = (
         yield* report.note(`✓ ${line}`);
     }
     const finished = yield* Clock.currentTimeMillis;
-    yield* writeProgress(home, { ...progress, finishedAt: finished }).pipe(Effect.ignore);
-    yield* fs.remove(runSecretsPath(home), { force: true }).pipe(Effect.ignore);
+    // The run's values go only once it is recorded as finished: a run still unfinished resumes with them.
+    const recorded = yield* writeProgress(home, { ...progress, finishedAt: finished }).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (recorded) yield* fs.remove(runSecretsPath(home), { force: true }).pipe(Effect.ignore);
   });
 
 /** What to say once a run is done, after "<node> is set up.", a message each. */

@@ -266,6 +266,17 @@ export const withMachineLock = <A, E, R, B, E2, R2>(
     (token) => (token === null ? Effect.void : releaseLock(lock, token)),
   );
 
+/** Who holds a machine lock now: nobody, this process, or another live one. */
+export const machineLockHolder = (lock: string) =>
+  Effect.gen(function* () {
+    const state = yield* lockState(lock, yield* Clock.currentTimeMillis);
+    if (state !== "held") return "free" as const;
+    const owner = yield* readOwner(lock);
+    return Option.isSome(owner) && owner.value.pid === process.pid
+      ? ("here" as const)
+      : ("elsewhere" as const);
+  });
+
 /**
  * Whether this process was started by the run holding the lock, with its
  * token. A token this process took itself is never inherited: only the fiber

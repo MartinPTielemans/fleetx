@@ -52,7 +52,16 @@ import {
   type PlanServer,
 } from "./Plan.ts";
 import { preflight, type Preflight } from "./Preflight.ts";
-import { bringUp, dropHub, readHub, writeHub, type HubRequest } from "./Hub.ts";
+import {
+  bringUp,
+  dropHub,
+  readHub,
+  requireAuthority,
+  undoAdmission,
+  updateHub,
+  writeHub,
+  type HubRequest,
+} from "./Hub.ts";
 import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
 import { probeHub } from "./Remote.ts";
 import { SELF_SERVER } from "./Repo.ts";
@@ -65,11 +74,14 @@ import {
   NODE_NAME,
   prepare,
   resumeInput,
+  RUN_ELSEWHERE,
+  runningElsewhere,
   runSteps,
   savedSteps,
   startRun,
   stepTitles,
   unfinishedRun,
+  withRunLock,
   type Prepared,
   type PrepareRequest,
 } from "./Session.ts";
@@ -475,6 +487,11 @@ export const make = (hooks: {
           pre,
           () => Effect.void,
         );
+        // The hub is set up from an authority (or the machine starting the fleet), never a member.
+        if (request.hub !== null && !p.authority)
+          return yield* Effect.fail(
+            `${p.node} is not an authority, so it cannot set up the fleet's hub: run this on an authority, or have one give ${p.node} the authority role`,
+          );
         const missing = missingOf(p, request);
         const digest = yield* Effect.promise(() =>
           sha256(`${key}\n${fingerprint(p, request, missing)}`),
@@ -493,6 +510,7 @@ export const make = (hooks: {
         const leaving = yield* leavingRefusal(home());
         const config = yield* member;
         const hub = yield* readHub(home());
+        const elsewhere = yield* runningElsewhere(home());
         return {
           stage: Option.isSome(unfinished) ? "unfinished" : config !== null ? "member" : "fresh",
           hostname,
@@ -522,6 +540,7 @@ export const make = (hooks: {
               startedAt: p.startedAt,
               done: p.done.length,
               total: savedSteps(p).length,
+              runningElsewhere: elsewhere,
             }),
           }),
           hub: Option.match(hub, {
@@ -603,22 +622,31 @@ export const make = (hooks: {
       work: (
         step: (text: string) => Effect.Effect<void>,
       ) => Effect.Effect<void, string, ProbeServices>,
-    ): SetupJob => ({ kind: "setup", title, run: (step) => closed(work(step)) });
+    ): SetupJob => ({
+      kind: "setup",
+      title,
+      run: (step) => closed(withRunLock(home(), work(step))),
+    });
 
     const hubJob = (hub: HubRequest): SetupJob => ({
       kind: "setup-hub",
       title: `Bring up ${hub.node}, the hub`,
       run: (step) =>
         closed(
-          Effect.gen(function* () {
-            yield* writeHub(home(), { ...hub, error: null });
-            yield* bringUp(hub, step).pipe(
-              Effect.tapError((why) =>
-                writeHub(home(), { ...hub, error: why }).pipe(Effect.ignore),
-              ),
-            );
-            yield* dropHub(home());
-          }),
+          withRunLock(
+            home(),
+            Effect.gen(function* () {
+              // What an earlier attempt recorded (what it committed) stays with the request.
+              const saved = Option.getOrElse(yield* readHub(home()), () => hub);
+              yield* writeHub(home(), { ...saved, error: null });
+              yield* bringUp(saved, step, home()).pipe(
+                Effect.tapError((why) =>
+                  updateHub(home(), (h) => ({ ...h, error: why })).pipe(Effect.ignore),
+                ),
+              );
+              yield* dropHub(home());
+            }),
+          ),
         ),
     });
 
@@ -646,8 +674,11 @@ export const make = (hooks: {
       closed(
         Effect.gen(function* () {
           if (request.kind === "abandon") {
-            const dropped = yield* abandonRun(home());
+            if (yield* runningElsewhere(home())) return yield* Effect.fail(RUN_ELSEWHERE);
             const hub = yield* readHub(home());
+            // What the hub's admission committed comes out again first; when it cannot, the run stays to retry.
+            if (Option.isSome(hub)) yield* undoAdmission(hub.value, home());
+            const dropped = yield* abandonRun(home());
             if (Option.isNone(dropped) && Option.isNone(hub))
               return yield* Effect.fail("there is no unfinished setup to abandon");
             yield* dropHub(home());
@@ -656,8 +687,12 @@ export const make = (hooks: {
           if (request.kind === "resume") {
             const leaving = yield* leavingRefusal(home());
             if (Option.isSome(leaving)) return yield* Effect.fail(leaving.value);
+            if (yield* runningElsewhere(home())) return yield* Effect.fail(RUN_ELSEWHERE);
             const unfinished = yield* unfinishedRun(home());
             const hub = Option.getOrNull(yield* readHub(home()));
+            // A machine in a fleet brings a hub up only as an authority (bringUp checks again).
+            const config = yield* member;
+            if (hub !== null && config !== null) yield* requireAuthority(config);
             const jobs: Array<SetupJob> = [];
             if (Option.isSome(unfinished)) {
               const progress = unfinished.value;
@@ -734,8 +769,9 @@ export const make = (hooks: {
               )
             : runJob(title, (step) =>
                 Effect.gen(function* () {
-                  if (found.hub !== null) yield* writeHub(p.home, found.hub);
                   const progress = yield* startRun(p, input, step);
+                  // Saved once the run is: a hub without a run to resume would show a setup that is not.
+                  if (found.hub !== null) yield* writeHub(p.home, found.hub);
                   yield* stepsOf(input, p.found.raw, progress, step);
                 }).pipe(Effect.mapError(message), Effect.ensuring(removeScratch(scratch))),
               );
