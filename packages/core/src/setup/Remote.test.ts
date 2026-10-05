@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { runningBuild } from "../Build.ts";
 import { exec, type ExecInput, type ExecResult } from "../Exec.ts";
-import { probeHub, bringUpHub, hubPlanSteps } from "./Remote.ts";
+import { probeHub, bringUpHub, forgetBundles, hubPlanSteps } from "./Remote.ts";
 
 vi.mock("../Exec.ts", async (original) => ({
   ...(await original<typeof import("../Exec.ts")>()),
@@ -90,6 +90,7 @@ const saved = (over: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
+  forgetBundles();
   readBundle.mockReset().mockReturnValue(Effect.succeed(bundle));
   vi.mocked(runningBuild).mockReset().mockReturnValue(null);
   overrides.clear();

@@ -31,8 +31,13 @@ const lastLine = (text: string) =>
     .filter((l) => l !== "")
     .pop() ?? "";
 
-/** Install this exact build, atomically, in the same locations as the release installer. */
-export const installEngineScript = (bundle: string) => {
+/**
+ * Install this exact build, atomically, in the same locations as the release
+ * installer. `digest` is the SHA-256 of `bundle` (UTF-8): what arrives is
+ * checked against it before it replaces anything, so a build changed on the
+ * way is never installed.
+ */
+export const installEngineScript = (bundle: string, digest: string) => {
   const share = `~/${SHARE_DIR}`;
   return [
     `mkdir -p ${share} ~/.local/bin`,
@@ -41,6 +46,8 @@ export const installEngineScript = (bundle: string) => {
       .toString("base64")
       .replace(/(.{76})/g, "$1\n"),
     "T3_FLEET_BUNDLE",
+    `got=$( (sha256sum ${share}/${BUNDLE_FILE}.tmp 2>/dev/null || shasum -a 256 ${share}/${BUNDLE_FILE}.tmp) | cut -d' ' -f1)`,
+    `if [ "$got" != "${digest}" ]; then rm -f ${share}/${BUNDLE_FILE}.tmp; echo "the ${PRODUCT} build arrived changed (sha256 $got, not ${digest}); nothing was installed" >&2; exit 1; fi`,
     `chmod 755 ${share}/${BUNDLE_FILE}.tmp && mv ${share}/${BUNDLE_FILE}.tmp ${share}/${BUNDLE_FILE}`,
     // A link that already points here (a development checkout) is left alone; a real file in the way is kept aside.
     `if [ -e ~/.local/bin/${CLI} ] && [ ! -L ~/.local/bin/${CLI} ]; then mv ~/.local/bin/${CLI} ~/.local/bin/${CLI}.t3-fleet-backup; fi`,
@@ -60,8 +67,8 @@ export const installEngineScript = (bundle: string) => {
  * live. ENGINE_INSTALL is replaced by this build, streamed inline as base64,
  * and linked as t3-fleet.
  */
-const script = (command: string, checkout: string, bundle: string) => {
-  const body = command === ENGINE_INSTALL ? installEngineScript(bundle) : command;
+const script = (command: string, checkout: string, bundle: string, digest: string) => {
+  const body = command === ENGINE_INSTALL ? installEngineScript(bundle, digest) : command;
   return `export T3_FLEET_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
 };
 
@@ -86,7 +93,9 @@ export const runFix = (
         summary: `no ${PRODUCT} build to install was given; nothing was changed`,
       } satisfies FixOutcome;
     }
-    const stdin = script(finding.fix.command, checkout, bundle);
+    const digest =
+      finding.fix.command === ENGINE_INSTALL ? yield* Effect.promise(() => sha256(bundle)) : "";
+    const stdin = script(finding.fix.command, checkout, bundle, digest);
     const run = yield* node.ssh === null
       ? exec({ command: "bash", args: ["-l", "-s"], stdin, timeout: Duration.minutes(10) })
       : remoteExec(node.ssh, { command: "bash -l -s", stdin, timeout: Duration.minutes(10) });

@@ -63,7 +63,7 @@ import {
   type HubRequest,
 } from "./Hub.ts";
 import { hubStepTitles, mcpHubLine } from "./PlanWords.ts";
-import { probeHub } from "./Remote.ts";
+import { pinOwnBundle, probeHub } from "./Remote.ts";
 import { SELF_SERVER } from "./Repo.ts";
 import {
   abandonRun,
@@ -421,6 +421,8 @@ export const make = (hooks: {
 }) =>
   Effect.gen(function* () {
     const services = yield* Effect.context<ProbeServices>();
+    // The build the hub is sent is this one, as it is now (Remote.bundleAt).
+    yield* pinOwnBundle;
     const closed = <A, E>(effect: Effect.Effect<A, E, ProbeServices>) =>
       effect.pipe(Effect.provide(services), Effect.mapError(message));
     const key = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), (b) =>
