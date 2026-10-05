@@ -682,7 +682,7 @@ export const planLeave = (departure: Departure, options: LeaveOptions) =>
       if (fleet.step !== null) steps.push(fleet.step);
       if (d.roles.includes("relay"))
         notes.push(
-          `${d.node} runs the fleet's relay: until another machine takes the relay role (and [relay] url points at it), the others lose the relay, its listeners and the MCP hub`,
+          `${d.node} runs the fleet's relay: until another machine takes the relay role (and [relay] url points at it), the others lose the relay, its listeners and the MCP hub. On an authority, remove [relay] from t3-fleet.toml (or point its url elsewhere), and [defaults.mcp] hub and gateway if it hosted the MCP servers`,
         );
       const own = varNames(
         yield* fs.readFileString(localSecretsPath(home)).pipe(Effect.orElseSucceed(() => "")),

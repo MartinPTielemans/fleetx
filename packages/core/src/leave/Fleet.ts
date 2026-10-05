@@ -31,7 +31,8 @@ import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessS
 import { parse as parseToml } from "smol-toml";
 
 import { ensureGitConfig, git, literal, nulList, ok, out, pullBranch, why } from "../Git.ts";
-import { branchPrefix } from "../Names.ts";
+import { branchPrefix, FLEET_FILE } from "../Names.ts";
+import { removeFromList } from "../setup/TomlEdit.ts";
 import {
   SECRETS_FILES,
   decryptWith,
@@ -181,8 +182,20 @@ export const standing = (repo: string, branch: string, node: string) =>
  * they were encrypted to recorded. When this machine cannot read them, they
  * stay as they were and the recorded set with them, so nothing claims the
  * remaining keys alone can read them.
+ *
+ * An authority's removal (`fleet`) also takes the node out of [notify]
+ * desktop, and says what of the relay it ran stays to change; a member's
+ * proposed departure changes nothing else, so it is still told apart
+ * (isDeparture).
  */
-const removalCommit = (repo: string, branch: string, node: string, home: string, message: string) =>
+const removalCommit = (
+  repo: string,
+  branch: string,
+  node: string,
+  home: string,
+  message: string,
+  fleet = false,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const base = `origin/${branch}`;
@@ -207,6 +220,23 @@ const removalCommit = (repo: string, branch: string, node: string, home: string,
         files.push(file);
       });
     const notes: Array<string> = [];
+    if (fleet) {
+      const text = yield* show(FLEET_FILE);
+      if (text !== null) {
+        const edit = removeFromList(text, ["notify"], "desktop", [node]);
+        if ("error" in edit)
+          notes.push(`${FLEET_FILE}: ${edit.error}; take ${node} out of [notify] desktop by hand`);
+        else if (edit.text !== text) {
+          yield* put(FLEET_FILE, edit.text);
+          notes.push(`took ${node} out of [notify] desktop`);
+        }
+      }
+      const roles = (yield* rolesAt(repo, base)).get(node) ?? [];
+      if (roles.includes("relay"))
+        notes.push(
+          `${node} ran the fleet's relay: in ${FLEET_FILE}, remove [relay] (or point its url at the machine that takes the relay role), and [defaults.mcp] hub and gateway if it hosted the MCP servers; until then the other machines look for a relay that is gone`,
+        );
+    }
     const originRecipients = yield* show(RECIPIENTS);
     const recipients =
       originRecipients === null
@@ -290,7 +320,7 @@ export const removeNode = (
           return yield* Effect.fail(
             `${node} is the fleet's only authority on ${branch}; give another machine the authority role first`,
           );
-        const built = yield* removalCommit(repo, branch, node, home, message);
+        const built = yield* removalCommit(repo, branch, node, home, message, true);
         // Checked again in what is about to be pushed, not in what was fetched.
         const after = yield* rolesAt(repo, built.commit);
         if (after.has(node) || authoritiesBesides(after, node).length === 0)

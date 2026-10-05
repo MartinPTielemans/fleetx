@@ -476,11 +476,15 @@ describe("a member leaving", () => {
     put(hubHome, ".config/t3-fleet/gitconfig", "[user]\n\tname = T\n\temail = t@example.com\n");
     put(hubHome, ".config/t3-fleet/age-key.txt", `${f.keys["hub"]}\n`, 0o600);
     put(f.hub, "secrets/secrets.env.age", await encrypt(Object.values(f.recipients), "API=two\n"));
+    put(f.hub, "t3-fleet.toml", '[fleet]\nbranch = "main"\n\n[notify]\ndesktop = ["hub", "laptop"]\n');
     commitAll(f.hub, "new secret");
     const [proposal] = await run(listProposals(f.hub, "main"));
     if (proposal === undefined) throw new Error("no proposal");
-    await run(approve(f.hub, "main", proposal, "hub"));
+    const approved = await run(approve(f.hub, "main", proposal, "hub"));
     expect(onBranch(f.origin, "nodes/laptop.toml")).toBeNull();
+    // Gone from the fleet, gone from its notifications too (review B-LOW).
+    expect(onBranch(f.origin, "t3-fleet.toml")).toContain('desktop = ["hub"]');
+    expect(approved.notes).toContain("took laptop out of [notify] desktop");
     expect(onBranch(f.origin, "secrets/recipients.toml")).not.toContain(f.recipients["laptop"]);
     const sealed = onBranch(f.origin, "secrets/secrets.env.age") ?? "";
     expect(await decrypt(f.keys["hub"] ?? "", sealed)).toBe("API=two\n");
