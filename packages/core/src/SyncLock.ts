@@ -13,12 +13,14 @@
  * owner (one an older build took, or whose process died between creating it
  * and writing the owner) goes stale after an hour, as before.
  *
- * Holding the lock is visible to everything the holder runs, so an entry
- * point that takes the lock itself (approve, say) simply runs when sync
- * calls it while already holding it. Sync also hands it to the commands its
- * fixes run (`t3-fleet secrets add-node` on an authority) through
- * T3_FLEET_SYNC_LOCK, the token: a process started with the holder's token
- * is part of its run.
+ * Holding the lock is visible to everything the holder runs (in its own
+ * fiber), so an entry point that takes the lock itself (approve, say) simply
+ * runs when sync calls it while already holding it. Sync also hands it to the
+ * commands its fixes run (`t3-fleet secrets add-node` on an authority)
+ * through T3_FLEET_SYNC_LOCK, the token, set in each such command's own
+ * environment (Exec.ChildSyncLock), never in this process's: a process
+ * started with the holder's token is part of its run, and nothing else here
+ * is.
  */
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -29,7 +31,7 @@ import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 
-import { exec } from "./Exec.ts";
+import { ChildSyncLock, exec, SYNC_LOCK_ENV } from "./Exec.ts";
 import { stateDir } from "./Names.ts";
 
 const Owner = Schema.Struct({
@@ -54,7 +56,7 @@ const HoldsSyncLock = Context.Reference<boolean>("t3-fleet/HoldsSyncLock", {
 });
 
 export const syncLockPath = (home: string) => `${stateDir(home)}/sync.lock`;
-export const SYNC_LOCK_ENV = "T3_FLEET_SYNC_LOCK";
+export { SYNC_LOCK_ENV };
 const ownerPath = (lock: string) => `${lock}/owner.json`;
 
 const OWNERLESS_STALE_MS = 3_600_000;
@@ -264,10 +266,14 @@ export const withMachineLock = <A, E, R, B, E2, R2>(
     (token) => (token === null ? Effect.void : releaseLock(lock, token)),
   );
 
-/** Whether this process was started by the run holding the lock, with its token. */
+/**
+ * Whether this process was started by the run holding the lock, with its
+ * token. A token this process took itself is never inherited: only the fiber
+ * holding it runs as its holder.
+ */
 const startedByHolder = Effect.gen(function* () {
   const inherited = process.env[SYNC_LOCK_ENV] ?? "";
-  if (inherited === "") return false;
+  if (inherited === "" || heldHere.has(inherited)) return false;
   const owner = yield* readOwner(syncLockPath(process.env["HOME"] ?? ""));
   return Option.isSome(owner) && owner.value.token === inherited;
 });
@@ -286,13 +292,11 @@ export const withSyncLock = <A, E, R, A2, E2, R2>(
       return yield* effect.pipe(Effect.provideService(HoldsSyncLock, true));
     const token = yield* takeSyncLock;
     if (token === null) return yield* busy;
-    const share = options.children === true;
-    const shared = share ? Effect.sync(() => (process.env[SYNC_LOCK_ENV] = token)) : Effect.void;
-    const unshared = share ? Effect.sync(() => delete process.env[SYNC_LOCK_ENV]) : Effect.void;
-    return yield* shared.pipe(
-      Effect.andThen(effect),
+    const shared = options.children === true ? token : null;
+    return yield* effect.pipe(
       Effect.provideService(HoldsSyncLock, true),
-      Effect.ensuring(unshared.pipe(Effect.andThen(releaseSyncLock(token)))),
+      Effect.provideService(ChildSyncLock, shared),
+      Effect.ensuring(releaseSyncLock(token)),
     );
   });
 

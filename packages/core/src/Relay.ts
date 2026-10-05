@@ -56,6 +56,7 @@ import {
   FixProgress,
   FixRequestBody,
   FixRequestRecord,
+  publicRecord,
   type FixRelay,
 } from "./FixRequest.ts";
 import { git, out } from "./Git.ts";
@@ -268,7 +269,7 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
           const body = yield* decodeFixBody(yield* request.text).pipe(Effect.option);
           if (Option.isNone(body) || !NODE_NAME.test(body.value.node))
             return HttpServerResponse.text("Not a fix request", { status: 400 });
-          return json(yield* encodeRecord(yield* fixRelay.request(body.value)), 202);
+          return json(yield* encodeRecord(publicRecord(yield* fixRelay.request(body.value))), 202);
         }).pipe(
           Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
         ),
@@ -281,7 +282,7 @@ export const relayLayer = <R = never>(options: RelayOptions<R>) =>
           if (!(yield* authorized)) return unauthorized;
           const record = yield* fixRelay.get((yield* HttpRouter.params)["id"] ?? "");
           if (record === null) return HttpServerResponse.text("No such request", { status: 404 });
-          return json(yield* encodeRecord(record));
+          return json(yield* encodeRecord(publicRecord(record)));
         }).pipe(
           Effect.orElseSucceed(() =>
             HttpServerResponse.text("Internal Server Error", { status: 500 }),

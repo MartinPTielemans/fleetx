@@ -12,6 +12,7 @@ import { ENGINE_INSTALL } from "./areas/Engine.ts";
 import { exec } from "./Exec.ts";
 import { sha256 } from "./Hash.ts";
 import type { Node } from "./Config.ts";
+import { localSecrets, redactSecrets } from "./RelayClient.ts";
 import { remoteExec } from "./Remote.ts";
 import { BUNDLE_FILE, CLI, launchdLabel, PRODUCT, SHARE_DIR, systemdUnit } from "./Names.ts";
 
@@ -64,11 +65,17 @@ const script = (command: string, checkout: string, bundle: string) => {
   return `export T3_FLEET_CHECKOUT=${shPath(checkout)}\nexport PATH="$HOME/.local/bin:$PATH"\n${body}\n`;
 };
 
+/**
+ * Run one fix. Its output is cleared of `secrets` (every value, in full)
+ * before a line of it is picked and shortened: a value cut short would no
+ * longer match, and its start would be reported.
+ */
 export const runFix = (
   node: Node,
   finding: Finding & { readonly fix: Fix },
   checkout: string,
   bundle: string,
+  secrets: ReadonlyMap<string, string> = new Map(),
 ) =>
   Effect.gen(function* () {
     // Installing an empty bundle would leave the node without T3 Fleet.
@@ -84,10 +91,13 @@ export const runFix = (
       ? exec({ command: "bash", args: ["-l", "-s"], stdin, timeout: Duration.minutes(10) })
       : remoteExec(node.ssh, { command: "bash -l -s", stdin, timeout: Duration.minutes(10) });
     const ok = run.code === 0;
+    const clean = (text: string) => redactSecrets(text, secrets);
+    const [stdout, stderr] = [clean(run.stdout), clean(run.stderr)];
     const summary = run.timedOut
       ? "timed out after 10 minutes"
-      : (run.spawnError ??
-        (lastLine(ok ? run.stdout || run.stderr : run.stderr || run.stdout) || `exit ${run.code}`));
+      : run.spawnError !== undefined
+        ? clean(run.spawnError)
+        : lastLine(ok ? stdout || stderr : stderr || stdout) || `exit ${run.code}`;
     return { finding, ok, summary: summary.slice(0, 240) } satisfies FixOutcome;
   });
 
@@ -109,6 +119,7 @@ export const inRunOrder = <F extends Finding & { readonly fix: Fix }>(
 /**
  * Fixes for one node run in order (an upgrade may depend on the one before); nodes run in parallel.
  * `localRepo` is the repo this machine loaded, which is what its probe observed; other nodes use `checkout`.
+ * Outputs are cleared of `secrets`, this machine's installed secrets unless given.
  */
 export const runFixes = (
   nodes: ReadonlyArray<Node>,
@@ -116,20 +127,26 @@ export const runFixes = (
   checkout: string,
   bundle = "",
   localRepo?: string,
+  secrets?: ReadonlyMap<string, string>,
 ) =>
-  Effect.forEach(
-    nodes,
-    (node) =>
-      Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) =>
-        runFix(
-          node,
-          f,
-          node.ssh === null && localRepo !== undefined ? localRepo : checkout,
-          bundle,
+  Effect.gen(function* () {
+    const hidden = secrets ?? (yield* localSecrets);
+    const perNode = yield* Effect.forEach(
+      nodes,
+      (node) =>
+        Effect.forEach(inRunOrder(fixes.filter((f) => (f.fix.on ?? f.node) === node.name)), (f) =>
+          runFix(
+            node,
+            f,
+            node.ssh === null && localRepo !== undefined ? localRepo : checkout,
+            bundle,
+            hidden,
+          ),
         ),
-      ),
-    { concurrency: "unbounded" },
-  ).pipe(Effect.map((perNode) => perNode.flat()));
+      { concurrency: "unbounded" },
+    );
+    return perNode.flat();
+  });
 
 /** Names exactly what a fix would do: where, which command, and what it interrupts. */
 export const fixDigest = (finding: Finding & { readonly fix: Fix }) => {

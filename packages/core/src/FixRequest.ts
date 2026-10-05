@@ -14,9 +14,13 @@
  * and the result go back to the relay, with the node's secret values taken out
  * of every output.
  *
- * A request is claimed once. One nobody claimed within the pickup time is
- * expired by the hub, so a machine that wakes later never runs a fix someone
- * gave up waiting for.
+ * A request is claimed once, atomically: the first "running" moves it from
+ * waiting and names a claim, a token only that run knows, and every later
+ * report must carry the same claim. A second listener, a replayed event, or a
+ * run that read the request before another claimed it is refused, so a fix
+ * never runs twice for one request. One nobody claimed within the pickup time
+ * is expired by the hub, so a machine that wakes later never runs a fix
+ * someone gave up waiting for.
  */
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -55,17 +59,35 @@ export const FixRequestRecord = Schema.Struct({
   step: Schema.NullOr(Schema.String),
   result: Schema.NullOr(UiApplyResult),
   error: Schema.NullOr(Schema.String),
+  /** The claim of the run answering it; kept by the relay, never handed out (publicRecord). */
+  claim: Schema.optionalKey(Schema.String),
 });
 export type FixRequestRecord = typeof FixRequestRecord.Type;
 
-/** What the machine reports back. The first "running" claims the request. */
+/** A request as the relay hands it out: without its claim. */
+export const publicRecord = (record: FixRequestRecord): FixRequestRecord => {
+  const { claim: _claim, ...rest } = record;
+  return rest;
+};
+
+/**
+ * What the machine reports back. The first "running" claims the request with
+ * `claim`, a token of its own; every report after it carries the same one.
+ */
 export const FixProgress = Schema.Struct({
   state: Schema.Literals(["running", "done", "failed"]),
   step: Schema.NullOr(Schema.String),
   result: Schema.NullOr(UiApplyResult),
   error: Schema.NullOr(Schema.String),
+  claim: Schema.String,
 });
 export type FixProgress = typeof FixProgress.Type;
+
+/** A claim no one else can guess. */
+export const newClaim = () =>
+  Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 
 /** The "fix" event's data. */
 export const FixAnnouncement = Schema.Struct({ node: Schema.String, request: Schema.String });
@@ -75,16 +97,18 @@ export const advance = (
   record: FixRequestRecord,
   progress: FixProgress,
 ): FixRequestRecord | string => {
-  if (record.state === "waiting" && progress.state !== "running")
-    return "claim the request (running) before answering it";
-  if (record.state !== "waiting" && record.state !== "running")
-    return `this request is ${record.state}`;
+  if (progress.claim.length < 16) return "a report names its claim";
+  if (record.state === "waiting") {
+    if (progress.state !== "running") return "claim the request (running) before answering it";
+  } else if (record.state !== "running") return `this request is ${record.state}`;
+  else if (record.claim !== progress.claim) return "this request is claimed by another run";
   return {
     ...record,
     state: progress.state,
     step: progress.step,
     result: progress.result,
     error: progress.error,
+    claim: progress.claim,
   };
 };
 
@@ -138,7 +162,7 @@ export const chooseForwarded = (
 /**
  * Answer one request on the machine it names: claim it, check again, run what
  * may run, report. A request for another machine, or one already claimed, is
- * left alone.
+ * left alone. Nothing runs unless this run's claim is the one the relay took.
  */
 export const answerFixRequest = <R, R2, R3>(options: {
   readonly self: string;
@@ -147,14 +171,18 @@ export const answerFixRequest = <R, R2, R3>(options: {
   readonly progress: (progress: FixProgress) => Effect.Effect<boolean, never, R3>;
   /** This machine's own findings, from a check made now. */
   readonly findings: Effect.Effect<ReadonlyArray<Finding>, string, R>;
+  /** Runs the fixes, their outputs cleared of `secrets` before anything is cut from them (Fix.runFix). */
   readonly run: (
     fixes: ReadonlyArray<Fixable>,
+    secrets: ReadonlyMap<string, string>,
   ) => Effect.Effect<ReadonlyArray<FixOutcome>, never, R2>;
   readonly secrets: ReadonlyMap<string, string>;
 }) =>
   Effect.gen(function* () {
-    const { self, request, progress } = options;
+    const { self, request } = options;
     if (request.node !== self || request.state !== "waiting") return false;
+    const claim = newClaim();
+    const progress = (p: Omit<FixProgress, "claim">) => options.progress({ ...p, claim });
     const running = (step: string) =>
       progress({ state: "running", step, result: null, error: null });
     if (!(yield* running(`${self} is checking itself again`))) return false;
@@ -174,7 +202,7 @@ export const answerFixRequest = <R, R2, R3>(options: {
       yield* running(
         `${self} is running ${chosen.length === 1 ? "1 fix" : `${chosen.length} fixes`}`,
       );
-      outcomes = yield* options.run(chosen);
+      outcomes = yield* options.run(chosen, options.secrets);
     }
     yield* progress({
       state: "done",
