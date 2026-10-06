@@ -25,7 +25,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { BuildId } from "./Build.ts";
 import { mergeLayers, type Layer, type Merged, type Table } from "./Settings.ts";
-import { configDir, FLEET_FILE } from "./Names.ts";
+import { configDir, DEFAULT_RELAY_PORT, FLEET_FILE } from "./Names.ts";
 
 export class ConfigError extends Schema.TaggedError<ConfigError>()("ConfigError", {
   message: Schema.String,
@@ -87,13 +87,35 @@ const RelaySection = Schema.Struct({
   port: Schema.optionalKey(Schema.Number),
 });
 
+const NotifySection = Schema.Struct({
+  desktop: Schema.optionalKey(Schema.Array(Schema.String)),
+  ntfy: Schema.optionalKey(Schema.String),
+});
+
+/**
+ * The app on the hub (HubUi.ts): the Tailscale logins it opens for. Setup
+ * writes the login of the authority that made the hub; none means nobody.
+ */
+const UiSection = Schema.Struct({
+  allow: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * false when the hub cannot serve the app: its OS, or how Tailscale runs
+   * there, leaves it unable to tell tailscale serve from another program
+   * (HubUi.ts). `t3-fleet ui` then serves the app on each machine. Setup
+   * writes it when its check of the hub says so; absent means true.
+   */
+  hosted: Schema.optionalKey(Schema.Boolean),
+});
+
 const FleetFile = Schema.Struct({
+  notify: Schema.optionalKey(NotifySection),
   fleet: Schema.optionalKey(FleetSection),
   /** Plugin areas, relative to the config repo (see Plugins.ts). */
   plugins: Schema.optionalKey(
     Schema.Struct({ areas: Schema.optionalKey(Schema.Array(Schema.String)) }),
   ),
   relay: Schema.optionalKey(RelaySection),
+  ui: Schema.optionalKey(UiSection),
   proxy: Schema.optionalKey(ProxySettings),
   accept: Schema.optionalKey(Schema.Array(Accepted)),
   allow_secret: Schema.optionalKey(Schema.Array(AllowedSecret)),
@@ -304,7 +326,10 @@ export const probeSettings = (
   ...(config.settings.relay === undefined
     ? {}
     : {
-        relay: { url: config.settings.relay.url ?? null, port: config.settings.relay.port ?? 8399 },
+        relay: {
+          url: config.settings.relay.url ?? null,
+          port: config.settings.relay.port ?? DEFAULT_RELAY_PORT,
+        },
       }),
   // This machine uses the repo it loaded, wherever it is (setup --dir, T3_FLEET_CONFIG_REPO); others their [fleet] checkout.
   checkout: node?.ssh === null ? config.repo : config.checkout,

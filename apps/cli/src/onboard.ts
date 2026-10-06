@@ -9,13 +9,10 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 
 import { loadConfig } from "@t3-fleet/core/Config";
 import { git, out } from "@t3-fleet/core/Git";
-import { addNode } from "@t3-fleet/core/Init";
-import { underSyncLock } from "@t3-fleet/core/Sync";
+import { addNode, inviteLine } from "@t3-fleet/core/Init";
+import { waitForSyncLock } from "@t3-fleet/core/SyncLock";
 
 import { reportUserErrors } from "./shared.ts";
-
-const INSTALL_URL =
-  "https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh";
 
 export const inviteCommand = Command.make("invite", {
   name: Argument.String("name").pipe(
@@ -46,11 +43,13 @@ export const inviteCommand = Command.make("invite", {
         return yield* Effect.fail(
           "the config repo has no origin remote yet; push it to a private repository first",
         );
-      const rev = yield* underSyncLock(
+      // Right after setup, the new timer's first sync is often running: wait for it rather than fail.
+      const rev = yield* waitForSyncLock(
         addNode(config.repo, name, ssh._tag === "Some" ? ssh.value : null, profile),
+        { waiting: Console.log("Waiting for the sync running on this machine to finish…") },
       );
       yield* Console.log(
-        `Added nodes/${name}.toml (${rev}). On ${name}, run:\n\n  curl -fsSL ${INSTALL_URL} | sh -s -- setup ${url} ${name}\n`,
+        `Added nodes/${name}.toml (${rev}). On ${name}, run:\n\n  ${inviteLine(url, name)}\n`,
       );
       yield* Console.log(
         "Setup there shows its plan before changing anything; this machine's next sync lets it read the secrets.",

@@ -118,7 +118,14 @@ export const setKey = (
       if (keyAt >= 0 && (first < 0 || keyAt < first)) {
         const { last, comment } = valueExtent(lines, keyAt, first < 0 ? lines.length : first);
         lines.splice(keyAt, last - keyAt + 1, comment === "" ? line : `${line} ${comment}`);
-      } else lines.splice(first < 0 ? lines.length : first, 0, ...body, ...(first < 0 ? [] : [""]));
+      } else if (first >= 0) lines.splice(first, 0, ...body, "");
+      else {
+        // At the end, before the newline that ends the file, so it still ends with one.
+        let end = lines.length;
+        while (end > 0 && lines[end - 1] === "") end--;
+        lines.splice(end, 0, ...body);
+        if (lines[lines.length - 1] !== "") lines.push("");
+      }
     } else {
       while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
       lines.push(...body, "");
@@ -132,10 +139,16 @@ export const setKey = (
   if (existing >= 0) {
     const { last, comment } = valueExtent(lines, existing, found.end);
     lines.splice(existing, last - existing + 1, comment === "" ? line : `${line} ${comment}`);
+    // A note says what the value means: the one above the key goes with the old value.
+    if (note.length > 0) {
+      if (existing > found.start + 1 && /^\s*#/.test(lines[existing - 1] ?? ""))
+        lines.splice(existing - 1, 1, ...note);
+      else lines.splice(existing, 0, ...note);
+    }
   } else {
-    // After the table's last key, before the blank lines that end it.
+    // After the table's last key, before the blank lines (and the next table's comments) that end it.
     let insert = found.end;
-    while (insert > found.start + 1 && (lines[insert - 1] ?? "").trim() === "") insert--;
+    while (insert > found.start + 1 && /^\s*(?:#.*)?$/.test(lines[insert - 1] ?? "")) insert--;
     lines.splice(insert, 0, ...note, line);
   }
   return check(lines.join("\n"), [...path, key], value, what);
@@ -158,6 +171,73 @@ export const addToList = (
   const added = values.filter((v) => !list.some((x) => same(x, v)));
   if (added.length === 0) return { text };
   return setKey(text, path, key, [...list, ...added]);
+};
+
+/** Take `values` out of the list `key` in the table `path`; the list stays, maybe empty. */
+export const removeFromList = (
+  text: string,
+  path: ReadonlyArray<string>,
+  key: string,
+  values: ReadonlyArray<unknown>,
+): Edit => {
+  const parsed = parse(text);
+  if (typeof parsed === "string") return { error: `${key}: the file does not parse (${parsed})` };
+  const current = at(parsed, [...path, key]);
+  if (current === undefined) return { text };
+  if (!Array.isArray(current))
+    return { error: `${[...path, key].join(".")} is not a list; change it by hand` };
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const kept = current.filter((x) => !values.some((v) => same(x, v)));
+  return kept.length === current.length ? { text } : setKey(text, path, key, kept);
+};
+
+/** Remove the table `path`, its header and keys; nothing when it is not there. */
+export const dropTable = (text: string, path: ReadonlyArray<string>): Edit => {
+  const what = path.join(".");
+  const parsed = parse(text);
+  if (typeof parsed === "string") return { error: `${what}: the file does not parse (${parsed})` };
+  if (at(parsed, path) === undefined) return { text };
+  const lines = text.split("\n");
+  const found = section(lines, path);
+  if (found === null)
+    return { error: `[${what}] is not a table of its own here; remove it by hand` };
+  lines.splice(found.start, found.end - found.start);
+  const after = `${lines.join("\n").replace(/\n+$/, "")}\n`;
+  const again = parse(after);
+  if (typeof again === "string") return { error: `${what}: the result would not parse (${again})` };
+  return at(again, path) === undefined
+    ? { text: after }
+    : { error: `${what}: could not remove it safely; remove it by hand` };
+};
+
+/** Remove the one-line key `key` from the table `path`; nothing when it is not there. */
+export const dropKey = (text: string, path: ReadonlyArray<string>, key: string): Edit => {
+  const what = [...path, key].join(".");
+  const parsed = parse(text);
+  if (typeof parsed === "string") return { error: `${what}: the file does not parse (${parsed})` };
+  if (at(parsed, [...path, key]) === undefined) return { text };
+  const lines = text.split("\n");
+  // A top-level key: the lines before the first table.
+  const first = lines.findIndex((l) => /^\s*\[/.test(l));
+  const found =
+    path.length === 0 ? { start: -1, end: first < 0 ? lines.length : first } : section(lines, path);
+  const keyPattern = new RegExp(`^\\s*${escape(tomlKey(key))}\\s*=`);
+  const existing =
+    found === null
+      ? -1
+      : lines.findIndex((l, i) => i > found.start && i < found.end && keyPattern.test(l));
+  if (found === null || existing < 0 || valueExtent(lines, existing, found.end).last !== existing)
+    return { error: `${what}: could not remove it safely; remove it by hand` };
+  lines.splice(existing, 1);
+  // Not two blank lines where one key was between them (setKey's own separator, say).
+  if (existing > 0 && lines[existing] === "" && lines[existing - 1] === "")
+    lines.splice(existing, 1);
+  const after = lines.join("\n");
+  const again = parse(after);
+  if (typeof again === "string") return { error: `${what}: the result would not parse (${again})` };
+  return at(again, [...path, key]) === undefined
+    ? { text: after }
+    : { error: `${what}: could not remove it safely; remove it by hand` };
 };
 
 /** Append one `[[path]]` entry. */

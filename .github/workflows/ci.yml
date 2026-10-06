@@ -30,3 +30,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Three throwaway nodes in containers
         run: tests/integration/run.sh
+      - name: Relay notifications with a fake ntfy sink
+        run: tests/integration/notify.sh
+      - name: The setup wizard end to end (systemd machines, a hub over ssh, an invite)
+        run: tests/integration/wizard-e2e.sh

@@ -61,6 +61,28 @@ describe("untilReplaced", () => {
     expect(events).toEqual(["drained", "stopped", "exit"]);
   });
 
+  it("exits the same way for a restart, saying its reason (the relay's settings changed)", async () => {
+    const events: Array<string> = [];
+    const restart = Deferred.makeUnsafe<string>();
+    const logged: Array<string> = [];
+    const log = console.log;
+    console.log = (line: string) => void logged.push(line);
+    try {
+      const fiber = Effect.runFork(
+        untilReplaced(slowToStop(events), Effect.never, {
+          restart: Deferred.await(restart),
+          exit: () => events.push("exit"),
+        }),
+      );
+      Effect.runSync(Deferred.succeed(restart, "its settings changed"));
+      await Effect.runPromise(Fiber.await(fiber));
+    } finally {
+      console.log = log;
+    }
+    expect(events).toEqual(["exit", "stopped"]);
+    expect(logged).toContain("its settings changed");
+  });
+
   it("never exits when the service stops on its own", async () => {
     const events: Array<string> = [];
     await Effect.runPromise(

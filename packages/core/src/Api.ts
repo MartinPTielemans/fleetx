@@ -290,6 +290,12 @@ export const UiProposal = Schema.Struct({
   files: Schema.Array(Schema.String),
   diff: Schema.String,
   autoApprovable: Schema.Boolean,
+  /**
+   * What approving it does besides landing the change, shown with it: a
+   * proposal that makes its machine the relay also lets this authority's
+   * Tailscale login into the app the hub hosts. Absent when nothing.
+   */
+  also: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type UiProposal = typeof UiProposal.Type;
 
@@ -402,6 +408,8 @@ export const UiJobKind = Schema.Literals([
   "skills-add",
   "skills-update",
   "skills-remove",
+  "setup",
+  "setup-hub",
 ]);
 export type UiJobKind = typeof UiJobKind.Type;
 
@@ -445,5 +453,13 @@ export const UiSession = Schema.Struct({
   nodes: Schema.Array(Schema.String),
   /** The relay's URL, when the fleet has one; the hub and live events go through it. */
   relay: Schema.NullOr(Schema.String),
+  /**
+   * Present when the app is served by the hub (HubUi.ts), not `t3-fleet ui`
+   * on this machine: who is signed in, and where proposals are decided
+   * (never on the hub). Machines are shown as they last reported.
+   */
+  hub: Schema.optionalKey(
+    Schema.Struct({ login: Schema.String, approveOn: Schema.Array(Schema.String) }),
+  ),
 });
 export type UiSession = typeof UiSession.Type;

@@ -26,6 +26,25 @@ export const writeLocalConfig = (repo: string, node: string) =>
     );
   });
 
+/** Where `curl … | sh` gets T3 Fleet from. */
+export const INSTALL_URL =
+  "https://github.com/MartinPTielemans/fleetx/releases/latest/download/install.sh";
+
+/**
+ * `s` as one POSIX shell word: left bare when it holds only characters no
+ * shell treats specially, single-quoted (with `'` written as `'\''`) otherwise.
+ */
+export const shellWord = (s: string) =>
+  /^[A-Za-z0-9@%+=:,./_-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
+
+/**
+ * The one line that sets up `name` on its own machine, joining the fleet at
+ * `url`. Both are quoted: a URL's `&` or `;` must reach setup intact, never
+ * run as shell on the new machine.
+ */
+export const inviteLine = (url: string, name: string) =>
+  `curl -fsSL ${INSTALL_URL} | sh -s -- setup ${shellWord(url)} ${shellWord(name)}`;
+
 /** Add a node to the repo (an authority inviting a machine). */
 export const addNode = (
   repo: string,

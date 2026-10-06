@@ -9,7 +9,7 @@ import type { Mode } from "./Plan.ts";
 export type ExtraName = "relay" | "model proxy" | "T3 access";
 
 const WHY: Readonly<Record<ExtraName, string>> = {
-  relay: "an always-on machine gives instant sync and holds your MCP logins",
+  relay: "an always-on machine: instant sync, alerts for every machine, the fleet's app",
   "model proxy": "retries, stats, a login that doesn't expire",
   "T3 access": "provider logins and health as T3 itself sees them",
 };

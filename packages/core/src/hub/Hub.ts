@@ -107,6 +107,15 @@ export interface HubConfig {
   readonly enabled: boolean;
   /** Servers already listening on a local port (`[mcp] ports`), served as they are. */
   readonly ports: Readonly<Record<string, number>>;
+  /**
+   * `enabled` and `ports` as they are now, read on every reload instead of
+   * the values given at the start: the relay follows the config repo, so
+   * turning the hub on there serves the hosted servers without a restart.
+   */
+  readonly serving?: Effect.Effect<{
+    readonly enabled: boolean;
+    readonly ports: Readonly<Record<string, number>>;
+  }>;
   /** The relay's public URL; OAuth redirects to `<url>/oauth/callback`. */
   readonly relayUrl: string | null;
   /** This node's age identity, for the token store. */
@@ -573,12 +582,16 @@ export const makeHub = (
 
     /** Bring the running servers in line with the repo's definitions. */
     const reload = Effect.gen(function* () {
-      const loaded = config.enabled
+      const now =
+        config.serving === undefined
+          ? { enabled: config.enabled, ports: config.ports }
+          : yield* config.serving;
+      const loaded = now.enabled
         ? yield* loadDefinitions(config.repo).pipe(Effect.provide(services))
         : { definitions: [], problems: [] };
       problems = loaded.problems;
       const wanted = new Map<string, HubDefinition>(loaded.definitions.map((d) => [d.name, d]));
-      for (const [name, port] of Object.entries(config.ports))
+      for (const [name, port] of Object.entries(now.ports))
         if (!wanted.has(name)) wanted.set(name, portDefinition(name, port));
       const secretValues = yield* secrets;
       // Deleting the current key while iterating a Map is safe.

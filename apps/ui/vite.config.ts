@@ -2,7 +2,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite-plus";
 
-import { fixtureEvents, fixtureResponse } from "./dev/fixtures.ts";
+import { fixtureEvents, fixtureResponse, followSetup } from "./dev/fixtures.ts";
 
 /**
  * `vp dev` proxies /api to a running `t3-fleet ui --port 8397` (or
@@ -10,6 +10,8 @@ import { fixtureEvents, fixtureResponse } from "./dev/fixtures.ts";
  * With T3_FLEET_UI_FIXTURES=1 it answers /api itself from dev/fixtures.ts
  * instead, so every view, the hub's and the models' too, can be worked on
  * without a fleet; open it at /#ticket=f (the fixtures take any ticket).
+ * The setup wizard is at /?setup=fresh#ticket=f; dev/setup-fixtures.ts lists
+ * its other variants.
  */
 const fixtures = (): Plugin => ({
   name: "t3-fleet-ui-fixtures",
@@ -17,19 +19,28 @@ const fixtures = (): Plugin => ({
     server.middlewares.use((req, res, next) => {
       const url = new URL(req.url ?? "/", "http://dev");
       if (!url.pathname.startsWith("/api/")) return next();
+      // The variant is the asking page's query string.
+      const page = new URL(req.headers.referer ?? "http://dev/").searchParams;
       let body = "";
       req.on("data", (chunk: Buffer) => (body += chunk.toString()));
       req.on("end", () => {
-        const answer = fixtureResponse(req.method ?? "GET", url.pathname, body);
+        const answer = fixtureResponse(req.method ?? "GET", url.pathname, body, page);
         if (answer === "events") {
           res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
           res.write(fixtureEvents);
+          const stop = followSetup(page, (chunk) => res.write(chunk));
+          // The response closes when the page goes; the request closes once read.
+          res.on("close", stop);
           return;
         }
-        res.writeHead(answer.status, {
-          "content-type": answer.body === "" ? "text/plain" : "application/json",
-        });
-        res.end(answer.body);
+        setTimeout(() => {
+          res.writeHead(answer.status, {
+            "content-type":
+              answer.body === "" || answer.status >= 400 ? "text/plain" : "application/json",
+            ...answer.headers,
+          });
+          res.end(answer.body);
+        }, answer.delay ?? 0);
       });
     });
   },

@@ -5,10 +5,25 @@ Topology is configuration. Every node has one or more roles:
 | role        | does                                                                                                  |
 | ----------- | ----------------------------------------------------------------------------------------------------- |
 | `authority` | approves proposals, changes secrets; its own changes under `auto_commit` paths are committed directly |
-| `relay`     | runs `t3-fleet relay serve`: events, published state, the MCP hub (optional)                          |
+| `relay`     | runs `t3-fleet relay serve`: events, published state, the app on the tailnet, the MCP hub (optional)  |
 | `member`    | converges, reports, proposes                                                                          |
 
 Git is always the hub. A relay only makes things faster.
+
+With `[notify]`, the relay delivers ntfy pushes for every node. Nodes listed in
+`desktop` display fleet OS notifications through their listener. Without a relay,
+each node delivers only its own alerts after sync. A returning laptop receives at
+most a summary of missed alerts per path. No agent or scheduled T3 thread is
+required. See [notifications](areas.md#notifications).
+
+You don't have to choose a layout by hand. The [setup wizard](design/setup-wizard.md)
+asks what machines you have and recommends one: your own computer as the
+authority, an always-on machine as the hub. It checks that machine over ssh
+from your computer and sets it up, so you don't run setup on it yourself.
+Only the wizard brings the hub up over ssh, and it is done only once the relay
+answers there. In the terminal, `t3-fleet setup` sets up the machine it runs
+on: run it on the server with `--relay`, as below; the authority that approves
+it lets its own Tailscale login into the app the hub hosts (`[ui] allow`).
 
 ## One laptop
 
@@ -49,18 +64,83 @@ port = 8399
 ```
 
 with a new `T3_FLEET_RELAY_TOKEN` among the secrets it proposes. Once an
-authority approves, the relay area installs `t3-fleet relay serve` on the
-server and publishes it on the tailnet; every other node runs `t3-fleet listen`
-and syncs seconds after the branch moves. A laptop that slept catches up on
-the events it missed. Without tailscale, set `[relay] url` once the server
-can be reached.
+authority approves, each machine's own sync does the rest, as it keeps
+anything else the fleet's: the relay area is among the areas sync always
+applies (with `[fleet] apply` set, setup adds `relay` to it), so the server's
+next sync installs `t3-fleet relay serve` and publishes it on the tailnet, and
+every other machine's runs `t3-fleet listen` and syncs seconds after the
+branch moves. A machine starts its service as soon as it can read the relay
+token; one sync goes as far as that (it reads the secrets, then starts the
+service). A laptop that slept catches up on the events it missed. Without
+tailscale, set `[relay] url` once the server can be reached.
+
+### The app on the hub
+
+The relay also serves T3 Fleet's web app, at its tailnet address, to the
+Tailscale logins in `[ui] allow` (setup writes yours); `t3-fleet ui` opens it
+there. It is built from what machines report, sends each fix to the machine
+it changes, and never decides proposals. See [the CLI](cli.md#on-the-hub).
+
+Who can ask a machine to run a fix: only someone the app lets in, after
+reviewing it there. A fix request is made by the app itself, inside the relay's
+process, when a login in `[ui] allow` applies fixes it was shown, confirming
+any that interrupt something; the relay has no route that makes one. The relay
+token, which every member holds, reads what machines report and follows the
+relay's events, and a machine's listener uses it to pick up a request that
+names it and report back, but it cannot ask for a fix: a member, or any
+program on one, that posts a request with it, real finding id, digest and
+confirmation included, is refused, and nothing runs. The hub still needs no
+ssh to any machine, and a machine still checks itself again and runs only a
+fix it proposes itself. A token holder can still get in a request's way (claim
+it first, or answer it falsely), which runs nothing; the machine's next report
+shows what it really did.
+
+What the hub can and cannot do, should it be compromised: it can read what
+machines report (no secret values: a fix whose command holds one is not
+reported, and outputs have them taken out in full before anything is cut
+short), and ask any machine for fixes, but a machine runs only a fix its own
+check proposes, exactly as it would propose it, and its interruption
+confirmed, once per request. It cannot approve a proposal, its own or
+another's, and setting it up approves nothing of its own but its proposed
+secrets: a change to its node file (a role, a profile, a setting) waits for
+you like any proposal. It holds the relay token, like every machine, so it
+could publish false reports. Only tailscale serve can say who is asking, so
+the relay asks the hub's kernel whose socket opened each connection to its
+loopback port, and refuses any other program on the hub, the relay's own user
+included:
+
+| Hub                                                                                                      | Serves the app to                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux, tailscaled as root (Tailscale's package)                                                          | connections of root's (`/proc/net/tcp`)                                                                                                                                                         |
+| Linux, tailscaled run as a user by its systemd unit, from an installed program                           | connections of root's, or of that user: only the unit's main process (`MainPID`) counts, and only when the program it runs, and every directory above it, is root's and writable by no one else |
+| macOS, the standalone Tailscale app (system extension, root)                                             | connections of root's (the kernel's TCP table, `net.inet.tcp.pcblist_n`)                                                                                                                        |
+| macOS, open-source `tailscaled` as a daemon (`sudo tailscaled install-system-daemon`)                    | connections of root's                                                                                                                                                                           |
+| macOS, the App Store Tailscale app (its extension runs as you)                                           | the extension's own connections only, by its code signature, checked on the running process                                                                                                     |
+| Linux with `tailscaled` run as a user any other way; macOS with `tailscaled` run as a user; any other OS | no one: setup writes `[ui] hosted = false` and `t3-fleet ui` serves the app on each machine                                                                                                     |
+
+A program's name proves nothing: any user can copy a program to
+`/tmp/tailscaled` and run it, so the relay never trusts a uid because a process
+of that name runs as it. When it cannot tell who tailscaled is (systemd not
+answering, the program unreadable or replaced since it started), it refuses.
+
+Root on the hub is out of reach of any of this, and so is the user a
+trusted tailscaled runs as, when that is not root: any program of theirs can
+pose as any login. If the hub is also an
+authority (one machine doing both), it can commit to the repo anyway, as any
+authority can.
 
 ### The MCP hub
 
 Why: an MCP server with an OAuth login otherwise needs that login on every
 machine, and a server run in docker needs docker everywhere. The relay can
 host your MCP servers instead, so every machine reaches them through one
-endpoint and one token, and OAuth logins live in one place:
+endpoint and one token, and OAuth logins live in one place.
+
+It is a choice, off by default: "Host your MCP servers on the hub" on the
+wizard's hub step, or `--mcp-hub` with `--relay` in the terminal. The trade-off:
+you sign in to each server once, on the hub, and every machine uses it; until
+you sign in there, those servers stop working on your machines. On, setup
+writes:
 
 ```toml
 # t3-fleet.toml
@@ -72,7 +152,11 @@ servers = ["fetch", "posthog"]
 
 The hub runs every definition in `mcp/` with a hosted kind (`remote`,
 `container`, `registry`, `hosted-stdio`) on the relay node, with Docker for
-images. Sign in to OAuth servers once with `t3-fleet mcp login <name>`; the
+images. Turning it on moves the servers it can take over: each plain https
+server (`direct`, as setup imports them) becomes `remote`, its bearer secret
+kept. A server that runs a command (`stdio`), sends headers of its own, speaks
+SSE, or carries a secret in its URL stays on each machine, as before. The plan
+lists which servers move and which stay, and why, before anything is written. Sign in to OAuth servers once with `t3-fleet mcp login <name>`; the
 callback goes to the relay, so it works from any browser on the tailnet. See
 [areas](areas.md#the-hub).
 

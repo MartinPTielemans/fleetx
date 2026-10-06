@@ -213,12 +213,17 @@ export const nodeFlag = Flag.String("node").pipe(
  * listening, and its unit would never start the new build. With `drain`, the
  * service keeps running once the new build is seen until `drain` completes.
  */
-export const untilNewBuild = <A, E, R, R2 = never>(
+export const untilNewBuild = <A, E, R, R2 = never, R3 = never>(
   service: Effect.Effect<A, E, R>,
-  options: { readonly drain?: Effect.Effect<unknown, never, R2> } = {},
+  options: {
+    readonly drain?: Effect.Effect<unknown, never, R2>;
+    /** Ends it the same way, saying why, when this completes (untilReplaced). */
+    readonly restart?: Effect.Effect<string, never, R3>;
+  } = {},
 ) =>
   untilReplaced(service, newBuild(process.argv[1] ?? ""), {
     ...(options.drain === undefined ? {} : { drain: options.drain }),
+    ...(options.restart === undefined ? {} : { restart: options.restart }),
     // A Node timer, not Effect.sleep: it has to fire after the runtime itself has finished.
     // @effect-diagnostics-next-line globalTimers:off
     exit: () => setTimeout(() => process.exit(0), 5_000).unref(),

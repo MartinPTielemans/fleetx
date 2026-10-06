@@ -8,6 +8,8 @@
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Random from "effect/Random";
 
 import { exec, type ExecResult } from "./Exec.ts";
 import { configDir } from "./Names.ts";
@@ -66,11 +68,57 @@ export const git = (
 
 export const ok = (r: ExecResult) => r.code === 0;
 export const out = (r: ExecResult) => r.stdout.trim();
-export const why = (r: ExecResult) =>
-  (r.stderr.trim().split("\n").filter(Boolean).pop() ?? r.spawnError ?? `exit ${r.code}`).slice(
-    0,
-    240,
-  );
+
+/** The file in a checkout's .git holding its enrollment id, made the first time it is asked for. */
+export const ENROLLMENT_ID = "t3-fleet-enrollment";
+
+/**
+ * The id of the checkout at `repo`, kept in its .git (ENROLLMENT_ID): one
+ * enrollment of this machine in one fleet. A machine that joins again, even
+ * the same fleet under the same name, clones again and gets another. With
+ * `create`, a checkout without one gets one; otherwise, and when it cannot be
+ * read or written, null.
+ */
+export const checkoutId = (repo: string, create = false) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const gitDir = yield* git(repo, ["rev-parse", "--absolute-git-dir"]);
+    if (!ok(gitDir)) return null;
+    const file = `${out(gitDir)}/${ENROLLMENT_ID}`;
+    let id = Option.getOrNull(
+      yield* fs.readFileString(file).pipe(
+        Effect.map((t) => t.trim()),
+        Effect.option,
+      ),
+    );
+    if (id === null && create) {
+      const parts: Array<string> = [];
+      for (let i = 0; i < 4; i++)
+        parts.push((yield* Random.nextIntBetween(0, 2 ** 31)).toString(16).padStart(8, "0"));
+      id = parts.join("");
+      yield* fs.writeFileString(file, `${id}\n`).pipe(Effect.orElseSucceed(() => (id = null)));
+    }
+    return id === "" ? null : id;
+  });
+/**
+ * Why a git command failed, in a line: its `fatal:` and `error:` lines when it
+ * has them (git's advice after them, "Please make sure you have the correct
+ * access rights / and the repository exists.", says nothing on its own), else
+ * its last line.
+ */
+export const why = (r: ExecResult) => {
+  const lines = r.stderr
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const said = lines.filter((l) => /^(?:fatal|error):/i.test(l));
+  return (
+    (said.length > 0 ? said.join("; ") : lines.pop()) ??
+    r.spawnError ??
+    `exit ${r.code}`
+  ).slice(0, 240);
+};
 
 /**
  * Write T3 Fleet's git config: the user's name and email (read once from their

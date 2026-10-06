@@ -13,12 +13,14 @@
  * owner (one an older build took, or whose process died between creating it
  * and writing the owner) goes stale after an hour, as before.
  *
- * Holding the lock is visible to everything the holder runs, so an entry
- * point that takes the lock itself (approve, say) simply runs when sync
- * calls it while already holding it. Sync also hands it to the commands its
- * fixes run (`t3-fleet secrets add-node` on an authority) through
- * T3_FLEET_SYNC_LOCK, the token: a process started with the holder's token
- * is part of its run.
+ * Holding the lock is visible to everything the holder runs (in its own
+ * fiber), so an entry point that takes the lock itself (approve, say) simply
+ * runs when sync calls it while already holding it. Sync also hands it to the
+ * commands its fixes run (`t3-fleet secrets add-node` on an authority)
+ * through T3_FLEET_SYNC_LOCK, the token, set in each such command's own
+ * environment (Exec.ChildSyncLock), never in this process's: a process
+ * started with the holder's token is part of its run, and nothing else here
+ * is.
  */
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -27,9 +29,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
-import { exec } from "./Exec.ts";
+import { ChildSyncLock, exec, SYNC_LOCK_ENV } from "./Exec.ts";
 import { stateDir } from "./Names.ts";
 
 const Owner = Schema.Struct({
@@ -54,7 +57,7 @@ const HoldsSyncLock = Context.Reference<boolean>("t3-fleet/HoldsSyncLock", {
 });
 
 export const syncLockPath = (home: string) => `${stateDir(home)}/sync.lock`;
-export const SYNC_LOCK_ENV = "T3_FLEET_SYNC_LOCK";
+export { SYNC_LOCK_ENV };
 const ownerPath = (lock: string) => `${lock}/owner.json`;
 
 const OWNERLESS_STALE_MS = 3_600_000;
@@ -173,86 +176,116 @@ const lockState = (lock: string, now: number) =>
   });
 
 /** This run's token, or null when another live run holds the lock. */
-export const takeSyncLock = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const lock = syncLockPath(process.env["HOME"] ?? "");
-  yield* fs
-    .makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true })
-    .pipe(Effect.ignore);
-  const now = yield* Clock.currentTimeMillis;
-  const boot = yield* bootId;
-  const started = yield* processIdentity(process.pid);
-  const owner: Owner = {
-    pid: process.pid,
-    start: now,
-    token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}`,
-    ...(Option.isSome(boot) ? { boot: boot.value } : {}),
-    ...(Option.isSome(started) ? { process: started.value } : {}),
-  };
-  // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
-  const create = fs.makeDirectory(lock).pipe(
-    Effect.as(true),
-    Effect.orElseSucceed(() => false),
-    Effect.flatMap((made) =>
-      made
-        ? writeOwner(lock, owner).pipe(
-            Effect.as(true),
-            Effect.catch(() =>
-              fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false)),
-            ),
-          )
-        : Effect.succeed(false),
-    ),
-  );
-  const mine = Effect.sync(() => {
-    heldHere.add(owner.token);
-    return owner.token;
-  });
-  if (yield* create) return yield* mine;
-  if ((yield* lockState(lock, now)) !== "stale") return null;
-
-  // Taking a dead run's lock over: one taker at a time, judging again under
-  // the guard, so two takers never both win. The guard is held for
-  // milliseconds; one older than a minute was left by a taker that died.
-  const guard = `${lock}.takeover`;
-  if (
-    !(yield* fs.makeDirectory(guard).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    ))
-  ) {
-    const age = yield* ageOf(guard, now);
-    if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS)
-      yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
-    return null;
-  }
-  const taken = yield* Effect.gen(function* () {
-    const state = yield* lockState(lock, now);
-    if (state === "free") return yield* create;
-    if (state === "held") return false;
-    return yield* writeOwner(lock, owner).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
-  }).pipe(Effect.ensuring(fs.remove(guard, { recursive: true }).pipe(Effect.ignore)));
-  return taken ? yield* mine : null;
-});
-
-/** Remove the lock if it is still this run's; a lock someone took over stays theirs. */
-export const releaseSyncLock = (token: string) =>
+const takeLock = (lock: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const lock = syncLockPath(process.env["HOME"] ?? "");
+    yield* fs
+      .makeDirectory(lock.slice(0, lock.lastIndexOf("/")), { recursive: true })
+      .pipe(Effect.ignore);
+    const now = yield* Clock.currentTimeMillis;
+    const boot = yield* bootId;
+    const started = yield* processIdentity(process.pid);
+    const owner: Owner = {
+      pid: process.pid,
+      start: now,
+      token: `${process.pid}-${now}-${yield* Random.nextIntBetween(0, 2 ** 31)}`,
+      ...(Option.isSome(boot) ? { boot: boot.value } : {}),
+      ...(Option.isSome(started) ? { process: started.value } : {}),
+    };
+    // A directory without its owner would read as taken for an hour: one that cannot get its owner goes again.
+    const create = fs.makeDirectory(lock).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+      Effect.flatMap((made) =>
+        made
+          ? writeOwner(lock, owner).pipe(
+              Effect.as(true),
+              Effect.catch(() =>
+                fs.remove(lock, { recursive: true }).pipe(Effect.ignore, Effect.as(false)),
+              ),
+            )
+          : Effect.succeed(false),
+      ),
+    );
+    const mine = Effect.sync(() => {
+      heldHere.add(owner.token);
+      return owner.token;
+    });
+    if (yield* create) return yield* mine;
+    if ((yield* lockState(lock, now)) !== "stale") return null;
+
+    // Taking a dead run's lock over: one taker at a time, judging again under
+    // the guard, so two takers never both win. The guard is held for
+    // milliseconds; one older than a minute was left by a taker that died.
+    const guard = `${lock}.takeover`;
+    if (
+      !(yield* fs.makeDirectory(guard).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      ))
+    ) {
+      const age = yield* ageOf(guard, now);
+      if (Option.isSome(age) && age.value > TAKEOVER_STALE_MS)
+        yield* fs.remove(guard, { recursive: true }).pipe(Effect.ignore);
+      return null;
+    }
+    const taken = yield* Effect.gen(function* () {
+      const state = yield* lockState(lock, now);
+      if (state === "free") return yield* create;
+      if (state === "held") return false;
+      return yield* writeOwner(lock, owner).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+    }).pipe(Effect.ensuring(fs.remove(guard, { recursive: true }).pipe(Effect.ignore)));
+    return taken ? yield* mine : null;
+  });
+
+/** Remove the lock if it is still this run's; a lock someone took over stays theirs. */
+const releaseLock = (lock: string, token: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const owner = yield* readOwner(lock);
     if (Option.isSome(owner) && owner.value.token === token)
       yield* fs.remove(lock, { recursive: true }).pipe(Effect.ignore);
     heldHere.delete(token);
   });
 
-/** Whether this process was started by the run holding the lock, with its token. */
+export const takeSyncLock = Effect.suspend(() => takeLock(syncLockPath(process.env["HOME"] ?? "")));
+export const releaseSyncLock = (token: string) =>
+  releaseLock(syncLockPath(process.env["HOME"] ?? ""), token);
+
+/** An independent machine lock, with sync's dead-owner recovery and no inherited ownership. */
+export const withMachineLock = <A, E, R, B, E2, R2>(
+  lock: string,
+  effect: Effect.Effect<A, E, R>,
+  busy: Effect.Effect<B, E2, R2>,
+) =>
+  Effect.acquireUseRelease(
+    takeLock(lock),
+    (token): Effect.Effect<A | B, E | E2, R | R2> => (token === null ? busy : effect),
+    (token) => (token === null ? Effect.void : releaseLock(lock, token)),
+  );
+
+/** Who holds a machine lock now: nobody, this process, or another live one. */
+export const machineLockHolder = (lock: string) =>
+  Effect.gen(function* () {
+    const state = yield* lockState(lock, yield* Clock.currentTimeMillis);
+    if (state !== "held") return "free" as const;
+    const owner = yield* readOwner(lock);
+    return Option.isSome(owner) && owner.value.pid === process.pid
+      ? ("here" as const)
+      : ("elsewhere" as const);
+  });
+
+/**
+ * Whether this process was started by the run holding the lock, with its
+ * token. A token this process took itself is never inherited: only the fiber
+ * holding it runs as its holder.
+ */
 const startedByHolder = Effect.gen(function* () {
   const inherited = process.env[SYNC_LOCK_ENV] ?? "";
-  if (inherited === "") return false;
+  if (inherited === "" || heldHere.has(inherited)) return false;
   const owner = yield* readOwner(syncLockPath(process.env["HOME"] ?? ""));
   return Option.isSome(owner) && owner.value.token === inherited;
 });
@@ -271,16 +304,49 @@ export const withSyncLock = <A, E, R, A2, E2, R2>(
       return yield* effect.pipe(Effect.provideService(HoldsSyncLock, true));
     const token = yield* takeSyncLock;
     if (token === null) return yield* busy;
-    const share = options.children === true;
-    const shared = share ? Effect.sync(() => (process.env[SYNC_LOCK_ENV] = token)) : Effect.void;
-    const unshared = share ? Effect.sync(() => delete process.env[SYNC_LOCK_ENV]) : Effect.void;
-    return yield* shared.pipe(
-      Effect.andThen(effect),
+    const shared = options.children === true ? token : null;
+    return yield* effect.pipe(
       Effect.provideService(HoldsSyncLock, true),
-      Effect.ensuring(unshared.pipe(Effect.andThen(releaseSyncLock(token)))),
+      Effect.provideService(ChildSyncLock, shared),
+      Effect.ensuring(releaseSyncLock(token)),
     );
   });
 
 /** Run `effect` holding the lock, so no sync proposes or pulls the repo halfway through an edit. */
 export const underSyncLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   withSyncLock(effect, Effect.fail("a sync is running on this machine; try again in a moment"));
+
+/** How long a command a person started waits for a sync already running (waitForSyncLock). */
+export const SYNC_PATIENCE = Duration.minutes(10);
+
+/**
+ * Run `effect` holding the lock, waiting for a sync already running to
+ * finish first rather than failing: for what a person started and watches
+ * (the hub's setup, an invite), which a sync the timer fired at the same
+ * moment should only delay. `waiting` is said once, when it has to wait.
+ * Gives up after `patience` (ten minutes by default), saying why.
+ */
+export const waitForSyncLock = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  options: {
+    readonly waiting?: Effect.Effect<void>;
+    readonly patience?: Duration.Duration;
+    readonly every?: Duration.Duration;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const once = withSyncLock(Effect.map(effect, Option.some), Effect.succeed(Option.none<A>()));
+    const first = yield* once;
+    if (Option.isSome(first)) return first.value;
+    if (options.waiting !== undefined) yield* options.waiting;
+    const every = options.every ?? Duration.seconds(2);
+    const patience = options.patience ?? SYNC_PATIENCE;
+    const times = Math.max(1, Math.ceil(Duration.toMillis(patience) / Duration.toMillis(every)));
+    const last = yield* once.pipe(
+      Effect.repeat({ while: (o) => Option.isNone(o), schedule: Schedule.spaced(every), times }),
+    );
+    if (Option.isSome(last)) return last.value;
+    return yield* Effect.fail(
+      `a sync on this machine has been running for over ${Math.round(Duration.toMillis(patience) / 60_000)} minutes; try again once it finishes (t3-fleet status shows it)`,
+    );
+  });

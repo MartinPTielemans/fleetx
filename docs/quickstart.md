@@ -2,6 +2,10 @@
 
 From one machine to two, with what each already has.
 
+There are two ways through, and they do the same setup: the **browser
+wizard** and the **CLI**. Pick one; you can change your mind between
+machines. Both show you the whole plan before anything is written.
+
 ## 1. Install
 
 ```sh
@@ -17,9 +21,55 @@ PATH, and whether a sync timer would run here.
 
 ## 2. Start a fleet on this machine
 
+### In the browser
+
+After a first install on your own computer (a Mac, or Linux with a desktop),
+the installer opens the wizard in your browser. Anywhere else it prints what
+to run next; run `t3-fleet ui`, or `t3-fleet setup --ui`, on a machine that is
+not in a fleet yet to open it. It runs only on 127.0.0.1 and answers only the tab it opened. It asks:
+
+1. **What machines do you have?** Whether one stays on (a home server, a Mac
+   mini, a VPS), and how many others you run T3 on. And how T3 Fleet looks
+   after them:
+   - **Keep things up to date automatically** (on): each sync updates T3 Code
+     (only when no thread is running), Claude Code and Codex, and skills.
+     Off, they wait for you to apply them; MCP servers, instructions,
+     secrets and the relay's services are kept in place either way. This is
+     `[fleet] apply`.
+   - **Notify me on this computer** (on): an OS notification for every fleet
+     alert (`[notify] desktop`).
+   - **Push to my phone with ntfy** (off): setup makes a private ntfy.sh topic
+     and shows it to subscribe to in the ntfy app; it is kept as the secret
+     `T3_FLEET_NTFY_URL` (`[notify] ntfy`). Anyone with the link can read your
+     alerts.
+2. **The recommended layout.** This computer is the **authority**: it
+   approves changes and holds the keys. An always-on machine is the **hub**:
+   it runs the relay for the fleet, and can host your MCP servers. A laptop is
+   never the hub, because it sleeps. See [topologies](topologies.md).
+3. **Where your setup lives.** A new private GitHub repository, an existing
+   repository URL, or local only.
+4. **Your hub, checked.** You give its ssh address; this computer checks it
+   read-only (Node, git, T3, tailscale, docker, a service manager) and says how
+   to fix anything missing. **Host your MCP servers on the hub** is off: on,
+   you sign in to each server once, on the hub, and every machine uses it;
+   until you sign in there, those servers stop working on your machines.
+5. **The plan.** The same plan `t3-fleet setup` shows, below, plus what the hub
+   will be asked to do. Credentials the plan needs and didn't find are typed
+   here; they are encrypted before the first step and never shown in progress.
+6. **Apply.** Live progress. This computer first, then the hub over ssh.
+7. **Invite.** The line to run on each next machine.
+
+If a run stops part-way, the wizard opens on it and offers to resume or
+abandon it, the same as `--resume` and `--abandon` below. The design is in
+[the setup wizard](design/setup-wizard.md).
+
+### Or in the terminal
+
 ```sh
 t3-fleet setup
 ```
+
+This is the same setup, with prompts instead of screens.
 
 Setup looks at what is already here and shows one screen of what it would do,
 before it writes anything:
@@ -58,7 +108,7 @@ Secrets (encrypted into the repo; never in plain text)
   POSTHOG_TOKEN  phx…  posthog: header Authorization
 
 Optional extras (each asked next; skippable)
-  relay        an always-on machine gives instant sync and holds your MCP logins
+  relay        an always-on machine: instant sync, alerts for every machine, the fleet's app
   model proxy  retries, stats, a login that doesn't expire
   T3 access    provider logins and health as T3 itself sees them
 
@@ -94,7 +144,16 @@ encrypts the secrets, commits and pushes, links skills and instructions into
 place, installs the sync timer when pre-flight says it will run, declares T3
 Fleet's own MCP server, and syncs once.
 
-`--plan` shows the plan and stops; it never writes anything. `--yes` takes
+After the conflicts and extras it asks the same questions the wizard does:
+keep things up to date automatically (on), a notification on this machine
+(on where one can be shown), push to a phone with ntfy (off), and, when this
+machine becomes the relay, whether it hosts the MCP servers (off). Each has a
+flag: `--auto-update`/`--no-auto-update`, `--notify`/`--no-notify`, `--ntfy`,
+`--mcp-hub` (with `--relay`). A machine joining a fleet keeps the fleet's
+updates setting.
+
+`--plan` shows the plan, and the Settings these flags would set (each one
+not given at its default), and stops; it never writes anything. `--yes` takes
 every default. Without gh or `--remote`, the fleet stays local and setup
 finishes there, saying how to add a remote later. Before it changes
 anything, setup keeps a snapshot of your clients' MCP servers and every
@@ -117,7 +176,7 @@ it (`~/.claude/backups/`); T3 Fleet keeps all of those at mode 600
 
 ## 3. Add a second machine
 
-On the first machine:
+On the first machine (the wizard's last screen shows this line too):
 
 ```sh
 t3-fleet invite desktop

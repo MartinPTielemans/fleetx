@@ -8,8 +8,11 @@
  *   POST /api/fixes/plan, /api/fixes, /api/proposals/<node>/approve | /reject,
  *        /api/hub/servers/<name>/login | /logout | /restart,
  *        /api/skills/lookup | /add | /preview | /update | /remove
+ *   GET  /api/setup/state, POST /api/setup/probe | /plan | /apply | /invite | /notify-test
+ *                        the setup wizard (SetupApi.ts)
  *   GET  /api/events     server-sent events: the latest status first, then the
- *                        relay's, plus "check", "check-failed" and "job"
+ *                        relay's, plus "check", "check-failed", "job" and
+ *                        "session"
  *   GET  *               the app
  *
  * Shapes are the ones in Api.ts, encoded here and decoded by the app.
@@ -47,6 +50,15 @@
  * them. Linking them on each machine stays a fix, shown before it runs. An
  * update is previewed first and kept only if upstream still gives the same
  * change.
+ *
+ * On a machine not in a fleet yet (or whose setup stopped part-way) the same
+ * server serves the setup wizard: `inFleet` is false, so no check runs, and
+ * the session names the machine setup would make. Apply runs setup as jobs
+ * ("setup", then "setup-hub" when a hub was asked for), one run at a time.
+ * Nothing restarts when it is done: the session, the relay and the checks are
+ * read as they are now, so once the "setup" job is done the same server is
+ * the fleet's. It says so with a "session" event carrying the new session;
+ * the app reloads into the fleet's views on it.
  */
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -105,9 +117,9 @@ import {
 import { Desired as SkillsDesired, Observed as SkillsObserved } from "./areas/Skills.ts";
 import type { CheckReport } from "./Check.ts";
 import { keptCopy, providerLabel, type Finding, type Fix } from "./Diagnose.ts";
-import type { FixOutcome } from "./Fix.ts";
-import { sha256 } from "./Hash.ts";
+import { fixDigest, type FixOutcome } from "./Fix.ts";
 import { constantTimeEqual } from "./hub/Policy.ts";
+import { identify, refusedPage, type HubGate } from "./HubUi.ts";
 import { releasesBehind } from "./Latest.ts";
 import { findingId } from "./Memory.ts";
 import type { MachineObservation } from "./Observation.ts";
@@ -115,6 +127,23 @@ import { renderStatus } from "./Render.ts";
 import type { NodeState } from "./State.ts";
 import { cliReleaseChannelOf } from "./vendor/t3/cliRelease.ts";
 import { isLauncher } from "./Names.ts";
+import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
+  UiInvite,
+  UiInviteRequest,
+  UiNotifyTest,
+  UiProbe,
+  UiProbeRequest,
+  UiSetupApplyRequest,
+  UiSetupPlan,
+  UiSetupPlanRequest,
+  UiSetupStarted,
+  UiSetupState,
+} from "./SetupApi.ts";
+import type { RunningElsewhere, SetupActions, SetupJob, StalePlan } from "./setup/Wizard.ts";
+
+export { fixDigest } from "./Fix.ts";
 
 /** A full check, with what it needs to be shown: published sync states and accepted differences. */
 export interface UiCheck {
@@ -126,8 +155,10 @@ export interface UiCheck {
 /** What the server does on the fleet; `t3-fleet ui` wires these to the real engine, tests to fakes. */
 export interface UiActions {
   readonly check: Effect.Effect<UiCheck, string>;
+  /** `step` says how it goes, for the job (the hub waits on other machines). */
   readonly apply: (
     fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
+    step: (text: string) => Effect.Effect<void>,
   ) => Effect.Effect<ReadonlyArray<FixOutcome>>;
   readonly proposals: Effect.Effect<ReadonlyArray<UiProposal>, string>;
   /** Approve `node`'s proposal, failing unless it still makes the reviewed `change` (UiProposal.change). */
@@ -155,24 +186,53 @@ export interface UiActions {
 }
 type UiConfigRow = typeof UiConfigRow.Type;
 
+export interface UiRelay {
+  readonly url: string;
+  readonly token: string;
+}
+
 export interface UiAsset {
   readonly type: string;
   readonly body: Uint8Array;
 }
 
+/** The app served by the hub instead of on this machine's loopback (HubUi.ts). */
+export interface UiHubAccess {
+  /** Who may open it, read as it is now. */
+  readonly gate: Effect.Effect<HubGate>;
+  /** The authorities: proposals are decided there, never on the hub. */
+  readonly approveOn: Effect.Effect<ReadonlyArray<string>>;
+  /**
+   * Whether tailscale serve made the request's connection, not another
+   * program on the hub (HubUi.servedByTailscale): null when it did, why not
+   * otherwise.
+   */
+  readonly servedBy: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<string | null>;
+}
+
 export interface UiServerOptions {
-  /** The one-use ticket in the link `t3-fleet ui` opens; the app trades it for a token. */
+  /** The one-use ticket in the link `t3-fleet ui` opens; the app trades it for a token. Unused on the hub. */
   readonly ticket: string;
   /** Called with a new ticket each time one is used, so the user can open another tab. */
   readonly onTicketUsed?: (next: string) => Effect.Effect<void>;
-  /** The port the server listens on, for the Host check. */
+  /** The port the server listens on, for the Host check. Unused on the hub. */
   readonly port: number;
+  /**
+   * Served by the hub: Tailscale identity in place of the ticket and the
+   * loopback Host, and no approving or rejecting proposals.
+   */
+  readonly hub?: UiHubAccess;
   /** The built app, by URL path ("/index.html", "/assets/…"). */
   readonly assets: ReadonlyMap<string, UiAsset>;
-  readonly session: UiSession;
+  /** This machine and its fleet; read as it is now when given as an effect (it changes once setup is done). */
+  readonly session: UiSession | Effect.Effect<UiSession>;
   readonly actions: UiActions;
-  /** The relay and its token, when the fleet has one. */
-  readonly relay: { readonly url: string; readonly token: string } | null;
+  /** The relay and its token, when the fleet has one; read as it is now when given as an effect. */
+  readonly relay: UiRelay | null | Effect.Effect<UiRelay | null>;
+  /** Whether this machine is in a fleet yet; checks run only once it is. Always, unless given. */
+  readonly inFleet?: Effect.Effect<boolean>;
+  /** The setup wizard's engine; without it, the /api/setup routes answer 404. */
+  readonly setup?: SetupActions;
   readonly checkEvery?: Duration.Input;
   /** How long finished jobs stay listed; half an hour unless a test says otherwise. */
   readonly keepJobsFor?: Duration.Input;
@@ -408,6 +468,23 @@ export const refusal = (
   return null;
 };
 
+/** On the hub: the token must be one this run handed to the same login. */
+const tokenRefusal = (
+  request: { readonly headers: Readonly<Record<string, string | undefined>> },
+  query: URLSearchParams,
+  handed: ReadonlyMap<string, string | null>,
+  login: string | null,
+  queryToken: boolean,
+): { readonly status: number; readonly message: string } | null => {
+  const given =
+    request.headers["x-t3-fleet-token"] ?? (queryToken ? query.get("token") : null) ?? "";
+  let owner: string | null | undefined;
+  for (const [token, who] of handed) if (constantTimeEqual(given, token)) owner = who;
+  if (owner === undefined || owner === null || owner !== login)
+    return { status: 401, message: "missing or stale session: reload the app" };
+  return null;
+};
+
 const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
@@ -450,19 +527,6 @@ const randomHex = (bytes: number) =>
     ).join(""),
   );
 
-/** Names exactly what a fix would do: where, which command, and what it interrupts. */
-export const fixDigest = (finding: Finding & { readonly fix: Fix }) => {
-  const { command, on, disrupts, safe } = finding.fix;
-  const parts = [
-    finding.node,
-    on ?? finding.node,
-    command,
-    disrupts ?? "-",
-    safe ? "safe" : "unsafe",
-  ];
-  return Effect.promise(() => sha256(parts.map((p) => `${p.length}:${p}`).join("")));
-};
-
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** How long finished jobs stay listed, for a tab that reloads or opens later. */
@@ -501,6 +565,16 @@ export const uiLayer = (options: UiServerOptions) =>
     Effect.gen(function* () {
       const { actions } = options;
       const client = yield* HttpClient.HttpClient;
+      const sessionNow: Effect.Effect<UiSession> = Effect.isEffect(options.session)
+        ? options.session
+        : Effect.succeed(options.session);
+      const relayNow: Effect.Effect<UiRelay | null> = Effect.isEffect(options.relay)
+        ? options.relay
+        : Effect.succeed(options.relay);
+      const inFleet = options.inFleet ?? Effect.succeed(true);
+      /** A check nobody asked for runs only on a machine in a fleet. */
+      const whenInFleet = <E>(effect: Effect.Effect<unknown, E>) =>
+        inFleet.pipe(Effect.flatMap((yes) => (yes ? Effect.ignore(effect) : Effect.void)));
       // Background work (checks, the relay, jobs) runs here rather than in the layer's own
       // scope, so stopping the server can wait for jobs before anything is interrupted.
       const scope = yield* Scope.make();
@@ -519,7 +593,8 @@ export const uiLayer = (options: UiServerOptions) =>
       const jobs = yield* Ref.make<ReadonlyMap<string, UiJob>>(new Map());
       /** Each running job's end, by id, for stopping the server. */
       const running = yield* Ref.make<ReadonlyMap<string, Deferred.Deferred<void>>>(new Map());
-      const tokens = yield* Ref.make<ReadonlySet<string>>(new Set());
+      /** The tokens this run handed out, each with the login it was handed to (null: by ticket). */
+      const tokens = yield* Ref.make<ReadonlyMap<string, string | null>>(new Map());
       const ticket = yield* Ref.make(options.ticket);
       const usedTickets = yield* Ref.make<ReadonlySet<string>>(new Set());
       /** Guards starting a check, so two callers never start two. */
@@ -607,9 +682,9 @@ export const uiLayer = (options: UiServerOptions) =>
       const current = checked(Number.POSITIVE_INFINITY);
 
       // A check at start, then every minute while a tab is looking.
-      yield* checked(0).pipe(Effect.ignore, Effect.forkIn(scope));
+      yield* whenInFleet(checked(0)).pipe(Effect.forkIn(scope));
       yield* Effect.gen(function* () {
-        if ((yield* Ref.get(clients)) > 0) yield* checked(everyMs).pipe(Effect.ignore);
+        if ((yield* Ref.get(clients)) > 0) yield* whenInFleet(checked(everyMs));
       }).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(5))), Effect.forkIn(scope));
 
       // ── jobs ──
@@ -730,11 +805,13 @@ export const uiLayer = (options: UiServerOptions) =>
         }),
       );
 
-      // Relay events pass through, so the app hears about syncs and the hub as they happen.
+      // Relay events pass through, so the app hears about syncs and the hub as they happen;
+      // a relay that comes later (setup made one) is picked up on the next try.
       if (options.relay !== null) {
-        const relay = options.relay;
         let lastId = 0;
         yield* Effect.gen(function* () {
+          const relay = yield* relayNow;
+          if (relay === null) return yield* Effect.fail("no relay yet");
           const response = yield* client.execute(
             HttpClientRequest.get(`${relay.url}/events?since=${lastId}`).pipe(
               HttpClientRequest.bearerToken(relay.token),
@@ -779,6 +856,33 @@ export const uiLayer = (options: UiServerOptions) =>
 
       // ── routes ──
 
+      /**
+       * Who is asking: on the hub, the Tailscale login (HubUi.ts); here, nobody
+       * in particular (null). A refusal is the response to send.
+       */
+      const identity = (request: HttpServerRequest.HttpServerRequest) =>
+        Effect.gen(function* () {
+          if (options.hub === undefined) return { login: null } as const;
+          const who = identify(
+            { headers: request.headers, remoteAddress: Option.getOrNull(request.remoteAddress) },
+            yield* options.hub.gate,
+          );
+          if (!who.ok) return { refused: who } as const;
+          // The headers say who is asking only when tailscale serve set them.
+          const notServed = yield* options.hub.servedBy(request);
+          if (notServed !== null)
+            return {
+              refused: {
+                ok: false,
+                status: 403,
+                title: "Not through Tailscale",
+                message: notServed,
+                login: null,
+              },
+            } as const;
+          return { login: who.login } as const;
+        });
+
       /** Guard, then run: every /api route goes through here. */
       const api = <E, R>(
         handler: (
@@ -790,15 +894,23 @@ export const uiLayer = (options: UiServerOptions) =>
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const query = new URL(request.url, "http://ui").searchParams;
-          const refused = refusal(
-            request,
-            {
-              port: options.port,
-              tokens: guard.ticket === true ? null : yield* Ref.get(tokens),
-              queryToken: guard.queryToken === true,
-            },
-            query,
-          );
+          const who = yield* identity(request);
+          if ("refused" in who) return plain(who.refused.message, who.refused.status);
+          const handed = yield* Ref.get(tokens);
+          const refused =
+            options.hub === undefined
+              ? refusal(
+                  request,
+                  {
+                    port: options.port,
+                    tokens: guard.ticket === true ? null : new Set(handed.keys()),
+                    queryToken: guard.queryToken === true,
+                  },
+                  query,
+                )
+              : guard.ticket === true
+                ? null
+                : tokenRefusal(request, query, handed, who.login, guard.queryToken === true);
           if (refused !== null) return plain(refused.message, refused.status);
           return yield* handler(request, query);
         });
@@ -822,12 +934,23 @@ export const uiLayer = (options: UiServerOptions) =>
       const accepted = jsonResponse(UiJob, 202);
 
       // The ticket is good once. A second use means the link went somewhere else too.
+      // On the hub there is no ticket: a login the gate lets in gets a token of its own.
       const trade = HttpRouter.add(
         "POST",
         "/api/session",
         api(
           (request) =>
             Effect.gen(function* () {
+              if (options.hub !== undefined) {
+                // A header no form can send: a page elsewhere cannot get a token without a preflight.
+                if (request.headers["x-t3-fleet-hub"] !== "1")
+                  return plain("ask for a session from the app", 400);
+                const who = yield* identity(request);
+                if ("refused" in who) return plain(who.refused.message, who.refused.status);
+                const token = yield* randomHex(24);
+                yield* Ref.update(tokens, (all) => new Map(all).set(token, who.login));
+                return yield* jsonResponse(UiSessionGrant)({ token });
+              }
               const given = request.headers["x-t3-fleet-ticket"] ?? "";
               const expected = yield* Ref.get(ticket);
               if (!constantTimeEqual(given, expected)) {
@@ -841,7 +964,7 @@ export const uiLayer = (options: UiServerOptions) =>
               }
               const token = yield* randomHex(24);
               const next = yield* randomHex(24);
-              yield* Ref.update(tokens, (all) => new Set(all).add(token));
+              yield* Ref.update(tokens, (all) => new Map(all).set(token, null));
               yield* Ref.update(usedTickets, (all) => new Set(all).add(given));
               yield* Ref.set(ticket, next);
               if (options.onTicketUsed !== undefined) yield* options.onTicketUsed(next);
@@ -854,7 +977,20 @@ export const uiLayer = (options: UiServerOptions) =>
       const session = HttpRouter.add(
         "GET",
         "/api/session",
-        api(() => jsonResponse(UiSession)(options.session)),
+        api((request) =>
+          Effect.gen(function* () {
+            const now = yield* sessionNow;
+            if (options.hub === undefined) return yield* jsonResponse(UiSession)(now);
+            const who = yield* identity(request);
+            return yield* jsonResponse(UiSession)({
+              ...now,
+              hub: {
+                login: "login" in who && who.login !== null ? who.login : "",
+                approveOn: [...(yield* options.hub.approveOn)],
+              },
+            });
+          }),
+        ),
       );
 
       const status = HttpRouter.add(
@@ -952,7 +1088,7 @@ export const uiLayer = (options: UiServerOptions) =>
             let outcomes: ReadonlyArray<FixOutcome> = [];
             if (chosen.length > 0) {
               yield* step(`running ${plural(chosen.length, "fix", "fixes")}`);
-              outcomes = yield* machines.withPermits(1)(actions.apply(chosen));
+              outcomes = yield* machines.withPermits(1)(actions.apply(chosen, step));
               yield* step("checking every machine again");
               yield* checked(0).pipe(Effect.ignore);
             }
@@ -1012,6 +1148,14 @@ export const uiLayer = (options: UiServerOptions) =>
           `/api/proposals/:node/${verb}`,
           api((request) =>
             Effect.gen(function* () {
+              // The hub shows proposals but never decides them: a hub that could would approve its own.
+              if (options.hub !== undefined) {
+                const on = yield* options.hub.approveOn;
+                return plain(
+                  `proposals are approved and rejected on an authority (${on.join(", ") || "none in this fleet"}), not in the app on the hub`,
+                  403,
+                );
+              }
               const node = (yield* HttpRouter.params)["node"] ?? "";
               if (!NAME.test(node)) return plain("not a machine name", 400);
               const { change } = yield* body(
@@ -1209,11 +1353,12 @@ export const uiLayer = (options: UiServerOptions) =>
         schema: S | null,
       ) =>
         Effect.gen(function* () {
-          if (options.relay === null) return plain("this fleet has no relay, so no hub", 503);
+          const relay = yield* relayNow;
+          if (relay === null) return plain("this fleet has no relay, so no hub", 503);
           const response = yield* client
             .execute(
-              HttpClientRequest.make(method)(`${options.relay.url}${path}`).pipe(
-                HttpClientRequest.bearerToken(options.relay.token),
+              HttpClientRequest.make(method)(`${relay.url}${path}`).pipe(
+                HttpClientRequest.bearerToken(relay.token),
               ),
             )
             .pipe(Effect.timeout(Duration.seconds(15)), Effect.option);
@@ -1288,7 +1433,7 @@ export const uiLayer = (options: UiServerOptions) =>
                 const subscription = yield* PubSub.subscribe(events);
                 yield* Ref.update(clients, (n) => n + 1);
                 yield* Effect.addFinalizer(() => Ref.update(clients, (n) => n - 1));
-                yield* checked(everyMs).pipe(Effect.ignore, Effect.forkIn(scope));
+                yield* whenInFleet(checked(everyMs)).pipe(Effect.forkIn(scope));
                 const snapshot: Array<string> = [": connected\n\n"];
                 const kept = yield* Ref.get(latest);
                 if (kept !== null)
@@ -1342,6 +1487,143 @@ export const uiLayer = (options: UiServerOptions) =>
         ),
       );
 
+      // ── the setup wizard ──
+
+      /** One setup at a time: deciding to start one, and its jobs, until the last ends. */
+      const startingSetup = yield* Semaphore.make(1);
+      const settingUp = yield* Semaphore.make(1);
+      const encodeSession = Schema.encodeEffect(Schema.fromJsonString(UiSession));
+      const setupRunning = Ref.get(jobs).pipe(
+        Effect.map((all) =>
+          [...all.values()].some(
+            (j) => (j.kind === "setup" || j.kind === "setup-hub") && j.finishedAt === null,
+          ),
+        ),
+      );
+
+      /** Start each job once the one before it has succeeded; the first one's id. */
+      const chain = (setupJobs: ReadonlyArray<SetupJob>): Effect.Effect<string | null> => {
+        const [first, ...rest] = setupJobs;
+        if (first === undefined) return Effect.succeed(null);
+        return startJob(first.kind, first.title, settingUp, (step) =>
+          first.run(step).pipe(
+            // Set up now: the app reloads into the fleet's views on this.
+            Effect.tap(() =>
+              first.kind !== "setup"
+                ? Effect.void
+                : sessionNow.pipe(
+                    Effect.flatMap(encodeSession),
+                    Effect.flatMap((data) => publish("session", data)),
+                    Effect.ignore,
+                  ),
+            ),
+            Effect.tap(() => chain(rest)),
+            Effect.as({}),
+          ),
+        ).pipe(Effect.map((job) => job.id));
+      };
+
+      /** An ssh destination as ssh takes it: never an option, never more than one word. */
+      const SSH_DESTINATION = /^(?!-)[A-Za-z0-9_.@:[\]%-]+$/;
+
+      /**
+       * A refusal as SetupApi.ts says: a stale plan its own 409, a setup another
+       * process here is applying a plain 409, anything else 422 with why.
+       */
+      const setupRefused = (e: string | StalePlan | RunningElsewhere) =>
+        Effect.succeed(
+          typeof e === "string"
+            ? plain(e, 422)
+            : e._tag === "RunningElsewhere"
+              ? plain(e.message, 409)
+              : HttpServerResponse.text(e.message, {
+                  status: 409,
+                  headers: { ...SECURITY_HEADERS, [SETUP_ERROR_HEADER]: STALE_PLAN },
+                }),
+        );
+
+      const setupRoute = <S extends Schema.Top & { readonly DecodingServices: never }>(
+        path: `/api/setup/${string}`,
+        schema: S,
+        run: (
+          setup: SetupActions,
+          request: S["Type"],
+        ) => Effect.Effect<
+          HttpServerResponse.HttpServerResponse,
+          string | StalePlan | RunningElsewhere
+        >,
+      ) =>
+        HttpRouter.add(
+          "POST",
+          path,
+          api((request) =>
+            Effect.gen(function* () {
+              if (options.setup === undefined) return plain("no setup here", 404);
+              const asked = yield* body(schema)(request);
+              return yield* run(options.setup, asked).pipe(Effect.catch(setupRefused));
+            }).pipe(Effect.catch(fail(400))),
+          ),
+        );
+
+      const setupState = HttpRouter.add(
+        "GET",
+        "/api/setup/state",
+        api(() =>
+          options.setup === undefined
+            ? Effect.succeed(plain("no setup here", 404))
+            : options.setup.state.pipe(
+                Effect.flatMap(jsonResponse(UiSetupState)),
+                Effect.catch(fail(500)),
+              ),
+        ),
+      );
+
+      const setupProbe = setupRoute("/api/setup/probe", UiProbeRequest, (setup, r) =>
+        SSH_DESTINATION.test(r.ssh)
+          ? setup.probe(r.ssh, r.repo).pipe(Effect.flatMap(jsonResponse(UiProbe)))
+          : Effect.succeed(plain("not an ssh destination: host, or user@host", 400)),
+      );
+
+      const setupPlan = setupRoute("/api/setup/plan", UiSetupPlanRequest, (setup, r) =>
+        r.hub !== null && !SSH_DESTINATION.test(r.hub.ssh)
+          ? Effect.succeed(plain("not an ssh destination: host, or user@host", 400))
+          : setup.plan(r).pipe(Effect.flatMap(jsonResponse(UiSetupPlan))),
+      );
+
+      const setupApply = setupRoute("/api/setup/apply", UiSetupApplyRequest, (setup, r) =>
+        startingSetup.withPermits(1)(
+          Effect.gen(function* () {
+            if (yield* setupRunning) return plain("setup is running already; watch its job", 409);
+            if (r.kind === "abandon")
+              return yield* jsonResponse(UiSetupStarted)({
+                jobId: null,
+                report: yield* setup.abandon,
+              });
+            const jobId = yield* chain(yield* setup.apply(r));
+            return yield* jsonResponse(UiSetupStarted, jobId === null ? 200 : 202)({ jobId });
+          }),
+        ),
+      );
+
+      const setupInvite = setupRoute("/api/setup/invite", UiInviteRequest, (setup, r) =>
+        editingRepo
+          .withPermits(1)(setup.invite(r.node))
+          .pipe(Effect.flatMap(jsonResponse(UiInvite))),
+      );
+
+      const setupNotifyTest = HttpRouter.add(
+        "POST",
+        "/api/setup/notify-test",
+        api(() =>
+          options.setup === undefined
+            ? Effect.succeed(plain("no setup here", 404))
+            : options.setup.notifyTest.pipe(
+                Effect.flatMap(jsonResponse(UiNotifyTest)),
+                Effect.catch(fail(422)),
+              ),
+        ),
+      );
+
       const unknownApi = HttpRouter.add(
         "*",
         "/api/*",
@@ -1354,11 +1636,17 @@ export const uiLayer = (options: UiServerOptions) =>
         "/*",
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
-          const refused = refusal(
-            request,
-            { port: options.port, tokens: null },
-            new URLSearchParams(),
-          );
+          const who = yield* identity(request);
+          if ("refused" in who)
+            return HttpServerResponse.text(refusedPage(who.refused), {
+              status: who.refused.status,
+              contentType: "text/html; charset=utf-8",
+              headers: { ...SECURITY_HEADERS, "cache-control": "no-store" },
+            });
+          const refused =
+            options.hub === undefined
+              ? refusal(request, { port: options.port, tokens: null }, new URLSearchParams())
+              : null;
           if (refused !== null) return plain(refused.message, refused.status);
           const path = new URL(request.url, "http://ui").pathname;
           const asset = options.assets.get(path);
@@ -1405,6 +1693,12 @@ export const uiLayer = (options: UiServerOptions) =>
         hubAction("login"),
         hubAction("logout"),
         hubAction("restart"),
+        setupState,
+        setupProbe,
+        setupPlan,
+        setupApply,
+        setupInvite,
+        setupNotifyTest,
         eventStream,
         unknownApi,
         app,

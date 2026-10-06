@@ -28,6 +28,7 @@ import {
   addPaths,
   allowedAt,
   changedFiles,
+  checkoutId,
   ensureGitConfig,
   git,
   literal,
@@ -68,28 +69,20 @@ import { applyAccepted } from "./Memory.ts";
 import { mergeProposedSecrets } from "./ProposedSecrets.ts";
 import { loadAreas } from "./Plugins.ts";
 import { lastSyncPath, probeMachine } from "./Probe.ts";
-import { NodeState, type Alert } from "./State.ts";
+import { NodeState, REPORT_FORMAT, type Alert } from "./State.ts";
 import type { NodeResult } from "./Remote.ts";
-import { reportToRelay } from "./RelayClient.ts";
+import { deliverAlerts } from "./Notify.ts";
+import { localSecrets, reportToRelay } from "./RelayClient.ts";
 import { approve, autoApproves, listProposals, settleRejection } from "./Staging.ts";
 import { isDepartureProposal } from "./leave/Fleet.ts";
 import { branchPrefix, stateDir } from "./Names.ts";
 import { withSyncLock } from "./SyncLock.ts";
+import { DEFAULT_APPLY } from "./Upkeep.ts";
 
 const decodeState = Schema.decodeEffect(Schema.fromJsonString(NodeState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(NodeState));
 
 const DEFAULT_AUTO_COMMIT = ["skills"];
-const DEFAULT_APPLY = [
-  "engine",
-  "secrets",
-  "dotfiles",
-  "instructions",
-  "skills",
-  "mcp",
-  "agents",
-  "t3",
-];
 const MAX_ALERTS = 50;
 
 const settingList = (
@@ -285,10 +278,80 @@ const withoutHashes = (message: string) =>
 /**
  * A node's errors by finding key, with their titles. Keyed by the key alone:
  * a title that counts something ("failed 4 times") changes every run, and is
- * still the same problem.
+ * still the same problem. Its own sync failing is left out: the run's streak
+ * says that (the "failing" and "recovered" alerts), one run sooner, and the
+ * finding, read from the record of the run before, would be announced as a
+ * new problem by the very run that recovers.
  */
 const healthOf = (findings: ReadonlyArray<Finding>) =>
-  new Map(findings.filter((f) => f.severity === "error").map((f) => [f.key, f.title] as const));
+  new Map(
+    findings
+      .filter((f) => f.severity === "error" && f.key !== "sync-failing")
+      .map((f) => [f.key, f.title] as const),
+  );
+
+/**
+ * The alerts for going from `before` to `after` (healthOf): each new error a
+ * problem, each gone a resolution. A node's first report (no `previous`) is a
+ * baseline, announcing nothing: what it starts with is in its findings, and
+ * setting a machine up would otherwise push every first-run error. An error
+ * never announced (in `unalerted`) goes away unannounced too.
+ */
+export const healthAlerts = (input: {
+  readonly node: string;
+  readonly at: number;
+  readonly first: boolean;
+  readonly before: ReadonlyMap<string, string>;
+  readonly after: ReadonlyMap<string, string>;
+  readonly unalerted: ReadonlyArray<string>;
+}) => {
+  const alerts: Array<Alert> = [];
+  if (input.first) return { alerts, unalerted: [...input.after.keys()] };
+  const quiet = new Set(input.unalerted);
+  for (const [key, title] of input.after)
+    if (!input.before.has(key))
+      alerts.push({ at: input.at, node: input.node, kind: "problem", message: title });
+  for (const [key, title] of input.before)
+    if (!input.after.has(key) && !quiet.has(key))
+      alerts.push({ at: input.at, node: input.node, kind: "resolved", message: title });
+  return { alerts, unalerted: [...quiet].filter((k) => input.after.has(k) && input.before.has(k)) };
+};
+
+/** This node's last report as it sent it, published or not (report() keeps it). */
+export const lastReportPath = (home: string) => `${stateDir(home)}/last-report.json`;
+
+/**
+ * The kept report, with the checkout it was made from (Git.ts checkoutId): a
+ * machine that left a fleet without --purge and joined another, under the
+ * same name, has another checkout, and none of the old fleet's alerts or
+ * findings carry over into the new one's reports.
+ */
+const LastReport = Schema.Struct({ checkout: Schema.String, state: NodeState });
+const decodeLastReport = Schema.decodeUnknownOption(Schema.fromJsonString(LastReport));
+const encodeLastReport = Schema.encodeEffect(Schema.fromJsonString(LastReport));
+
+/**
+ * The state this node last reported, when it kept one, for `node` in the
+ * checkout `checkout`; and whether what is kept is another checkout's.
+ */
+const lastReported = (home: string, node: string, checkout: string | null) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(lastReportPath(home)).pipe(Effect.option);
+    const kept = Option.flatMap(text, decodeLastReport);
+    const another = Option.isSome(kept) && kept.value.checkout !== checkout;
+    return {
+      state: Option.filter(
+        Option.map(kept, (k) => k.state),
+        (s) => !another && checkout !== null && s.node === node,
+      ),
+      another,
+    };
+  });
+
+/** The newer of two states of one node. */
+const newestState = (a: Option.Option<NodeState>, b: Option.Option<NodeState>) =>
+  Option.isNone(a) ? b : Option.isNone(b) ? a : b.value.at > a.value.at ? b : a;
 
 /** The streak in this node's own record of its last run, which a failed publish cannot lose. */
 const localStreak = (home: string) =>
@@ -732,7 +795,7 @@ export const report = ({
   config,
   node,
   now,
-  previous,
+  previous: fromGit,
   failed,
   message,
   lines,
@@ -744,8 +807,19 @@ export const report = ({
     const fs = yield* FileSystem.FileSystem;
     const home = process.env["HOME"] ?? "";
     const repo = config.repo;
-    const previousStreak = Option.getOrElse(yield* localStreak(home), () =>
-      Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
+    // What the relay last heard from this node may be newer than what reached git (a publish
+    // that failed): transitions count from that, so a problem is never raised twice.
+    const checkout = yield* checkoutId(repo, true);
+    const kept = yield* lastReported(home, node, checkout);
+    const previous = newestState(fromGit, kept.state);
+    // A fix whose command holds one of this node's secret values is not published: it runs here only.
+    const secrets = [...(yield* localSecrets).values()].filter((v) => v.length >= 6);
+    const publishable = (fix: Finding["fix"]) =>
+      fix !== undefined && !secrets.some((v) => fix.command.includes(v));
+    // The local streak is another enrollment's too when the kept report is.
+    const previousStreak = Option.getOrElse(
+      kept.another ? Option.none<number>() : yield* localStreak(home),
+      () => Option.match(previous, { onNone: () => 0, onSome: (p) => p.streak }),
     );
     const stateOf = (fail: boolean, reason: string): NodeState => {
       const streak = fail ? previousStreak + 1 : 0;
@@ -759,10 +833,15 @@ export const report = ({
         }),
       );
       const after = healthOf(findings);
-      for (const [key, title] of after)
-        if (!before.has(key)) alerts.push({ at: now, node, kind: "problem", message: title });
-      for (const [key, title] of before)
-        if (!after.has(key)) alerts.push({ at: now, node, kind: "resolved", message: title });
+      const health = healthAlerts({
+        node,
+        at: now,
+        first: Option.isNone(previous),
+        before,
+        after,
+        unalerted: Option.match(previous, { onNone: () => [], onSome: (p) => p.unalerted ?? [] }),
+      });
+      alerts.push(...health.alerts);
       const wasFailing = previousStreak >= config.alertAfter;
       if (streak >= config.alertAfter && !wasFailing)
         alerts.push({
@@ -774,6 +853,7 @@ export const report = ({
       if (streak === 0 && wasFailing)
         alerts.push({ at: now, node, kind: "recovered", message: "sync works again" });
       return {
+        format: REPORT_FORMAT,
         node,
         at: now,
         result: fail ? "fail" : "ok",
@@ -788,9 +868,20 @@ export const report = ({
           area: f.area,
           title: f.title,
           ...(f.detail === undefined ? {} : { detail: f.detail }),
+          ...(f.fix !== undefined && publishable(f.fix)
+            ? {
+                fix: {
+                  command: f.fix.command,
+                  safe: f.fix.safe,
+                  ...(f.fix.disrupts === undefined ? {} : { disrupts: f.fix.disrupts }),
+                  ...(f.fix.on === undefined ? {} : { on: f.fix.on }),
+                },
+              }
+            : {}),
         })),
         applied,
         alerts: alerts.slice(-MAX_ALERTS),
+        ...(health.unalerted.length === 0 ? {} : { unalerted: health.unalerted }),
       };
     };
     const record = (state: NodeState) =>
@@ -802,6 +893,15 @@ export const report = ({
               lastSyncPath(home),
               `${Math.round(now / 1000)}\t${state.result}\t${state.streak}\t${state.message.replaceAll("\n", " ")}\n`,
             ),
+          ),
+          Effect.andThen(
+            checkout === null
+              ? fs.remove(lastReportPath(home), { force: true })
+              : encodeLastReport({ checkout, state }).pipe(
+                  Effect.flatMap((text) =>
+                    fs.writeFileString(lastReportPath(home), text, { mode: 0o600 }),
+                  ),
+                ),
           ),
           Effect.ignore,
         );
@@ -819,9 +919,11 @@ export const report = ({
       );
       yield* record(unpublished);
       yield* reportToRelay(config, unpublished).pipe(Effect.ignore);
+      lines.push(...(yield* deliverAlerts(config, [unpublished], "sync")));
       return yield* Effect.fail(published.failure);
     }
     yield* record(state);
+    lines.push(...(yield* deliverAlerts(config, [state], "sync")));
     if (yield* reportToRelay(config, state)) lines.push("reported to the relay");
     return state;
   });
@@ -830,6 +932,108 @@ export interface SyncResult {
   readonly state: NodeState;
   readonly lines: ReadonlyArray<string>;
 }
+
+/**
+ * A node's own check, as sync makes it: itself observed now and the others as
+ * they last published, diagnosed together. Its findings are this node's own,
+ * and the fixes other nodes need that run here (an authority adding a node's
+ * key). A fix request from the hub is checked against exactly this.
+ */
+export const ownCheck = (config: Config, self: Node, others: ReadonlyArray<NodeState>) =>
+  Effect.gen(function* () {
+    const selfResult: NodeResult = {
+      node: self,
+      ok: true,
+      observation: yield* probeMachine(probeSettings(config, self)),
+      ms: 0,
+    };
+    const results: Array<NodeResult> = [
+      selfResult,
+      ...others
+        .filter((s) => s.node !== self.name && s.observation !== null)
+        .flatMap((s) => {
+          const node = config.nodes.find((n) => n.name === s.node);
+          return node === undefined || s.observation === null
+            ? []
+            : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
+        }),
+    ];
+    const versions = results
+      .flatMap((x) =>
+        x.ok
+          ? [x.observation.t3.descriptor?.serverVersion ?? x.observation.t3.installedVersion ?? ""]
+          : [],
+      )
+      .filter(Boolean);
+    const latest = yield* lookupLatest(versions);
+    const { areas } = yield* loadAreas(config.repo, config.settings.plugins?.areas ?? []);
+    const findings = applyAccepted(
+      diagnose(results, latest, config.settings, config.nodes, areas),
+      config.settings.accept,
+    ).filter((f) => f.node === self.name || f.fix?.on === self.name);
+    return { selfResult, findings };
+  });
+
+/**
+ * Apply the safe fixes in `areas` that run on `self`, checking again after
+ * each round and applying what that check newly offers, so one sync takes
+ * the machine as far as it goes: a fix can make another possible (the
+ * secrets installed, so the relay token is there and the relay can start).
+ * Each finding's fix is tried once per run, and no command runs twice (an
+ * agent CLI just installed, then found behind "latest", is not installed over
+ * again); three rounds at most.
+ */
+export const convergeFixes = <
+  C extends { readonly findings: ReadonlyArray<Finding> },
+  E,
+  R,
+  E2,
+  R2,
+>(
+  first: C,
+  options: {
+    readonly self: string;
+    readonly areas: ReadonlyArray<string>;
+    readonly run: (
+      fixes: ReadonlyArray<Finding & { readonly fix: Fix }>,
+    ) => Effect.Effect<
+      ReadonlyArray<{ readonly finding: Finding; readonly ok: boolean; readonly summary: string }>,
+      E,
+      R
+    >;
+    readonly check: Effect.Effect<C, E2, R2>;
+    readonly rounds?: number;
+  },
+) =>
+  Effect.gen(function* () {
+    let checked = first;
+    const applied: Array<{ title: string; ok: boolean; output: string }> = [];
+    const lines: Array<string> = [];
+    const tried = new Set<string>();
+    const ran = new Set<string>();
+    for (let round = 0; round < (options.rounds ?? 3); round++) {
+      const applicable = checked.findings.filter(
+        (f): f is Finding & { readonly fix: Fix } =>
+          f.fix !== undefined &&
+          f.fix.safe &&
+          (f.fix.on ?? f.node) === options.self &&
+          options.areas.includes(f.area) &&
+          !tried.has(`${f.node}\0${f.key}`) &&
+          !ran.has(f.fix.command),
+      );
+      if (applicable.length === 0) break;
+      for (const f of applicable) {
+        tried.add(`${f.node}\0${f.key}`);
+        ran.add(f.fix.command);
+      }
+      const outcomes = yield* options.run(applicable);
+      for (const o of outcomes)
+        applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
+      lines.push(...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`));
+      checked = yield* options.check;
+    }
+    return { checked, applied, lines };
+  });
 
 export const syncRun = (
   startConfig: Config,
@@ -859,65 +1063,25 @@ export const syncRun = (
 
       // 3. Observe, diagnose against everyone's last state, apply safe fixes.
       const others = yield* readStates(repo);
-      const observeSelf = probeMachine(probeSettings(config, self)).pipe(
-        Effect.map((observation): NodeResult => ({ node: self, ok: true, observation, ms: 0 })),
-      );
-      const fleetResults = (selfResult: NodeResult): Array<NodeResult> => [
-        selfResult,
-        ...others
-          .filter((s) => s.node !== self.name && s.observation !== null)
-          .flatMap((s) => {
-            const node = config.nodes.find((n) => n.name === s.node);
-            return node === undefined || s.observation === null
-              ? []
-              : [{ node, ok: true as const, observation: s.observation, ms: 0 }];
-          }),
-      ];
-      const versions = (r: ReadonlyArray<NodeResult>) =>
-        r
-          .flatMap((x) =>
-            x.ok
-              ? [
-                  x.observation.t3.descriptor?.serverVersion ??
-                    x.observation.t3.installedVersion ??
-                    "",
-                ]
-              : [],
-          )
-          .filter(Boolean);
-      const findingsFor = (results: ReadonlyArray<NodeResult>) =>
-        Effect.gen(function* () {
-          const latest = yield* lookupLatest(versions(results));
-          const { areas } = yield* loadAreas(repo, config.settings.plugins?.areas ?? []);
-          // This node's findings, plus fixes other nodes need that must run here (an authority adding a node's key).
-          return applyAccepted(
-            diagnose(results, latest, config.settings, config.nodes, areas),
-            config.settings.accept,
-          ).filter((f) => f.node === self.name || f.fix?.on === self.name);
-        });
-
-      let selfResult = yield* observeSelf;
-      let findings = yield* findingsFor(fleetResults(selfResult));
+      let { selfResult, findings } = yield* ownCheck(config, self, others);
       const applyAreas = settingList(config, "apply", DEFAULT_APPLY).filter(
         (a) => options.areas === undefined || options.areas.includes(a),
       );
-      const applicable = findings.filter(
-        (f): f is Finding & { readonly fix: Fix } =>
-          f.fix !== undefined &&
-          f.fix.safe &&
-          (f.fix.on ?? f.node) === self.name &&
-          applyAreas.includes(f.area),
-      );
       const applied: Array<{ title: string; ok: boolean; output: string }> = [];
-      if (options.apply && applicable.length > 0) {
-        const outcomes = yield* runFixes([{ ...self, ssh: null }], applicable, repo);
-        for (const o of outcomes)
-          applied.push({ title: o.finding.title, ok: o.ok, output: o.summary });
-        lines.push(
-          ...outcomes.map((o) => `${o.ok ? "fixed" : "could not fix"}: ${o.finding.title}`),
+      if (options.apply) {
+        const here = self;
+        const converged = yield* convergeFixes(
+          { selfResult, findings },
+          {
+            self: self.name,
+            areas: applyAreas,
+            run: (fixes) => runFixes([{ ...here, ssh: null }], fixes, repo),
+            check: ownCheck(config, self, others),
+          },
         );
-        selfResult = yield* observeSelf;
-        findings = yield* findingsFor(fleetResults(selfResult));
+        ({ selfResult, findings } = converged.checked);
+        applied.push(...converged.applied);
+        lines.push(...converged.lines);
       }
       if (applied.some((a) => !a.ok)) {
         failed = true;

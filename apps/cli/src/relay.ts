@@ -1,6 +1,12 @@
 /**
- * t3-fleet relay serve   run the relay (on the node with the relay role)
- * t3-fleet listen        follow the relay and sync as soon as the branch moves
+ * t3-fleet relay serve   run the relay (on the node with the relay role), and
+ *                        the app beside it, for the tailnet (hubUi.ts)
+ * t3-fleet listen        follow the relay: sync as soon as the branch moves,
+ *                        and answer fix requests from the app on the hub
+ *
+ * Fix requests are answered where they run (core FixRequest.ts): by each
+ * node's listener, and on the relay node, which runs no listener, by the
+ * relay itself following its own events on loopback.
  */
 // The HTTP server itself has no Effect equivalent; T3 Code builds its server the same way.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -9,25 +15,106 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
-import { Command } from "effect/unstable/cli";
+import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 import { loadConfig, type Config } from "@t3-fleet/core/Config";
+import { runFixes } from "@t3-fleet/core/Fix";
+import { answerFixRequest, fetchFixRequest, sendFixProgress } from "@t3-fleet/core/FixRequest";
 import { decodeModelsSettings, upstreamBases, upstreamsOf } from "@t3-fleet/core/models/Recipes";
 import { git, out } from "@t3-fleet/core/Git";
 import { relayLayer } from "@t3-fleet/core/Relay";
-import { listen, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
+import { listen, localSecrets, RELAY_TOKEN, secretVar } from "@t3-fleet/core/RelayClient";
 import { ensureIdentity } from "@t3-fleet/core/Secrets";
-import { syncRun } from "@t3-fleet/core/Sync";
+import { ownCheck, readStates, syncRun } from "@t3-fleet/core/Sync";
+import { withSyncLock } from "@t3-fleet/core/SyncLock";
 
 import packageJson from "../package.json" with { type: "json" };
 
-import { reportUserErrors, untilNewBuild } from "./shared.ts";
+import { hubUiLayer } from "./hubUi.ts";
+import { ownBundle, reportUserErrors, untilNewBuild } from "./shared.ts";
+import { failureText, loadAssets } from "./ui.ts";
+
+const timestamped = (line: string) =>
+  DateTime.now.pipe(Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)));
+
+/**
+ * Answer the fix request `id` if it names this node: check here again, run
+ * only what this node proposes, report through the relay at `url`; then sync,
+ * so the hub sees the machine as it is now. Holds the sync lock from reading
+ * the request to the last fix, waiting for a sync already running; the
+ * request is read again under it, and the relay takes only one claim
+ * (FixRequest.ts), so a request answered meanwhile is left alone.
+ */
+const answerHere = (url: string, token: string) => (node: string, id: string) =>
+  Effect.gen(function* () {
+    const config = yield* loadConfig;
+    if (node !== config.self) return;
+    const self = config.nodes.find((n) => n.name === config.self);
+    if (self === undefined) return;
+    const bundle = yield* ownBundle.pipe(Effect.orElseSucceed(() => ""));
+    const local = { ...self, ssh: null };
+    const answered = yield* withSyncLock(
+      Effect.gen(function* () {
+        const request = yield* fetchFixRequest(url, token, id);
+        if (request === null || request.state !== "waiting") return false;
+        return yield* answerFixRequest({
+          self: config.self,
+          request,
+          // Said once this run holds the request: one the hub let expire is left unsaid.
+          claimed: timestamped(`the hub asks for ${request.fixes.length} fix(es) here`),
+          progress: (p) => sendFixProgress(url, token, id, p),
+          findings: readStates(config.repo).pipe(
+            Effect.flatMap((others) => ownCheck(config, self, others)),
+            Effect.map((r) => r.findings),
+            Effect.mapError(failureText),
+          ),
+          run: (fixes, secrets) =>
+            runFixes([local], fixes, config.repo, bundle, config.repo, secrets),
+          secrets: yield* localSecrets,
+        });
+      }),
+      Effect.fail("busy"),
+      { children: true },
+    ).pipe(
+      Effect.retry({ times: 24, schedule: Schedule.spaced(Duration.seconds(5)) }),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!answered) return;
+    yield* timestamped("answered the hub; syncing");
+    yield* syncRun(config, { apply: false }).pipe(Effect.ignore);
+  }).pipe(
+    Effect.catchCause((cause) => timestamped(`answering a fix request failed: ${String(cause)}`)),
+  );
+
+/**
+ * What the relay reads only as it starts: [relay] port (where it listens) and
+ * url (where OAuth sends a login back). The MCP hub and ports it follows as
+ * they change (mcpOf).
+ */
+export const servingOf = (config: Config) =>
+  JSON.stringify({
+    port: config.settings.relay?.port ?? 8399,
+    url: config.settings.relay?.url ?? null,
+  });
+
+/** This node's [mcp] hub and ports: the hosted servers, and the gateway's local ones. */
+export const mcpOf = (config: Config) => {
+  const self = config.nodes.find((n) => n.name === config.self);
+  const mcp = (self?.settings.table["mcp"] ?? {}) as {
+    ports?: Record<string, number>;
+    hub?: boolean;
+  };
+  return { enabled: mcp.hub === true, ports: mcp.ports ?? {} };
+};
 
 /** Every upstream base some node's [models] declares: where /egress may forward. */
 const egressBasesOf = (config: Config) => [
@@ -59,12 +146,24 @@ const serve = Command.make("serve").pipe(
         hub?: boolean;
       };
       const { identity } = yield* ensureIdentity;
-      // Followed as sync updates the config repo; a read that fails keeps the last good set.
+      // Followed as sync updates the config repo; a read that fails keeps the last good one.
+      let current = config;
       let egressBases = egressBasesOf(config);
+      // What the relay reads only as it starts (its port, its address): a change restarts it.
+      const serving = servingOf(config);
+      const changed = yield* Deferred.make<string>();
       yield* loadConfig.pipe(
-        Effect.map((c) => {
-          egressBases = egressBasesOf(c);
-        }),
+        Effect.flatMap((c) =>
+          Effect.gen(function* () {
+            current = c;
+            egressBases = egressBasesOf(c);
+            if (servingOf(c) !== serving)
+              yield* Deferred.succeed(
+                changed,
+                "the relay's port or address changed; exiting so the service restarts with them",
+              );
+          }),
+        ),
         Effect.ignore,
         Effect.repeat(Schedule.spaced(Duration.seconds(30))),
         Effect.forkDetach,
@@ -73,8 +172,25 @@ const serve = Command.make("serve").pipe(
       yield* Console.log(
         `relay on 127.0.0.1:${port}; ${hub ? "MCP hub serving the repo's hosted servers" : `MCP gateway for ${Object.keys(mcp.ports ?? {}).join(", ") || "no servers"}`}`,
       );
+      const assets = yield* loadAssets.pipe(Effect.orElseSucceed(() => new Map()));
+      const url = config.settings.relay?.url ?? null;
+      yield* Console.log(
+        url === null
+          ? "the app is not served: [relay] url is not set"
+          : `the app on ${url}, for ${(config.settings.ui?.allow ?? []).join(", ") || "nobody yet ([ui] allow)"}`,
+      );
+      // The relay node runs no listener: the relay answers fix requests for it, following itself.
+      const loopback = `http://127.0.0.1:${port}`;
+      yield* listen(
+        config,
+        () => Effect.void,
+        () => Effect.void,
+        answerHere(loopback, token),
+        loopback,
+      ).pipe(Effect.ignore, Effect.forkDetach);
       const routes = relayLayer({
         token,
+        node: config.self,
         repo: config.repo,
         branch: config.branch,
         hub: {
@@ -82,11 +198,20 @@ const serve = Command.make("serve").pipe(
           home: process.env["HOME"] ?? "",
           enabled: hub,
           ports: mcp.ports ?? {},
+          // Followed: hostMcp turning the hub on is served on the hub's next reload.
+          serving: Effect.sync(() => mcpOf(current)),
           relayUrl: config.settings.relay?.url ?? null,
           identity,
           version: packageJson.version,
         },
         egressBases: () => egressBases,
+        extra: (relay) =>
+          hubUiLayer(relay, {
+            config: Effect.sync(() => current),
+            port,
+            relayToken: token,
+            assets,
+          }),
       });
       return yield* untilNewBuild(
         Layer.launch(
@@ -97,14 +222,56 @@ const serve = Command.make("serve").pipe(
             ),
           ),
         ),
+        { restart: Deferred.await(changed) },
       );
+    }).pipe(reportUserErrors),
+  ),
+);
+
+/** Whether the relay on this machine answers its /health on loopback. */
+const answers = (port: number) =>
+  HttpClient.HttpClient.pipe(
+    Effect.flatMap((client) =>
+      client.execute(HttpClientRequest.get(`http://127.0.0.1:${port}/health`)),
+    ),
+    Effect.map((r) => r.status === 200),
+    Effect.timeout(Duration.seconds(5)),
+    Effect.orElseSucceed(() => false),
+  );
+
+const health = Command.make("health", {
+  wait: Flag.Int("wait").pipe(
+    Flag.withDescription("Keep asking for up to this many seconds (a relay starting up)."),
+    Flag.withDefault(0),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Whether the relay on this machine answers on 127.0.0.1:[relay] port; exits 1 when it does not.",
+  ),
+  Command.withHandler(({ wait }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig;
+      const port = config.settings.relay?.port ?? 8399;
+      const ok = yield* answers(port).pipe(
+        Effect.repeat({
+          until: (up) => up,
+          schedule: Schedule.spaced(Duration.seconds(2)),
+          times: Math.ceil(Math.max(0, wait) / 2),
+        }),
+        Effect.provide(FetchHttpClient.layer),
+      );
+      if (ok) return yield* Console.log(`the relay answers on 127.0.0.1:${port}`);
+      yield* Console.error(
+        `the relay does not answer on 127.0.0.1:${port}${wait > 0 ? ` (asked for ${wait}s)` : ""}; t3-fleet status here says why, and ~/.local/state/t3-fleet/serve.log what it said`,
+      );
+      process.exitCode = 1;
     }).pipe(reportUserErrors),
   ),
 );
 
 export const relayCommand = Command.make("relay").pipe(
   Command.withDescription("The optional always-on relay."),
-  Command.withSubcommands([serve]),
+  Command.withSubcommands([serve, health]),
 );
 
 export const listenCommand = Command.make("listen").pipe(
@@ -114,10 +281,9 @@ export const listenCommand = Command.make("listen").pipe(
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadConfig;
-      const log = (line: string) =>
-        DateTime.now.pipe(
-          Effect.flatMap((now) => Console.log(`${DateTime.formatIso(now)} ${line}`)),
-        );
+      const log = timestamped;
+      const url = config.settings.relay?.url?.replace(/\/+$/, "") ?? "";
+      const token = yield* secretVar(RELAY_TOKEN);
       return yield* untilNewBuild(
         listen(
           config,
@@ -142,6 +308,7 @@ export const listenCommand = Command.make("listen").pipe(
               );
             }),
           log,
+          answerHere(url, token),
         ),
       );
     }).pipe(reportUserErrors),

@@ -175,37 +175,44 @@ export const GITIGNORE = [
 ].join("\n");
 
 /**
- * Clone the fleet's repository into `dir`, writing no config anywhere (so
- * `setup --plan` changes nothing): T3 Fleet's git settings go in the
- * environment, with gh as GitHub's credential helper when gh is here.
+ * The environment git reaches the fleet's repository with before this machine
+ * is in it, writing no config anywhere (so `setup --plan` changes nothing):
+ * this user's own (HOME, the ssh agent), T3 Fleet's git settings, and gh as
+ * GitHub's credential helper when gh is here. Checking a remote and cloning
+ * it see the same: one answers only where the other would.
  */
+export const remoteGitEnv = Effect.gen(function* () {
+  const gh = (yield* exec({
+    command: "sh",
+    args: ["-c", "command -v gh"],
+    timeout: Duration.seconds(5),
+  })).stdout.trim();
+  const helper =
+    gh === ""
+      ? {}
+      : {
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
+          GIT_CONFIG_VALUE_0: "",
+          GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+          GIT_CONFIG_VALUE_1: `!${gh} auth git-credential`,
+        };
+  return {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+    ...helper,
+  };
+});
+
+/** Clone the fleet's repository into `dir`, as remoteGitEnv reaches it. */
 export const cloneFleet = (url: string, dir: string) =>
   Effect.gen(function* () {
-    const gh = (yield* exec({
-      command: "sh",
-      args: ["-c", "command -v gh"],
-      timeout: Duration.seconds(5),
-    })).stdout.trim();
-    const helper =
-      gh === ""
-        ? {}
-        : {
-            GIT_CONFIG_COUNT: "2",
-            GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
-            GIT_CONFIG_VALUE_0: "",
-            GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
-            GIT_CONFIG_VALUE_1: `!${gh} auth git-credential`,
-          };
     const clone = yield* exec({
       command: "git",
       args: ["clone", "-q", "--", url, dir],
-      env: {
-        ...process.env,
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
-        ...helper,
-      },
+      env: yield* remoteGitEnv,
       timeout: Duration.minutes(5),
     });
     if (clone.code !== 0)

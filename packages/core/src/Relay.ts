@@ -7,7 +7,8 @@
  *   GET  /fleet         every node's latest reported state
  *   GET  /events        server-sent events: "pull" when the branch moves,
  *                       "state" when a node reports, "hub" when a hosted MCP
- *                       server changes state; replays what a client missed
+ *                       server changes state, "fix" when the app on the hub
+ *                       asks a node for fixes; replays what a client missed
  *                       (Last-Event-ID or ?since=) so a laptop that slept
  *                       catches up, and adds a "pull" when it cannot know
  *                       what was missed (see eventIds)
@@ -15,6 +16,14 @@
  *                       endpoint and one token (see hub/Hub.ts)
  *        /hub/*, /oauth/callback
  *                       managing the hub and signing in (see hub/Routes.ts)
+ *   GET /fixes/<id>, POST /fixes/<id>/progress
+ *                       fix requests, claimed and answered by the node they
+ *                       name (FixRequest.ts). Only the app beside the relay
+ *                       makes them, in this process (RelayHandle.fixes): no
+ *                       route does, so the relay token, which every member
+ *                       holds, never asks a machine to run a fix
+ *   GET  /, /api/*      the app, when this relay hosts it (HubUi.ts): its own
+ *                       guard, Tailscale identity, instead of the relay token
  *   *    /egress/…      model traffic from nodes with [models] egress = "relay"
  *                       (models/Egress.ts; token in x-t3-fleet-relay-token)
  *   GET  /health
@@ -27,6 +36,10 @@
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import type * as Path from "effect/Path";
+import type * as FileSystem from "effect/FileSystem";
+import type * as HttpClient from "effect/unstable/http/HttpClient";
+import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -38,6 +51,16 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
+import { loadConfigFrom } from "./Config.ts";
+import { deliverAlerts } from "./Notify.ts";
+import { readStates } from "./Sync.ts";
+import {
+  advance,
+  FixProgress,
+  FixRequestRecord,
+  publicRecord,
+  type FixRelay,
+} from "./FixRequest.ts";
 import { git, out } from "./Git.ts";
 import { egressLayer } from "./models/Egress.ts";
 import { makeHub, type HubConfig } from "./hub/Hub.ts";
@@ -48,17 +71,21 @@ import { NodeState } from "./State.ts";
 export interface RelayEvent {
   readonly id: number;
   readonly at: number;
-  readonly type: "pull" | "state" | "hub";
+  readonly type: "pull" | "state" | "hub" | "fix";
   readonly node?: string;
   readonly rev?: string;
+  /** fix: the request's id; what it asks for is fetched from /fixes/<id>. */
+  readonly request?: string;
   /** hub: the server, its new state, and why. */
   readonly server?: string;
   readonly state?: string;
   readonly detail?: string | null;
 }
 
-export interface RelayOptions {
+export interface RelayOptions<R = never> {
   readonly token: string;
+  /** This relay node, enabling deterministic delivery. Omitted by embedders without notifications. */
+  readonly node?: string;
   /** The config repo on this node, watched for new commits. */
   readonly repo: string;
   readonly branch: string;
@@ -68,7 +95,19 @@ export interface RelayOptions {
   readonly pollEvery?: Duration.Input;
   /** The upstream bases /egress may forward to (models/Egress.ts); the built-in ones when absent. */
   readonly egressBases?: () => ReadonlyArray<string>;
+  /** More routes on the same port, given the relay's state: the app (HubUi.ts). */
+  readonly extra?: (relay: RelayHandle) => Layer.Layer<never, never, R>;
 }
+
+/** What the relay keeps, for routes served beside it. */
+export interface RelayHandle {
+  /** Every node's latest report since the relay started. */
+  readonly states: Effect.Effect<ReadonlyArray<NodeState>>;
+  readonly fixes: FixRelay;
+}
+
+/** How long a fix request is kept, answered or not. */
+const FIX_REQUESTS_KEPT_MS = 60 * 60 * 1000;
 
 const MAX_EVENTS = 500;
 
@@ -94,12 +133,41 @@ export const eventIds = (startedAt: number) => {
 };
 
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(NodeState));
+const decodeProgress = Schema.decodeUnknownEffect(Schema.fromJsonString(FixProgress));
+const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(FixRequestRecord));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const unauthorized = HttpServerResponse.text("Unauthorized", { status: 401 });
 
+/**
+ * A listener's events: `snapshot`'s replay, then each event published after
+ * it, none lost and none twice. The subscription is taken before the snapshot
+ * is read, so an event emitted between the two is in one or the other; one in
+ * both (it was kept by the time the snapshot read them) is sent once.
+ */
+export const snapshotThenLive = <E extends { readonly id: number }, R>(
+  pubsub: PubSub.PubSub<E>,
+  snapshot: Effect.Effect<
+    { readonly replay: ReadonlyArray<E>; readonly kept: ReadonlyArray<E> },
+    never,
+    R
+  >,
+): Stream.Stream<E, never, R> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(pubsub);
+      const { replay, kept } = yield* snapshot;
+      const sent = new Set(kept.map((e) => e.id));
+      return Stream.fromIterable(replay).pipe(
+        Stream.concat(
+          Stream.fromSubscription(subscription).pipe(Stream.filter((e) => !sent.has(e.id))),
+        ),
+      );
+    }),
+  );
+
 /** The relay's routes and its background watcher, as one layer. */
-export const relayLayer = (options: RelayOptions) =>
+export const relayLayer = <R = never>(options: RelayOptions<R>) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const events = yield* Ref.make<ReadonlyArray<RelayEvent>>([]);
@@ -134,6 +202,38 @@ export const relayLayer = (options: RelayOptions) =>
         Effect.forkDetach,
       );
 
+      const notifyServices = yield* Effect.context<
+        | Path.Path
+        | FileSystem.FileSystem
+        | HttpClient.HttpClient
+        | ChildProcessSpawner.ChildProcessSpawner
+      >();
+      const notify = (catchUp: boolean) =>
+        Effect.gen(function* () {
+          if (options.node === undefined) return;
+          const config = yield* loadConfigFrom(options.repo, options.node);
+          yield* deliverAlerts(config, [...(yield* Ref.get(states)).values()], "relay", {
+            catchUp,
+          });
+        }).pipe(Effect.ignore, Effect.provide(notifyServices));
+      if (options.node !== undefined) {
+        // Rehydrate from git after restart; polling also covers reports lost while the relay was down.
+        yield* Effect.gen(function* () {
+          for (const state of yield* readStates(options.repo)) {
+            const current = (yield* Ref.get(states)).get(state.node);
+            if (current === undefined || current.at < state.at) {
+              yield* Ref.update(states, (m) => new Map(m).set(state.node, state));
+              yield* emit({ type: "state", node: state.node, rev: state.rev });
+            }
+          }
+          yield* notify(true);
+        }).pipe(
+          Effect.ignore,
+          Effect.repeat(Schedule.spaced(Duration.seconds(30))),
+          Effect.forkDetach,
+        );
+      }
+
       const authorized = Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         return yield* bearerMatches(request.headers["authorization"], options.token);
@@ -141,6 +241,92 @@ export const relayLayer = (options: RelayOptions) =>
 
       const hubService = yield* makeHub({ ...options.hub, relayToken: options.token }, (e) =>
         emit({ type: "hub", server: e.server, state: e.state, detail: e.detail }),
+      );
+
+      // ── fix requests (FixRequest.ts) ──
+      const requests = yield* Ref.make<ReadonlyMap<string, FixRequestRecord>>(new Map());
+      const fixRelay: FixRelay = {
+        request: (body) =>
+          Effect.gen(function* () {
+            const at = yield* Clock.currentTimeMillis;
+            const id = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(12)), (b) =>
+              b.toString(16).padStart(2, "0"),
+            ).join("");
+            const record: FixRequestRecord = {
+              id,
+              node: body.node,
+              at,
+              fixes: body.fixes,
+              acknowledged: body.acknowledged,
+              state: "waiting",
+              step: null,
+              result: null,
+              error: null,
+            };
+            yield* Ref.update(
+              requests,
+              (all) =>
+                new Map(
+                  [...all, [id, record] as const].filter(
+                    ([, r]) => at - r.at < FIX_REQUESTS_KEPT_MS,
+                  ),
+                ),
+            );
+            yield* emit({ type: "fix", node: body.node, request: id });
+            return record;
+          }),
+        get: (id) => Ref.get(requests).pipe(Effect.map((all) => all.get(id) ?? null)),
+        expire: (id) =>
+          Ref.modify(requests, (all): [boolean, ReadonlyMap<string, FixRequestRecord>] => {
+            const record = all.get(id);
+            if (record?.state !== "waiting") return [false, all];
+            return [true, new Map(all).set(id, { ...record, state: "expired" })];
+          }),
+      };
+
+      const json = (body: string, status = 200) =>
+        HttpServerResponse.text(body, { status, contentType: "application/json" });
+
+      const fixRequest = HttpRouter.add(
+        "GET",
+        "/fixes/:id",
+        Effect.gen(function* () {
+          if (!(yield* authorized)) return unauthorized;
+          const record = yield* fixRelay.get((yield* HttpRouter.params)["id"] ?? "");
+          if (record === null) return HttpServerResponse.text("No such request", { status: 404 });
+          return json(yield* encodeRecord(publicRecord(record)));
+        }).pipe(
+          Effect.orElseSucceed(() =>
+            HttpServerResponse.text("Internal Server Error", { status: 500 }),
+          ),
+        ),
+      );
+
+      const fixProgress = HttpRouter.add(
+        "POST",
+        "/fixes/:id/progress",
+        Effect.gen(function* () {
+          if (!(yield* authorized)) return unauthorized;
+          const id = (yield* HttpRouter.params)["id"] ?? "";
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const progress = yield* decodeProgress(yield* request.text).pipe(Effect.option);
+          if (Option.isNone(progress))
+            return HttpServerResponse.text("Not a fix progress", { status: 400 });
+          const refused = yield* Ref.modify(
+            requests,
+            (all): [string | null, ReadonlyMap<string, FixRequestRecord>] => {
+              const record = all.get(id);
+              if (record === undefined) return ["No such request", all];
+              const next = advance(record, progress.value);
+              return typeof next === "string" ? [next, all] : [null, new Map(all).set(id, next)];
+            },
+          );
+          return refused === null
+            ? HttpServerResponse.empty({ status: 204 })
+            : HttpServerResponse.text(refused, { status: 409 });
+        }).pipe(
+          Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
+        ),
       );
 
       const health = HttpRouter.add("GET", "/health", HttpServerResponse.text("ok"));
@@ -157,6 +343,7 @@ export const relayLayer = (options: RelayOptions) =>
             return HttpServerResponse.text("Not a node state", { status: 400 });
           yield* Ref.update(states, (m) => new Map(m).set(state.value.node, state.value));
           yield* emit({ type: "state", node: state.value.node, rev: state.value.rev });
+          yield* notify(false);
           return HttpServerResponse.empty({ status: 204 });
         }).pipe(
           Effect.orElseSucceed(() => HttpServerResponse.text("Bad Request", { status: 400 })),
@@ -188,29 +375,33 @@ export const relayLayer = (options: RelayOptions) =>
           const url = new URL(request.url, "http://relay");
           const since =
             Number(request.headers["last-event-id"] ?? url.searchParams.get("since") ?? "0") || 0;
-          const kept = yield* Ref.get(events);
-          const next = yield* Ref.get(nextId);
-          const known = ids.knows(since, kept, next);
-          const missed = known ? kept.filter((e) => e.id > since) : kept;
-          // With the newest id handed out, so the listener's next `since` is one of this run's.
-          const pull: ReadonlyArray<RelayEvent> = known
-            ? []
-            : [
-                {
-                  id: next - 1,
-                  at: yield* Clock.currentTimeMillis,
-                  type: "pull",
-                  rev: (yield* Ref.get(lastRev)).slice(0, 7),
-                },
-              ];
           const frame = (e: RelayEvent) =>
             `id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`;
-          const live = Stream.fromPubSub(hub);
+          const listened = snapshotThenLive(
+            hub,
+            Effect.gen(function* () {
+              const kept = yield* Ref.get(events);
+              const next = yield* Ref.get(nextId);
+              const known = ids.knows(since, kept, next);
+              const missed = known ? kept.filter((e) => e.id > since) : kept;
+              // With the newest id handed out, so the listener's next `since` is one of this run's.
+              const pull: ReadonlyArray<RelayEvent> = known
+                ? []
+                : [
+                    {
+                      id: next - 1,
+                      at: yield* Clock.currentTimeMillis,
+                      type: "pull",
+                      rev: (yield* Ref.get(lastRev)).slice(0, 7),
+                    },
+                  ];
+              return { replay: [...missed, ...pull], kept };
+            }),
+          );
           const keepalive = Stream.tick(Duration.seconds(25)).pipe(
             Stream.map(() => ": keepalive\n\n"),
           );
-          const body = Stream.make(...[...missed, ...pull].map(frame)).pipe(
-            Stream.concat(Stream.merge(live.pipe(Stream.map(frame)), keepalive)),
+          const body = Stream.merge(listened.pipe(Stream.map(frame)), keepalive).pipe(
             Stream.encodeText,
           );
           return HttpServerResponse.stream(body, {
@@ -220,11 +411,19 @@ export const relayLayer = (options: RelayOptions) =>
         }),
       );
 
+      const handle: RelayHandle = {
+        states: Ref.get(states).pipe(Effect.map((m) => [...m.values()])),
+        fixes: fixRelay,
+      };
+
       return Layer.mergeAll(
         health,
         report,
         fleet,
         eventStream,
+        fixRequest,
+        fixProgress,
+        options.extra === undefined ? Layer.empty : options.extra(handle),
         hubRoutes(hubService, options.token),
         egressLayer(
           options.token,

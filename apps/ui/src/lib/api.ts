@@ -8,6 +8,11 @@
  * keeps working but nothing outlives the tab. A tab opened from this one asks
  * the tabs already open for the token. If the ticket was already used, the
  * page says so: someone else opened the link.
+ *
+ * On the hub there is no ticket: the hub knows who is asking from Tailscale,
+ * and gives a login it lets in a token of its own (core HubUi.ts). Its tokens
+ * live as long as the relay: after a restart a call answered 401 asks the hub
+ * for a new one, once, and is made again with it.
  */
 import {
   HubCall,
@@ -27,6 +32,18 @@ import {
   UiSkillsPreview,
   UiStatus,
 } from "@t3-fleet/core/Api";
+import {
+  SETUP_ERROR_HEADER,
+  STALE_PLAN,
+  UiInvite,
+  UiNotifyTest,
+  UiProbe,
+  UiSetupPlan,
+  UiSetupStarted,
+  UiSetupState,
+  type UiSetupApplyRequest,
+  type UiSetupPlanRequest,
+} from "@t3-fleet/core/SetupApi";
 import * as Schema from "effect/Schema";
 
 const TOKEN_KEY = "t3-fleet:token";
@@ -105,6 +122,8 @@ export async function startSession(): Promise<SessionStart> {
     window.sessionStorage.setItem(TOKEN_KEY, shared);
     return { ok: true };
   }
+  const hub = await hubSession();
+  if (hub !== null) return hub;
   return {
     ok: false,
     title: "Open the link t3-fleet ui printed",
@@ -112,13 +131,54 @@ export async function startSession(): Promise<SessionStart> {
   };
 }
 
+/**
+ * A new token from the hub, for one that stopped working (its relay
+ * restarted); false when this is not the hub or it lets this login in no
+ * longer. Calls answered 401 at once share one exchange.
+ */
+let renewing: Promise<boolean> | null = null;
+const renewHubSession = () => {
+  renewing ??= hubSession()
+    .then((started) => started?.ok === true)
+    .catch(() => false)
+    .finally(() => {
+      renewing = null;
+    });
+  return renewing;
+};
+
+/** A session from the hub, or null when this is `t3-fleet ui` on a machine (it wants a ticket). */
+async function hubSession(): Promise<SessionStart | null> {
+  let response: Response;
+  try {
+    response = await fetch("/api/session", { method: "POST", headers: { "x-t3-fleet-hub": "1" } });
+  } catch {
+    return null;
+  }
+  const text = await response.text();
+  if (response.ok) {
+    window.sessionStorage.setItem(TOKEN_KEY, decoder(UiSessionGrant)("/api/session", text).token);
+    return { ok: true };
+  }
+  // `t3-fleet ui` answers 401 for a missing ticket; the hub refuses with why.
+  if (response.status === 401 && text.includes("t3-fleet ui")) return null;
+  return { ok: false, title: "The hub did not let you in", message: text.trim() };
+}
+
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** The kind of refusal the server named (SETUP_ERROR_HEADER), when it named one. */
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+/** Apply refused the plan as out of date: plan again (SetupApi.ts). */
+export const isStalePlan = (error: unknown) =>
+  error instanceof ApiError && error.status === 409 && error.code === STALE_PLAN;
 
 /** The hub or the models part is not there (yet): no relay, no hub on it, or no answer. */
 export const isUnavailable = (error: unknown) =>
@@ -126,22 +186,30 @@ export const isUnavailable = (error: unknown) =>
 export const isUnauthorized = (error: unknown) => error instanceof ApiError && error.status === 401;
 
 async function request(method: "GET" | "POST", path: string, body?: unknown): Promise<string> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method,
-      headers: {
-        "x-t3-fleet-token": token(),
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  } catch {
-    throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
-  }
+  const send = async () => {
+    try {
+      return await fetch(path, {
+        method,
+        headers: {
+          "x-t3-fleet-token": token(),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch {
+      throw new ApiError(0, "t3-fleet ui is not answering; is it still running?");
+    }
+  };
+  let response = await send();
+  // The hub forgot this token (its relay restarted): a new one, once, then the same call again.
+  if (response.status === 401 && (await renewHubSession())) response = await send();
   const text = await response.text();
   if (!response.ok)
-    throw new ApiError(response.status, text.trim() || `${response.status} ${response.statusText}`);
+    throw new ApiError(
+      response.status,
+      text.trim() || `${response.status} ${response.statusText}`,
+      response.headers.get(SETUP_ERROR_HEADER),
+    );
   return text;
 }
 
@@ -175,6 +243,7 @@ const getConfig = get(Schema.Array(UiConfigRow));
 const getSkills = get(UiSkills);
 const getJobs = get(Schema.Array(UiJob));
 const decodeLogin = decoder(HubLoginStart);
+const getSetupState = get(UiSetupState);
 
 const post = <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) => {
   const decode = decoder(schema);
@@ -186,10 +255,16 @@ const postLookup = post(UiSkillsLookup);
 const postPreview = post(UiSkillsPreview);
 /** Starts a job; the answer is the job as it begins. */
 const postJob = post(UiJob);
+const postProbe = post(UiProbe);
+const postSetupPlan = post(UiSetupPlan);
+const postSetupApply = post(UiSetupStarted);
+const postInvite = post(UiInvite);
+const postNotifyTest = post(UiNotifyTest);
 
 export const decodeStatusEvent = decoder(UiStatus);
 export const decodeCheckFailedEvent = decoder(UiCheckFailed);
 export const decodeJobEvent = decoder(UiJob);
+export const decodeSessionEvent = decoder(UiSession);
 
 export const api = {
   session: () => getSession("/api/session"),
@@ -231,6 +306,16 @@ export const api = {
   skillsUpdate: (skills: ReadonlyArray<string>, digest: string) =>
     postJob("/api/skills/update", { skills, digest }),
   skillsRemove: (skills: ReadonlyArray<string>) => postJob("/api/skills/remove", { skills }),
+  /** Where this machine stands: in a fleet, not yet, or part-way through setup. */
+  setupState: () => getSetupState("/api/setup/state"),
+  /** `repo`: the repository being joined, when it is one, so a hub already in it is welcome. */
+  setupProbe: (ssh: string, repo?: string) =>
+    postProbe("/api/setup/probe", repo === undefined || repo === "" ? { ssh } : { ssh, repo }),
+  setupPlan: (request: UiSetupPlanRequest) => postSetupPlan("/api/setup/plan", request),
+  setupApply: (request: UiSetupApplyRequest) => postSetupApply("/api/setup/apply", request),
+  setupInvite: (node: string) => postInvite("/api/setup/invite", { node }),
+  /** Once set up: one test alert through this machine's [notify] paths. */
+  setupNotifyTest: () => postNotifyTest("/api/setup/notify-test", {}),
   /** EventSource cannot send headers; the token goes in the query instead, which only this endpoint accepts. */
   eventsUrl: () => `/api/events?token=${encodeURIComponent(token())}`,
 };
@@ -251,4 +336,15 @@ export type {
   UiSkillsPreview as UiSkillsPreviewT,
   UiStatus,
 } from "@t3-fleet/core/Api";
+export type {
+  UiInvite,
+  UiNotifyTest,
+  UiPlanConflict,
+  UiPlanItem,
+  UiProbe,
+  UiProbeItem,
+  UiSetupCheck,
+  UiSetupPlan,
+  UiSetupState,
+} from "@t3-fleet/core/SetupApi";
 export type UiAlertT = typeof UiAlert.Type;

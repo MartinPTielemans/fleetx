@@ -18,8 +18,10 @@ import type { ProbeServices } from "../Area.ts";
 import { readSecrets, setVar } from "../Secrets.ts";
 import {
   commitPaths,
+  credentialedUrls,
   persistable,
   restored,
+  RUN_JOIN_URL,
   secretsToStore,
   setupSteps,
   type SetupInput,
@@ -91,6 +93,34 @@ const runSteps = async (setup: SetupInput, done: Array<string>) => {
 };
 
 describe("a setup that stops part-way", () => {
+  it("keeps a URL's credential only among the run's encrypted values, and resumes with it (review #47)", async () => {
+    const join_ = "https://me:tok-SEKRIT@git.example/fleet.git";
+    const remote = "https://me:tok-SEKRIT@git.example/new.git";
+    const first: SetupInput = {
+      ...input(),
+      mode: "join",
+      join: { url: join_, clone: join(home, "scratch-clone") },
+      remote: { url: remote },
+    };
+    const saved = JSON.parse(JSON.stringify(persistable(first))) as SetupInput;
+    expect(JSON.stringify(saved)).not.toContain("SEKRIT");
+    let plain = "";
+    for (const s of [...secretsToStore(first), ...credentialedUrls(first)])
+      plain = setVar(plain, s.name, s.value);
+    // The fleet's own secrets never get them: only the run's values do.
+    expect(secretsToStore(first).map((s) => s.name)).not.toContain(RUN_JOIN_URL);
+    const back = restored(saved, `# run 7\n${plain}`);
+    if ("missing" in back) return expect.unreachable();
+    expect(back.join?.url).toBe(join_);
+    expect(back.remote).toEqual({ url: remote });
+    // A run saved before they were kept resumes as it did, with the URLs setup.json has.
+    const older = restored(saved, `# run 7\n${plain.replace(/^T3_FLEET_SETUP_.*$/gm, "")}`);
+    if ("missing" in older) return expect.unreachable();
+    expect(older.join?.url).toBe("https://git.example/fleet.git");
+    // A URL without a credential is not kept twice.
+    expect(credentialedUrls(input())).toEqual([]);
+  });
+
   it("resumes from what was saved, with every secret, and no value outside the encrypted files", async () => {
     const first = input();
     // Saved before the first step: the run without values, the values encrypted beside it.

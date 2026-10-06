@@ -4,6 +4,7 @@ import {
   BoxesIcon,
   GitPullRequestArrowIcon,
   MonitorIcon,
+  MonitorSmartphoneIcon,
   MoonIcon,
   PlugIcon,
   ServerIcon,
@@ -14,16 +15,21 @@ import {
   ActivityIcon,
   PlugZapIcon,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type * as React from "react";
+import type { UiSetupState } from "@t3-fleet/core/SetupApi";
 
-import { Dot } from "./components/common";
+import { Dot, ErrorState } from "./components/common";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { JobsTray } from "./components/Jobs";
 import { Empty } from "./components/ui/empty";
+import { Spinner } from "./components/ui/spinner";
+import { ApiError, api } from "./lib/api";
 import { follow, useRoute, type View } from "./lib/router";
 import { StoreProvider, useStore } from "./lib/store";
 import { useTheme, type ThemeChoice } from "./lib/theme";
 import { cn } from "./lib/utils";
+import { AddMachinesView } from "./views/AddMachines";
 import { AlertsView } from "./views/Alerts";
 import { ConfigView } from "./views/Config";
 import { EnvironmentsView } from "./views/Environments";
@@ -31,6 +37,8 @@ import { FindingsView } from "./views/Findings";
 import { McpView } from "./views/Mcp";
 import { ModelsView } from "./views/Models";
 import { ProposalsView } from "./views/Proposals";
+import { loadRun, saveRun } from "./views/setup/run";
+import { SetupWizard } from "./views/setup/Setup";
 import { SkillsView } from "./views/Skills";
 
 const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> = [
@@ -42,12 +50,78 @@ const NAV: ReadonlyArray<{ view: View; label: string; icon: React.ReactNode }> =
   { view: "mcp", label: "MCP", icon: <PlugIcon /> },
   { view: "models", label: "Models", icon: <ActivityIcon /> },
   { view: "config", label: "Config", icon: <SlidersHorizontalIcon /> },
+  { view: "machines", label: "Add machines", icon: <MonitorSmartphoneIcon /> },
 ];
 
+/** The views this app offers: invites only on an authority, in the app it serves itself. */
+const useNav = () => {
+  const { session } = useStore();
+  const invites = session !== null && session.authority && session.hub === undefined;
+  return NAV.filter((item) => item.view !== "machines" || invites);
+};
+
+/** Where `t3-fleet ui` serves the app on this machine; any other host is the hub's copy. */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+type Gate =
+  | { readonly kind: "loading" }
+  | { readonly kind: "error"; readonly error: unknown }
+  | { readonly kind: "setup"; readonly state: UiSetupState }
+  | { readonly kind: "fleet" };
+
+/**
+ * A machine in a fleet gets the fleet; one that is not yet, or whose setup
+ * stopped part-way, gets the setup wizard, which hands over when it is done.
+ * A server without the setup endpoints is a fleet's.
+ */
 export function App() {
+  const [gate, setGate] = useState<Gate>({ kind: "loading" });
+  const load = () => {
+    // The hub's copy of the app (on its tailnet address) has no setup to ask about: it is a fleet's.
+    if (!LOCAL_HOSTS.has(window.location.hostname)) return setGate({ kind: "fleet" });
+    setGate({ kind: "loading" });
+    api.setupState().then(
+      (state) => {
+        // The wizard stays for a hub still to bring up, and for its last screen, the
+        // invites, until the fleet is opened.
+        if (state.stage === "member" && state.hub === null && loadRun()?.finished !== true) {
+          saveRun(null);
+          setGate({ kind: "fleet" });
+        } else setGate({ kind: "setup", state });
+      },
+      (error: unknown) =>
+        setGate(
+          error instanceof ApiError && error.status === 404
+            ? { kind: "fleet" }
+            : { kind: "error", error },
+        ),
+    );
+  };
+  useEffect(load, []);
+  if (gate.kind === "loading")
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Spinner className="size-5 text-muted-foreground motion-safe:animate-[fade-in_200ms_ease_400ms_both,spin_1s_linear_infinite]" />
+      </div>
+    );
+  if (gate.kind === "error")
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <ErrorState error={gate.error} what="this machine's setup" onRetry={load} />
+      </div>
+    );
   return (
-    <StoreProvider>
-      <Shell />
+    <StoreProvider key={gate.kind} checks={gate.kind === "fleet"}>
+      {gate.kind === "setup" ? (
+        <SetupWizard
+          initial={gate.state}
+          onMember={() => setGate({ kind: "fleet" })}
+          railFooter={<ThemeSwitch />}
+          banner={<Stale />}
+        />
+      ) : (
+        <Shell />
+      )}
     </StoreProvider>
   );
 }
@@ -88,12 +162,13 @@ const CONNECTION_TEXT = {
 
 function Shell() {
   const { view, rest } = useRoute();
+  const nav = useNav();
   return (
     <div className="flex h-full min-h-0">
       <Sidebar active={view} />
       <div className="flex min-w-0 flex-1 flex-col">
         <nav className="flex shrink-0 gap-1 overflow-x-auto border-b bg-sidebar px-2 py-1.5 md:hidden">
-          {NAV.map((item) => (
+          {nav.map((item) => (
             <a
               key={item.view}
               href={`/${item.view}`}
@@ -116,6 +191,7 @@ function Shell() {
             {view === "mcp" && <McpView />}
             {view === "models" && <ModelsView />}
             {view === "config" && <ConfigView node={rest} />}
+            {view === "machines" && <AddMachinesView />}
           </ErrorBoundary>
         </div>
         <JobsTray />
@@ -128,6 +204,7 @@ function Sidebar({ active }: { active: View }) {
   const { status, session, connection } = useStore();
   const problems = status?.findings.filter((f) => f.severity !== "info").length ?? 0;
   const errors = status?.findings.some((f) => f.severity === "error") ?? false;
+  const nav = useNav();
   return (
     <aside className="hidden w-(--sidebar-width) shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:flex">
       <div className="flex h-13 items-center gap-2 px-4">
@@ -138,7 +215,7 @@ function Sidebar({ active }: { active: View }) {
         )}
       </div>
       <nav className="flex flex-col gap-0.5 px-2 py-1">
-        {NAV.map((item) => (
+        {nav.map((item) => (
           <a
             key={item.view}
             href={`/${item.view}`}
@@ -176,7 +253,11 @@ function Sidebar({ active }: { active: View }) {
           />
           <span className="truncate">
             {CONNECTION_TEXT[connection]}
-            {session === null ? "" : ` · on ${session.self}`}
+            {session === null
+              ? ""
+              : session.hub !== undefined
+                ? ` · on the hub (${session.self}) as ${session.hub.login}`
+                : ` · on ${session.self}`}
           </span>
         </div>
         <ThemeSwitch />

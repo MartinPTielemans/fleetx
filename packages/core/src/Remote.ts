@@ -14,7 +14,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { exec } from "./Exec.ts";
+import { exec, type ExecInput } from "./Exec.ts";
 import type { Node, ProbeSettings } from "./Config.ts";
 import { BUNDLE_FILE, SHARE_DIR } from "./Names.ts";
 import { MachineObservation } from "./Observation.ts";
@@ -69,6 +69,50 @@ const notInstalled = new Set<string>();
 
 const SSH = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
 
+/** A destination, not ssh options or shell syntax. Aliases and user@host are supported. */
+export const validSshDestination = (ssh: string) =>
+  ssh !== "" &&
+  !ssh.startsWith("-") &&
+  !/\s/.test(ssh) &&
+  !Array.from(ssh).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+
+/**
+ * The same bounded, non-interactive transport for checks and setup. Stdin may
+ * be a bundle or shell script. Regular checks respect the user's SSH host-key
+ * policy; the wizard opts into read-only host-key handling.
+ */
+export const remoteExec = (
+  ssh: string,
+  input: Omit<ExecInput, "command" | "args" | "env" | "extendEnv"> & {
+    readonly command: string;
+    readonly readonlyHostKeys?: boolean;
+  },
+) =>
+  validSshDestination(ssh)
+    ? exec({
+        command: "ssh",
+        args: [
+          ...SSH,
+          ...(input.readonlyHostKeys
+            ? ["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+            : []),
+          ...(input.stdin === undefined ? ["-n"] : ["-o", "Compression=yes"]),
+          "--",
+          ssh,
+          input.command,
+        ],
+        env: process.env,
+        ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+        timeout: input.timeout ?? Duration.seconds(90),
+      })
+    : Effect.succeed({
+        stdout: "",
+        stderr: "",
+        code: null,
+        timedOut: false,
+        spawnError: "Enter an SSH host or user@host, without options or spaces.",
+      });
+
 /**
  * Observes a node over ssh: its own copy first, unless it is known not to
  * have this build, then the bundle when the copy is missing or failed. An
@@ -86,26 +130,15 @@ export const probeRemote = (
     let run =
       engine === undefined || notInstalled.has(key)
         ? null
-        : yield* exec({
-            command: "ssh",
-            args: [...SSH, "-n", ssh, `bash -lc '${installedProbe(engine, settings)}'`],
-            env: process.env,
+        : yield* remoteExec(ssh, {
+            command: `bash -lc '${installedProbe(engine, settings)}'`,
             timeout: Duration.seconds(timeoutSeconds),
           });
     if (run !== null && run.code === NOT_INSTALLED) notInstalled.add(key);
     // Anything but an answer or an unreachable node tries the bundle; it may run where the copy did not.
     if (run === null || (!run.timedOut && run.code !== 0 && run.code !== 255)) {
-      run = yield* exec({
-        command: "ssh",
-        // Compressed: the bundle is mostly text.
-        args: [
-          ...SSH,
-          "-o",
-          "Compression=yes",
-          ssh,
-          `bash -lc 'node --input-type=module - probe ${encodeSettings(settings)}'`,
-        ],
-        env: process.env,
+      run = yield* remoteExec(ssh, {
+        command: `bash -lc 'node --input-type=module - probe ${encodeSettings(settings)}'`,
         stdin: bundle,
         timeout: Duration.seconds(timeoutSeconds),
       });

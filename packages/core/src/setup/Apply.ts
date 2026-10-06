@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { parse as parseToml } from "smol-toml";
 
 import type { ProbeServices } from "../Area.ts";
@@ -44,7 +45,7 @@ import {
   why,
 } from "../Git.ts";
 import { writeLocalConfig } from "../Init.ts";
-import { FLEET_FILE } from "../Names.ts";
+import { DEFAULT_RELAY_PORT, FLEET_FILE } from "../Names.ts";
 import {
   encryptFor,
   ensureIdentity,
@@ -60,22 +61,75 @@ import {
 import { refusal } from "../SecretScan.ts";
 import { recordSources } from "../SkillSources.ts";
 import { syncRun } from "../Sync.ts";
+import { applyAreas, NTFY_SECRET } from "../Upkeep.ts";
 import type { Secret } from "./Credentials.ts";
+import { backFromHub, hostingOf } from "./HubHosting.ts";
 import { cleanUrl, type Discovery } from "./Discover.ts";
 import { PROPOSED_SECRETS, type Actions, type Mode } from "./Plan.ts";
+import { settingsWords } from "./PlanWords.ts";
 import type { Preflight } from "./Preflight.ts";
 import { cloneFleet, GITIGNORE, newFleetFile, newNodeFile } from "./Repo.ts";
 import { addSetupProposed, backupDir, recordMoved, takeSnapshot } from "./State.ts";
-import { addToList, appendEntry, setKey, type Edit } from "./TomlEdit.ts";
+import { addToList, appendEntry, edits, removeFromList, setKey, type Edit } from "./TomlEdit.ts";
 
 export interface Extras {
-  /** An always-on machine: the relay. `url` is where the others reach it. */
-  readonly relay: { readonly url: string | null; readonly token: string | null } | null;
+  /**
+   * An always-on machine: the relay. `url` is where the others reach it;
+   * `mcp` hosts the fleet's MCP servers there too ([defaults.mcp] hub).
+   */
+  readonly relay: {
+    readonly url: string | null;
+    readonly token: string | null;
+    readonly mcp?: boolean;
+  } | null;
   /** The model proxy, with Claude's long-lived token when one was given. */
   readonly models: { readonly token: string | null } | null;
   /** T3 Fleet's read-only token for T3. */
   readonly t3: boolean;
 }
+
+/** How the fleet looks after its machines (Upkeep.ts), as a run sets it. */
+export interface Upkeep {
+  /**
+   * [fleet] apply with updates on or off, and [defaults.t3] update to match;
+   * null leaves the fleet's as they are (a fleet this machine joins).
+   */
+  readonly autoUpdate: boolean | null;
+  /**
+   * This machine in [notify] desktop (an OS notification here for every
+   * fleet alert), or out of it; null leaves it as it is (a machine set up
+   * already, with no flag naming it).
+   */
+  readonly desktop: boolean | null;
+  /** [notify] ntfy, the topic URL stored as T3_FLEET_NTFY_URL; null for no push. A saved run keeps no URL. */
+  readonly ntfy: { readonly url: string | null } | null;
+  /**
+   * [defaults.mcp] hub on, served at `gateway` (the fleet's relay, set up
+   * already), or off; null or absent leaves it. A new relay's MCP hub is
+   * Extras.relay.mcp instead.
+   */
+  readonly mcpHub?: { readonly gateway: string } | false | null;
+}
+
+/**
+ * Updates and notifications as a run takes them, whichever front end asked:
+ * a fleet being joined keeps its own [fleet] apply.
+ */
+export const upkeepFor = (
+  mode: Mode,
+  chosen: {
+    readonly autoUpdate: boolean | null;
+    readonly desktop: boolean | null;
+    readonly ntfy: string | null;
+    readonly mcpHub?: { readonly gateway: string } | false | null;
+  },
+): Upkeep => ({
+  autoUpdate: mode === "join" ? null : chosen.autoUpdate,
+  // Off on a machine not in the fleet yet: nothing to take it out of.
+  desktop: chosen.desktop === false && mode !== "again" ? null : chosen.desktop,
+  ntfy: chosen.ntfy === null ? null : { url: chosen.ntfy },
+  ...(chosen.mcpHub == null ? {} : { mcpHub: chosen.mcpHub }),
+});
 
 export interface SetupInput {
   readonly mode: Mode;
@@ -96,6 +150,8 @@ export interface SetupInput {
   readonly now: number;
   /** The fleet's branch (config.branch); main when a saved run predates it. */
   readonly branch?: string;
+  /** Updates and notifications; a run saved before setup asked about them sets neither. */
+  readonly upkeep?: Upkeep;
 }
 
 export interface Step {
@@ -172,6 +228,29 @@ export const secretsToStore = (input: SetupInput): ReadonlyArray<Secret> => [
         },
       ]
     : []),
+  ...(input.upkeep?.ntfy?.url != null
+    ? [{ name: NTFY_SECRET, value: input.upkeep.ntfy.url, where: "the ntfy topic setup made" }]
+    : []),
+];
+
+/**
+ * A URL with a credential in it, as the run's encrypted values keep it
+ * (setup.json keeps it without): a resume, from the terminal or the browser,
+ * reaches the repository as the run did.
+ */
+export const RUN_JOIN_URL = "T3_FLEET_SETUP_JOIN_URL";
+export const RUN_REMOTE_URL = "T3_FLEET_SETUP_REMOTE_URL";
+
+/** The run's URLs that carry a credential, by the names its encrypted values keep them under. */
+export const credentialedUrls = (input: SetupInput) => [
+  ...(input.join !== null && cleanUrl(input.join.url) !== input.join.url
+    ? [{ name: RUN_JOIN_URL, value: input.join.url }]
+    : []),
+  ...(input.remote !== null &&
+  "url" in input.remote &&
+  cleanUrl(input.remote.url) !== input.remote.url
+    ? [{ name: RUN_REMOTE_URL, value: input.remote.url }]
+    : []),
 ];
 
 /** A run as setup.json keeps it: no secret value, no credential in a URL. */
@@ -191,6 +270,14 @@ export const persistable = (input: SetupInput): SetupInput => ({
     relay: input.extras.relay === null ? null : { ...input.extras.relay, token: null },
     models: input.extras.models === null ? null : { token: null },
   },
+  ...(input.upkeep === undefined
+    ? {}
+    : {
+        upkeep: {
+          ...input.upkeep,
+          ntfy: input.upkeep.ntfy === null ? null : { url: null },
+        },
+      }),
 });
 
 /**
@@ -212,10 +299,19 @@ export const restored = (
   const missing = [
     ...saved.actions.secrets.map((s) => s.name),
     ...(saved.extras.relay === null ? [] : ["T3_FLEET_RELAY_TOKEN"]),
+    ...(saved.upkeep?.ntfy == null ? [] : [NTFY_SECRET]),
   ].filter((n) => !values.has(n) || values.get(n) === "");
   if (missing.length > 0) return { missing };
+  // A URL kept with its credential (credentialedUrls); setup.json has it without.
+  const joinUrl = value(RUN_JOIN_URL);
+  const remoteUrl = value(RUN_REMOTE_URL);
   return {
     ...saved,
+    join: saved.join === null || joinUrl === null ? saved.join : { ...saved.join, url: joinUrl },
+    remote:
+      saved.remote !== null && "url" in saved.remote && remoteUrl !== null
+        ? { url: remoteUrl }
+        : saved.remote,
     actions: {
       ...saved.actions,
       secrets: saved.actions.secrets.map((s) => ({ ...s, value: value(s.name) ?? "" })),
@@ -228,6 +324,14 @@ export const restored = (
           : { ...saved.extras.relay, token: value("T3_FLEET_RELAY_TOKEN") },
       models: saved.extras.models === null ? null : { token: value("CLAUDE_CODE_OAUTH_TOKEN") },
     },
+    ...(saved.upkeep === undefined
+      ? {}
+      : {
+          upkeep: {
+            ...saved.upkeep,
+            ntfy: saved.upkeep.ntfy === null ? null : { url: value(NTFY_SECRET) },
+          },
+        }),
   };
 };
 
@@ -235,7 +339,10 @@ export const restored = (
 export const writtenPaths = (input: SetupInput) => [
   ...input.actions.skills.map((s) => `skills/${s.name}`),
   ...(input.actions.skills.some((s) => s.source !== null) ? ["skills/SOURCES.json"] : []),
-  ...input.actions.servers.map((s) => `mcp/${s.name}.json`),
+  // Turning the MCP hub on (or off) rewrites every definition it can host (or took), not only those added here.
+  ...(turnsMcpHubOn(input) || turnsMcpHubOff(input)
+    ? ["mcp"]
+    : input.actions.servers.map((s) => `mcp/${s.name}.json`)),
   ...input.actions.instructions.map((i) => i.src),
   FLEET_FILE,
   `nodes/${input.node}.toml`,
@@ -248,7 +355,7 @@ export const commitPaths = (input: SetupInput) => [
   ...SECRETS_FILES,
 ];
 
-const rolesOf = (text: string): Array<string> => {
+export const rolesOf = (text: string): Array<string> => {
   try {
     const roles = (parseToml(text) as { roles?: unknown }).roles;
     return Array.isArray(roles)
@@ -279,11 +386,201 @@ const listedDests = (text: string): ReadonlySet<unknown> => {
   }
 };
 
-const relayEdits = (text: string, url: string | null): Edit => {
-  const port = setKey(text, ["relay"], "port", 8399);
-  if ("error" in port || url === null) return port;
-  return setKey(port.text, ["relay"], "url", url);
+/**
+ * [relay] with its port (and url, once known), and `relay` in [fleet] apply
+ * when the fleet lists its areas, so sync starts the relay and the listeners
+ * by itself (without the key, the default includes it).
+ */
+export const relayEdits = (text: string, url: string | null): Edit =>
+  edits(
+    text,
+    (t) => setKey(t, ["relay"], "port", DEFAULT_RELAY_PORT),
+    (t) => (url === null ? { text: t } : setKey(t, ["relay"], "url", url)),
+    applyRelay,
+  );
+
+/** `relay` added to [fleet] apply when the key lists areas without it; nothing when the key is not there. */
+export const applyRelay = (text: string): Edit => {
+  const apply = valueAt(text, ["fleet", "apply"]);
+  return Array.isArray(apply) && !apply.includes("relay")
+    ? addToList(text, ["fleet"], "apply", ["relay"])
+    : { text };
 };
+
+/** Whether [fleet] apply lists relay; null when the file has no such list (sync's default applies it). */
+export const appliesRelay = (text: string): boolean | null => {
+  const apply = valueAt(text, ["fleet", "apply"]);
+  return Array.isArray(apply) ? apply.includes("relay") : null;
+};
+
+const valueAt = (text: string, path: ReadonlyArray<string>): unknown => {
+  try {
+    let at: unknown = parseToml(text);
+    for (const key of path)
+      at = typeof at === "object" && at !== null ? (at as Record<string, unknown>)[key] : undefined;
+    return at;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The fleet's relay URL ([relay] url), when it has one. */
+export const relayUrlIn = (fleetText: string): string | null => {
+  const url = valueAt(fleetText, ["relay", "url"]);
+  return typeof url === "string" && url !== "" ? url : null;
+};
+
+/** Whether a t3-fleet.toml pushes alerts to ntfy already ([notify] ntfy). */
+export const pushesToNtfy = (fleetText: string) =>
+  valueAt(fleetText, ["notify", "ntfy"]) !== undefined;
+
+/** Whether a run turns the MCP hub on: the terminal's --relay --mcp-hub, or --mcp-hub on a fleet with a relay. */
+export const turnsMcpHubOn = (input: SetupInput) =>
+  (input.extras.relay?.mcp === true && input.extras.relay.url !== null) ||
+  (input.upkeep?.mcpHub != null && input.upkeep.mcpHub !== false);
+
+const AnyObject = Schema.Record(Schema.String, Schema.Unknown);
+
+/**
+ * The repo's MCP definitions the hub can host, rewritten for it (HubHosting.ts):
+ * what moved, what stays on each machine and why, and the files changed.
+ */
+export const moveServersToHub = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const names = (yield* fs
+      .readDirectory(`${repo}/mcp`)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+      .filter((f) => f.endsWith(".json"))
+      .sort();
+    const moved: Array<string> = [];
+    const stayed: Array<{ name: string; why: string }> = [];
+    const files: Array<string> = [];
+    for (const file of names) {
+      const name = file.slice(0, -".json".length);
+      const definition = yield* fs
+        .readFileString(`${repo}/mcp/${file}`)
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(AnyObject))), Effect.option);
+      if (Option.isNone(definition)) {
+        stayed.push({ name, why: "its definition is not a JSON object" });
+        continue;
+      }
+      const hosting = hostingOf(definition.value);
+      if (hosting.on === "machines") stayed.push({ name, why: hosting.why });
+      else if (hosting.definition !== null) {
+        yield* fs.writeFileString(`${repo}/mcp/${file}`, pretty(hosting.definition));
+        moved.push(name);
+        files.push(`mcp/${file}`);
+      }
+    }
+    return { moved, stayed, files };
+  });
+
+/** Whether a run turns the MCP hub off (--no-mcp-hub): the servers it moved go back to each machine. */
+export const turnsMcpHubOff = (input: SetupInput) => input.upkeep?.mcpHub === false;
+
+/**
+ * The definitions the hub took over put back as they were (HubHosting.ts
+ * backFromHub): what went back, and the files changed.
+ */
+export const moveServersBack = (repo: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const names = (yield* fs
+      .readDirectory(`${repo}/mcp`)
+      .pipe(Effect.orElseSucceed(() => [] as Array<string>)))
+      .filter((f) => f.endsWith(".json"))
+      .sort();
+    const back: Array<string> = [];
+    const files: Array<string> = [];
+    for (const file of names) {
+      const definition = yield* fs
+        .readFileString(`${repo}/mcp/${file}`)
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(AnyObject))), Effect.option);
+      if (Option.isNone(definition)) continue;
+      const before = backFromHub(definition.value);
+      if (before === null) continue;
+      yield* fs.writeFileString(`${repo}/mcp/${file}`, pretty(before));
+      back.push(file.slice(0, -".json".length));
+      files.push(`mcp/${file}`);
+    }
+    return { back, files };
+  });
+
+/** What moveServersToHub did, in the plan's words. */
+export const movedLines = (
+  node: string,
+  moved: {
+    readonly moved: ReadonlyArray<string>;
+    readonly stayed: ReadonlyArray<{ readonly name: string; readonly why: string }>;
+  },
+) => [
+  ...(moved.moved.length === 0 ? [] : [`moved to ${node}: ${moved.moved.join(", ")}`]),
+  ...moved.stayed.map((s) => `${s.name} stays on each machine: ${s.why}`),
+];
+
+/** [defaults.mcp]: the relay hosts every machine's MCP servers, reached at `gateway` (docs/topologies.md). */
+export const mcpHubEdits = (text: string, gateway: string): Edit =>
+  edits(
+    text,
+    (t) => setKey(t, ["defaults", "mcp"], "hub", true),
+    (t) => setKey(t, ["defaults", "mcp"], "gateway", gateway),
+  );
+
+/** [fleet] apply, [defaults.t3] update and [notify], as `upkeep` says; nothing for a run that did not ask. */
+export const upkeepEdits = (
+  upkeep: Upkeep | undefined,
+  node: string,
+): ReadonlyArray<(text: string) => Edit> => {
+  if (upkeep === undefined) return [];
+  const out: Array<(text: string) => Edit> = [];
+  const auto = upkeep.autoUpdate;
+  if (auto !== null) {
+    out.push((t) =>
+      setKey(
+        t,
+        ["fleet"],
+        "apply",
+        [...applyAreas(auto)],
+        auto
+          ? "Areas whose safe fixes sync applies by itself; updates included (T3 waits until no thread runs)."
+          : "Areas whose safe fixes sync applies by itself; add t3, agents and skills to keep them up to date too.",
+      ),
+    );
+    out.push((t) =>
+      auto
+        ? setKey(t, ["defaults", "t3"], "update", "when-idle")
+        : valueAt(t, ["defaults", "t3", "update"]) === undefined
+          ? { text: t }
+          : setKey(t, ["defaults", "t3"], "update", "manual"),
+    );
+  }
+  if (upkeep.desktop === true) out.push((t) => addToList(t, ["notify"], "desktop", [node]));
+  if (upkeep.desktop === false) out.push((t) => removeFromList(t, ["notify"], "desktop", [node]));
+  if (upkeep.ntfy !== null) out.push((t) => setKey(t, ["notify"], "ntfy", NTFY_SECRET));
+  const hub = upkeep.mcpHub;
+  if (hub != null && hub !== false) out.push((t) => mcpHubEdits(t, hub.gateway));
+  if (hub === false)
+    out.push((t) =>
+      valueAt(t, ["defaults", "mcp", "hub"]) === true
+        ? setKey(t, ["defaults", "mcp"], "hub", false)
+        : { text: t },
+    );
+  return out;
+};
+
+/** What a run sets for looking after the machines, in plain words, for its plan. */
+export const settingsLines = (input: SetupInput): ReadonlyArray<string> =>
+  settingsWords({
+    node: input.node,
+    mcpHub:
+      (input.extras.relay?.mcp === true && input.extras.relay.url !== null) ||
+      (input.upkeep?.mcpHub != null && input.upkeep.mcpHub !== false),
+    mcpHubOff: input.upkeep?.mcpHub === false,
+    autoUpdate: input.upkeep?.autoUpdate ?? null,
+    desktop: input.upkeep?.desktop ?? null,
+    ntfy: input.upkeep?.ntfy != null,
+  });
 
 /** Setup's first sync: everything but MCP until this machine reads the fleet's secrets. */
 export const firstSync = (repo: string) =>
@@ -304,6 +601,8 @@ export const firstSync = (repo: string) =>
       "skills",
       "instructions",
       "dotfiles",
+      // The listener (or, on the hub, the relay) once this machine has the relay token.
+      "relay",
       ...(Option.isSome(readable) ? ["mcp"] : []),
     ];
     const result = yield* syncRun(config, { apply: true, areas });
@@ -354,7 +653,9 @@ export const setupSteps = (
             .readDirectory(repo)
             .pipe(Effect.orElseSucceed(() => [] as Array<string>));
           if (files.length > 0)
-            return yield* Effect.fail(`${repo} already exists and is not empty; pass --dir`);
+            return yield* Effect.fail(
+              `${repo} already exists and is not empty; move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
+            );
         }
         yield* fs.makeDirectory(`${repo}/nodes`, { recursive: true });
         if (!(yield* exists(fleetFile)))
@@ -436,11 +737,13 @@ export const setupSteps = (
           if (cleanUrl(origin) === cleanUrl(join.url))
             return [`${repo} is already a clone of ${cleanUrl(join.url)}`];
           return yield* Effect.fail(
-            `${repo} already holds another repository (${cleanUrl(origin) || "no remote"}); pass --dir`,
+            `${repo} already holds another repository (${cleanUrl(origin) || "no remote"}); move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
           );
         }
         if (yield* exists(repo))
-          return yield* Effect.fail(`${repo} already exists; move it or pass --dir`);
+          return yield* Effect.fail(
+            `${repo} already exists; move it aside (or, from a terminal, choose another place with \`t3-fleet setup --dir <path>\`)`,
+          );
         yield* fs.makeDirectory(repo.slice(0, repo.lastIndexOf("/")), { recursive: true });
         if (yield* exists(`${join.clone}/.git`)) {
           // The plan's clone, from a temporary directory: mv crosses filesystems where rename cannot.
@@ -496,6 +799,11 @@ export const setupSteps = (
           input.extras.relay === null || /^\[relay\]/m.test(t)
             ? { text: t }
             : relayEdits(t, input.extras.relay.url),
+        (t) => (input.extras.relay === null ? { text: t } : applyRelay(t)),
+        (t) =>
+          input.extras.relay?.mcp === true && input.extras.relay.url !== null
+            ? mcpHubEdits(t, input.extras.relay.url)
+            : { text: t },
         ...(input.extras.models === null
           ? []
           : [
@@ -504,7 +812,16 @@ export const setupSteps = (
                   ? { text: t }
                   : setKey(t, ["defaults", "models"], "egress", "direct"),
             ]),
+        ...upkeepEdits(input.upkeep, input.node),
       ]);
+      if (turnsMcpHubOn(input)) {
+        const moved = yield* moveServersToHub(repo);
+        lines.push(...movedLines("the hub", moved));
+      }
+      if (turnsMcpHubOff(input)) {
+        const { back } = yield* moveServersBack(repo);
+        if (back.length > 0) lines.push(`back on each machine: ${back.join(", ")}`);
+      }
       const roles = input.extras.relay === null ? ["member"] : ["relay", "member"];
       const ignored = a.ignored.map((i) => i.name);
       yield* editToml(nodeFile, newNodeFile(input.node, roles, "t3-fleet setup"), [

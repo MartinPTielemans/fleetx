@@ -1,0 +1,14 @@
+services:
+  hub:
+    build: .
+    image: wiznot-node:notify
+    volumes: ["../../apps/cli/dist:/t3-fleet:ro", "keys:/keys"]
+  member:
+    image: wiznot-node:notify
+    volumes: ["../../apps/cli/dist:/t3-fleet:ro", "keys:/keys"]
+  sink:
+    image: node:24-bookworm-slim
+    command: ["node", "/sink.mjs"]
+    volumes: ["./notify-sink.mjs:/sink.mjs:ro"]
+volumes:
+  keys: {}

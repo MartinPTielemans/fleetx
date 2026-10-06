@@ -31,9 +31,11 @@ export function ProposalsView() {
       description={
         session === null
           ? undefined
-          : session.authority
-            ? "Changes other machines made under the auto-commit paths, waiting for you"
-            : `${session.self} is not an authority: proposals can be reviewed here and approved on an authority`
+          : session.hub !== undefined
+            ? `Shown as the hub sees them. Approve or reject on an authority (${session.hub.approveOn.join(", ") || "none in this fleet"}): t3-fleet approve, or t3-fleet ui --local there. The hub never decides proposals, so it cannot approve its own.`
+            : session.authority
+              ? "Changes other machines made under the auto-commit paths, waiting for you"
+              : `${session.self} is not an authority: proposals can be reviewed here and approved on an authority`
       }
       actions={
         <Button
@@ -71,7 +73,8 @@ export function ProposalsView() {
           <Proposal
             key={p.node}
             proposal={p}
-            canDecide={session?.authority === true}
+            canDecide={session?.authority === true && session.hub === undefined}
+            decideOn={session?.hub?.approveOn ?? null}
             onDecide={(verb) => setDeciding({ verb, proposal: p })}
           />
         ))
@@ -93,10 +96,13 @@ export function ProposalsView() {
 function Proposal({
   proposal: p,
   canDecide,
+  decideOn,
   onDecide,
 }: {
   proposal: UiProposalT;
   canDecide: boolean;
+  /** On the hub: the authorities where it is decided instead. */
+  decideOn: ReadonlyArray<string> | null;
   onDecide: (verb: "approve" | "reject") => void;
 }) {
   return (
@@ -110,6 +116,11 @@ function Proposal({
         {p.autoApprovable ? <Badge variant="info">auto-approvable</Badge> : null}
         <span className="text-muted-foreground text-xs">{p.summary}</span>
         <span className="ml-auto flex gap-2">
+          {decideOn !== null ? (
+            <span className="self-center text-muted-foreground text-xs">
+              Approve on {decideOn.join(" or ") || "an authority"}
+            </span>
+          ) : null}
           <Button
             size="sm"
             variant="destructive-outline"
@@ -125,6 +136,7 @@ function Proposal({
           </Button>
         </span>
       </div>
+      <AlsoNote proposal={p} />
       <div className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-2 text-xs">
         {p.files.map((f) => (
           <span key={f} className="flex items-center gap-1 font-mono text-muted-foreground">
@@ -135,6 +147,20 @@ function Proposal({
       </div>
       <Diff text={p.diff} />
     </Group>
+  );
+}
+
+/** What approving does besides landing the change (a relay's proposal: who may open its app). */
+function AlsoNote({ proposal }: { proposal: UiProposalT }) {
+  if (proposal.also === undefined || proposal.also.length === 0) return null;
+  return (
+    <div className="px-4 py-2 text-xs">
+      {proposal.also.map((line) => (
+        <p key={line} className="text-foreground">
+          {line}
+        </p>
+      ))}
+    </div>
   );
 }
 
@@ -197,6 +223,7 @@ function DecideDialog({
             : `${proposal.node} proposed something different while this was open. Close this and review the new one.`}
         </div>
       ) : null}
+      {verb === "approve" ? <AlsoNote proposal={proposal} /> : null}
       <div className="overflow-hidden rounded-lg border">
         <Diff text={proposal.diff} />
       </div>
