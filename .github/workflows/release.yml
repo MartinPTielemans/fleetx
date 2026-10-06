@@ -70,15 +70,35 @@ jobs:
           cp README.md LICENSE apps/cli/
           cd apps/cli
           npm publish --access public --registry=https://registry.npmjs.org
+      # main's ruleset takes changes only through pull requests, except from this
+      # repository's deploy key; the release pushes this one file with it.
       - name: Point the Nix flake at this release
+        env:
+          NIX_DEPLOY_KEY: ${{ secrets.NIX_DEPLOY_KEY }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           hash="sha256-$(openssl dgst -sha256 -binary t3-fleet.mjs | base64)"
+          umask 077
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$NIX_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+          unset NIX_DEPLOY_KEY
+          # Use GitHub's HTTPS-published host keys, never an unauthenticated scan.
+          curl --fail --silent --show-error --retry 3 https://api.github.com/meta \
+            | jq -er '.ssh_keys[] | "github.com " + .' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -F /dev/null -i '$ssh_dir/id_ed25519' -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$ssh_dir/known_hosts'"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch -q origin main && git checkout -q main
           printf '{\n  "version": "%s",\n  "hash": "%s"\n}\n' "$version" "$hash" > nix/release.json
-          git add nix/release.json && git commit -q -m "Nix: T3 Fleet $version" && git push -q origin main || echo "flake already current"
+          if git diff --quiet -- nix/release.json; then
+            echo "::notice::The Nix flake already points at T3 Fleet $version"
+            exit 0
+          fi
+          git add nix/release.json
+          git commit -q -m "Nix: T3 Fleet $version"
+          git push -q "git@github.com:${GITHUB_REPOSITORY}.git" HEAD:main
       - name: Update the Homebrew formula
         env:
           TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
